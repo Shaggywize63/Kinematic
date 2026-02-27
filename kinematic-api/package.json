@@ -10,10 +10,6 @@
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"
   },
-  "engines": {
-    "node": "20.x",
-    "npm": "10.x"
-  },
   "dependencies": {
     "@supabase/supabase-js": "^2.43.0",
     "compression": "^1.7.4",
