@@ -30,9 +30,9 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     password,
   });
 
-  if (signInError || !session.session) {
-    logger.warn(`Failed login attempt for email: ${email}`);
-    return unauthorized(res, 'Invalid email or password');
+if (signInError || !session?.session) {
+    logger.warn(`Failed login attempt for email: ${email} — ${signInError?.message}`);
+    return res.status(401).json({ success: false, error: signInError?.message || 'No session returned', code: signInError?.status });
   }
 
   // Fetch user profile from users table using the auth user id
