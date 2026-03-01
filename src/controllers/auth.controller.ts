@@ -7,7 +7,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 
 const loginSchema = z.object({
-  mobile: z.string().min(10).max(15),
+  email: z.string().email(),
   password: z.string().min(6),
   fcm_token: z.string().optional(),
   device_id: z.string().optional(),
@@ -22,32 +22,28 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const body = loginSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
-  const { mobile, password, fcm_token, device_id } = body.data;
+  const { email, password, fcm_token, device_id } = body.data;
 
-  // Fetch user by mobile to get their email (Supabase Auth uses email/phone)
-  const { data: userProfile, error: profileError } = await supabaseAdmin
-    .from('users')
-    .select('id, org_id, name, role, is_active')
-    .eq('mobile', mobile)
-    .single();
-
-  if (profileError || !userProfile) return unauthorized(res, 'Invalid mobile number or password');
-  if (!userProfile.is_active) return unauthorized(res, 'Account is deactivated. Contact your admin.');
-
-  // Get auth user email via admin
-  const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(userProfile.id);
-  if (!authUser?.user?.email) return unauthorized(res, 'Auth account not found');
-
-  // Sign in with email + password
+  // Sign in directly with email + password via Supabase Auth
   const { data: session, error: signInError } = await supabase.auth.signInWithPassword({
-    email: authUser.user.email,
+    email,
     password,
   });
 
   if (signInError || !session.session) {
-    logger.warn(`Failed login attempt for mobile: ${mobile}`);
-    return unauthorized(res, 'Invalid mobile number or password');
+    logger.warn(`Failed login attempt for email: ${email}`);
+    return unauthorized(res, 'Invalid email or password');
   }
+
+  // Fetch user profile from users table using the auth user id
+  const { data: userProfile, error: profileError } = await supabaseAdmin
+    .from('users')
+    .select('id, org_id, name, role, is_active')
+    .eq('id', session.user.id)
+    .single();
+
+  if (profileError || !userProfile) return unauthorized(res, 'User profile not found');
+  if (!userProfile.is_active) return unauthorized(res, 'Account is deactivated. Contact your admin.');
 
   // Update FCM token and device ID if provided
   if (fcm_token || device_id) {
