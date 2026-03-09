@@ -94,8 +94,6 @@ const V1 = '/api/v1';
 
 app.use(`${V1}/auth`,         authRoutes);
 app.use(`${V1}/attendance`,   attendanceRoutes);
-app.post(`${V1}/attendance/override`, requireAuth, requireRole('admin','city_manager','super_admin'), attendanceCtrl.overrideAttendance)
-app.patch(`${V1}/attendance/:id/override`, requireAuth, requireRole('admin','city_manager','super_admin'), attendanceCtrl.updateAttendanceOverride)
 app.use(`${V1}/forms`,        formsRoutes);
 app.use(`${V1}/stock`,        stockRoutes);
 app.use(`${V1}/broadcast`,    broadcastRoutes);
