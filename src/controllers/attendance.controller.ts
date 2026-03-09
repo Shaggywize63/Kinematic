@@ -101,7 +101,7 @@ export const updateAttendanceOverride = asyncHandler(async (req: Request, res: R
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data, 'Attendance updated')
 })
-
+export { overrideAttendance, updateAttendanceOverride }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Then in src/app.ts add these two lines near the other attendance routes:
