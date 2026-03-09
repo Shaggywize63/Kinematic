@@ -15,4 +15,4 @@ router.get('/history',       ctrl.getHistory);
 router.get('/team',          requireSupervisorOrAbove, ctrl.getTeamToday);
 
 export default router;
-export { overrideAttendance, updateAttendanceOverride }
+
