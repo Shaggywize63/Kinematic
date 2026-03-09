@@ -13,6 +13,7 @@ router.post('/break/end',    ctrl.endBreak);
 router.get('/today',         ctrl.getToday);
 router.get('/history',       ctrl.getHistory);
 router.get('/team',          requireSupervisorOrAbove, ctrl.getTeamToday);
-
+router.post('/override',      requireSupervisorOrAbove, ctrl.overrideAttendance);
+router.patch('/:id/override', requireSupervisorOrAbove, ctrl.updateAttendanceOverride);
 export default router;
 
