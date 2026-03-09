@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import * as misc from './controllers/misc.controller';
-import { requireRole } from './middleware/auth';
+import { requireAuth, requireRole } from './middleware/auth';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
