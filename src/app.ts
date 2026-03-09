@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
+import * as misc from './controllers/misc.controller';
+import { requireRole } from './middleware/auth';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
@@ -7,6 +9,11 @@ import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 
 import { logger } from './lib/logger';
+app.get(`${V1}/users`,       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getUsers);
+app.post(`${V1}/users`,      requireAuth, requireRole('admin','city_manager','super_admin'), misc.createUser);
+app.patch(`${V1}/users/:id`, requireAuth, requireRole('admin','city_manager','super_admin'), misc.updateUser);
+app.get(`${V1}/zones`,       requireAuth, misc.getZones);
+app.post(`${V1}/zones`,      requireAuth, requireRole('admin','super_admin'), misc.createZone);
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 
 // Routes
@@ -23,7 +30,7 @@ import grievanceRoutes    from './routes/grievance.routes';
 import analyticsRoutes    from './routes/analytics.routes';
 import visitlogRoutes     from './routes/visitlog.routes';
 import uploadRoutes       from './routes/upload.routes';
-import allRoutes          from './routes/index';
+
 
 const app = express();
 
@@ -101,7 +108,7 @@ app.use(`${V1}/grievances`,   grievanceRoutes);
 app.use(`${V1}/analytics`,    analyticsRoutes);
 app.use(`${V1}/visits`,       visitlogRoutes);
 app.use(`${V1}/upload`,       uploadRoutes);
-app.use(V1,                   allRoutes);  // users, zones, analytics/summary, analytics/activity-feed
+
 
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
