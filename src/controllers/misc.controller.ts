@@ -51,11 +51,14 @@ export const getMyGrievances = asyncHandler(async (req: Request, res: Response) 
 export const getAllGrievances = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user!
   const { status } = req.query
- const { page, limit, from: offset, to } = getPagination(req.query.page as string, req.query.limit as string)
+  const { page, limit, offset } = getPagination(
+    parseInt(req.query.page as string) || 1,
+    parseInt(req.query.limit as string) || 20
+  )
   let query = supabaseAdmin.from('grievances')
     .select('*, submitted_by_user:submitted_by(id, name, zone_id)', { count: 'exact' })
     .eq('org_id', user.org_id).order('created_at', { ascending: false })
-   .range(offset, to)
+    .range(offset, offset + limit - 1)
   if (status) query = query.eq('status', status as string)
   const { data, error, count } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
@@ -106,10 +109,13 @@ export const createMaterial = asyncHandler(async (req: Request, res: Response) =
 // NOTIFICATIONS
 export const getNotifications = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user!
-  const { page, limit, from: offset, to } = getPagination(req.query.page as string, req.query.limit as string)
+  const { page, limit, offset } = getPagination(
+    parseInt(req.query.page as string) || 1,
+    parseInt(req.query.limit as string) || 20
+  )
   const { data, error, count } = await supabaseAdmin.from('notifications')
     .select('*', { count: 'exact' }).eq('user_id', user.id)
-    .order('created_at', { ascending: false }).range(offset, to)
+    .order('created_at', { ascending: false }).range(offset, offset + limit - 1)
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendPaginated(res, data || [], count || 0, page, limit)
 })
@@ -140,7 +146,6 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   if (is_active !== undefined) query = query.eq('is_active', is_active === 'true')
   if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id)
   const { data, error, count } = await query
-  console.log('getUsers:', { count, dataLength: data?.length, error: error?.message })
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendPaginated(res, data || [], count || 0, page, limit)
 })
@@ -148,13 +153,62 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
 export const createUser = asyncHandler(async (req: Request, res: Response) => {
   const { name, mobile, password, role, zone_id, supervisor_id, employee_id, joined_date } = req.body
   const admin = req.user!
-  const email = mobile + '@kinematic.app'
-  const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({ email, password, email_confirm: true })
-  if (authErr) throw new AppError(400, authErr.message, 'AUTH_ERROR')
+
+  // Validate required fields
+  if (!name || !mobile || !password) {
+    throw new AppError(400, 'name, mobile and password are required', 'VALIDATION_ERROR')
+  }
+  if (!/^\d{10}$/.test(mobile)) {
+    throw new AppError(400, 'mobile must be exactly 10 digits', 'VALIDATION_ERROR')
+  }
+
+  const email = `${mobile}@kinematic.app`
+
+  // 1. Create Supabase Auth user
+  const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { name, mobile, role: role || 'executive' },
+  })
+
+  if (authErr) {
+    // Give a clearer message if the mobile is already registered
+    const msg = authErr.message.toLowerCase().includes('already')
+      ? `Mobile ${mobile} is already registered`
+      : authErr.message
+    throw new AppError(400, msg, 'AUTH_ERROR')
+  }
+
+  const authId = authData.user.id
+
+  // 2. Insert into public.users
   const { data, error } = await supabaseAdmin.from('users')
-    .insert({ id: authData.user.id, org_id: admin.org_id, name, mobile, role, zone_id: zone_id || null, supervisor_id: supervisor_id || null, employee_id: employee_id || null, joined_date: joined_date || null })
-    .select().single()
-  if (error) { await supabaseAdmin.auth.admin.deleteUser(authData.user.id); throw new AppError(500, error.message, 'DB_ERROR') }
+    .insert({
+      id:            authId,
+      org_id:        admin.org_id,
+      name:          name.trim(),
+      mobile:        mobile.trim(),
+      role:          role || 'executive',
+      zone_id:       zone_id       || null,
+      supervisor_id: supervisor_id || null,
+      employee_id:   employee_id   || null,
+      joined_date:   joined_date   || null,
+      is_active:     true,
+    })
+    .select('*, zones(name)')
+    .single()
+
+  if (error) {
+    // Rollback: delete the auth user we just created
+    await supabaseAdmin.auth.admin.deleteUser(authId)
+    // Friendly message for duplicate mobile in public.users
+    const msg = error.message.toLowerCase().includes('unique')
+      ? `Mobile ${mobile} is already in use`
+      : error.message
+    throw new AppError(500, msg, 'DB_ERROR')
+  }
+
   sendSuccess(res, data, 'User created', 201)
 })
 
