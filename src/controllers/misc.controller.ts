@@ -51,7 +51,7 @@ export const getMyGrievances = asyncHandler(async (req: Request, res: Response) 
 export const getAllGrievances = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user!
   const { status } = req.query
-  const { page, limit, offset } = getPagination(Number(req.query.page), Number(req.query.limit))
+ const { page, limit, from: offset, to } = getPagination(req.query.page as string, req.query.limit as string)
   let query = supabaseAdmin.from('grievances')
     .select('*, submitted_by_user:submitted_by(id, name, zone_id)', { count: 'exact' })
     .eq('org_id', user.org_id).order('created_at', { ascending: false })
