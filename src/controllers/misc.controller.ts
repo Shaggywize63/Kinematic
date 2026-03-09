@@ -55,7 +55,7 @@ export const getAllGrievances = asyncHandler(async (req: Request, res: Response)
   let query = supabaseAdmin.from('grievances')
     .select('*, submitted_by_user:submitted_by(id, name, zone_id)', { count: 'exact' })
     .eq('org_id', user.org_id).order('created_at', { ascending: false })
-    .range(offset, offset + limit - 1)
+   .range(offset, to)
   if (status) query = query.eq('status', status as string)
   const { data, error, count } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
