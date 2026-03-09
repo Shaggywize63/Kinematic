@@ -128,15 +128,19 @@ export const markRead = asyncHandler(async (req: Request, res: Response) => {
 export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user!
   const { role, zone_id, is_active } = req.query
-  const { page, limit, from: offset, to } = getPagination(req.query.page as string, req.query.limit as string)
+  const { page, limit, offset } = getPagination(
+    parseInt(req.query.page as string) || 1,
+    parseInt(req.query.limit as string) || 20
+  )
   let query = supabaseAdmin.from('users')
     .select('id, name, mobile, role, employee_id, zone_id, supervisor_id, is_active, joined_date, zones(name)', { count: 'exact' })
-    .eq('org_id', user.org_id).order('name').range(offset, to)
+    .eq('org_id', user.org_id).order('name').range(offset, offset + limit - 1)
   if (role) query = query.eq('role', role as string)
   if (zone_id) query = query.eq('zone_id', zone_id as string)
   if (is_active !== undefined) query = query.eq('is_active', is_active === 'true')
   if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id)
   const { data, error, count } = await query
+  console.log('getUsers:', { count, dataLength: data?.length, error: error?.message })
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendPaginated(res, data || [], count || 0, page, limit)
 })
