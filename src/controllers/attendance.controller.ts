@@ -259,8 +259,12 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
 // POST /api/v1/attendance/override  (admin+)
 export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Response) => {
   const admin = req.user!;
-  const { user_id, date, status, checkin_at, checkout_at, override_reason,
-          checkin_lat, checkin_lng, checkout_lat, checkout_lng } = req.body;
+  const {
+    user_id, date, status, override_reason,
+    checkin_at, checkin_lat, checkin_lng, checkin_selfie_url,
+    checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
+    notes,
+  } = req.body;
 
   if (!user_id || !date || !status) {
     return badRequest(res, 'user_id, date and status are required');
@@ -270,29 +274,30 @@ export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Res
   if (checkin_at && checkout_at) {
     let ciMs = new Date(checkin_at).getTime();
     let coMs = new Date(checkout_at).getTime();
-    // Midnight crossover: checkout earlier than checkin means next-day checkout
-    if (coMs < ciMs) coMs += 24 * 60 * 60 * 1000;
-    const diff = (coMs - ciMs) / 3_600_000;
-    total_hours = parseFloat(Math.min(Math.max(diff, 0), 24).toFixed(2));
+    if (coMs < ciMs) coMs += 24 * 60 * 60 * 1000; // midnight crossover
+    total_hours = parseFloat(Math.min(Math.max((coMs - ciMs) / 3_600_000, 0), 24).toFixed(2));
   }
 
   const { data, error } = await supabaseAdmin
     .from('attendance')
     .upsert({
-      org_id:           admin.org_id,
+      org_id:               admin.org_id,
       user_id,
       date,
       status,
-      checkin_at:       checkin_at   || null,
-      checkout_at:      checkout_at  || null,
+      checkin_at:           checkin_at            || null,
+      checkout_at:          checkout_at           || null,
       total_hours,
-      override_reason:  override_reason?.trim() || 'Manual override by admin',
-      override_by:      admin.id,
-      checkin_verified: false,
-      ...(checkin_lat  != null && { checkin_lat }),
-      ...(checkin_lng  != null && { checkin_lng }),
-      ...(checkout_lat != null && { checkout_lat }),
-      ...(checkout_lng != null && { checkout_lng }),
+      override_reason:      override_reason?.trim() || 'Manual override by admin',
+      override_by:          admin.id,
+      is_regularised:       true,
+      ...(checkin_lat           != null && { checkin_lat }),
+      ...(checkin_lng           != null && { checkin_lng }),
+      ...(checkin_selfie_url    != null && { checkin_selfie_url }),
+      ...(checkout_lat          != null && { checkout_lat }),
+      ...(checkout_lng          != null && { checkout_lng }),
+      ...(checkout_selfie_url   != null && { checkout_selfie_url }),
+      ...(notes                 != null && { notes }),
     }, { onConflict: 'user_id,date' })
     .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
     .single();
@@ -304,8 +309,12 @@ export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Res
 // PATCH /api/v1/attendance/:id/override  (admin+)
 export const updateAttendanceOverride = asyncHandler(async (req: AuthRequest, res: Response) => {
   const admin = req.user!;
-  const { status, checkin_at, checkout_at, override_reason,
-          checkin_lat, checkin_lng, checkout_lat, checkout_lng } = req.body;
+  const {
+    status, override_reason,
+    checkin_at, checkin_lat, checkin_lng, checkin_selfie_url,
+    checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
+    notes,
+  } = req.body;
 
   const { data: existing, error: fetchErr } = await supabaseAdmin
     .from('attendance')
@@ -323,24 +332,26 @@ export const updateAttendanceOverride = asyncHandler(async (req: AuthRequest, re
   if (newCheckin && newCheckout) {
     let ciMs = new Date(newCheckin).getTime();
     let coMs = new Date(newCheckout).getTime();
-    // Midnight crossover: checkout earlier than checkin means next-day checkout
-    if (coMs < ciMs) coMs += 24 * 60 * 60 * 1000;
-    const diff = (coMs - ciMs) / 3_600_000;
-    total_hours = parseFloat(Math.min(Math.max(diff, 0), 24).toFixed(2));
+    if (coMs < ciMs) coMs += 24 * 60 * 60 * 1000; // midnight crossover
+    total_hours = parseFloat(Math.min(Math.max((coMs - ciMs) / 3_600_000, 0), 24).toFixed(2));
   }
 
   const updates: any = {
-    override_reason: override_reason?.trim() || 'Manual override by admin',
-    override_by:     admin.id,
+    override_reason:  override_reason?.trim() || 'Manual override by admin',
+    override_by:      admin.id,
+    is_regularised:   true,
   };
-  if (status)        updates.status        = status;
-  if (checkin_at)    updates.checkin_at    = checkin_at;
-  if (checkout_at)   updates.checkout_at   = checkout_at;
-  if (total_hours !== null)       updates.total_hours   = total_hours;
-  if (checkin_lat  != null)       updates.checkin_lat   = checkin_lat;
-  if (checkin_lng  != null)       updates.checkin_lng   = checkin_lng;
-  if (checkout_lat != null)       updates.checkout_lat  = checkout_lat;
-  if (checkout_lng != null)       updates.checkout_lng  = checkout_lng;
+  if (status)                   updates.status              = status;
+  if (checkin_at)               updates.checkin_at          = checkin_at;
+  if (checkout_at)              updates.checkout_at         = checkout_at;
+  if (total_hours !== null)     updates.total_hours         = total_hours;
+  if (checkin_lat  != null)     updates.checkin_lat         = checkin_lat;
+  if (checkin_lng  != null)     updates.checkin_lng         = checkin_lng;
+  if (checkin_selfie_url)       updates.checkin_selfie_url  = checkin_selfie_url;
+  if (checkout_lat != null)     updates.checkout_lat        = checkout_lat;
+  if (checkout_lng != null)     updates.checkout_lng        = checkout_lng;
+  if (checkout_selfie_url)      updates.checkout_selfie_url = checkout_selfie_url;
+  if (notes != null)            updates.notes               = notes;
 
   const { data, error } = await supabaseAdmin
     .from('attendance')
