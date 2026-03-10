@@ -287,7 +287,7 @@ export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Res
       status,
       checkin_at:           checkin_at            || null,
       checkout_at:          checkout_at           || null,
-      total_hours,
+      ...(total_hours !== null && { total_hours }),
       override_reason:      override_reason?.trim() || 'Manual override by admin',
       override_by:          admin.id,
       is_regularised:       true,
