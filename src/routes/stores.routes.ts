@@ -10,6 +10,6 @@ router2.get('/:id',   storesCtrl.getOne);
 router2.post('/',     requireRole('admin','supervisor'), storesCtrl.create);
 router2.patch('/:id', requireRole('admin','supervisor'), storesCtrl.update);
 router2.delete('/:id',requireRole('admin'), storesCtrl.remove);
-export { router2 as storesRouter };
+export default router2;
 
 
