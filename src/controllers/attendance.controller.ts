@@ -233,13 +233,21 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
 // GET /api/v1/attendance/team  (supervisor+)
 export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = new Date().toISOString().split('T')[0];
+  const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
   const zoneId = req.query.zone_id as string | undefined;
 
   let query = supabaseAdmin
-    .from('v_today_attendance')
-    .select('*')
-    .eq('org_id', user.org_id);
+    .from('attendance')
+    .select(`
+      id, user_id, org_id, zone_id, date, status,
+      checkin_at, checkin_lat, checkin_lng, checkin_selfie_url, checkin_address, checkin_distance_m,
+      checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
+      total_hours, break_minutes, working_minutes, notes,
+      is_regularised, created_at, updated_at,
+      users!attendance_user_id_fkey(name, employee_id, zones(name))
+    `)
+    .eq('org_id', user.org_id)
+    .eq('date', date);
 
   if (zoneId) query = query.eq('zone_id', zoneId);
   if (user.role === 'supervisor') {
@@ -249,11 +257,12 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
       .eq('supervisor_id', user.id);
     const ids = (teamIds || []).map((u: { id: string }) => u.id);
     if (ids.length) query = query.in('user_id', ids);
+    else return ok(res, []);
   }
 
-  const { data, error } = await query.order('conversions', { ascending: false });
+  const { data, error } = await query.order('checkin_at', { ascending: true, nullsFirst: false });
   if (error) return badRequest(res, error.message);
-  return ok(res, data);
+  return ok(res, data || []);
 });
 
 // POST /api/v1/attendance/override  (admin+)
