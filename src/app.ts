@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import activitiesRouter from './routes/activities.routes';
 import compression from 'compression';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
@@ -30,6 +31,7 @@ import citiesRouter       from './routes/cities.routes';
 import storesRouter       from './routes/stores.routes';
 import skusRouter         from './routes/skus.routes';
 import assetsRouter       from './routes/assets.routes';
+
 
 const app = express();
 
@@ -110,6 +112,7 @@ app.use(`${V1}/cities`,        citiesRouter);
 app.use(`${V1}/stores`,        storesRouter);
 app.use(`${V1}/skus`,          skusRouter);
 app.use(`${V1}/assets`,        assetsRouter);
+app.use(`${V1}/activities`, activitiesRouter);
 
 app.get(`${V1}/users`,       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getUsers);
 app.post(`${V1}/users`,      requireAuth, requireRole('admin','city_manager','super_admin'), misc.createUser);
