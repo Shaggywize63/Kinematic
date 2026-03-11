@@ -1,13 +1,12 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/auth';
+import { requireAuth, requireRole } from '../middleware/auth';
 import { assetsCtrl } from '../controllers/management.controller';
 
-const router4 = Router();
-router4.use(requireAuth);
-router4.get('/',      assetsCtrl.list);
-router4.get('/:id',   assetsCtrl.getOne);
-router4.post('/',     requireRole('admin','supervisor'), assetsCtrl.create);
-router4.patch('/:id', requireRole('admin','supervisor'), assetsCtrl.update);
-router4.delete('/:id',requireRole('admin'), assetsCtrl.remove);
-export default router4;
+const router = Router();
+router.use(requireAuth);
+router.get('/',       assetsCtrl.list);
+router.get('/:id',    assetsCtrl.getOne);
+router.post('/',      requireRole('admin', 'super_admin'), assetsCtrl.create);
+router.patch('/:id',  requireRole('admin', 'super_admin'), assetsCtrl.update);
+router.delete('/:id', requireRole('admin', 'super_admin'), assetsCtrl.remove);
+export default router;
