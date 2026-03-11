@@ -1,15 +1,12 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/auth';
+import { requireAuth, requireRole } from '../middleware/auth';
 import { storesCtrl } from '../controllers/management.controller';
 
-const router2 = Router();
-router2.use(requireAuth);
-router2.get('/',      storesCtrl.list);
-router2.get('/:id',   storesCtrl.getOne);
-router2.post('/',     requireRole('admin','supervisor'), storesCtrl.create);
-router2.patch('/:id', requireRole('admin','supervisor'), storesCtrl.update);
-router2.delete('/:id',requireRole('admin'), storesCtrl.remove);
-export default router2;
-
-
+const router = Router();
+router.use(requireAuth);
+router.get('/',       storesCtrl.list);
+router.get('/:id',    storesCtrl.getOne);
+router.post('/',      requireRole('admin', 'supervisor'), storesCtrl.create);
+router.patch('/:id',  requireRole('admin', 'supervisor'), storesCtrl.update);
+router.delete('/:id', requireRole('admin', 'super_admin'), storesCtrl.remove);
+export default router;
