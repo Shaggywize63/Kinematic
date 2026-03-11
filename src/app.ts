@@ -1,26 +1,16 @@
 import 'dotenv/config';
 import express from 'express';
-import * as misc from './controllers/misc.controller';
-import { requireAuth, requireRole } from './middleware/auth';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import morgan from 'morgan';
-import citiesRouter   from './routes/cities.routes';
-import storesRouter   from './routes/stores.routes';
-import skusRouter     from './routes/skus.routes';
-import assetsRouter   from './routes/assets.routes';
-app.use('/api/v1/cities',    citiesRouter);
-app.use('/api/v1/stores',    storesRouter);
-app.use('/api/v1/skus',      skusRouter);
-app.use('/api/v1/assets',    assetsRouter);
-
-import * as attendanceCtrl from './controllers/attendance.controller'
 import rateLimit from 'express-rate-limit';
 
 import { logger } from './lib/logger';
-
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
+import { requireAuth, requireRole } from './middleware/auth';
+import * as misc from './controllers/misc.controller';
+import * as attendanceCtrl from './controllers/attendance.controller';
 
 // Routes
 import authRoutes         from './routes/auth.routes';
@@ -36,11 +26,14 @@ import grievanceRoutes    from './routes/grievance.routes';
 import analyticsRoutes    from './routes/analytics.routes';
 import visitlogRoutes     from './routes/visitlog.routes';
 import uploadRoutes       from './routes/upload.routes';
-
+import citiesRouter       from './routes/cities.routes';
+import storesRouter       from './routes/stores.routes';
+import skusRouter         from './routes/skus.routes';
+import assetsRouter       from './routes/assets.routes';
 
 const app = express();
 
-// ── Security ─────────────────────────────────────────────────
+// ── Security ──────────────────────────────────────────────────
 app.use(helmet());
 app.set('trust proxy', 1);
 
@@ -50,7 +43,6 @@ const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3001')
 
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow Postman / server-to-server (no origin)
     if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error(`CORS policy: origin ${origin} not allowed`));
   },
@@ -69,8 +61,8 @@ const limiter = rateLimit({
 });
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10,                   // 10 login attempts per window
+  windowMs: 15 * 60 * 1000,
+  max: 10,
   message: { success: false, error: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
@@ -101,25 +93,30 @@ app.get('/health', (_req, res) => {
 // ── API routes ────────────────────────────────────────────────
 const V1 = '/api/v1';
 
-app.use(`${V1}/auth`,         authRoutes);
-app.use(`${V1}/attendance`,   attendanceRoutes);
-app.use(`${V1}/forms`,        formsRoutes);
-app.use(`${V1}/stock`,        stockRoutes);
-app.use(`${V1}/broadcast`,    broadcastRoutes);
-app.use(`${V1}/sos`,          sosRoutes);
-app.use(`${V1}/leaderboard`,  leaderboardRoutes);
+app.use(`${V1}/auth`,          authRoutes);
+app.use(`${V1}/attendance`,    attendanceRoutes);
+app.use(`${V1}/forms`,         formsRoutes);
+app.use(`${V1}/stock`,         stockRoutes);
+app.use(`${V1}/broadcast`,     broadcastRoutes);
+app.use(`${V1}/sos`,           sosRoutes);
+app.use(`${V1}/leaderboard`,   leaderboardRoutes);
 app.use(`${V1}/notifications`, notifRoutes);
-app.use(`${V1}/learning`,     learningRoutes);
-app.use(`${V1}/grievances`,   grievanceRoutes);
-app.use(`${V1}/analytics`,    analyticsRoutes);
-app.use(`${V1}/visits`,       visitlogRoutes);
-app.use(`${V1}/upload`,       uploadRoutes);
+app.use(`${V1}/learning`,      learningRoutes);
+app.use(`${V1}/grievances`,    grievanceRoutes);
+app.use(`${V1}/analytics`,     analyticsRoutes);
+app.use(`${V1}/visits`,        visitlogRoutes);
+app.use(`${V1}/upload`,        uploadRoutes);
+app.use(`${V1}/cities`,        citiesRouter);
+app.use(`${V1}/stores`,        storesRouter);
+app.use(`${V1}/skus`,          skusRouter);
+app.use(`${V1}/assets`,        assetsRouter);
 
 app.get(`${V1}/users`,       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getUsers);
 app.post(`${V1}/users`,      requireAuth, requireRole('admin','city_manager','super_admin'), misc.createUser);
 app.patch(`${V1}/users/:id`, requireAuth, requireRole('admin','city_manager','super_admin'), misc.updateUser);
 app.get(`${V1}/zones`,       requireAuth, misc.getZones);
 app.post(`${V1}/zones`,      requireAuth, requireRole('admin','super_admin'), misc.createZone);
+
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
 app.use(errorHandler);
