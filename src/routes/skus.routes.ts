@@ -11,4 +11,4 @@ router3.get('/:id',   skusCtrl.getOne);
 router3.post('/',     requireRole('admin','supervisor'), skusCtrl.create);
 router3.patch('/:id', requireRole('admin','supervisor'), skusCtrl.update);
 router3.delete('/:id',requireRole('admin'), skusCtrl.remove);
-export { router3 as skusRouter };
+export default router2;
