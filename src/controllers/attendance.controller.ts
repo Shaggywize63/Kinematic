@@ -278,32 +278,70 @@ export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Res
     total_hours = parseFloat(Math.min(Math.max((coMs - ciMs) / 3_600_000, 0), 24).toFixed(2));
   }
 
-  const { data, error } = await supabaseAdmin
-    .from('attendance')
-    .upsert({
-      org_id:               admin.org_id,
-      user_id,
-      date,
-      status,
-      checkin_at:           checkin_at            || null,
-      checkout_at:          checkout_at           || null,
-      ...(total_hours !== null && { total_hours }),
-      override_reason:      override_reason?.trim() || 'Manual override by admin',
-      override_by:          admin.id,
-      is_regularised:       true,
-      ...(checkin_lat           != null && { checkin_lat }),
-      ...(checkin_lng           != null && { checkin_lng }),
-      ...(checkin_selfie_url    != null && { checkin_selfie_url }),
-      ...(checkout_lat          != null && { checkout_lat }),
-      ...(checkout_lng          != null && { checkout_lng }),
-      ...(checkout_selfie_url   != null && { checkout_selfie_url }),
-      ...(notes                 != null && { notes }),
-    }, { onConflict: 'user_id,date' })
-    .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
-    .single();
+  // Build payload — fields to write regardless of insert or update
+  const payload: any = {
+    status,
+    checkin_at:  checkin_at  || null,
+    checkout_at: checkout_at || null,
+    ...(total_hours         !== null && { total_hours }),
+    ...(checkin_lat         != null  && { checkin_lat:         parseFloat(String(checkin_lat)) }),
+    ...(checkin_lng         != null  && { checkin_lng:         parseFloat(String(checkin_lng)) }),
+    ...(checkin_selfie_url  != null  && { checkin_selfie_url }),
+    ...(checkout_lat        != null  && { checkout_lat:        parseFloat(String(checkout_lat)) }),
+    ...(checkout_lng        != null  && { checkout_lng:        parseFloat(String(checkout_lng)) }),
+    ...(checkout_selfie_url != null  && { checkout_selfie_url }),
+    ...(notes               != null  && { notes }),
+    override_reason: override_reason?.trim() || 'Manual override by admin',
+    override_by:     admin.id,
+    is_regularised:  true,
+  };
 
-  if (error) return badRequest(res, error.message);
-  return created(res, data, 'Attendance record saved');
+  // Check if a record already exists for this user+date
+  const { data: existing } = await supabaseAdmin
+    .from('attendance')
+    .select('id')
+    .eq('user_id', user_id)
+    .eq('date', date)
+    .eq('org_id', admin.org_id)
+    .maybeSingle();
+
+  let result: any;
+  if (existing?.id) {
+    // UPDATE — always overwrites every field including status
+    result = await supabaseAdmin
+      .from('attendance')
+      .update(payload)
+      .eq('id', existing.id)
+      .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
+      .single();
+  } else {
+    // INSERT — brand new record
+    result = await supabaseAdmin
+      .from('attendance')
+      .insert({ org_id: admin.org_id, user_id, date, ...payload })
+      .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
+      .single();
+  }
+
+  // Fallback: override_reason/override_by/is_regularised columns may not exist yet
+  if (result.error && (
+    result.error.message.includes('override_reason') ||
+    result.error.message.includes('override_by') ||
+    result.error.message.includes('is_regularised')
+  )) {
+    const { override_reason: _or, override_by: _ob, is_regularised: _ir, ...basePayload } = payload;
+    if (existing?.id) {
+      result = await supabaseAdmin.from('attendance').update(basePayload)
+        .eq('id', existing.id)
+        .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))').single();
+    } else {
+      result = await supabaseAdmin.from('attendance').insert({ org_id: admin.org_id, user_id, date, ...basePayload })
+        .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))').single();
+    }
+  }
+
+  if (result.error) return badRequest(res, result.error.message);
+  return created(res, result.data, 'Attendance record saved');
 });
 
 // PATCH /api/v1/attendance/:id/override  (admin+)
@@ -318,7 +356,7 @@ export const updateAttendanceOverride = asyncHandler(async (req: AuthRequest, re
 
   const { data: existing, error: fetchErr } = await supabaseAdmin
     .from('attendance')
-    .select('date, checkin_at, checkout_at')
+    .select('date, status, checkin_at, checkout_at')
     .eq('id', req.params.id)
     .eq('org_id', admin.org_id)
     .single();
@@ -336,31 +374,52 @@ export const updateAttendanceOverride = asyncHandler(async (req: AuthRequest, re
     total_hours = parseFloat(Math.min(Math.max((coMs - ciMs) / 3_600_000, 0), 24).toFixed(2));
   }
 
-  const updates: any = {
-    override_reason:  override_reason?.trim() || 'Manual override by admin',
-    override_by:      admin.id,
-    is_regularised:   true,
-  };
-  if (status)                   updates.status              = status;
-  if (checkin_at)               updates.checkin_at          = checkin_at;
-  if (checkout_at)              updates.checkout_at         = checkout_at;
-  if (total_hours !== null)     updates.total_hours         = total_hours;
-  if (checkin_lat  != null)     updates.checkin_lat         = checkin_lat;
-  if (checkin_lng  != null)     updates.checkin_lng         = checkin_lng;
-  if (checkin_selfie_url)       updates.checkin_selfie_url  = checkin_selfie_url;
-  if (checkout_lat != null)     updates.checkout_lat        = checkout_lat;
-  if (checkout_lng != null)     updates.checkout_lng        = checkout_lng;
-  if (checkout_selfie_url)      updates.checkout_selfie_url = checkout_selfie_url;
-  if (notes != null)            updates.notes               = notes;
+  // status is ALWAYS written — it is the primary purpose of an override
+  // Use incoming status if provided, else keep existing
+  const newStatus = status ?? existing.status;
+  const updates: any = { status: newStatus };
 
-  const { data, error } = await supabaseAdmin
+  // Times
+  if (checkin_at)           updates.checkin_at          = checkin_at;
+  if (checkout_at)          updates.checkout_at         = checkout_at;
+  if (total_hours !== null) updates.total_hours         = total_hours;
+
+  // Optional location + selfie
+  if (checkin_lat  != null)  updates.checkin_lat         = checkin_lat;
+  if (checkin_lng  != null)  updates.checkin_lng         = checkin_lng;
+  if (checkin_selfie_url)    updates.checkin_selfie_url  = checkin_selfie_url;
+  if (checkout_lat != null)  updates.checkout_lat        = checkout_lat;
+  if (checkout_lng != null)  updates.checkout_lng        = checkout_lng;
+  if (checkout_selfie_url)   updates.checkout_selfie_url = checkout_selfie_url;
+  if (notes != null)         updates.notes               = notes;
+
+  // Columns added by migration — try with them first, fall back without
+  const updatesWithMeta = {
+    ...updates,
+    override_reason: override_reason?.trim() || 'Manual override by admin',
+    override_by:     admin.id,
+    is_regularised:  true,
+  };
+
+  let result = await supabaseAdmin
     .from('attendance')
-    .update(updates)
+    .update(updatesWithMeta)
     .eq('id', req.params.id)
     .eq('org_id', admin.org_id)
     .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
     .single();
 
-  if (error) return badRequest(res, error.message);
-  return ok(res, data, 'Attendance updated');
+  // If failed due to missing columns, retry with base fields only
+  if (result.error && (result.error.message.includes('override_reason') || result.error.message.includes('override_by') || result.error.message.includes('is_regularised'))) {
+    result = await supabaseAdmin
+      .from('attendance')
+      .update(updates)
+      .eq('id', req.params.id)
+      .eq('org_id', admin.org_id)
+      .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
+      .single();
+  }
+
+  if (result.error) return badRequest(res, result.error.message);
+  return ok(res, result.data, 'Attendance updated');
 });
