@@ -6,6 +6,15 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import morgan from 'morgan';
+import citiesRouter   from './routes/cities.routes';
+import storesRouter   from './routes/stores.routes';
+import skusRouter     from './routes/skus.routes';
+import assetsRouter   from './routes/assets.routes';
+app.use('/api/v1/cities',    citiesRouter);
+app.use('/api/v1/stores',    storesRouter);
+app.use('/api/v1/skus',      skusRouter);
+app.use('/api/v1/assets',    assetsRouter);
+
 import * as attendanceCtrl from './controllers/attendance.controller'
 import rateLimit from 'express-rate-limit';
 
