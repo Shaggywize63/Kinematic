@@ -10,4 +10,4 @@ router4.get('/:id',   assetsCtrl.getOne);
 router4.post('/',     requireRole('admin','supervisor'), assetsCtrl.create);
 router4.patch('/:id', requireRole('admin','supervisor'), assetsCtrl.update);
 router4.delete('/:id',requireRole('admin'), assetsCtrl.remove);
-export { router4 as assetsRouter };
+export default router4;
