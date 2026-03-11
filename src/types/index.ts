@@ -1,4 +1,5 @@
 import { Request } from 'express';
+import activitiesRouter from './routes/activities.routes';
 
 export type UserRole = 'super_admin' | 'admin' | 'city_manager' | 'supervisor' | 'executive';
 
