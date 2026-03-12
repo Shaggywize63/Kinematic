@@ -23,7 +23,6 @@ import grievanceRoutes    from './routes/grievance.routes';
 import analyticsRoutes    from './routes/analytics.routes';
 import visitlogRoutes     from './routes/visitlog.routes';
 import uploadRoutes       from './routes/upload.routes';
-import wmsRoutes          from './routes/wms.routes';
 import allRoutes          from './routes/index';
 
 const app = express();
@@ -102,8 +101,7 @@ app.use(`${V1}/grievances`,   grievanceRoutes);
 app.use(`${V1}/analytics`,    analyticsRoutes);
 app.use(`${V1}/visits`,       visitlogRoutes);
 app.use(`${V1}/upload`,       uploadRoutes);
-app.use(`${V1}/warehouses`,   wmsRoutes);
-app.use(V1,                   allRoutes);  // users, zones, analytics/summary, analytics/activity-feed
+app.use(V1,                   allRoutes);  // catch-all: users, zones, cities, stores, skus, assets, warehouses, etc.
 
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
