@@ -12,6 +12,8 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import { requireAuth, requireRole } from './middleware/auth';
 import * as misc from './controllers/misc.controller';
 import * as attendanceCtrl from './controllers/attendance.controller';
+import routePlanRouter from './routes/route-plan.routes';
+   app.use(`${V1}/route-plans`, routePlanRouter);
 
 // Routes
 import authRoutes         from './routes/auth.routes';
