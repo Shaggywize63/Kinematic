@@ -10,4 +10,3 @@ router.get('/summary', ctrl.getWarehouseSummary);
 router.get('/inventory', ctrl.getWarehouseInventory);
 
 export default router;
-
