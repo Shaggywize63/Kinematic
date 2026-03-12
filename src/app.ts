@@ -12,8 +12,7 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import { requireAuth, requireRole } from './middleware/auth';
 import * as misc from './controllers/misc.controller';
 import * as attendanceCtrl from './controllers/attendance.controller';
-import routePlanRouter from './routes/route-plan.routes';
-   app.use(`${V1}/route-plans`, routePlanRouter);
+
 
 // Routes
 import authRoutes         from './routes/auth.routes';
@@ -33,7 +32,7 @@ import citiesRouter       from './routes/cities.routes';
 import storesRouter       from './routes/stores.routes';
 import skusRouter         from './routes/skus.routes';
 import assetsRouter       from './routes/assets.routes';
-
+import routePlanRouter from './routes/route-plan.routes';
 
 const app = express();
 
@@ -115,6 +114,7 @@ app.use(`${V1}/stores`,        storesRouter);
 app.use(`${V1}/skus`,          skusRouter);
 app.use(`${V1}/assets`,        assetsRouter);
 app.use(`${V1}/activities`, activitiesRouter);
+app.use(`${V1}/route-plans`, routePlanRouter);
 
 app.get(`${V1}/users`,       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getUsers);
 app.post(`${V1}/users`,      requireAuth, requireRole('admin','city_manager','super_admin'), misc.createUser);
