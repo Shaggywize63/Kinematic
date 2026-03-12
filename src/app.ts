@@ -2,18 +2,12 @@ import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
-import activitiesRouter from './routes/activities.routes';
 import compression from 'compression';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 
 import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
-import { requireAuth, requireRole } from './middleware/auth';
-import * as misc from './controllers/misc.controller';
-import * as attendanceCtrl from './controllers/attendance.controller';
-import wmsRoutes from './routes/wms.routes';
-
 
 // Routes
 import authRoutes         from './routes/auth.routes';
@@ -29,16 +23,12 @@ import grievanceRoutes    from './routes/grievance.routes';
 import analyticsRoutes    from './routes/analytics.routes';
 import visitlogRoutes     from './routes/visitlog.routes';
 import uploadRoutes       from './routes/upload.routes';
-import citiesRouter       from './routes/cities.routes';
-import storesRouter       from './routes/stores.routes';
-import skusRouter         from './routes/skus.routes';
-import assetsRouter       from './routes/assets.routes';
-import routePlanRouter from './routes/route-plan.routes';
-import warehouseRoutes from './routes/warehouse.routes';
+import wmsRoutes          from './routes/wms.routes';
+import allRoutes          from './routes/index';
 
 const app = express();
 
-// ── Security ──────────────────────────────────────────────────
+// ── Security ─────────────────────────────────────────────────
 app.use(helmet());
 app.set('trust proxy', 1);
 
@@ -48,6 +38,7 @@ const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3001')
 
 app.use(cors({
   origin: (origin, cb) => {
+    // Allow Postman / server-to-server (no origin)
     if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error(`CORS policy: origin ${origin} not allowed`));
   },
@@ -66,8 +57,8 @@ const limiter = rateLimit({
 });
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,                   // 10 login attempts per window
   message: { success: false, error: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
@@ -98,33 +89,21 @@ app.get('/health', (_req, res) => {
 // ── API routes ────────────────────────────────────────────────
 const V1 = '/api/v1';
 
-app.use(`${V1}/auth`,          authRoutes);
-app.use(`${V1}/attendance`,    attendanceRoutes);
-app.use(`${V1}/forms`,         formsRoutes);
-app.use(`${V1}/stock`,         stockRoutes);
-app.use(`${V1}/broadcast`,     broadcastRoutes);
-app.use(`${V1}/sos`,           sosRoutes);
-app.use(`${V1}/leaderboard`,   leaderboardRoutes);
+app.use(`${V1}/auth`,         authRoutes);
+app.use(`${V1}/attendance`,   attendanceRoutes);
+app.use(`${V1}/forms`,        formsRoutes);
+app.use(`${V1}/stock`,        stockRoutes);
+app.use(`${V1}/broadcast`,    broadcastRoutes);
+app.use(`${V1}/sos`,          sosRoutes);
+app.use(`${V1}/leaderboard`,  leaderboardRoutes);
 app.use(`${V1}/notifications`, notifRoutes);
-app.use(`${V1}/learning`,      learningRoutes);
-app.use(`${V1}/grievances`,    grievanceRoutes);
-app.use(`${V1}/analytics`,     analyticsRoutes);
-app.use(`${V1}/visits`,        visitlogRoutes);
-app.use(`${V1}/upload`,        uploadRoutes);
-app.use(`${V1}/cities`,        citiesRouter);
-app.use(`${V1}/stores`,        storesRouter);
-app.use(`${V1}/skus`,          skusRouter);
-app.use(`${V1}/assets`,        assetsRouter);
-app.use(`${V1}/activities`, activitiesRouter);
-app.use(`${V1}/route-plans`, routePlanRouter);
-app.use('/api/v1/warehouse', warehouseRoutes);
-app.use('/api/v1/warehouses', wmsRoutes);
-
-app.get(`${V1}/users`,       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getUsers);
-app.post(`${V1}/users`,      requireAuth, requireRole('admin','city_manager','super_admin'), misc.createUser);
-app.patch(`${V1}/users/:id`, requireAuth, requireRole('admin','city_manager','super_admin'), misc.updateUser);
-app.get(`${V1}/zones`,       requireAuth, misc.getZones);
-app.post(`${V1}/zones`,      requireAuth, requireRole('admin','super_admin'), misc.createZone);
+app.use(`${V1}/learning`,     learningRoutes);
+app.use(`${V1}/grievances`,   grievanceRoutes);
+app.use(`${V1}/analytics`,    analyticsRoutes);
+app.use(`${V1}/visits`,       visitlogRoutes);
+app.use(`${V1}/upload`,       uploadRoutes);
+app.use(`${V1}/warehouses`,   wmsRoutes);
+app.use(V1,                   allRoutes);  // users, zones, analytics/summary, analytics/activity-feed
 
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
