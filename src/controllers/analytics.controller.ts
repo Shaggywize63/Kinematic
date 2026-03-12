@@ -4,10 +4,32 @@ import { AuthRequest } from '../types';
 import { ok, badRequest } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 
+// IST offset in minutes (UTC+5:30)
+const IST_OFFSET = 330;
+
+/** Return a Date shifted to IST so .getUTCFullYear/Month/Date/Hours() give IST values */
+function toIST(utcDate: Date): Date {
+  return new Date(utcDate.getTime() + IST_OFFSET * 60 * 1000);
+}
+
+/** "YYYY-MM-DD" in IST for a given UTC Date */
+function istDateKey(utcDate: Date): string {
+  const ist = toIST(utcDate);
+  const y = ist.getUTCFullYear();
+  const m = String(ist.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(ist.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/** Hour (0-23) in IST for a given UTC Date */
+function istHour(utcDate: Date): number {
+  return toIST(utcDate).getUTCHours();
+}
+
 // GET /api/v1/analytics/summary
 export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
+  const date = (req.query.date as string) || istDateKey(new Date());
 
   const { data: kpis } = await supabaseAdmin
     .from('v_daily_kpis')
@@ -99,14 +121,19 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 // GET /api/v1/analytics/hourly
 export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
+  const date = (req.query.date as string) || istDateKey(new Date());
+
+  // Build IST day boundaries in UTC for the Supabase query
+  // IST midnight = UTC midnight - 5h30m => subtract 330 min
+  const dayStartUTC = new Date(`${date}T00:00:00+05:30`);
+  const dayEndUTC   = new Date(`${date}T23:59:59+05:30`);
 
   const { data, error } = await supabaseAdmin
     .from('form_submissions')
     .select('submitted_at, is_converted')
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${date}T00:00:00`)
-    .lte('submitted_at', `${date}T23:59:59`);
+    .gte('submitted_at', dayStartUTC.toISOString())
+    .lte('submitted_at', dayEndUTC.toISOString());
 
   if (error) return badRequest(res, error.message);
 
@@ -118,7 +145,7 @@ export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) =>
   }));
 
   (data || []).forEach((s) => {
-    const h = new Date(s.submitted_at).getHours();
+    const h = istHour(new Date(s.submitted_at));
     hourly[h].engagements++;
     if (s.is_converted) hourly[h].conversions++;
   });
@@ -131,29 +158,41 @@ export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Resp
   const user = req.user!;
 
   const days = Math.min(30, Math.max(1, parseInt((req.query.days as string) || '7', 10)));
-  const end = new Date();
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - (days - 1));
+
+  // Compute IST "today" and "start" dates, then convert to UTC for Supabase
+  const nowIST      = toIST(new Date());
+  const todayIST    = istDateKey(new Date());
+  const startISTStr = (() => {
+    const d = new Date(nowIST.getTime());
+    d.setUTCDate(d.getUTCDate() - (days - 1));
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+  })();
+
+  const startUTC = new Date(`${startISTStr}T00:00:00+05:30`);
+  const endUTC   = new Date(`${todayIST}T23:59:59+05:30`);
 
   const { data, error } = await supabaseAdmin
     .from('form_submissions')
     .select('submitted_at')
     .eq('org_id', user.org_id)
-    .gte('submitted_at', start.toISOString())
-    .lte('submitted_at', end.toISOString())
+    .gte('submitted_at', startUTC.toISOString())
+    .lte('submitted_at', endUTC.toISOString())
     .order('submitted_at', { ascending: true });
 
   if (error) return badRequest(res, error.message);
 
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+  // Build row skeleton using IST dates
   const rows = Array.from({ length: days }, (_, i) => {
-    const d = new Date(start);
-    d.setDate(start.getDate() + i);
+    const ist = new Date(startUTC.getTime() + i * 24 * 60 * 60 * 1000 + IST_OFFSET * 60 * 1000);
+    const dateKey = `${ist.getUTCFullYear()}-${String(ist.getUTCMonth()+1).padStart(2,'0')}-${String(ist.getUTCDate()).padStart(2,'0')}`;
     return {
-      date: d.toISOString().split('T')[0],
-      day: dayNames[d.getDay()],
+      date: dateKey,
+      day: dayNames[ist.getUTCDay()],
       hours: Array.from({ length: 24 }, (_, hour) => ({ hour, count: 0 })),
       total: 0,
     };
@@ -163,9 +202,9 @@ export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Resp
 
   for (const item of data || []) {
     if (!item.submitted_at) continue;
-    const dt = new Date(item.submitted_at);
-    const dateKey = dt.toISOString().split('T')[0];
-    const hour = dt.getHours();
+    const utcDate = new Date(item.submitted_at);
+    const dateKey = istDateKey(utcDate);   // bucket by IST date
+    const hour    = istHour(utcDate);      // bucket by IST hour
     const row = rowMap.get(dateKey);
     if (!row) continue;
     row.hours[hour].count += 1;
