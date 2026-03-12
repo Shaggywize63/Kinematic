@@ -305,7 +305,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
 
   // Fetch all FEs and stores for this org (for matching)
   const [{ data: fes }, { data: stores }] = await Promise.all([
-    supabase.from('users').select('id, employee_id, name').eq('org_id', org).eq('role', 'field_executive'),
+    supabase.from('users').select('id, employee_id, name').eq('org_id', org).eq('role', 'executive'),
     supabase.from('stores').select('id, store_code, name').eq('org_id', org),
   ]);
 
