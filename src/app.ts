@@ -33,6 +33,7 @@ import storesRouter       from './routes/stores.routes';
 import skusRouter         from './routes/skus.routes';
 import assetsRouter       from './routes/assets.routes';
 import routePlanRouter from './routes/route-plan.routes';
+import warehouseRoutes from './routes/warehouse.routes';
 
 const app = express();
 
@@ -115,6 +116,7 @@ app.use(`${V1}/skus`,          skusRouter);
 app.use(`${V1}/assets`,        assetsRouter);
 app.use(`${V1}/activities`, activitiesRouter);
 app.use(`${V1}/route-plans`, routePlanRouter);
+app.use('/api/v1/warehouse', warehouseRoutes);
 
 app.get(`${V1}/users`,       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getUsers);
 app.post(`${V1}/users`,      requireAuth, requireRole('admin','city_manager','super_admin'), misc.createUser);
