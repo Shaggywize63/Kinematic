@@ -12,6 +12,7 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import { requireAuth, requireRole } from './middleware/auth';
 import * as misc from './controllers/misc.controller';
 import * as attendanceCtrl from './controllers/attendance.controller';
+import wmsRoutes from './routes/wms.routes';
 
 
 // Routes
@@ -117,6 +118,7 @@ app.use(`${V1}/assets`,        assetsRouter);
 app.use(`${V1}/activities`, activitiesRouter);
 app.use(`${V1}/route-plans`, routePlanRouter);
 app.use('/api/v1/warehouse', warehouseRoutes);
+app.use('/api/v1/warehouses', wmsRoutes);
 
 app.get(`${V1}/users`,       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getUsers);
 app.post(`${V1}/users`,      requireAuth, requireRole('admin','city_manager','super_admin'), misc.createUser);
