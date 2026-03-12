@@ -1,112 +1,113 @@
-import 'dotenv/config';
-import express from 'express';
-import helmet from 'helmet';
-import cors from 'cors';
-import compression from 'compression';
-import morgan from 'morgan';
-import rateLimit from 'express-rate-limit';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
-import { logger } from './lib/logger';
-import { errorHandler, notFoundHandler } from './middleware/errorHandler';
+class ApiClient {
+  private baseUrl: string;
 
-// Routes
-import authRoutes         from './routes/auth.routes';
-import attendanceRoutes   from './routes/attendance.routes';
-import formsRoutes        from './routes/forms.routes';
-import stockRoutes        from './routes/stock.routes';
-import broadcastRoutes    from './routes/broadcast.routes';
-import sosRoutes          from './routes/sos.routes';
-import leaderboardRoutes  from './routes/leaderboard.routes';
-import notifRoutes        from './routes/notifications.routes';
-import learningRoutes     from './routes/learning.routes';
-import grievanceRoutes    from './routes/grievance.routes';
-import analyticsRoutes    from './routes/analytics.routes';
-import visitlogRoutes     from './routes/visitlog.routes';
-import uploadRoutes       from './routes/upload.routes';
-import managementRoutes   from './routes/management.routes';
-import wmsRoutes          from './routes/wms.routes';
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
 
-const app = express();
+  private getToken(): string | null {
+    if (typeof window === 'undefined') return null;
+    return localStorage.getItem('kinematic_token');
+  }
 
-// ── Security ─────────────────────────────────────────────────
-app.use(helmet());
-app.set('trust proxy', 1);
+  private async request<T>(
+    path: string,
+    options: RequestInit = {}
+  ): Promise<T> {
+    const token = this.getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string>),
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
 
-const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3001')
-  .split(',')
-  .map((o) => o.trim());
+    const res = await fetch(`${this.baseUrl}${path}`, { ...options, headers });
 
-app.use(cors({
-  origin: (origin, cb) => {
-    // Allow Postman / server-to-server (no origin)
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS policy: origin ${origin} not allowed`));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+    if (res.status === 401) {
+      throw new Error('Unauthorized');
+    }
 
-// ── Rate limiting ─────────────────────────────────────────────
-const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
-  max: parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, error: 'Too many requests. Please slow down.' },
-});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    return data;
+  }
 
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10,                   // 10 login attempts per window
-  message: { success: false, error: 'Too many login attempts. Try again in 15 minutes.' },
-});
+  get<T>(path: string) { return this.request<T>(path); }
+  post<T>(path: string, body: unknown) {
+    return this.request<T>(path, { method: 'POST', body: JSON.stringify(body) });
+  }
+  put<T>(path: string, body: unknown) {
+    return this.request<T>(path, { method: 'PUT', body: JSON.stringify(body) });
+  }
+  patch<T>(path: string, body: unknown) {
+    return this.request<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
+  }
+  delete<T>(path: string) {
+    return this.request<T>(path, { method: 'DELETE' });
+  }
 
-app.use('/api', limiter);
-app.use('/api/v1/auth/login', authLimiter);
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  login(email: string, password: string) {
+    return this.post<{ success: boolean; data: { user: object; access_token: string } }>(
+      '/api/v1/auth/login',
+      { email, password }
+    );
+  }
 
-// ── Body parsing & misc ───────────────────────────────────────
-app.use(compression());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+  // ── Dashboard ─────────────────────────────────────────────────────────────
+  getDashboardStats() {
+    return this.get('/api/v1/dashboard/stats');
+  }
+  getLiveActivity() {
+    return this.get('/api/v1/dashboard/live');
+  }
 
-// ── HTTP logging ──────────────────────────────────────────────
-app.use(morgan('combined', {
-  stream: { write: (msg) => logger.http(msg.trim()) },
-  skip: (req) => req.path === '/health',
-}));
+  // ── Field Executives ──────────────────────────────────────────────────────
+  getFieldExecutives(params?: Record<string, string>) {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return this.get(`/api/v1/field-executives${qs}`);
+  }
+  getFieldExecutive(id: string) {
+    return this.get(`/api/v1/field-executives/${id}`);
+  }
 
-// ── Health check ──────────────────────────────────────────────
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'kinematic-api',
-    version: process.env.npm_package_version || '1.0.0',
-    timestamp: new Date().toISOString(),
-  });
-});
+  // ── Attendance ────────────────────────────────────────────────────────────
+  getAttendance(params?: Record<string, string>) {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return this.get(`/api/v1/attendance${qs}`);
+  }
 
-// ── API routes ────────────────────────────────────────────────
-const V1 = '/api/v1';
+  // ── Forms (CC) ────────────────────────────────────────────────────────────
+  getForms(params?: Record<string, string>) {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return this.get(`/api/v1/forms${qs}`);
+  }
 
-app.use(`${V1}/auth`,         authRoutes);
-app.use(`${V1}/attendance`,   attendanceRoutes);
-app.use(`${V1}/forms`,        formsRoutes);
-app.use(`${V1}/stock`,        stockRoutes);
-app.use(`${V1}/broadcast`,    broadcastRoutes);
-app.use(`${V1}/sos`,          sosRoutes);
-app.use(`${V1}/leaderboard`,  leaderboardRoutes);
-app.use(`${V1}/notifications`, notifRoutes);
-app.use(`${V1}/learning`,     learningRoutes);
-app.use(`${V1}/grievances`,   grievanceRoutes);
-app.use(`${V1}/analytics`,    analyticsRoutes);
-app.use(`${V1}/visits`,       visitlogRoutes);
-app.use(`${V1}/upload`,       uploadRoutes);
-app.use(V1,                   managementRoutes);  // cities, stores, skus, assets, users, zones
-app.use(`${V1}/warehouses`,   wmsRoutes);
+  // ── Stock ─────────────────────────────────────────────────────────────────
+  getStock() { return this.get('/api/v1/stock'); }
+  getStockAllocations(params?: Record<string, string>) {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    return this.get(`/api/v1/stock/allocations${qs}`);
+  }
+  allocateStock(feId: string, items: Array<{ item_id: string; qty: number }>) {
+    return this.post('/api/v1/stock/allocate', { fe_id: feId, items });
+  }
 
-// ── 404 + error handlers ──────────────────────────────────────
-app.use(notFoundHandler);
-app.use(errorHandler);
+  // ── Broadcast ─────────────────────────────────────────────────────────────
+  getBroadcast() { return this.get('/api/v1/broadcast'); }
+  createBroadcast(data: object) { return this.post('/api/v1/broadcast', data); }
 
-export default app;
+  // ── Notifications ─────────────────────────────────────────────────────────
+  getNotifications() { return this.get('/api/v1/notifications'); }
+  sendNotification(data: object) { return this.post('/api/v1/notifications/send', data); }
+
+  // ── Analytics ─────────────────────────────────────────────────────────────
+  getAnalytics(period: string) {
+    return this.get(`/api/v1/analytics?period=${period}`);
+  }
+}
+
+export const api = new ApiClient(API_URL);
+export default api;
