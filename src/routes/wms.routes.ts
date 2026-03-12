@@ -15,18 +15,20 @@ import {
 const router = Router();
 router.use(requireAuth);
 
-// Summary
+// !! Static routes MUST come before param routes (:id) to avoid shadowing !!
+
+// Summary — static, must be first
 router.get('/summary',                             getWmsSummary);
 
-// Warehouses CRUD
-router.get('/',                                    listWarehouses);
-router.get('/:id',                                 getWarehouse);
-router.post('/',                                   createWarehouse);
-router.patch('/:id',                               updateWarehouse);
-router.delete('/:id',                              deleteWarehouse);
-
-// Movements (scoped to a warehouse)
+// Movements — static sub-path pattern, register before /:id
 router.get('/:warehouseId/movements',              listMovements);
 router.post('/:warehouseId/movements',             createMovement);
+
+// Warehouses CRUD — param routes last
+router.get('/',                                    listWarehouses);
+router.post('/',                                   createWarehouse);
+router.get('/:id',                                 getWarehouse);
+router.patch('/:id',                               updateWarehouse);
+router.delete('/:id',                              deleteWarehouse);
 
 export default router;
