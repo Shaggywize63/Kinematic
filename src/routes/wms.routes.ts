@@ -9,26 +9,30 @@ import {
   deleteWarehouse,
   listMovements,
   createMovement,
+  updateMovement,
+  deleteMovement,
   getWmsSummary,
 } from '../controllers/wms.controller';
 
 const router = Router();
 router.use(requireAuth);
 
-// !! Static routes MUST come before param routes (:id) to avoid shadowing !!
+// !! Static routes MUST come before param routes (:id) !!
 
 // Summary — static, must be first
-router.get('/summary',                             getWmsSummary);
+router.get('/summary', getWmsSummary);
 
-// Movements — static sub-path pattern, register before /:id
-router.get('/:warehouseId/movements',              listMovements);
-router.post('/:warehouseId/movements',             createMovement);
+// Movement CRUD — static sub-path, before /:id
+router.get('/:warehouseId/movements',                   listMovements);
+router.post('/:warehouseId/movements',                  createMovement);
+router.patch('/:warehouseId/movements/:movementId',     updateMovement);
+router.delete('/:warehouseId/movements/:movementId',    deleteMovement);
 
-// Warehouses CRUD — param routes last
-router.get('/',                                    listWarehouses);
-router.post('/',                                   createWarehouse);
-router.get('/:id',                                 getWarehouse);
-router.patch('/:id',                               updateWarehouse);
-router.delete('/:id',                              deleteWarehouse);
+// Warehouse CRUD — param routes last
+router.get('/',     listWarehouses);
+router.post('/',    createWarehouse);
+router.get('/:id',  getWarehouse);
+router.patch('/:id', updateWarehouse);
+router.delete('/:id', deleteWarehouse);
 
 export default router;
