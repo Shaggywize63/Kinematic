@@ -1,14 +1,30 @@
 import { Router } from 'express';
-import * as ctrl from '../controllers/broadcast.controller';
-import { requireAuth, requireAdminOrAbove } from '../middleware/auth';
+import { requireAuth, requireRole } from '../middleware/auth';
+import {
+  getQuestions,
+  getAdminQuestions,
+  createQuestion,
+  updateQuestion,
+  deleteQuestion,
+  updateStatus,
+  submitAnswer,
+  getResults,
+} from '../controllers/broadcast.controller';
 
 const router = Router();
 
 router.use(requireAuth);
 
-router.get('/',              ctrl.getQuestions);
-router.post('/',             requireAdminOrAbove, ctrl.createQuestion);
-router.post('/:id/answer',   ctrl.submitAnswer);
-router.get('/:id/results',   requireAdminOrAbove, ctrl.getResults);
+// Admin routes
+router.get('/admin', requireRole('admin', 'super_admin', 'city_manager'), getAdminQuestions);
+router.post('/', requireRole('admin', 'super_admin', 'city_manager'), createQuestion);
+router.patch('/:id', requireRole('admin', 'super_admin', 'city_manager'), updateQuestion);
+router.delete('/:id', requireRole('admin', 'super_admin', 'city_manager'), deleteQuestion);
+router.patch('/:id/status', requireRole('admin', 'super_admin', 'city_manager'), updateStatus);
+router.get('/:id/results', requireRole('admin', 'super_admin', 'city_manager'), getResults);
+
+// FE / Supervisor routes
+router.get('/', getQuestions);
+router.post('/:id/answer', submitAnswer);
 
 export default router;
