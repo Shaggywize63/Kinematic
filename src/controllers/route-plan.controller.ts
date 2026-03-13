@@ -11,7 +11,7 @@ const userId = (req: Request) => (req as any).user.id as string;
 const today  = () => new Date().toISOString().split('T')[0];
 
 /* ─────────────────────────────────────────────────────────────
-   GET /api/v1/route-plans?date=YYYY-MM-DD&user_id=&status=&zone_id=
+   GET /api/v1/route-plan?date=YYYY-MM-DD&user_id=&status=&zone_id=
    Admin / Supervisor — full list with outlet detail via view
 ───────────────────────────────────────────────────────────── */
 export const getRoutePlans = asyncHandler(async (req: Request, res: Response) => {
@@ -60,7 +60,7 @@ export const getRoutePlans = asyncHandler(async (req: Request, res: Response) =>
 });
 
 /* ─────────────────────────────────────────────────────────────
-   GET /api/v1/route-plans/summary?date=YYYY-MM-DD
+   GET /api/v1/route-plan/summary?date=YYYY-MM-DD
 ───────────────────────────────────────────────────────────── */
 export const getRoutePlanSummary = asyncHandler(async (req: Request, res: Response) => {
   const org  = orgId(req);
@@ -93,7 +93,7 @@ export const getRoutePlanSummary = asyncHandler(async (req: Request, res: Respon
 });
 
 /* ─────────────────────────────────────────────────────────────
-   GET /api/v1/route-plans/me?date=YYYY-MM-DD
+   GET /api/v1/route-plan/me?date=YYYY-MM-DD
    Field Executive — own plan for a date
 ───────────────────────────────────────────────────────────── */
 export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) => {
@@ -374,7 +374,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
 });
 
 /* ─────────────────────────────────────────────────────────────
-   GET /api/v1/route-plans/imports?date=YYYY-MM-DD
+   GET /api/v1/route-plan/imports?date=YYYY-MM-DD
    Admin — list recent imports
 ───────────────────────────────────────────────────────────── */
 export const getImports = asyncHandler(async (req: Request, res: Response) => {
@@ -394,7 +394,7 @@ export const getImports = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /* ─────────────────────────────────────────────────────────────
-   GET /api/v1/route-plans/outlet-frequency
+   GET /api/v1/route-plan/outlet-frequency
    Admin — get all outlet visit frequency configs
 ───────────────────────────────────────────────────────────── */
 export const getOutletFrequency = asyncHandler(async (req: Request, res: Response) => {
