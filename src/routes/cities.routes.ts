@@ -1,13 +1,25 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth';
-import { requireRole } from '../middleware/auth';
+import { requireAuth, requireRole } from '../middleware/auth';
 import { citiesCtrl } from '../controllers/management.controller';
 
 const router = Router();
+
+// All /cities routes require auth
 router.use(requireAuth);
-router.get('/',      citiesCtrl.list);
-router.get('/:id',   citiesCtrl.getOne);
-router.post('/',     requireRole('admin','supervisor'), citiesCtrl.create);
-router.patch('/:id', requireRole('admin','supervisor'), citiesCtrl.update);
-router.delete('/:id',requireRole('admin'), citiesCtrl.remove);
+
+// GET /api/v1/cities        → list cities
+router.get('/', citiesCtrl.list);
+
+// GET /api/v1/cities/:id    → get single city
+router.get('/:id', citiesCtrl.getOne);
+
+// POST /api/v1/cities       → create city (admin/supervisor)
+router.post('/', requireRole('admin', 'supervisor'), citiesCtrl.create);
+
+// PATCH /api/v1/cities/:id  → update city (admin/supervisor)
+router.patch('/:id', requireRole('admin', 'supervisor'), citiesCtrl.update);
+
+// DELETE /api/v1/cities/:id → delete city (admin)
+router.delete('/:id', requireRole('admin'), citiesCtrl.remove);
+
 export default router;
