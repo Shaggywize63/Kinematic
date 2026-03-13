@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, notFound, conflict } from '../utils/response';
+import { ok, created, badRequest, notFound, conflict, serverError } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const questionSchema = z.object({
@@ -14,23 +14,25 @@ const questionSchema = z.object({
   })).min(2),
   correct_option: z.number().int().optional(),
   is_urgent: z.boolean().default(false),
-  deadline_at: z.string().datetime().optional(),
+  deadline_at: z.string().datetime().optional().nullable(),
   target_roles: z.array(z.string()).default(['executive']),
   target_zone_ids: z.array(z.string().uuid()).default([]),
+  target_cities: z.array(z.string()).default([]),
 });
 
 const answerSchema = z.object({
   selected: z.number().int().min(0),
 });
 
-// GET /api/v1/broadcast  — get active questions for current user
+// GET /api/v1/broadcast — active questions for current user (FE/supervisor)
 export const getQuestions = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
 
-  const { data, error } = await supabaseAdmin
+  let query = supabaseAdmin
     .from('broadcast_questions')
     .select(`
-      id, question, options, correct_option, is_urgent, deadline_at, status, created_at,
+      id, question, options, correct_option, is_urgent, deadline_at,
+      status, target_roles, target_zone_ids, target_cities, created_at,
       broadcast_answers!left(id, selected, is_correct, answered_at)
     `)
     .eq('org_id', user.org_id)
@@ -39,25 +41,62 @@ export const getQuestions = asyncHandler(async (req: AuthRequest, res: Response)
     .order('is_urgent', { ascending: false })
     .order('created_at', { ascending: false });
 
+  const { data, error } = await query;
   if (error) return badRequest(res, error.message);
 
-  // Mask correct_option from executives
   const sanitised = (data || []).map((q) => ({
     ...q,
     correct_option: ['admin', 'city_manager', 'super_admin'].includes(user.role)
       ? q.correct_option
       : undefined,
-    already_answered: Array.isArray(q.broadcast_answers) && q.broadcast_answers.length > 0,
-    my_answer: Array.isArray(q.broadcast_answers) && q.broadcast_answers.length > 0
-      ? q.broadcast_answers[0]
-      : null,
+    already_answered:
+      Array.isArray(q.broadcast_answers) && q.broadcast_answers.length > 0,
+    my_answer:
+      Array.isArray(q.broadcast_answers) && q.broadcast_answers.length > 0
+        ? q.broadcast_answers[0]
+        : null,
     broadcast_answers: undefined,
   }));
 
   return ok(res, sanitised);
 });
 
-// POST /api/v1/broadcast  (admin+)
+// GET /api/v1/broadcast/admin — all questions for admin dashboard
+export const getAdminQuestions = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+
+  const { data, error } = await supabaseAdmin
+    .from('broadcast_questions')
+    .select(`
+      id, question, options, correct_option, is_urgent, deadline_at,
+      status, target_roles, target_zone_ids, target_cities, created_at, updated_at,
+      broadcast_answers(id, selected, is_correct, answered_at, user_id)
+    `)
+    .eq('org_id', user.org_id)
+    .order('created_at', { ascending: false });
+
+  if (error) return serverError(res, error.message);
+
+  // Enrich with response counts
+  const enriched = (data || []).map((q) => {
+    const answers = (q.broadcast_answers || []) as { selected: number; is_correct: boolean }[];
+    const tally = (q.options as { label: string }[]).map((opt, i) => ({
+      ...opt,
+      index: i,
+      count: answers.filter((a) => a.selected === i).length,
+    }));
+    return {
+      ...q,
+      response_count: answers.length,
+      tally,
+      broadcast_answers: undefined,
+    };
+  });
+
+  return ok(res, enriched);
+});
+
+// POST /api/v1/broadcast — create question (admin+)
 export const createQuestion = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const body = questionSchema.safeParse(req.body);
@@ -65,7 +104,11 @@ export const createQuestion = asyncHandler(async (req: AuthRequest, res: Respons
 
   const { data, error } = await supabaseAdmin
     .from('broadcast_questions')
-    .insert({ ...body.data, org_id: user.org_id, created_by: user.id })
+    .insert({
+      ...body.data,
+      org_id: user.org_id,
+      created_by: user.id,
+    })
     .select()
     .single();
 
@@ -73,14 +116,75 @@ export const createQuestion = asyncHandler(async (req: AuthRequest, res: Respons
   return created(res, data, 'Question posted');
 });
 
-// POST /api/v1/broadcast/:id/answer
+// PATCH /api/v1/broadcast/:id — update question (admin+)
+export const updateQuestion = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  const body = questionSchema.partial().safeParse(req.body);
+  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
+
+  const { data, error } = await supabaseAdmin
+    .from('broadcast_questions')
+    .update({ ...body.data, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('org_id', user.org_id)
+    .select()
+    .single();
+
+  if (error) return badRequest(res, error.message);
+  if (!data) return notFound(res, 'Question not found');
+  return ok(res, data, 'Question updated');
+});
+
+// DELETE /api/v1/broadcast/:id — delete question (admin+)
+export const deleteQuestion = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+
+  // Delete answers first
+  await supabaseAdmin
+    .from('broadcast_answers')
+    .delete()
+    .eq('question_id', id);
+
+  const { error } = await supabaseAdmin
+    .from('broadcast_questions')
+    .delete()
+    .eq('id', id)
+    .eq('org_id', user.org_id);
+
+  if (error) return badRequest(res, error.message);
+  return ok(res, null, 'Question deleted');
+});
+
+// PATCH /api/v1/broadcast/:id/status — close/reopen (admin+)
+export const updateStatus = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  const { status } = req.body as { status: string };
+
+  if (!['active', 'closed'].includes(status)) return badRequest(res, 'Status must be active or closed');
+
+  const { data, error } = await supabaseAdmin
+    .from('broadcast_questions')
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('org_id', user.org_id)
+    .select()
+    .single();
+
+  if (error) return badRequest(res, error.message);
+  if (!data) return notFound(res, 'Question not found');
+  return ok(res, data, `Question ${status}`);
+});
+
+// POST /api/v1/broadcast/:id/answer — submit answer (FE/supervisor)
 export const submitAnswer = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
   const body = answerSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
-  // Check question exists and is active
   const { data: question } = await supabaseAdmin
     .from('broadcast_questions')
     .select('id, options, correct_option, status, deadline_at')
@@ -94,7 +198,6 @@ export const submitAnswer = asyncHandler(async (req: AuthRequest, res: Response)
     return badRequest(res, 'Deadline has passed');
   }
 
-  // Check not already answered
   const { data: existing } = await supabaseAdmin
     .from('broadcast_answers')
     .select('id')
@@ -107,9 +210,10 @@ export const submitAnswer = asyncHandler(async (req: AuthRequest, res: Response)
   const opts = question.options as unknown[];
   if (body.data.selected >= opts.length) return badRequest(res, 'Invalid option index');
 
-  const is_correct = question.correct_option !== null
-    ? body.data.selected === question.correct_option
-    : null;
+  const is_correct =
+    question.correct_option !== null
+      ? body.data.selected === question.correct_option
+      : null;
 
   const { data, error } = await supabaseAdmin
     .from('broadcast_answers')
@@ -127,7 +231,7 @@ export const submitAnswer = asyncHandler(async (req: AuthRequest, res: Response)
   return created(res, { ...data, correct_option: question.correct_option }, 'Answer submitted');
 });
 
-// GET /api/v1/broadcast/:id/results  (admin+)
+// GET /api/v1/broadcast/:id/results (admin+)
 export const getResults = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
