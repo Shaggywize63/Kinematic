@@ -28,6 +28,15 @@ import usersRoutes        from './routes/users.routes';
 import zonesRoutes        from './routes/zones.routes';
 import routePlanRoutes    from './routes/route-plan.routes';
 
+// Other management routes (available, now mounted)
+import activitiesRoutes   from './routes/activities.routes';
+import assetsRoutes       from './routes/assets.routes';
+import citiesRoutes       from './routes/cities.routes';
+import managementRoutes   from './routes/management.routes';
+import skusRoutes         from './routes/skus.routes';
+import storesRoutes       from './routes/stores.routes';
+import warehouseRoutes    from './routes/warehouse.routes';
+
 const app = express();
 
 // ── Security ─────────────────────────────────────────────────
@@ -108,6 +117,15 @@ app.use(`${V1}/warehouses`,   wmsRoutes);
 app.use(`${V1}/users`,        usersRoutes);
 app.use(`${V1}/zones`,        zonesRoutes);
 app.use(`${V1}/route-plan`,   routePlanRoutes);
+
+// Other management mounts
+app.use(`${V1}/activities`,   activitiesRoutes);
+app.use(`${V1}/assets`,       assetsRoutes);
+app.use(`${V1}/cities`,       citiesRoutes);
+app.use(`${V1}/management`,   managementRoutes);
+app.use(`${V1}/skus`,         skusRoutes);
+app.use(`${V1}/stores`,       storesRoutes);
+app.use(`${V1}/warehouse`,    warehouseRoutes);
 
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
