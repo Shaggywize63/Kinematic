@@ -116,7 +116,10 @@ app.use(`${V1}/upload`,       uploadRoutes);
 app.use(`${V1}/warehouses`,   wmsRoutes);
 app.use(`${V1}/users`,        usersRoutes);
 app.use(`${V1}/zones`,        zonesRoutes);
+
+// Route plan (singular and plural alias)
 app.use(`${V1}/route-plan`,   routePlanRoutes);
+app.use(`${V1}/route-plans`,  routePlanRoutes);
 
 // Other management mounts
 app.use(`${V1}/activities`,   activitiesRoutes);
