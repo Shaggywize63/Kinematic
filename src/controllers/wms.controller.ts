@@ -1,6 +1,5 @@
 // ═══════════════════════════════════════════════════════════
 // src/controllers/wms.controller.ts
-// Warehouse Management System — warehouses + inventory movements
 // ═══════════════════════════════════════════════════════════
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
@@ -8,11 +7,15 @@ import { AuthRequest } from '../middleware/auth';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ok, created, badRequest, notFound } from '../utils/response';
 
-/* ─────────────────────────────────────────────────────────────
-   WAREHOUSES
-───────────────────────────────────────────────────────────── */
+const MOVEMENT_SELECT = `
+  *,
+  sku:sku_id(id, sku_code, name, unit),
+  performer:performed_by(id, name, employee_id),
+  asset:asset_id(id, name, asset_code)
+`;
 
-/** GET /api/v1/warehouses */
+/* ── WAREHOUSES ─────────────────────────────────────────── */
+
 export const listWarehouses = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
   const { data, error } = await supabaseAdmin
@@ -24,7 +27,6 @@ export const listWarehouses = asyncHandler(async (req: AuthRequest, res: Respons
   return ok(res, data || []);
 });
 
-/** GET /api/v1/warehouses/:id */
 export const getWarehouse = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
   const { id } = req.params;
@@ -36,7 +38,6 @@ export const getWarehouse = asyncHandler(async (req: AuthRequest, res: Response)
   return ok(res, data);
 });
 
-/** POST /api/v1/warehouses */
 export const createWarehouse = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
   const body = req.body;
@@ -51,7 +52,6 @@ export const createWarehouse = asyncHandler(async (req: AuthRequest, res: Respon
   return created(res, data);
 });
 
-/** PATCH /api/v1/warehouses/:id */
 export const updateWarehouse = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
   const { id } = req.params;
@@ -67,7 +67,6 @@ export const updateWarehouse = asyncHandler(async (req: AuthRequest, res: Respon
   return ok(res, data);
 });
 
-/** DELETE /api/v1/warehouses/:id */
 export const deleteWarehouse = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
   const { id } = req.params;
@@ -77,13 +76,8 @@ export const deleteWarehouse = asyncHandler(async (req: AuthRequest, res: Respon
   return ok(res, { deleted: true });
 });
 
-/* ─────────────────────────────────────────────────────────────
-   INVENTORY MOVEMENTS
-───────────────────────────────────────────────────────────── */
+/* ── INVENTORY MOVEMENTS ────────────────────────────────── */
 
-/** GET /api/v1/warehouses/:warehouseId/movements
- *  query: ?type=inbound&limit=50&offset=0
- */
 export const listMovements = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
   const { warehouseId } = req.params;
@@ -93,12 +87,7 @@ export const listMovements = asyncHandler(async (req: AuthRequest, res: Response
 
   let q = supabaseAdmin
     .from('inventory_movements')
-    .select(`
-      *,
-      sku:sku_id(id, sku_code, name, unit),
-      performer:performed_by(id, name, employee_id),
-      asset:asset_id(id, name, asset_code)
-    `)
+    .select(MOVEMENT_SELECT)
     .eq('org_id', org_id)
     .eq('warehouse_id', warehouseId)
     .order('moved_at', { ascending: false })
@@ -111,7 +100,6 @@ export const listMovements = asyncHandler(async (req: AuthRequest, res: Response
   return ok(res, data || []);
 });
 
-/** POST /api/v1/warehouses/:warehouseId/movements */
 export const createMovement = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id, id: user_id } = req.user!;
   const { warehouseId } = req.params;
@@ -135,32 +123,64 @@ export const createMovement = asyncHandler(async (req: AuthRequest, res: Respons
   const { data, error } = await supabaseAdmin
     .from('inventory_movements')
     .insert(payload)
-    .select(`
-      *,
-      sku:sku_id(id, sku_code, name, unit),
-      performer:performed_by(id, name, employee_id),
-      asset:asset_id(id, name, asset_code)
-    `)
+    .select(MOVEMENT_SELECT)
     .single();
   if (error) return badRequest(res, error.message);
   return created(res, data);
 });
 
-/* ─────────────────────────────────────────────────────────────
-   WMS SUMMARY   GET /api/v1/warehouses/summary
-   Returns per-warehouse inventory totals and recent movement counts
-───────────────────────────────────────────────────────────── */
+/** PATCH /api/v1/warehouses/:warehouseId/movements/:movementId */
+export const updateMovement = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  const { warehouseId, movementId } = req.params;
+
+  const validTypes = ['inbound', 'outbound', 'transfer', 'adjustment', 'damage'];
+  const { org_id: _, warehouse_id: __, ...rest } = req.body;
+
+  if (rest.movement_type && !validTypes.includes(rest.movement_type))
+    return badRequest(res, `movement_type must be one of: ${validTypes.join(', ')}`);
+
+  const { data, error } = await supabaseAdmin
+    .from('inventory_movements')
+    .update(rest)
+    .eq('id', movementId)
+    .eq('warehouse_id', warehouseId)
+    .eq('org_id', org_id)
+    .select(MOVEMENT_SELECT)
+    .single();
+
+  if (error) return badRequest(res, error.message);
+  if (!data) return notFound(res, 'Movement not found');
+  return ok(res, data);
+});
+
+/** DELETE /api/v1/warehouses/:warehouseId/movements/:movementId */
+export const deleteMovement = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  const { warehouseId, movementId } = req.params;
+
+  const { error } = await supabaseAdmin
+    .from('inventory_movements')
+    .delete()
+    .eq('id', movementId)
+    .eq('warehouse_id', warehouseId)
+    .eq('org_id', org_id);
+
+  if (error) return badRequest(res, error.message);
+  return ok(res, { deleted: true });
+});
+
+/* ── WMS SUMMARY ────────────────────────────────────────── */
+
 export const getWmsSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
 
-  // warehouses
   const { data: whs, error: whErr } = await supabaseAdmin
     .from('warehouses')
     .select('id, name, warehouse_code, type, city, is_active')
     .eq('org_id', org_id);
   if (whErr) return badRequest(res, whErr.message);
 
-  // all movements for this org (last 30 days)
   const since30 = new Date();
   since30.setDate(since30.getDate() - 30);
   const { data: movements, error: mErr } = await supabaseAdmin
@@ -170,21 +190,18 @@ export const getWmsSummary = asyncHandler(async (req: AuthRequest, res: Response
     .gte('moved_at', since30.toISOString());
   if (mErr) return badRequest(res, mErr.message);
 
-  // aggregate per warehouse
   const mvMap: Record<string, { inbound: number; outbound: number; total_moves: number }> = {};
   (movements || []).forEach((m) => {
     const wid = m.warehouse_id;
     if (!mvMap[wid]) mvMap[wid] = { inbound: 0, outbound: 0, total_moves: 0 };
     mvMap[wid].total_moves++;
     if (m.movement_type === 'inbound')  mvMap[wid].inbound  += m.quantity;
-    if (m.movement_type === 'outbound') mvMap[wid].outbound += m.quantity;
+    if (m.movement_type === 'outbound') mvMap[wid].outbound += Math.abs(m.quantity);
   });
 
-  // skus count
   const { count: skuCount } = await supabaseAdmin
     .from('skus').select('*', { count: 'exact', head: true }).eq('org_id', org_id);
 
-  // assets count
   const { count: assetCount } = await supabaseAdmin
     .from('assets').select('*', { count: 'exact', head: true }).eq('org_id', org_id).eq('is_active', true);
 
@@ -194,11 +211,11 @@ export const getWmsSummary = asyncHandler(async (req: AuthRequest, res: Response
   }));
 
   return ok(res, {
-    warehouses:   warehousesWithStats,
-    total_warehouses: (whs || []).length,
-    active_warehouses: (whs || []).filter((w) => w.is_active).length,
-    total_skus:    skuCount  ?? 0,
-    total_assets:  assetCount ?? 0,
+    warehouses:          warehousesWithStats,
+    total_warehouses:    (whs || []).length,
+    active_warehouses:   (whs || []).filter((w) => w.is_active).length,
+    total_skus:          skuCount  ?? 0,
+    total_assets:        assetCount ?? 0,
     total_movements_30d: (movements || []).length,
   });
 });
