@@ -151,7 +151,7 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
 })
 
 export const createUser = asyncHandler(async (req: Request, res: Response) => {
-  const { name, mobile, password, role, zone_id, supervisor_id, employee_id, joined_date } = req.body
+  const { name, mobile, password, role, zone_id, supervisor_id, employee_id, joined_date, city, email } = req.body
   const admin = req.user!
 
   // Validate required fields
@@ -162,18 +162,17 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
     throw new AppError(400, 'mobile must be exactly 10 digits', 'VALIDATION_ERROR')
   }
 
-  const email = `${mobile}@kinematic.app`
+  const authEmail = email?.trim() || `${mobile}@kinematic.app`
 
   // 1. Create Supabase Auth user
   const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
-    email,
+    email: authEmail,
     password,
     email_confirm: true,
     user_metadata: { name, mobile, role: role || 'executive' },
   })
 
   if (authErr) {
-    // Give a clearer message if the mobile is already registered
     const msg = authErr.message.toLowerCase().includes('already')
       ? `Mobile ${mobile} is already registered`
       : authErr.message
@@ -189,11 +188,13 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
       org_id:        admin.org_id,
       name:          name.trim(),
       mobile:        mobile.trim(),
+      email:         email?.trim() || null,
       role:          role || 'executive',
       zone_id:       zone_id       || null,
       supervisor_id: supervisor_id || null,
       employee_id:   employee_id   || null,
       joined_date:   joined_date   || null,
+      city:          city          || null,
       is_active:     true,
     })
     .select('*, zones(name)')
@@ -213,13 +214,23 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
 })
 
 export const updateUser = asyncHandler(async (req: Request, res: Response) => {
-  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'avatar_url']
+  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role']
   const updates: any = {}
   for (const key of allowed) { if (req.body[key] !== undefined) updates[key] = req.body[key] }
   const { data, error } = await supabaseAdmin.from('users')
     .update(updates).eq('id', req.params.id).eq('org_id', req.user!.org_id).select().single()
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data, 'User updated')
+})
+
+export const resetUserPassword = asyncHandler(async (req: Request, res: Response) => {
+  const { password } = req.body
+  if (!password || password.length < 6) {
+    throw new AppError(400, 'Password must be at least 6 characters', 'VALIDATION_ERROR')
+  }
+  const { error } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password })
+  if (error) throw new AppError(500, error.message, 'AUTH_ERROR')
+  sendSuccess(res, { message: 'Password reset successfully' })
 })
 
 // ZONES
