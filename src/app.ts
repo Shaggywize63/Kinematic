@@ -27,6 +27,7 @@ import wmsRoutes          from './routes/wms.routes';
 import usersRoutes        from './routes/users.routes';
 import zonesRoutes        from './routes/zones.routes';
 import routePlanRoutes    from './routes/route-plan.routes';
+import candidatesRouter from './routes/candidates.routes';
 
 // Other management routes (available, now mounted)
 import activitiesRoutes   from './routes/activities.routes';
@@ -116,6 +117,8 @@ app.use(`${V1}/upload`,       uploadRoutes);
 app.use(`${V1}/warehouses`,   wmsRoutes);
 app.use(`${V1}/users`,        usersRoutes);
 app.use(`${V1}/zones`,        zonesRoutes);
+app.use('/api/v1/candidates', candidatesRouter);
+
 
 // Route plan (singular and plural alias)
 app.use(`${V1}/route-plan`,   routePlanRoutes);
