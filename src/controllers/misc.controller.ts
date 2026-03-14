@@ -139,7 +139,7 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
     parseInt(req.query.limit as string) || 20
   )
   let query = supabaseAdmin.from('users')
-    .select('id, name, mobile, role, employee_id, zone_id, supervisor_id, is_active, joined_date, zones(name)', { count: 'exact' })
+    .select('id, name, mobile, email, role, employee_id, zone_id, city, supervisor_id, is_active, joined_date, zones(name)', { count: 'exact' })
     .eq('org_id', user.org_id).order('name').range(offset, offset + limit - 1)
   if (role) query = query.eq('role', role as string)
   if (zone_id) query = query.eq('zone_id', zone_id as string)
