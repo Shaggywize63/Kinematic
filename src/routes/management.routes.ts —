@@ -129,6 +129,7 @@ router.post('/zones',  requireAuth, requireRole('admin','super_admin'), misc.cre
 // ─────────────────────────────────────────────────────────────
 // ANALYTICS
 // ─────────────────────────────────────────────────────────────
+router.post('/users/:id/reset-password', requireAuth, requireRole('admin','city_manager','super_admin'), misc.resetUserPassword)
 router.get('/analytics/summary',       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getDashboardSummary)
 router.get('/analytics/activity-feed', requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getActivityFeed)
 
