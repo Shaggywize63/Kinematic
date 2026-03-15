@@ -16,6 +16,7 @@ import candidatesRoutes  from './routes/candidates.routes';
 import aiRoutes          from './routes/ai.routes';
 import settingsRoutes    from './routes/settings.routes';
 import builderRoutes     from './routes/builder.routes';
+import authRoutes        from './routes/auth.routes';
 import wmsRoutes         from './routes/wms.routes';
 
 const app = express();
@@ -78,6 +79,7 @@ app.get('/health', (_req, res) => {
 });
 
 // ── API Routes ────────────────────────────────────────────────
+app.use('/api/v1/auth',        authRoutes);
 app.use('/api/v1',             managementRoutes);  // users, cities, zones, stores, skus, assets, auth, attendance, forms, leaderboard, etc
 app.use('/api/v1/analytics',   analyticsRoutes);   // live-locations, summary, weekly-contacts
 app.use('/api/v1/broadcast',   broadcastRoutes);   // broadcast questions & answers
