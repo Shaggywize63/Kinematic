@@ -7,9 +7,3 @@ router.post('/setup-password', async (req, res) => {
   await sb.from('users').update({ password_hash: hash }).eq('email', req.body.email);
   res.json({ success: true, hash });
 });
-```
-
-Then after deploying, call it once:
-```
-POST https://kinematic-production.up.railway.app/api/v1/auth/setup-password
-{ "email": "sagar@horizontechstudio.com", "password": "Shaggye63@1" }
