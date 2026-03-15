@@ -25,7 +25,7 @@
     "zod": "^3.23.8",
     "jsonwebtoken": "^9.0.2",
     "bcrypt": "^5.1.1",
-  },
+  }
   "devDependencies": {
     "@types/compression": "^1.7.5",
     "@types/cors": "^2.8.17",
