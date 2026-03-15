@@ -5,6 +5,7 @@ import cors from 'cors';
 import compression from 'compression';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
+import aiRouter from './routes/ai.routes';
 
 import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
@@ -118,6 +119,7 @@ app.use(`${V1}/warehouses`,   wmsRoutes);
 app.use(`${V1}/users`,        usersRoutes);
 app.use(`${V1}/zones`,        zonesRoutes);
 app.use('/api/v1/candidates', candidatesRouter);
+app.use('/api/v1/ai', aiRouter);
 
 
 // Route plan (singular and plural alias)
