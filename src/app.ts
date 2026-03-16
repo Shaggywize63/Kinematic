@@ -37,6 +37,7 @@ const allowedOrigins = [
   'http://localhost:3001',
   'https://kinematic-dashboard.vercel.app'
 ];
+
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
