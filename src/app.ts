@@ -16,7 +16,7 @@ import analyticsRoutes  from './routes/analytics.routes';
 import broadcastRoutes  from './routes/broadcast.routes';
 import candidatesRoutes from './routes/candidates.routes';
 import aiRoutes         from './routes/ai.routes';
-import settingsRoutes   from './routes/setting.routes';
+import settingsRoutes   from './routes/settings.routes';
 import builderRoutes    from './routes/builder.routes';
 import wmsRoutes        from './routes/wms.routes';
 
