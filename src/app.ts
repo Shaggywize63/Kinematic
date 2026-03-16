@@ -84,7 +84,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/attendance', attendanceRoutes);
 app.use('/api/v1/warehouses', wmsRoutes);
-app.use('/api/v1/cities', managementRoutes);
+app.use('/api/v1', managementRoutes);
 app.use('/api/v1/analytics', analyticsRoutes);
 app.use('/api/v1/broadcast', broadcastRoutes);
 app.use('/api/v1/candidates', candidatesRoutes);
