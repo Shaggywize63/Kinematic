@@ -9,20 +9,18 @@ import rateLimit from 'express-rate-limit';
 import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 
-import authRoutes        from './routes/auth.routes';
-import attendanceRoutes  from './routes/attendance.routes';
-import managementRoutes  from './routes/management.routes';
-import analyticsRoutes   from './routes/analytics.routes';
-import broadcastRoutes   from './routes/broadcast.routes';
-import candidatesRoutes  from './routes/candidates.routes';
-import aiRoutes          from './routes/ai.routes';
-import settingsRoutes    from './routes/settings.routes';
-import builderRoutes     from './routes/builder.routes';
-import wmsRoutes         from './routes/wms.routes';
-import usersRoutes    from './routes/users.routes';
-import zoneRoutes from './routes/zones.routes';  // path may vary
-
-app.use('/api/v1/zones', zoneRoutes);
+import authRoutes from './routes/auth.routes';
+import attendanceRoutes from './routes/attendance.routes';
+import managementRoutes from './routes/management.routes';
+import analyticsRoutes from './routes/analytics.routes';
+import broadcastRoutes from './routes/broadcast.routes';
+import candidatesRoutes from './routes/candidates.routes';
+import aiRoutes from './routes/ai.routes';
+import settingsRoutes from './routes/settings.routes';
+import builderRoutes from './routes/builder.routes';
+import wmsRoutes from './routes/wms.routes';
+import usersRoutes from './routes/users.routes';
+import zoneRoutes from './routes/zones.routes';
 
 const app = express();
 
@@ -84,18 +82,18 @@ app.get('/health', (_req, res) => {
 });
 
 // ── API Routes ────────────────────────────────────────────────
-app.use('/api/v1/auth',        authRoutes);        // login, logout, me
-app.use('/api/v1/attendance',  attendanceRoutes);  // team, history, summary, override
-app.use('/api/v1/warehouses',  wmsRoutes);         // warehouse alias (frontend uses /warehouses)
-app.use('/api/v1/cities',      managementRoutes); // cities CRUD
-app.use('/api/v1/analytics',   analyticsRoutes);   // live-locations, summary, weekly-contacts
-app.use('/api/v1/broadcast',   broadcastRoutes);   // broadcast questions & answers
-app.use('/api/v1/candidates',  candidatesRoutes);  // HR hiring pipeline & documents
-app.use('/api/v1/ai',          aiRoutes);          // Kinematic AI chat proxy
-app.use('/api/v1/settings',    settingsRoutes);    // geofence, working hours, role access
-app.use('/api/v1/builder',     builderRoutes);     // form builder — forms, pages, questions, submissions
-app.use('/api/v1/wms',         wmsRoutes);         // warehouse management (original mount)
-app.use('/api/v1/users',   usersRoutes);   // user management
+app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/attendance', attendanceRoutes);
+app.use('/api/v1/warehouses', wmsRoutes);
+app.use('/api/v1/cities', managementRoutes);
+app.use('/api/v1/analytics', analyticsRoutes);
+app.use('/api/v1/broadcast', broadcastRoutes);
+app.use('/api/v1/candidates', candidatesRoutes);
+app.use('/api/v1/ai', aiRoutes);
+app.use('/api/v1/settings', settingsRoutes);
+app.use('/api/v1/builder', builderRoutes);
+app.use('/api/v1/wms', wmsRoutes);
+app.use('/api/v1/users', usersRoutes);
 app.use('/api/v1/zones', zoneRoutes);
 
 // ── 404 + error handlers ──────────────────────────────────────
