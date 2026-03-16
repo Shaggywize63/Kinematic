@@ -31,20 +31,25 @@ app.use(helmet());
 app.set('trust proxy', 1);
 
 // ── CORS ──────────────────────────────────────────────────────
-const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3001')
-  .split(',')
-  .map((o) => o.trim());
+const allowedOrigins = [
+  'http://localhost:3001',
+  'https://kinematic-dashboard.vercel.app'
+];
 
 app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-    return cb(null, true); // allow temporarily to avoid dashboard break
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, true); // allow temporarily
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
 }));
 
 app.options('*', cors());
-
 // ── Rate limiting ─────────────────────────────────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
