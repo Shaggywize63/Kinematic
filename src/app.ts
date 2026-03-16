@@ -9,95 +9,51 @@ import rateLimit from 'express-rate-limit';
 import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 
-import authRoutes from './routes/auth.routes';
+import authRoutes       from './routes/auth.routes';
 import attendanceRoutes from './routes/attendance.routes';
 import managementRoutes from './routes/management.routes';
-import analyticsRoutes from './routes/analytics.routes';
-
-import broadcastRoutes from './routes/broadcast.routes';
+import analyticsRoutes  from './routes/analytics.routes';
+import broadcastRoutes  from './routes/broadcast.routes';
 import candidatesRoutes from './routes/candidates.routes';
-import aiRoutes from './routes/ai.routes';
-import settingsRoutes from './routes/settings.routes';
-import builderRoutes from './routes/builder.routes';
-import wmsRoutes from './routes/wms.routes';
-import usersRoutes from './routes/users.routes';
-import zoneRoutes from './routes/zones.routes';
+import aiRoutes         from './routes/ai.routes';
+import settingsRoutes   from './routes/setting.routes';
+import builderRoutes    from './routes/builder.routes';
+import wmsRoutes        from './routes/wms.routes';
 
 const app = express();
 
 app.disable('x-powered-by');
-
-
-// ───────────────── SECURITY ─────────────────
 app.use(helmet());
 app.set('trust proxy', 1);
 
-
-// ───────────────── CORS ─────────────────
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'https://kinematic-dashboard.vercel.app'
-];
-
-app.use(
-  cors({
-    origin: function (origin, callback) {
-
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      return callback(new Error('Not allowed by CORS'));
-    },
-    credentials: true,
-    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-    allowedHeaders: ['Content-Type','Authorization']
-  })
-);
-
+app.use(cors({
+  origin: (origin, cb) => { cb(null, true); },
+  credentials: true,
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
+}));
 app.options('*', cors());
 
-
-// ───────────────── RATE LIMIT ─────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
-  max: parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
+  max: parseInt(process.env.RATE_LIMIT_MAX || '200', 10),
   standardHeaders: true,
   legacyHeaders: false
 });
-
 app.use('/api', limiter);
 
-
-// ───────────────── BODY PARSER ─────────────────
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+app.use(morgan('combined', {
+  stream: { write: (msg) => logger.http(msg.trim()) },
+  skip: (req) => req.path === '/health'
+}));
 
-// ───────────────── LOGGING ─────────────────
-app.use(
-  morgan('combined', {
-    stream: { write: (msg) => logger.http(msg.trim()) },
-    skip: (req) => req.path === '/health'
-  })
-);
-
-
-// ───────────────── HEALTH CHECK ─────────────────
 app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'kinematic-api',
-    timestamp: new Date().toISOString()
-  });
+  res.json({ status: 'ok', service: 'kinematic-api', timestamp: new Date().toISOString() });
 });
-
 
 // ── API Routes ────────────────────────────────────────────────
 app.use('/api/v1/auth',       authRoutes);
@@ -110,10 +66,9 @@ app.use('/api/v1/settings',   settingsRoutes);
 app.use('/api/v1/builder',    builderRoutes);
 app.use('/api/v1/warehouses', wmsRoutes);
 app.use('/api/v1/wms',        wmsRoutes);
-app.use('/api/v1/users',      usersRoutes);
-app.use('/api/v1/zones',      zoneRoutes);
 app.use('/api/v1',            managementRoutes);
 
-// ── 404 handler ───────────────────────────────────────────────
 app.use(notFoundHandler);
 app.use(errorHandler);
+
+export default app;
