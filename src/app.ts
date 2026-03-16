@@ -68,7 +68,7 @@ app.use('/api/v1/builder',    builderRoutes);
 app.use('/api/v1/warehouses', wmsRoutes);
 app.use('/api/v1/wms',        wmsRoutes);
 app.use('/api/v1',            managementRoutes);
-app.use('/api/cities', cityRoutes);
+app.use('/api/v1/cities', cityRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
