@@ -41,11 +41,11 @@ const allowedOrigins = [
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    return callback(null, true); // allow temporarily
-  },
+   if (allowedOrigins.includes(origin)) {
+  return callback(null, true);
+}
+
+return callback(new Error('Not allowed by CORS'));
   credentials: true,
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization']
@@ -97,7 +97,7 @@ app.use('/api/v1/warehouses', wmsRoutes);
 app.use('/api/v1/wms',        wmsRoutes);
 app.use('/api/v1/users',      usersRoutes);
 app.use('/api/v1/zones',      zoneRoutes);
-app.use('/api/v1/cities', managementRoutes);
+
 
 // ── 404 handler ───────────────────────────────────────────────
 app.use(notFoundHandler);
