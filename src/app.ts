@@ -96,7 +96,7 @@ app.use('/api/v1/warehouses', wmsRoutes);
 app.use('/api/v1/wms',        wmsRoutes);
 app.use('/api/v1/users',      usersRoutes);
 app.use('/api/v1/zones',      zoneRoutes);
-app.use('/api/v1',            managementRoutes);
+app.use('/api/v1/cities', managementRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────
 app.use(notFoundHandler);
