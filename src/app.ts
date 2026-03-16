@@ -80,25 +80,24 @@ app.get('/health', (_req, res) => {
   });
 });
 
+
 // ── API Routes ────────────────────────────────────────────────
-app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/auth',       authRoutes);
 app.use('/api/v1/attendance', attendanceRoutes);
-app.use('/api/v1/warehouses', wmsRoutes);
-app.use('/api/v1', managementRoutes);
-app.use('/api/v1/analytics', analyticsRoutes);
-app.use('/api/v1/broadcast', broadcastRoutes);
+app.use('/api/v1/analytics',  analyticsRoutes);
+app.use('/api/v1/broadcast',  broadcastRoutes);
 app.use('/api/v1/candidates', candidatesRoutes);
-app.use('/api/v1/ai', aiRoutes);
-app.use('/api/v1/settings', settingsRoutes);
-app.use('/api/v1/builder', builderRoutes);
-app.use('/api/v1/wms', wmsRoutes);
-app.use('/api/v1/users', usersRoutes);
-app.use('/api/v1/zones', zoneRoutes);
+app.use('/api/v1/ai',         aiRoutes);
+app.use('/api/v1/settings',   settingsRoutes);
+app.use('/api/v1/builder',    builderRoutes);
+app.use('/api/v1/warehouses', wmsRoutes);
+app.use('/api/v1/wms',        wmsRoutes);
+app.use('/api/v1/users',      usersRoutes);
+app.use('/api/v1/zones',      zoneRoutes);
+app.use('/api/v1',            managementRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────
 app.use(notFoundHandler);
-
-// ── Global error handler ──────────────────────────────────────
 app.use(errorHandler);
 
 export default app;
