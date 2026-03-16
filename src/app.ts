@@ -83,7 +83,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/v1/auth',        authRoutes);        // login, logout, me
 app.use('/api/v1/attendance',  attendanceRoutes);  // team, history, summary, override
 app.use('/api/v1/warehouses',  wmsRoutes);         // warehouse alias (frontend uses /warehouses)
-app.use('/api/v1',             managementRoutes);  // users, cities, zones, stores, skus, assets
+app.use('/api/v1/cities',      managementRoutes); // cities CRUD
 app.use('/api/v1/analytics',   analyticsRoutes);   // live-locations, summary, weekly-contacts
 app.use('/api/v1/broadcast',   broadcastRoutes);   // broadcast questions & answers
 app.use('/api/v1/candidates',  candidatesRoutes);  // HR hiring pipeline & documents
