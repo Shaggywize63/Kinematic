@@ -19,6 +19,7 @@ import aiRoutes          from './routes/ai.routes';
 import settingsRoutes    from './routes/settings.routes';
 import builderRoutes     from './routes/builder.routes';
 import wmsRoutes         from './routes/wms.routes';
+import usersRoutes    from './routes/users.routes';
 
 const app = express();
 
@@ -91,6 +92,7 @@ app.use('/api/v1/ai',          aiRoutes);          // Kinematic AI chat proxy
 app.use('/api/v1/settings',    settingsRoutes);    // geofence, working hours, role access
 app.use('/api/v1/builder',     builderRoutes);     // form builder — forms, pages, questions, submissions
 app.use('/api/v1/wms',         wmsRoutes);         // warehouse management (original mount)
+app.use('/api/v1/users',   usersRoutes);   // user management
 
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
