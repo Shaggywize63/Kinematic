@@ -3,7 +3,6 @@ import { requireAuth } from "../middleware/auth";
 import { asyncHandler, sendSuccess, AppError } from "../utils";
 import { supabaseAdmin } from "../lib/supabase";
 import { AuthRequest } from "../types";
-import builderRoutes from './routes/builder.routes';
 const router = Router();
 
 /* ── Forms ───────────────────────────────────────── */
