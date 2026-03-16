@@ -27,34 +27,43 @@ const app = express();
 
 app.disable('x-powered-by');
 
-// ── Security ──────────────────────────────────────────────────
+
+// ───────────────── SECURITY ─────────────────
 app.use(helmet());
 app.set('trust proxy', 1);
 
-// ── CORS ──────────────────────────────────────────────────────
+
+// ───────────────── CORS ─────────────────
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   'https://kinematic-dashboard.vercel.app'
 ];
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
+app.use(
+  cors({
+    origin: function (origin, callback) {
 
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
+      if (!origin) {
+        return callback(null, true);
+      }
 
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization']
-}));
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+    allowedHeaders: ['Content-Type','Authorization']
+  })
+);
 
 app.options('*', cors());
-// ── Rate limiting ─────────────────────────────────────────────
+
+
+// ───────────────── RATE LIMIT ─────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
   max: parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
@@ -64,18 +73,23 @@ const limiter = rateLimit({
 
 app.use('/api', limiter);
 
-// ── Body parsing ──────────────────────────────────────────────
+
+// ───────────────── BODY PARSER ─────────────────
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ── HTTP logging ──────────────────────────────────────────────
-app.use(morgan('combined', {
-  stream: { write: (msg) => logger.http(msg.trim()) },
-  skip: (req) => req.path === '/health'
-}));
 
-// ── Health check ──────────────────────────────────────────────
+// ───────────────── LOGGING ─────────────────
+app.use(
+  morgan('combined', {
+    stream: { write: (msg) => logger.http(msg.trim()) },
+    skip: (req) => req.path === '/health'
+  })
+);
+
+
+// ───────────────── HEALTH CHECK ─────────────────
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -85,24 +99,28 @@ app.get('/health', (_req, res) => {
 });
 
 
-// ── API Routes ────────────────────────────────────────────────
-app.use('/api/v1/auth',       authRoutes);
+// ───────────────── API ROUTES ─────────────────
+app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/attendance', attendanceRoutes);
-app.use('/api/v1/analytics',  analyticsRoutes);
-app.use('/api/v1/broadcast',  broadcastRoutes);
+app.use('/api/v1/analytics', analyticsRoutes);
+app.use('/api/v1/broadcast', broadcastRoutes);
 app.use('/api/v1/candidates', candidatesRoutes);
-app.use('/api/v1/ai',         aiRoutes);
-app.use('/api/v1/cities',      managementRoutes); // cities CRUD
-app.use('/api/v1/settings',   settingsRoutes);
-app.use('/api/v1/builder',    builderRoutes);
+app.use('/api/v1/ai', aiRoutes);
+
+app.use('/api/v1/cities', managementRoutes);
+app.use('/api/v1/settings', settingsRoutes);
+app.use('/api/v1/builder', builderRoutes);
+
 app.use('/api/v1/warehouses', wmsRoutes);
-app.use('/api/v1/wms',        wmsRoutes);
-app.use('/api/v1/users',      usersRoutes);
-app.use('/api/v1/zones',      zoneRoutes);
+app.use('/api/v1/wms', wmsRoutes);
+
+app.use('/api/v1/users', usersRoutes);
+app.use('/api/v1/zones', zoneRoutes);
 
 
-// ── 404 handler ───────────────────────────────────────────────
+// ───────────────── ERROR HANDLERS ─────────────────
 app.use(notFoundHandler);
 app.use(errorHandler);
+
 
 export default app;
