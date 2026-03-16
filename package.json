@@ -2,10 +2,11 @@
   "name": "kinematic-api",
   "version": "1.0.0",
   "description": "Kinematic Field Force Management — REST API",
+  "type": "module",
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc --noEmitOnError false || true",
+    "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"
