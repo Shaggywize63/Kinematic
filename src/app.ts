@@ -20,6 +20,9 @@ import settingsRoutes    from './routes/settings.routes';
 import builderRoutes     from './routes/builder.routes';
 import wmsRoutes         from './routes/wms.routes';
 import usersRoutes    from './routes/users.routes';
+import zoneRoutes from './routes/zones.routes';  // path may vary
+
+app.use('/api/v1/zones', zoneRoutes);
 
 const app = express();
 
@@ -93,6 +96,7 @@ app.use('/api/v1/settings',    settingsRoutes);    // geofence, working hours, r
 app.use('/api/v1/builder',     builderRoutes);     // form builder — forms, pages, questions, submissions
 app.use('/api/v1/wms',         wmsRoutes);         // warehouse management (original mount)
 app.use('/api/v1/users',   usersRoutes);   // user management
+app.use('/api/v1/zones', zoneRoutes);
 
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
