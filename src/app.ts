@@ -13,6 +13,7 @@ import authRoutes from './routes/auth.routes';
 import attendanceRoutes from './routes/attendance.routes';
 import managementRoutes from './routes/management.routes';
 import analyticsRoutes from './routes/analytics.routes';
+
 import broadcastRoutes from './routes/broadcast.routes';
 import candidatesRoutes from './routes/candidates.routes';
 import aiRoutes from './routes/ai.routes';
@@ -88,6 +89,7 @@ app.use('/api/v1/analytics',  analyticsRoutes);
 app.use('/api/v1/broadcast',  broadcastRoutes);
 app.use('/api/v1/candidates', candidatesRoutes);
 app.use('/api/v1/ai',         aiRoutes);
+app.use('/api/v1/cities',      managementRoutes); // cities CRUD
 app.use('/api/v1/settings',   settingsRoutes);
 app.use('/api/v1/builder',    builderRoutes);
 app.use('/api/v1/warehouses', wmsRoutes);
