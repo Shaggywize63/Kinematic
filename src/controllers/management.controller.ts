@@ -5,7 +5,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ok, created, badRequest, notFound } from '../utils/response';
 
 // Tables that use org_id (IMPORTANT)
-const ORG_TABLES = ['stores', 'skus', 'assets', 'activities']; 
+const ORG_TABLES = ['cities', 'stores', 'skus', 'assets', 'activities'];
 // 👉 cities intentionally excluded unless your DB has org_id
 
 function hasOrg(table: string) {
