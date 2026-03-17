@@ -78,9 +78,10 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       if (!body[f]) return badRequest(res, `${f} is required`);
     }
 
-    const payload = hasOrg(tableName)
-      ? { ...body, org_id: user.org_id }
-      : { ...body };
+   const payload = {
+  ...body,
+  org_id: user.org_id
+};
 
     const { data, error } = await supabaseAdmin
       .from(tableName)
