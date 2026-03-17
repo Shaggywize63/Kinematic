@@ -68,6 +68,7 @@ app.use('/api/v1/settings',   settingsRoutes);
 app.use('/api/v1/builder',    builderRoutes);
 app.use('/api/v1/warehouses', wmsRoutes);
 app.use('/api/v1/wms',        wmsRoutes);
+app.use('/api/v1', managementRoutes);
 
 
 app.use(notFoundHandler);
