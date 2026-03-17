@@ -4,6 +4,14 @@ import { AuthRequest } from '../middleware/auth';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ok, created, badRequest, notFound } from '../utils/response';
 
+// Tables that use org_id (IMPORTANT)
+const ORG_TABLES = ['stores', 'skus', 'assets', 'activities']; 
+// 👉 cities intentionally excluded unless your DB has org_id
+
+function hasOrg(table: string) {
+  return ORG_TABLES.includes(table);
+}
+
 // Helper: select fields
 function getSelect(table: string): string {
   if (table === 'stores') return '*, zones(name), cities(name)';
@@ -17,13 +25,22 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     const user = req.user;
     if (!user) return badRequest(res, 'Unauthorized');
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from(tableName)
       .select(getSelect(tableName))
-      .eq('org_id', user.org_id)
       .order('created_at', { ascending: false });
 
-    if (error) return badRequest(res, error.message);
+    if (hasOrg(tableName)) {
+      query = query.eq('org_id', user.org_id);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error(`❌ LIST ERROR [${tableName}]`, error);
+      return badRequest(res, error.message);
+    }
+
     return ok(res, data || []);
   });
 
@@ -33,14 +50,21 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
     const { id } = req.params;
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from(tableName)
       .select('*')
-      .eq('id', id)
-      .eq('org_id', user.org_id)
-      .single();
+      .eq('id', id);
 
-    if (error || !data) return notFound(res, `${tableName} record not found`);
+    if (hasOrg(tableName)) {
+      query = query.eq('org_id', user.org_id);
+    }
+
+    const { data, error } = await query.single();
+
+    if (error || !data) {
+      return notFound(res, `${tableName} record not found`);
+    }
+
     return ok(res, data);
   });
 
@@ -54,7 +78,9 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       if (!body[f]) return badRequest(res, `${f} is required`);
     }
 
-    const payload = { ...body, org_id: user.org_id };
+    const payload = hasOrg(tableName)
+      ? { ...body, org_id: user.org_id }
+      : { ...body };
 
     const { data, error } = await supabaseAdmin
       .from(tableName)
@@ -62,7 +88,11 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       .select()
       .single();
 
-    if (error) return badRequest(res, error.message);
+    if (error) {
+      console.error(`❌ CREATE ERROR [${tableName}]`, error);
+      return badRequest(res, error.message);
+    }
+
     return created(res, data);
   });
 
@@ -73,19 +103,28 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     const { id } = req.params;
     const { org_id, ...rest } = req.body;
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from(tableName)
       .update({
         ...rest,
         updated_at: new Date().toISOString()
       })
-      .eq('id', id)
-      .eq('org_id', user.org_id)
-      .select()
-      .single();
+      .eq('id', id);
 
-    if (error) return badRequest(res, error.message);
-    if (!data) return notFound(res, `${tableName} record not found`);
+    if (hasOrg(tableName)) {
+      query = query.eq('org_id', user.org_id);
+    }
+
+    const { data, error } = await query.select().single();
+
+    if (error) {
+      console.error(`❌ UPDATE ERROR [${tableName}]`, error);
+      return badRequest(res, error.message);
+    }
+
+    if (!data) {
+      return notFound(res, `${tableName} record not found`);
+    }
 
     return ok(res, data);
   });
@@ -96,13 +135,21 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
     const { id } = req.params;
 
-    const { error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from(tableName)
       .delete()
-      .eq('id', id)
-      .eq('org_id', user.org_id);
+      .eq('id', id);
 
-    if (error) return badRequest(res, error.message);
+    if (hasOrg(tableName)) {
+      query = query.eq('org_id', user.org_id);
+    }
+
+    const { error } = await query;
+
+    if (error) {
+      console.error(`❌ DELETE ERROR [${tableName}]`, error);
+      return badRequest(res, error.message);
+    }
 
     return ok(res, { deleted: true });
   });
