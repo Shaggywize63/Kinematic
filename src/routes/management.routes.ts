@@ -4,9 +4,8 @@ import { z } from 'zod'
 import { requireAuth, requireRole } from '../middleware/auth'
 import { validate } from '../middleware/validate'
 
-// ✅ FIXED IMPORTS (NO * as)
+// Controllers
 import authCtrl from '../controllers/auth.controller'
-
 import { getToday } from '../controllers/attendance.controller'
 import { getUsers } from '../controllers/misc.controller'
 
@@ -30,16 +29,23 @@ import {
 
 const router = Router()
 
-// ───────────────── AUTH ─────────────────
-router.post('/auth/login', validate(...), authCtrl.login)
+// ================= AUTH =================
+
+// ✅ FIXED: proper schema instead of validate(...)
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6)
+})
+
+router.post('/auth/login', validate(loginSchema), authCtrl.login)
 router.post('/auth/refresh', authCtrl.refreshToken)
 router.post('/auth/logout', requireAuth, authCtrl.logout)
 router.get('/auth/me', requireAuth, authCtrl.getMe)
 
-// ───────────────── ATTENDANCE ─────────────────
+// ================= ATTENDANCE =================
 router.get('/attendance/today', requireAuth, getToday)
 
-// ───────────────── USERS ─────────────────
+// ================= USERS =================
 router.get(
   '/users',
   requireAuth,
@@ -47,13 +53,13 @@ router.get(
   getUsers
 )
 
-// ───────────────── ANALYTICS ─────────────────
+// ================= ANALYTICS =================
 const adm = requireRole('supervisor', 'city_manager', 'admin', 'super_admin')
 
 router.get('/analytics/summary', requireAuth, adm, getSummary)
 router.get('/analytics/activity-feed', requireAuth, adm, getActivityFeed)
 
-// ───────────────── CITIES ─────────────────
+// ================= CITIES =================
 router.get('/cities', requireAuth, citiesCtrl.list)
 router.get('/cities/:id', requireAuth, citiesCtrl.getOne)
 
@@ -78,23 +84,23 @@ router.delete(
   citiesCtrl.remove
 )
 
-// ───────────────── STORES ─────────────────
+// ================= STORES =================
 router.get('/stores', requireAuth, storesCtrl.list)
 router.get('/stores/:id', requireAuth, storesCtrl.getOne)
 
-// ───────────────── SKUS ─────────────────
+// ================= SKUS =================
 router.get('/skus', requireAuth, skusCtrl.list)
 router.get('/skus/:id', requireAuth, skusCtrl.getOne)
 
-// ───────────────── ASSETS ─────────────────
+// ================= ASSETS =================
 router.get('/assets', requireAuth, assetsCtrl.list)
 router.get('/assets/:id', requireAuth, assetsCtrl.getOne)
 
-// ───────────────── ACTIVITIES ─────────────────
+// ================= ACTIVITIES =================
 router.get('/activities', requireAuth, activitiesCtrl.list)
 router.get('/activities/:id', requireAuth, activitiesCtrl.getOne)
 
-// ───────────────── WAREHOUSES ─────────────────
+// ================= WAREHOUSES =================
 router.get(
   '/warehouses/summary',
   requireAuth,
