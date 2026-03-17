@@ -5,12 +5,7 @@ import { requireAuth, requireRole } from '../middleware/auth'
 import { validate } from '../middleware/validate'
 
 // ✅ FIXED IMPORTS (NO * as)
-import {
-  login,
-  refreshToken,
-  logout,
-  getMe
-} from '../controllers/auth.controller'
+import authCtrl from '../controllers/auth.controller'
 
 import { getToday } from '../controllers/attendance.controller'
 import { getUsers } from '../controllers/misc.controller'
@@ -36,22 +31,10 @@ import {
 const router = Router()
 
 // ───────────────── AUTH ─────────────────
-router.post(
-  '/auth/login',
-  validate(
-    z.object({
-      mobile: z.string().min(10),
-      password: z.string().min(6),
-      fcm_token: z.string().optional(),
-      device_id: z.string().optional()
-    })
-  ),
-  login // ✅ FIXED
-)
-
-router.post('/auth/refresh', refreshToken)
-router.post('/auth/logout', requireAuth, logout)
-router.get('/auth/me', requireAuth, getMe)
+router.post('/auth/login', validate(...), authCtrl.login)
+router.post('/auth/refresh', authCtrl.refreshToken)
+router.post('/auth/logout', requireAuth, authCtrl.logout)
+router.get('/auth/me', requireAuth, authCtrl.getMe)
 
 // ───────────────── ATTENDANCE ─────────────────
 router.get('/attendance/today', requireAuth, getToday)
