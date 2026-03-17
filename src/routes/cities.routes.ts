@@ -1,23 +1,11 @@
 import { Router } from 'express';
 import { requireAuth, requireRole } from '../middleware/auth';
-
-// ✅ safer import (prevents undefined destructuring issues)
-import * as managementCtrl from '../controllers/management.controller';
-
-const { citiesCtrl } = managementCtrl;
+import { citiesCtrl } from '../controllers/cities.controller';
 
 const router = Router();
 
-// 🔍 DEBUG (remove later)
-console.log('citiesCtrl:', citiesCtrl);
-
-// All /cities routes require auth
+// All routes require auth
 router.use(requireAuth);
-
-// Safety check (prevents crash)
-if (!citiesCtrl) {
-  throw new Error('citiesCtrl is undefined — check management.controller export');
-}
 
 // GET /api/v1/cities
 router.get('/', citiesCtrl.list);
