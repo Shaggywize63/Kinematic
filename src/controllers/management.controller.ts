@@ -24,7 +24,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const list = asyncHandler(async (req: AuthRequest, res: Response) => {
     const user = req.user;
     if (!user) return badRequest(res, 'Unauthorized');
-
+    console.log('00000000-0000-0000-0000-000000000001', user.org_id);
     let query = supabaseAdmin
       .from(tableName)
       .select(getSelect(tableName))
