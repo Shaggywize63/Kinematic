@@ -1,181 +1,25 @@
-import { Router } from 'express'
-import { z } from 'zod'
+import { Router } from 'express';
+import { requireAuth, requireRole } from '../middleware/auth';
+import { citiesCtrl } from '../controllers/management.controller';
 
-import { requireAuth, requireRole } from '../middleware/auth'
-import { validate } from '../middleware/validate'
+const router = Router();
 
-// Controllers
-import * as authCtrl from '../controllers/auth.controller'
-import { getToday } from '../controllers/attendance.controller'
-import { getUsers } from '../controllers/misc.controller'
+// All /cities routes require auth
+router.use(requireAuth);
 
-import {
-  citiesCtrl,
-  storesCtrl,
-  skusCtrl,
-  assetsCtrl,
-  activitiesCtrl
-} from '../controllers/management.controller'
+// GET /api/v1/cities        → list cities
+router.get('/', citiesCtrl.list);
 
-import {
-  listWarehouses,
-  getWmsSummary
-} from '../controllers/wms.controller'
+// GET /api/v1/cities/:id    → get single city
+router.get('/:id', citiesCtrl.getOne);
 
-import {
-  getSummary,
-  getActivityFeed
-} from '../controllers/analytics.controller'
+// POST /api/v1/cities       → create city (admin/supervisor)
+router.post('/', requireRole('admin', 'super_admin'), citiesCtrl.create);
 
-const router = Router()
+// PATCH /api/v1/cities/:id  → update city (admin/supervisor)
+router.patch('/:id', requireRole('admin', 'super_admin'), citiesCtrl.update);
 
-// ─────────────────────────────────────────
-// AUTH
-// ─────────────────────────────────────────
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(6)
-})
+// DELETE /api/v1/cities/:id → delete city (admin)
+router.delete('/:id', requireRole('admin'), citiesCtrl.remove);
 
-router.post('/auth/login', validate(loginSchema), authCtrl.login)
-router.post('/auth/refresh', authCtrl.refreshToken)
-router.post('/auth/logout', requireAuth, authCtrl.logout)
-router.get('/auth/me', requireAuth, authCtrl.getMe)
-
-// ─────────────────────────────────────────
-// ATTENDANCE
-// ─────────────────────────────────────────
-router.get('/attendance/today', requireAuth, getToday)
-
-// ─────────────────────────────────────────
-// USERS
-// ─────────────────────────────────────────
-router.get(
-  '/users',
-  requireAuth,
-  requireRole('supervisor', 'city_manager', 'admin', 'super_admin'),
-  getUsers
-)
-
-// ─────────────────────────────────────────
-// ANALYTICS
-// ─────────────────────────────────────────
-const adm = requireRole('supervisor', 'city_manager', 'admin', 'super_admin')
-
-router.get('/analytics/summary', requireAuth, adm, getSummary)
-router.get('/analytics/activity-feed', requireAuth, adm, getActivityFeed)
-
-// ─────────────────────────────────────────
-// CITIES
-// ─────────────────────────────────────────
-router.get('/cities', requireAuth, citiesCtrl.list)
-router.get('/cities/:id', requireAuth, citiesCtrl.getOne)
-
-router.post(
-  '/cities',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  citiesCtrl.create
-)
-
-router.patch(
-  '/cities/:id',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  citiesCtrl.update
-)
-
-router.delete(
-  '/cities/:id',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  citiesCtrl.remove
-)
-
-// ─────────────────────────────────────────
-// STORES
-// ─────────────────────────────────────────
-router.get('/stores', requireAuth, storesCtrl.list)
-router.get('/stores/:id', requireAuth, storesCtrl.getOne)
-
-router.post(
-  '/stores',
-  requireAuth,
-  requireRole('admin', 'supervisor'),
-  storesCtrl.create
-)
-
-router.patch(
-  '/stores/:id',
-  requireAuth,
-  requireRole('admin', 'supervisor'),
-  storesCtrl.update
-)
-
-router.delete(
-  '/stores/:id',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  storesCtrl.remove
-)
-
-// ─────────────────────────────────────────
-// SKUS
-// ─────────────────────────────────────────
-router.get('/skus', requireAuth, skusCtrl.list)
-router.get('/skus/:id', requireAuth, skusCtrl.getOne)
-
-router.post(
-  '/skus',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  skusCtrl.create
-)
-
-router.patch(
-  '/skus/:id',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  skusCtrl.update
-)
-
-router.delete(
-  '/skus/:id',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  skusCtrl.remove
-)
-
-// ─────────────────────────────────────────
-// ASSETS  ⚠️ IMPORTANT FIX
-// ─────────────────────────────────────────
-router.get('/assets', requireAuth, assetsCtrl.list)
-router.get('/assets/:id', requireAuth, assetsCtrl.getOne)
-
-// ⚠️ THIS WAS CRASHING BEFORE
-router.post(
-  '/assets',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  assetsCtrl.create // MUST exist in controller
-)
-
-// ─────────────────────────────────────────
-// ACTIVITIES
-// ─────────────────────────────────────────
-router.get('/activities', requireAuth, activitiesCtrl.list)
-router.get('/activities/:id', requireAuth, activitiesCtrl.getOne)
-
-// ─────────────────────────────────────────
-// WAREHOUSES
-// ─────────────────────────────────────────
-router.get(
-  '/warehouses/summary',
-  requireAuth,
-  requireRole('admin', 'super_admin'),
-  getWmsSummary
-)
-
-router.get('/warehouses', requireAuth, listWarehouses)
-
-export default router
+export default router;
