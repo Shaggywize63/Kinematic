@@ -13,7 +13,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
     const { data, error } = await supabaseAdmin
       .from(tableName)
-      .select(getSelect(tableName))
+      .select('*')
       .eq('org_id', user.org_id)
       .order('created_at', { ascending: false });
 
@@ -34,7 +34,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       .eq('org_id', user.org_id)
       .single();
 
-    if (error || !data) return notFound(res, `${tableName} record not found`);
+    if (error || !data) return notFound(res, `${tableName} not found`);
     return ok(res, data);
   });
 
@@ -76,7 +76,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       .single();
 
     if (error) return badRequest(res, error.message);
-    if (!data) return notFound(res, `${tableName} record not found`);
+    if (!data) return notFound(res, `${tableName} not found`);
 
     return ok(res, data);
   });
@@ -101,14 +101,9 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   return { list, getOne, create, update, remove };
 }
 
-function getSelect(table: string): string {
-  if (table === 'stores') return '*, zones(name), cities(name)';
-  return '*';
-}
-
 // Controllers
-export const citiesCtrl      = buildCRUD('cities', ['name']);
-export const storesCtrl      = buildCRUD('stores', ['name']);
-export const skusCtrl        = buildCRUD('skus', ['sku_code', 'name']);
-export const assetsCtrl      = buildCRUD('assets', ['name']);
-export const activitiesCtrl  = buildCRUD('activities', ['name']);
+export const citiesCtrl     = buildCRUD('cities', ['name']);
+export const storesCtrl     = buildCRUD('stores', ['name']);
+export const skusCtrl       = buildCRUD('skus', ['sku_code', 'name']);
+export const assetsCtrl     = buildCRUD('assets', ['name']);
+export const activitiesCtrl = buildCRUD('activities', ['name']);
