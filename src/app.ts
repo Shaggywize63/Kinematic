@@ -19,6 +19,9 @@ import aiRoutes         from './routes/ai.routes';
 import settingsRoutes   from './routes/settings.routes';
 import builderRoutes    from './routes/builder.routes';
 import wmsRoutes        from './routes/wms.routes';
+import citiesRoutes     from './routes/cities.routes';
+
+app.use('/api/v1/cities', citiesRoutes);
 
 const app = express();
 
@@ -59,6 +62,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/v1/auth',       authRoutes);
 app.use('/api/v1/attendance', attendanceRoutes);
 app.use('/api/v1/analytics',  analyticsRoutes);
+app.use('/api/v1',            managementRoutes);
 app.use('/api/v1/broadcast',  broadcastRoutes);
 app.use('/api/v1/candidates', candidatesRoutes);
 app.use('/api/v1/ai',         aiRoutes);
