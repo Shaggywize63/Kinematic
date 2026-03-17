@@ -1,25 +1,37 @@
 import { Router } from 'express';
 import { requireAuth, requireRole } from '../middleware/auth';
-import { citiesCtrl } from '../controllers/management.controller';
+
+// ✅ safer import (prevents undefined destructuring issues)
+import * as managementCtrl from '../controllers/management.controller';
+
+const { citiesCtrl } = managementCtrl;
 
 const router = Router();
+
+// 🔍 DEBUG (remove later)
+console.log('citiesCtrl:', citiesCtrl);
 
 // All /cities routes require auth
 router.use(requireAuth);
 
-// GET /api/v1/cities        → list cities
+// Safety check (prevents crash)
+if (!citiesCtrl) {
+  throw new Error('citiesCtrl is undefined — check management.controller export');
+}
+
+// GET /api/v1/cities
 router.get('/', citiesCtrl.list);
 
-// GET /api/v1/cities/:id    → get single city
+// GET /api/v1/cities/:id
 router.get('/:id', citiesCtrl.getOne);
 
-// POST /api/v1/cities       → create city (admin/supervisor)
+// POST /api/v1/cities
 router.post('/', requireRole('admin', 'supervisor'), citiesCtrl.create);
 
-// PATCH /api/v1/cities/:id  → update city (admin/supervisor)
+// PATCH /api/v1/cities/:id
 router.patch('/:id', requireRole('admin', 'supervisor'), citiesCtrl.update);
 
-// DELETE /api/v1/cities/:id → delete city (admin)
+// DELETE /api/v1/cities/:id
 router.delete('/:id', requireRole('admin'), citiesCtrl.remove);
 
 export default router;
