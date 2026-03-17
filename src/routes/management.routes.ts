@@ -12,11 +12,14 @@ import * as broadcastCtrl   from '../controllers/broadcast.controller'
 import * as sosCtrl         from '../controllers/sos.controller'
 import * as leaderCtrl      from '../controllers/leaderboard.controller'
 import * as misc            from '../controllers/misc.controller'
+
 import { citiesCtrl, storesCtrl, skusCtrl, assetsCtrl, activitiesCtrl } from '../controllers/management.controller'
+
 import {
   listWarehouses, getWarehouse, createWarehouse, updateWarehouse, deleteWarehouse,
   listMovements, createMovement, updateMovement, deleteMovement, getWmsSummary,
 } from '../controllers/wms.controller'
+
 import {
   getSummary, getActivityFeed, getHourly,
   getContactHeatmap, getWeeklyContacts,
@@ -26,193 +29,169 @@ import {
 
 const router = Router()
 
-// ─────────────────────────────────────────────────────────────
-// AUTH
-// ─────────────────────────────────────────────────────────────
-router.post('/auth/login',      validate(z.object({ mobile: z.string().min(10), password: z.string().min(6), fcm_token: z.string().optional(), device_id: z.string().optional() })), authCtrl.login)
-router.post('/auth/refresh',    authCtrl.refreshToken)
-router.post('/auth/logout',     requireAuth, authCtrl.logout)
-router.get ('/auth/me',         requireAuth, authCtrl.getMe)
-router.patch('/auth/fcm-token', requireAuth, validate(z.object({ fcm_token: z.string() })), authCtrl.updateFcmToken)
+// ───────────────────────── AUTH ─────────────────────────
+router.post('/auth/login',
+  validate(z.object({
+    mobile: z.string().min(10),
+    password: z.string().min(6),
+    fcm_token: z.string().optional(),
+    device_id: z.string().optional()
+  })),
+  authCtrl.login
+)
 
-// ─────────────────────────────────────────────────────────────
-// ATTENDANCE
-// ─────────────────────────────────────────────────────────────
-router.post('/attendance/checkin',    requireAuth, validate(z.object({ latitude: z.number(), longitude: z.number(), selfie_url: z.string().optional(), activity_id: z.string().uuid().optional(), address: z.string().optional() })), attendanceCtrl.checkin)
-router.post('/attendance/checkout',   requireAuth, validate(z.object({ latitude: z.number(), longitude: z.number(), selfie_url: z.string().optional() })), attendanceCtrl.checkout)
-router.post('/attendance/break/start',requireAuth, attendanceCtrl.startBreak)
-router.post('/attendance/break/end',  requireAuth, attendanceCtrl.endBreak)
-router.get ('/attendance/today',      requireAuth, attendanceCtrl.getToday)
-router.get ('/attendance/history',    requireAuth, attendanceCtrl.getHistory)
-router.get ('/attendance/team',       requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), attendanceCtrl.getTeamToday)
-router.post('/attendance/override',   requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), attendanceCtrl.overrideAttendance)
-router.patch('/attendance/:id/override', requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), attendanceCtrl.updateAttendanceOverride)
+router.post('/auth/refresh', authCtrl.refreshToken)
+router.post('/auth/logout', requireAuth, authCtrl.logout)
+router.get('/auth/me', requireAuth, authCtrl.getMe)
 
-// ─────────────────────────────────────────────────────────────
-// FORMS
-// ─────────────────────────────────────────────────────────────
-router.get ('/forms/templates',            requireAuth, formsCtrl.getTemplates)
-router.get ('/forms/templates/:id',        requireAuth, formsCtrl.getTemplate)
-router.post('/forms/templates',            requireAuth, requireRole('admin','city_manager','super_admin'), formsCtrl.createTemplate)
-router.post('/forms/templates/:id/fields', requireAuth, requireRole('admin','city_manager','super_admin'), formsCtrl.addField)
-router.post('/forms/submit',               requireAuth, formsCtrl.submitForm)
-router.get ('/forms/submissions',          requireAuth, formsCtrl.getMySubmissions)
-router.get ('/forms/submissions/:id',      requireAuth, formsCtrl.getSubmission)
-router.get ('/forms/admin/submissions',    requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), formsCtrl.getAllSubmissions)
+router.patch('/auth/fcm-token',
+  requireAuth,
+  validate(z.object({ fcm_token: z.string() })),
+  authCtrl.updateFcmToken
+)
 
-// ─────────────────────────────────────────────────────────────
-// STOCK
-// ─────────────────────────────────────────────────────────────
-router.get ('/stock/my',         requireAuth, stockCtrl.getMyAllocation)
-router.patch('/stock/items/:id', requireAuth, validate(z.object({ status: z.enum(['accepted','rejected','partially_accepted']), rejection_reason: z.string().optional(), quantity_accepted: z.number().optional() })), stockCtrl.updateItem)
-router.post('/stock/allocations',requireAuth, requireRole('admin','city_manager','super_admin'), stockCtrl.createAllocation)
-router.get ('/stock/allocations',requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), stockCtrl.getAllAllocations)
+// ─────────────────────── ATTENDANCE ───────────────────────
+router.post('/attendance/checkin',
+  requireAuth,
+  validate(z.object({
+    latitude: z.number(),
+    longitude: z.number(),
+    selfie_url: z.string().optional(),
+    activity_id: z.string().uuid().optional(),
+    address: z.string().optional()
+  })),
+  attendanceCtrl.checkin
+)
 
-// ─────────────────────────────────────────────────────────────
-// BROADCAST
-// ─────────────────────────────────────────────────────────────
-// NOTE: static paths MUST come before /:id — Express matches top-down
-router.get ('/broadcast/admin',      requireAuth, requireRole('admin','city_manager','super_admin'), broadcastCtrl.getAdminQuestions)
-router.get ('/broadcast',            requireAuth, broadcastCtrl.getQuestions)
-router.post('/broadcast',            requireAuth, requireRole('admin','city_manager','super_admin'), broadcastCtrl.createQuestion)
-router.patch('/broadcast/:id',       requireAuth, requireRole('admin','city_manager','super_admin'), broadcastCtrl.updateQuestion)
-router.delete('/broadcast/:id',      requireAuth, requireRole('admin','city_manager','super_admin'), broadcastCtrl.deleteQuestion)
-router.patch('/broadcast/:id/status',requireAuth, requireRole('admin','city_manager','super_admin'), broadcastCtrl.updateStatus)
-router.get ('/broadcast/:id/results',requireAuth, requireRole('admin','city_manager','super_admin'), broadcastCtrl.getResults)
-router.post('/broadcast/:id/answer', requireAuth, broadcastCtrl.submitAnswer)
+router.post('/attendance/checkout',
+  requireAuth,
+  validate(z.object({
+    latitude: z.number(),
+    longitude: z.number(),
+    selfie_url: z.string().optional()
+  })),
+  attendanceCtrl.checkout
+)
 
-// ─────────────────────────────────────────────────────────────
-// SOS
-// ─────────────────────────────────────────────────────────────
-router.post('/sos/trigger',          requireAuth, validate(z.object({ latitude: z.number(), longitude: z.number(), address: z.string().optional(), message: z.string().optional() })), sosCtrl.triggerSOS)
-router.get ('/sos',                  requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), sosCtrl.getAlerts)
-router.patch('/sos/:id/acknowledge', requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), sosCtrl.acknowledgeAlert)
-router.patch('/sos/:id/resolve',     requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), sosCtrl.resolveAlert)
+router.post('/attendance/break/start', requireAuth, attendanceCtrl.startBreak)
+router.post('/attendance/break/end', requireAuth, attendanceCtrl.endBreak)
+router.get('/attendance/today', requireAuth, attendanceCtrl.getToday)
+router.get('/attendance/history', requireAuth, attendanceCtrl.getHistory)
 
-// ─────────────────────────────────────────────────────────────
-// LEADERBOARD
-// ─────────────────────────────────────────────────────────────
-router.get ('/leaderboard',          requireAuth, leaderCtrl.getLeaderboard)
-router.get ('/leaderboard/my-stats', requireAuth, leaderCtrl.getMyStats)
-router.post('/leaderboard/compute',  requireAuth, requireRole('admin','city_manager','super_admin'), leaderCtrl.computeScores)
+router.get('/attendance/team',
+  requireAuth,
+  requireRole('supervisor','city_manager','admin','super_admin'),
+  attendanceCtrl.getTeamToday
+)
 
-// ─────────────────────────────────────────────────────────────
-// VISIT LOGS
-// ─────────────────────────────────────────────────────────────
-router.get ('/visits', requireAuth, misc.getVisitLogs)
-router.post('/visits', requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), validate(z.object({ executive_id: z.string().uuid().optional(), rating: z.enum(['excellent','good','average','poor']), remarks: z.string().optional(), photo_url: z.string().optional(), latitude: z.number().optional(), longitude: z.number().optional() })), misc.createVisitLog)
+// ─────────────────────── FORMS ───────────────────────
+router.get('/forms/templates', requireAuth, formsCtrl.getTemplates)
+router.get('/forms/templates/:id', requireAuth, formsCtrl.getTemplate)
 
-// ─────────────────────────────────────────────────────────────
-// GRIEVANCES
-// ─────────────────────────────────────────────────────────────
-router.post('/grievances',       requireAuth, validate(z.object({ category: z.string(), description: z.string().min(10), against_role: z.string().optional(), incident_date: z.string().optional(), is_anonymous: z.boolean().optional() })), misc.submitGrievance)
-router.get ('/grievances/mine',  requireAuth, misc.getMyGrievances)
-router.get ('/grievances',       requireAuth, requireRole('admin','city_manager','super_admin'), misc.getAllGrievances)
-router.patch('/grievances/:id',  requireAuth, requireRole('admin','city_manager','super_admin'), misc.updateGrievance)
+router.post('/forms/templates',
+  requireAuth,
+  requireRole('admin','city_manager','super_admin'),
+  formsCtrl.createTemplate
+)
 
-// ─────────────────────────────────────────────────────────────
-// LEARNING CENTER
-// ─────────────────────────────────────────────────────────────
-router.get ('/learning',               requireAuth, misc.getMaterials)
-router.post('/learning',               requireAuth, requireRole('admin','city_manager','super_admin'), misc.createMaterial)
-router.patch('/learning/:id/progress', requireAuth, validate(z.object({ progress_pct: z.number().min(0).max(100), is_completed: z.boolean().optional() })), misc.updateProgress)
-
-// ─────────────────────────────────────────────────────────────
-// NOTIFICATIONS
-// ─────────────────────────────────────────────────────────────
-router.get  ('/notifications',      requireAuth, misc.getNotifications)
+// ─────────────────────── NOTIFICATIONS ───────────────────────
+router.get('/notifications', requireAuth, misc.getNotifications)
 router.patch('/notifications/read', requireAuth, misc.markRead)
 
-// ─────────────────────────────────────────────────────────────
-// USERS
-// ─────────────────────────────────────────────────────────────
-router.get  ('/users',                    requireAuth, requireRole('supervisor','city_manager','admin','super_admin'), misc.getUsers)
-router.post ('/users',                    requireAuth, requireRole('admin','city_manager','super_admin'), misc.createUser)
-router.patch('/users/:id',               requireAuth, requireRole('admin','city_manager','super_admin'), misc.updateUser)
-router.post ('/users/:id/reset-password', requireAuth, requireRole('admin','city_manager','super_admin'), misc.resetUserPassword)
+// ─────────────────────── USERS ───────────────────────
+router.get('/users',
+  requireAuth,
+  requireRole('supervisor','city_manager','admin','super_admin'),
+  misc.getUsers
+)
 
-// ─────────────────────────────────────────────────────────────
-// ZONES
-// ─────────────────────────────────────────────────────────────
-router.get ('/zones',  requireAuth, misc.getZones)
-router.post('/zones',  requireAuth, requireRole('admin','super_admin'), misc.createZone)
+router.post('/users',
+  requireAuth,
+  requireRole('admin','city_manager','super_admin'),
+  misc.createUser
+)
 
-// ─────────────────────────────────────────────────────────────
-// ANALYTICS
-// ─────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────
-// ANALYTICS  (all admin/supervisor only)
-// ─────────────────────────────────────────────────────────────
+router.patch('/users/:id',
+  requireAuth,
+  requireRole('admin','city_manager','super_admin'),
+  misc.updateUser
+)
+
+// ─────────────────────── ANALYTICS ───────────────────────
 const adm = requireRole('supervisor','city_manager','admin','super_admin')
-router.get('/analytics/summary',          requireAuth, adm, getSummary)
-router.get('/analytics/activity-feed',    requireAuth, adm, getActivityFeed)
-router.get('/analytics/hourly',           requireAuth, adm, getHourly)
-router.get('/analytics/contact-heatmap',  requireAuth, adm, getContactHeatmap)
-router.get('/analytics/weekly-contacts',  requireAuth, adm, getWeeklyContacts)   // ?from=&to=
-router.get('/analytics/live-locations',   requireAuth, adm, getLiveLocations)
-router.get('/analytics/attendance-today', requireAuth, adm, getAttendanceToday)
-router.get('/analytics/outlet-coverage',  requireAuth, adm, getOutletCoverage)   // ?from=&to=
-router.get('/analytics/city-performance', requireAuth, adm, getCityPerformance)  // ?from=&to=
 
-// ─────────────────────────────────────────────────────────────
-// CITIES
-// ─────────────────────────────────────────────────────────────
-router.get   ('/cities',     requireAuth, citiesCtrl.list)
-router.get   ('/cities/:id', requireAuth, citiesCtrl.getOne)
-router.post  ('/cities',     requireAuth, requireRole('admin','super_admin'), citiesCtrl.create)
-router.patch ('/cities/:id', requireAuth, requireRole('admin','super_admin'), citiesCtrl.update)
-router.delete('/cities/:id', requireAuth, requireRole('admin','super_admin'), citiesCtrl.remove)
+router.get('/analytics/summary', requireAuth, adm, getSummary)
+router.get('/analytics/activity-feed', requireAuth, adm, getActivityFeed)
 
-// ─────────────────────────────────────────────────────────────
-// STORES
-// ─────────────────────────────────────────────────────────────
-router.get   ('/stores',     requireAuth, storesCtrl.list)
-router.get   ('/stores/:id', requireAuth, storesCtrl.getOne)
-router.post  ('/stores',     requireAuth, requireRole('admin','supervisor'), storesCtrl.create)
-router.patch ('/stores/:id', requireAuth, requireRole('admin','supervisor'), storesCtrl.update)
-router.delete('/stores/:id', requireAuth, requireRole('admin','super_admin'), storesCtrl.remove)
+// ─────────────────────── CITIES ───────────────────────
+router.get('/cities', requireAuth, citiesCtrl.list)
+router.get('/cities/:id', requireAuth, citiesCtrl.getOne)
 
-// ─────────────────────────────────────────────────────────────
-// SKUs
-// ─────────────────────────────────────────────────────────────
-router.get   ('/skus',     requireAuth, skusCtrl.list)
-router.get   ('/skus/:id', requireAuth, skusCtrl.getOne)
-router.post  ('/skus',     requireAuth, requireRole('admin','super_admin'), skusCtrl.create)
-router.patch ('/skus/:id', requireAuth, requireRole('admin','super_admin'), skusCtrl.update)
-router.delete('/skus/:id', requireAuth, requireRole('admin','super_admin'), skusCtrl.remove)
+router.post('/cities',
+  requireAuth,
+  requireRole('admin','super_admin'),
+  citiesCtrl.create
+)
 
-// ─────────────────────────────────────────────────────────────
-// ASSETS
-// ─────────────────────────────────────────────────────────────
-router.get   ('/assets',     requireAuth, assetsCtrl.list)
-router.get   ('/assets/:id', requireAuth, assetsCtrl.getOne)
-router.post  ('/assets',     requireAuth, requireRole('admin','super_admin'), assetsCtrl.create)
-router.patch ('/assets/:id', requireAuth, requireRole('admin','super_admin'), assetsCtrl.update)
-router.delete('/assets/:id', requireAuth, requireRole('admin','super_admin'), assetsCtrl.remove)
+router.patch('/cities/:id',
+  requireAuth,
+  requireRole('admin','super_admin'),
+  citiesCtrl.update
+)
 
-// ─────────────────────────────────────────────────────────────
-// ACTIVITIES
-// ─────────────────────────────────────────────────────────────
-router.get   ('/activities',     requireAuth, activitiesCtrl.list)
-router.get   ('/activities/:id', requireAuth, activitiesCtrl.getOne)
-router.post  ('/activities',     requireAuth, requireRole('admin','super_admin'), activitiesCtrl.create)
-router.patch ('/activities/:id', requireAuth, requireRole('admin','super_admin'), activitiesCtrl.update)
-router.delete('/activities/:id', requireAuth, requireRole('admin','super_admin'), activitiesCtrl.remove)
+router.delete('/cities/:id',
+  requireAuth,
+  requireRole('admin','super_admin'),
+  citiesCtrl.remove
+)
 
-// ─────────────────────────────────────────────────────────────
-// WAREHOUSES (WMS)
-// NOTE: Static routes (/warehouses/summary) MUST come before
-//       param routes (/warehouses/:id) — Express matches top-down
-// ─────────────────────────────────────────────────────────────
-router.get   ('/warehouses/summary',                  requireAuth, requireRole('admin','super_admin'), getWmsSummary)
-router.get   ('/warehouses/:warehouseId/movements',              requireAuth, listMovements)
-router.post  ('/warehouses/:warehouseId/movements',              requireAuth, requireRole('admin','super_admin'), createMovement)
-router.patch ('/warehouses/:warehouseId/movements/:movementId',  requireAuth, requireRole('admin','super_admin'), updateMovement)
-router.delete('/warehouses/:warehouseId/movements/:movementId',  requireAuth, requireRole('admin','super_admin'), deleteMovement)
-router.get   ('/warehouses',                                     requireAuth, listWarehouses)
-router.post  ('/warehouses',                          requireAuth, requireRole('admin','super_admin'), createWarehouse)
-router.get   ('/warehouses/:id',                      requireAuth, getWarehouse)
-router.patch ('/warehouses/:id',                      requireAuth, requireRole('admin','super_admin'), updateWarehouse)
-router.delete('/warehouses/:id',                      requireAuth, requireRole('admin','super_admin'), deleteWarehouse)
+// ─────────────────────── STORES ───────────────────────
+router.get('/stores', requireAuth, storesCtrl.list)
+router.get('/stores/:id', requireAuth, storesCtrl.getOne)
+
+router.post('/stores',
+  requireAuth,
+  requireRole('admin','supervisor'),
+  storesCtrl.create
+)
+
+// ─────────────────────── SKUS ───────────────────────
+router.get('/skus', requireAuth, skusCtrl.list)
+router.get('/skus/:id', requireAuth, skusCtrl.getOne)
+
+router.post('/skus',
+  requireAuth,
+  requireRole('admin','super_admin'),
+  skusCtrl.create
+)
+
+router.patch('/skus/:id',
+  requireAuth,
+  requireRole('admin','super_admin'),
+  skusCtrl.update
+)
+
+router.delete('/skus/:id',
+  requireAuth,
+  requireRole('admin','super_admin'),
+  skusCtrl.remove
+)
+
+// ─────────────────────── ASSETS ───────────────────────
+router.get('/assets', requireAuth, assetsCtrl.list)
+router.get('/assets/:id', requireAuth, assetsCtrl.getOne)
+
+// ─────────────────────── ACTIVITIES ───────────────────────
+router.get('/activities', requireAuth, activitiesCtrl.list)
+router.get('/activities/:id', requireAuth, activitiesCtrl.getOne)
+
+// ─────────────────────── WAREHOUSES ───────────────────────
+router.get('/warehouses/summary',
+  requireAuth,
+  requireRole('admin','super_admin'),
+  getWmsSummary
+)
+
+router.get('/warehouses', requireAuth, listWarehouses)
 
 export default router
