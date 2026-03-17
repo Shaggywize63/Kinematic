@@ -19,9 +19,7 @@ import aiRoutes         from './routes/ai.routes';
 import settingsRoutes   from './routes/settings.routes';
 import builderRoutes    from './routes/builder.routes';
 import wmsRoutes        from './routes/wms.routes';
-import citiesRoutes     from './routes/cities.routes';
 
-app.use('/api/v1/cities', citiesRoutes);
 
 const app = express();
 
@@ -70,7 +68,7 @@ app.use('/api/v1/settings',   settingsRoutes);
 app.use('/api/v1/builder',    builderRoutes);
 app.use('/api/v1/warehouses', wmsRoutes);
 app.use('/api/v1/wms',        wmsRoutes);
-app.use('/api/v1',            managementRoutes);
+
 
 app.use(notFoundHandler);
 app.use(errorHandler);
