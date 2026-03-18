@@ -29,6 +29,8 @@ import usersRoutes        from './routes/users.routes';
 import zonesRoutes        from './routes/zones.routes';
 import routePlanRoutes    from './routes/route-plan.routes';
 import candidatesRouter from './routes/candidates.routes';
+import builderRouter from './routes/builder.routes';
+
 
 // Other management routes (available, now mounted)
 import activitiesRoutes   from './routes/activities.routes';
@@ -120,6 +122,7 @@ app.use(`${V1}/users`,        usersRoutes);
 app.use(`${V1}/zones`,        zonesRoutes);
 app.use('/api/v1/candidates', candidatesRouter);
 app.use('/api/v1/ai', aiRouter);
+app.use('/api/v1/builder', builderRouter);
 
 
 // Route plan (singular and plural alias)
