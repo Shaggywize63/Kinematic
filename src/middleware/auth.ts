@@ -1,70 +1,56 @@
 import { Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest, UserRole } from '../types';
 import { unauthorized, forbidden } from '../utils/response';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'kinematic-secret-2024';
-
-export const requireAuth = async (
-  req: AuthRequest,
-  res: Response,
-  next: NextFunction
-) => {
+export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
-    return unauthorized(res, 'Missing authorization header');
+    return unauthorized(res, 'Missing or invalid Authorization header');
   }
 
   const token = authHeader.split(' ')[1];
 
-  // Verify the custom JWT signed by auth.controller.ts
-  let decoded: any;
-  try {
-    decoded = jwt.verify(token, JWT_SECRET);
-  } catch (err) {
+  // Verify JWT with Supabase
+  const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+  if (error || !user) {
     return unauthorized(res, 'Invalid or expired token');
   }
 
-  if (!decoded?.id) {
-    return unauthorized(res, 'Invalid token payload');
-  }
-
-  // Look up the user from our DB using the id embedded in the JWT
-  const { data: dbUser, error: dbError } = await supabaseAdmin
+  // Fetch user profile from our users table
+  const { data: profile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select('id, org_id, name, mobile, email, role, employee_id, zone_id, supervisor_id, fcm_token, is_active')
-    .eq('id', decoded.id)
-    .eq('is_active', true)
+    .select('id, org_id, name, mobile, role, zone_id, supervisor_id, fcm_token, is_active')
+    .eq('id', user.id)
     .single();
 
-  if (dbError || !dbUser) {
-    return unauthorized(res, 'User not found or inactive');
+  if (profileError || !profile) {
+    return unauthorized(res, 'User profile not found');
   }
 
-  req.user = {
-    id: dbUser.id,
-    org_id: dbUser.org_id,
-    name: dbUser.name,
-    mobile: dbUser.mobile,
-    role: dbUser.role as UserRole,
-    employee_id: dbUser.employee_id,
-    zone_id: dbUser.zone_id,
-    supervisor_id: dbUser.supervisor_id,
-    fcm_token: dbUser.fcm_token,
-    is_active: dbUser.is_active,
-  };
+  if (!profile.is_active) {
+    return forbidden(res, 'Account is deactivated');
+  }
+
+  req.user = profile as AuthRequest['user'];
   req.accessToken = token;
-
   next();
-};
+}
 
-export const requireRole = (...roles: UserRole[]) => {
+export function requireRole(...roles: UserRole[]) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) return unauthorized(res);
     if (!roles.includes(req.user.role)) {
-      return forbidden(res, 'Insufficient permissions');
+      return forbidden(res, `Requires one of: ${roles.join(', ')}`);
     }
     next();
   };
-};
+}
+
+export function requireSupervisorOrAbove(req: AuthRequest, res: Response, next: NextFunction) {
+  return requireRole('super_admin', 'admin', 'city_manager', 'supervisor')(req, res, next);
+}
+
+export function requireAdminOrAbove(req: AuthRequest, res: Response, next: NextFunction) {
+  return requireRole('super_admin', 'admin', 'city_manager')(req, res, next);
+}
