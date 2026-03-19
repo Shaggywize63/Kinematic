@@ -84,7 +84,7 @@ function getSelect(table: string): string {
 }
 
 // ── Export individual controllers ──
-export const citiesCtrl   = buildCRUD('cities',   ['name']);
+export const citiesCtrl   = buildCRUD('cities',   ['name', 'state']);
 export const storesCtrl   = buildCRUD('stores',   ['name']);
 export const skusCtrl     = buildCRUD('skus',     ['sku_code', 'name']);
 export const assetsCtrl   = buildCRUD('assets',   ['name']);
