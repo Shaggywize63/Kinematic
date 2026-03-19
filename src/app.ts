@@ -16,7 +16,6 @@ import analyticsRoutes  from './routes/analytics.routes';
 import broadcastRoutes  from './routes/broadcast.routes';
 import candidatesRoutes from './routes/candidates.routes';
 import aiRoutes         from './routes/ai.routes';
-import builderRoutes    from './routes/builder.routes';
 import wmsRoutes        from './routes/wms.routes';
 
 const app = express();
@@ -61,7 +60,6 @@ app.use('/api/v1/analytics',  analyticsRoutes);
 app.use('/api/v1/broadcast',  broadcastRoutes);
 app.use('/api/v1/candidates', candidatesRoutes);
 app.use('/api/v1/ai',         aiRoutes);
-app.use('/api/v1/builder',    builderRoutes);
 app.use('/api/v1/warehouses', wmsRoutes);
 app.use('/api/v1/wms',        wmsRoutes);
 app.use('/api/v1',            managementRoutes);
