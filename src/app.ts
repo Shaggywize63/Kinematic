@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import morgan from 'morgan';
-import rateLimit from 'express-rate-limit';
+import { rateLimit } from 'express-rate-limit';
 import aiRouter from './routes/ai.routes';
 
 import { logger } from './lib/logger';
@@ -47,7 +47,8 @@ app.set('trust proxy', 1);
 
 const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3001')
   .split(',')
-  .map((o) => o.trim());
+  .map((o) => o.trim())
+  .filter(Boolean);
 
 app.use(cors({
   origin: (origin, cb) => {
@@ -78,16 +79,16 @@ const authLimiter = rateLimit({
 app.use('/api', limiter);
 app.use('/api/v1/auth/login', authLimiter);
 
-// ── Body parsing & misc ───────────────────────────────────────
-app.use(compression());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
 // ── HTTP logging ──────────────────────────────────────────────
 app.use(morgan('combined', {
   stream: { write: (msg) => logger.http(msg.trim()) },
   skip: (req) => req.path === '/health',
 }));
+
+// ── Body parsing & misc ───────────────────────────────────────
+app.use(compression());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ── Health check ──────────────────────────────────────────────
 app.get('/health', (_req, res) => {
