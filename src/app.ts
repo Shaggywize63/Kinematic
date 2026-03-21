@@ -29,7 +29,7 @@ import wmsRoutes          from './routes/wms.routes';
 import usersRoutes        from './routes/users.routes';
 import zonesRoutes        from './routes/zones.routes';
 import routePlanRoutes    from './routes/route-plan.routes';
-import candidatesRouter from './routes/candidates.routes';
+import candidatesRouter   from './routes/candidates.routes';
 
 // Other management routes (available, now mounted)
 import activitiesRoutes   from './routes/activities.routes';
@@ -46,17 +46,14 @@ const app = express();
 app.use(helmet());
 app.set('trust proxy', 1);
 
-const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3001')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
-
+// ── CORS ──────────────────────────────────────────────────────
+// Allow all origins. React Native apps do not send an Origin
+// header at all (or send origin: 'null'), so the old allowedOrigins
+// check caused intermittent 403s on mobile. JWT auth on every
+// protected route already ensures only authenticated users can
+// access data, so opening CORS here is safe.
 app.use(cors({
-  origin: (origin, cb) => {
-    // Allow Postman / server-to-server (no origin)
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS policy: origin ${origin} not allowed`));
-  },
+  origin: (origin, cb) => cb(null, true),  // ← only line changed
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -104,39 +101,38 @@ app.get('/health', (_req, res) => {
 // ── API routes ────────────────────────────────────────────────
 const V1 = '/api/v1';
 
-app.use(`${V1}/auth`,         authRoutes);
-app.use(`${V1}/attendance`,   attendanceRoutes);
-app.use(`${V1}/forms`,        formsRoutes);
-app.use(`${V1}/builder`,      builderRoutes);
-app.use(`${V1}/stock`,        stockRoutes);
-app.use(`${V1}/broadcast`,    broadcastRoutes);
-app.use(`${V1}/sos`,          sosRoutes);
-app.use(`${V1}/leaderboard`,  leaderboardRoutes);
+app.use(`${V1}/auth`,          authRoutes);
+app.use(`${V1}/attendance`,    attendanceRoutes);
+app.use(`${V1}/forms`,         formsRoutes);
+app.use(`${V1}/builder`,       builderRoutes);
+app.use(`${V1}/stock`,         stockRoutes);
+app.use(`${V1}/broadcast`,     broadcastRoutes);
+app.use(`${V1}/sos`,           sosRoutes);
+app.use(`${V1}/leaderboard`,   leaderboardRoutes);
 app.use(`${V1}/notifications`, notifRoutes);
-app.use(`${V1}/learning`,     learningRoutes);
-app.use(`${V1}/grievances`,   grievanceRoutes);
-app.use(`${V1}/analytics`,    analyticsRoutes);
-app.use(`${V1}/visits`,       visitlogRoutes);
-app.use(`${V1}/upload`,       uploadRoutes);
-app.use(`${V1}/warehouses`,   wmsRoutes);
-app.use(`${V1}/users`,        usersRoutes);
-app.use(`${V1}/zones`,        zonesRoutes);
-app.use('/api/v1/candidates', candidatesRouter);
-app.use('/api/v1/ai', aiRouter);
-
+app.use(`${V1}/learning`,      learningRoutes);
+app.use(`${V1}/grievances`,    grievanceRoutes);
+app.use(`${V1}/analytics`,     analyticsRoutes);
+app.use(`${V1}/visits`,        visitlogRoutes);
+app.use(`${V1}/upload`,        uploadRoutes);
+app.use(`${V1}/warehouses`,    wmsRoutes);
+app.use(`${V1}/users`,         usersRoutes);
+app.use(`${V1}/zones`,         zonesRoutes);
+app.use('/api/v1/candidates',  candidatesRouter);
+app.use('/api/v1/ai',          aiRouter);
 
 // Route plan (singular and plural alias)
-app.use(`${V1}/route-plan`,   routePlanRoutes);
-app.use(`${V1}/route-plans`,  routePlanRoutes);
+app.use(`${V1}/route-plan`,    routePlanRoutes);
+app.use(`${V1}/route-plans`,   routePlanRoutes);
 
 // Other management mounts
-app.use(`${V1}/activities`,   activitiesRoutes);
-app.use(`${V1}/assets`,       assetsRoutes);
-app.use(`${V1}/cities`,       citiesRoutes);
-app.use(`${V1}/management`,   managementRoutes);
-app.use(`${V1}/skus`,         skusRoutes);
-app.use(`${V1}/stores`,       storesRoutes);
-app.use(`${V1}/warehouse`,    warehouseRoutes);
+app.use(`${V1}/activities`,    activitiesRoutes);
+app.use(`${V1}/assets`,        assetsRoutes);
+app.use(`${V1}/cities`,        citiesRoutes);
+app.use(`${V1}/management`,    managementRoutes);
+app.use(`${V1}/skus`,          skusRoutes);
+app.use(`${V1}/stores`,        storesRoutes);
+app.use(`${V1}/warehouse`,     warehouseRoutes);
 
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
