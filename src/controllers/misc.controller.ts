@@ -236,9 +236,15 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
   if (req.body.app_password) {
     const pw = req.body.app_password.trim()
     if (pw.length < 6) throw new AppError(400, 'App password must be at least 6 characters', 'VALIDATION_ERROR')
-    const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: pw })
-    if (authErr) throw new AppError(400, `Auth password update failed: ${authErr.message}`, 'AUTH_ERROR')
-    updates.app_password = pw
+    
+    try {
+      const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: pw })
+      if (authErr) throw new AppError(400, `Auth password update failed: ${authErr.message}`, 'AUTH_ERROR')
+      updates.app_password = pw
+    } catch (e: any) {
+      if (e instanceof AppError) throw e
+      throw new AppError(500, `Auth identity update crashed: ${e.message}`, 'AUTH_CRASH')
+    }
   }
 
   // Only run DB update if there's something to update
@@ -246,11 +252,29 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
     return sendSuccess(res, null, 'Nothing to update')
   }
 
-  const { data, error } = await supabaseAdmin.from('users')
-    .update(updates).eq('id', req.params.id).eq('org_id', req.user!.org_id).select().single()
-  if (error) throw new AppError(500, `DB update failed: ${error.message} (code: ${error.code})`, 'DB_ERROR')
-  if (!data) throw new AppError(404, 'User not found or access denied', 'NOT_FOUND')
-  sendSuccess(res, data, 'User updated')
+  try {
+    const query = supabaseAdmin.from('users').update(updates).eq('id', req.params.id)
+    
+    // Scoped update unless super_admin
+    if (req.user?.role !== 'super_admin') {
+      query.eq('org_id', req.user!.org_id)
+    }
+
+    const { data, error } = await query.select()
+    
+    if (error) {
+      throw new AppError(500, `DB update failed: ${error.message} (code: ${error.code})`, 'DB_ERROR')
+    }
+    
+    if (!data || data.length === 0) {
+      throw new AppError(404, `User not found or you don't have permission to edit them (ID: ${req.params.id})`, 'NOT_FOUND')
+    }
+    
+    sendSuccess(res, data[0], 'User updated')
+  } catch (e: any) {
+    if (e instanceof AppError) throw e
+    throw new AppError(500, `DB update crashed: ${e.message}`, 'DB_CRASH')
+  }
 })
 
 export const resetUserPassword = asyncHandler(async (req: AuthRequest, res: Response) => {
