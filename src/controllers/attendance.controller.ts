@@ -214,14 +214,16 @@ export const endBreak = asyncHandler(async (req: AuthRequest, res: Response) => 
 // GET /api/v1/attendance/today
 export const getToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = new Date().toISOString().split('T')[0];
+  const today = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
   const { data, error } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)')
     .eq('user_id', user.id)
     .eq('date', today)
-    .single();
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }
   ok(res, data || null);
