@@ -11,8 +11,8 @@ export const getVisitLogs = asyncHandler(async (req: Request, res: Response) => 
     .select('*, visitor:visitor_id(id, name, role), executive:executive_id(id, name, zone_id, zones(name))')
     .eq('org_id', user.org_id).eq('date', date)
     .order('visited_at', { ascending: false })
-  if (user.role === 'executive') query = query.eq('executive_id', user.id)
-  if (user.role === 'supervisor') query = query.eq('visitor_id', user.id)
+  if (['executive', 'field_executive', 'field-executive'].includes(user.role)) query = query.eq('executive_id', user.id)
+  if (['supervisor', 'city_manager', 'program_manager'].includes(user.role)) query = query.eq('visitor_id', user.id)
   const { data, error } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data)
@@ -141,10 +141,14 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   let query = supabaseAdmin.from('users')
     .select('id, name, mobile, email, role, employee_id, zone_id, city, supervisor_id, is_active, joined_date, app_password, zones(name)', { count: 'exact' })
     .eq('org_id', user.org_id).order('name').range(offset, offset + limit - 1)
-  if (role) query = query.eq('role', role as string)
+  if (role) {
+    if (role === 'executive') query = query.in('role', ['executive', 'field_executive', 'field-executive'])
+    else if (role === 'supervisor') query = query.in('role', ['supervisor', 'city_manager', 'program_manager'])
+    else query = query.eq('role', role as string)
+  }
   if (zone_id) query = query.eq('zone_id', zone_id as string)
   if (is_active !== undefined) query = query.eq('is_active', is_active === 'true')
-  if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id)
+  if (['supervisor', 'city_manager', 'program_manager'].includes(user.role)) query = query.eq('supervisor_id', user.id)
   const { data, error, count } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendPaginated(res, data || [], count || 0, page, limit)
