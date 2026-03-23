@@ -21,20 +21,21 @@ const checkoutSchema = z.object({
 });
 
 // POST /api/v1/attendance/checkin
-export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const body = checkinSchema.safeParse(req.body);
-  if (!body.success) { badRequest(res, 'Validation failed', body.error.errors); return; }
-
-  const { latitude, longitude, selfie_url, activity_id, zone_id } = body.data;
   const today = new Date().toISOString().split('T')[0];
+  const { latitude, longitude, selfie_url, activity_id, zone_id, date: passedDate } = req.body;
+  const attendanceDate = passedDate || today;
 
+  if (latitude == null || longitude == null) return badRequest(res, 'Latitude and longitude are required');
+
+  // Phase 1: Check existing record for the day to avoid duplicates
   const { data: existing } = await supabaseAdmin
     .from('attendance')
-    .select('id, status')
+    .select('id')
     .eq('user_id', user.id)
-    .eq('date', today)
-    .single();
+    .eq('date', attendanceDate)
+    .maybeSingle();
 
   if (existing) { conflict(res, 'Already checked in today'); return; }
 
@@ -73,7 +74,7 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
       org_id: user.org_id,
       zone_id: resolvedZoneId,
       activity_id,
-      date: today,
+      date: attendanceDate,
       status: 'checked_in',
       checkin_at: new Date().toISOString(),
       checkin_lat: latitude,
@@ -91,7 +92,7 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
     org_id: user.org_id,
     user_id: user.id,
     attendance_id: data.id,
-    activity_type: 'check_in',
+    activity_type: 'CHECK_IN',
     lat: latitude,
     lng: longitude,
     captured_at: data.checkin_at
@@ -103,21 +104,23 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
 // POST /api/v1/attendance/checkout
 export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const body = checkoutSchema.safeParse(req.body);
-  if (!body.success) { badRequest(res, 'Validation failed', body.error.errors); return; }
-
-  const { latitude, longitude, selfie_url } = body.data;
+  const { latitude, longitude, selfie_url, date: passedDate } = req.body;
   const today = new Date().toISOString().split('T')[0];
+  const attendanceDate = passedDate || today;
 
-  const { data: record } = await supabaseAdmin
+  const { data: record, error: findError } = await supabaseAdmin
     .from('attendance')
-    .select('id, status, checkin_at, break_minutes')
+    .select('*')
     .eq('user_id', user.id)
-    .eq('date', today)
-    .single();
+    .eq('date', attendanceDate)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (findError && findError.code !== 'PGRST116') { badRequest(res, findError.message); return; }
 
   if (!record) { badRequest(res, 'No check-in found for today'); return; }
-  if (record.status === 'checked_out') { conflict(res, 'Already checked out today'); return; }
+  if (record.status === 'CHECKED_OUT') { conflict(res, 'Already checked out today'); return; }
 
   // Enforce selfie for field executives
   if (user.role === 'executive' && !selfie_url) {
@@ -130,7 +133,7 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
   const totalMinutes = Math.round((checkoutTime.getTime() - checkinTime.getTime()) / 60000);
   const workingMinutes = totalMinutes - (record.break_minutes || 0);
 
-  const { data, error } = await supabaseAdmin
+  const { data: updatedRecord, error } = await supabaseAdmin
     .from('attendance')
     .update({
       status: 'checked_out',
@@ -145,7 +148,19 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
     .single();
 
   if (error) { badRequest(res, error.message); return; }
-  ok(res, data, 'Checked out successfully');
+
+  // Record activity
+  await supabaseAdmin.from('work_activity').insert({
+    org_id: user.org_id,
+    user_id: user.id,
+    attendance_id: record.id,
+    activity_type: 'CHECK_OUT',
+    lat: latitude,
+    lng: longitude,
+    captured_at: updatedRecord.checkout_at
+  });
+
+  ok(res, updatedRecord, 'Checked out successfully');
 });
 
 // POST /api/v1/attendance/break/start
