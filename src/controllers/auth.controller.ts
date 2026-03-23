@@ -25,14 +25,49 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const { email, password, fcm_token, device_id } = body.data;
 
   // Sign in directly with email + password via Supabase Auth
-  const { data: session, error: signInError } = await supabase.auth.signInWithPassword({
+  let { data: session, error: signInError } = await supabase.auth.signInWithPassword({
     email,
     password,
   });
 
-if (signInError || !session?.session) {
+  if (signInError || !session?.session) {
+    // If standard login fails, check for app_password in users table
+    const { data: userProfile } = await supabaseAdmin
+      .from('users')
+      .select('id, app_password, role')
+      .eq('email', email)
+      .single();
+
+    if (userProfile && userProfile.app_password && userProfile.app_password === password) {
+      logger.info(`Valid app_password login for email: ${email}`);
+      
+      // Use magiclink OTP to sign the user in without their main password
+      const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+        type: 'magiclink',
+        email,
+      });
+
+      if (!linkError && linkData?.properties?.email_otp) {
+        const { data: otpData, error: otpError } = await supabase.auth.verifyOtp({
+          email,
+          token: linkData.properties.email_otp,
+          type: 'magiclink',
+        });
+
+        if (!otpError && otpData?.session) {
+          session = otpData as any;
+        } else {
+          logger.error(`Failed to verify OTP for app_password login: ${otpError?.message}`);
+        }
+      } else {
+        logger.error(`Failed to generate link for app_password login: ${linkError?.message}`);
+      }
+    }
+  }
+
+  if (!session?.session) {
     logger.warn(`Failed login attempt for email: ${email} — ${signInError?.message}`);
-    return res.status(401).json({ success: false, error: signInError?.message || 'No session returned', code: signInError?.status });
+    return res.status(401).json({ success: false, error: signInError?.message || 'Invalid credentials', code: signInError?.status });
   }
 
   // Fetch user profile from users table using the auth user id
@@ -106,7 +141,7 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
     .select(`
       id, org_id, name, mobile, role, employee_id,
       zone_id, supervisor_id, city, state, avatar_url,
-      is_active, joined_date, created_at,
+      is_active, joined_date, created_at, app_password,
       zones(id, name, city, meeting_lat, meeting_lng, geofence_radius),
       organisations(id, name, logo_url)
     `)

@@ -139,7 +139,7 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
     parseInt(req.query.limit as string) || 20
   )
   let query = supabaseAdmin.from('users')
-    .select('id, name, mobile, email, role, employee_id, zone_id, city, supervisor_id, is_active, joined_date, zones(name)', { count: 'exact' })
+    .select('id, name, mobile, email, role, employee_id, zone_id, city, supervisor_id, is_active, joined_date, app_password, zones(name)', { count: 'exact' })
     .eq('org_id', user.org_id).order('name').range(offset, offset + limit - 1)
   if (role) query = query.eq('role', role as string)
   if (zone_id) query = query.eq('zone_id', zone_id as string)
@@ -150,8 +150,17 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   sendPaginated(res, data || [], count || 0, page, limit)
 })
 
+export const getUserById = asyncHandler(async (req: Request, res: Response) => {
+  const { data, error } = await supabaseAdmin.from('users')
+    .select('*, zones(name)')
+    .eq('id', req.params.id).eq('org_id', req.user!.org_id).single()
+  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  if (!data) throw new AppError(404, 'User not found', 'NOT_FOUND')
+  sendSuccess(res, data)
+})
+
 export const createUser = asyncHandler(async (req: Request, res: Response) => {
-  const { name, mobile, password, role, zone_id, supervisor_id, employee_id, joined_date, city, email } = req.body
+  const { name, mobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email } = req.body
   const admin = req.user!
 
   // Validate required fields
@@ -195,6 +204,7 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
       employee_id:   employee_id   || null,
       joined_date:   joined_date   || null,
       city:          city          || null,
+      app_password:  app_password  || password || null,
       is_active:     true,
     })
     .select('*, zones(name)')
@@ -214,9 +224,16 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
 })
 
 export const updateUser = asyncHandler(async (req: Request, res: Response) => {
-  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role']
+  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'app_password']
   const updates: any = {}
   for (const key of allowed) { if (req.body[key] !== undefined) updates[key] = req.body[key] }
+
+  // Sync app_password with Supabase Auth if provided
+  if (req.body.app_password) {
+    const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: req.body.app_password })
+    if (authErr) throw new AppError(400, authErr.message, 'AUTH_ERROR')
+  }
+
   const { data, error } = await supabaseAdmin.from('users')
     .update(updates).eq('id', req.params.id).eq('org_id', req.user!.org_id).select().single()
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
