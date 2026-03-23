@@ -3,9 +3,11 @@ import { z } from 'zod';
 import { supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest, conflict, notFound, forbidden } from '../utils/response';
-import { asyncHandler, AppError, sendSuccess } from '../utils';
+import { asyncHandler } from '../utils/asyncHandler';
 import { isWithinGeofence } from '../lib/haversine';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
+import { AppError } from '../utils/AppError';
+import { sendSuccess } from '../utils/response';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -248,7 +250,7 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
     .eq('date', date);
 
   if (zoneId) query = query.eq('zone_id', zoneId);
-  if (['supervisor', 'city_manager', 'program_manager'].includes(user.role)) {
+  if (user.role === 'supervisor') {
     const { data: teamIds } = await supabaseAdmin
       .from('users')
       .select('id')
