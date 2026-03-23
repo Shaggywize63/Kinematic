@@ -30,6 +30,19 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     .from('grievances').select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id).eq('status', 'submitted');
 
+  // New Metrics: Days Worked & Leaves (Last 30 days)
+  const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const { data: attStats } = await supabaseAdmin
+    .from('attendance')
+    .select('status, user_id')
+    .eq('org_id', user.org_id)
+    .gte('date', isoDate(thirtyDaysAgo));
+
+  const totalDaysWorked = (attStats || []).filter(a => a.status === 'present' || a.status === 'checked_out').length;
+  // Approximation of leaves: if we assumed everyone worked every day, this would be complex.
+  // For now, let's treat any attendance record with status 'absent' as a leave.
+  const totalLeaves = (attStats || []).filter(a => a.status === 'absent').length;
+
   return ok(res, {
     date,
     kpis: kpis || {
@@ -39,7 +52,50 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     total_executives: totalExecs || 0,
     active_sos_alerts: activeSos || 0,
     open_grievances: openGrievances || 0,
+    total_days_worked: totalDaysWorked || 0,
+    total_leaves: totalLeaves || 0,
   });
+});
+
+/* ── GET /api/v1/analytics/tff-trends ─────────────────────── */
+export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const from = (req.query.from as string) || isoDate(new Date(Date.now() - 7 * 86400000));
+  const to   = (req.query.to   as string) || isoDate(new Date());
+
+  const { data, error } = await supabaseAdmin
+    .from('form_submissions')
+    .select('submitted_at, is_converted')
+    .eq('org_id', user.org_id)
+    .gte('submitted_at', `${from}T00:00:00`)
+    .lte('submitted_at', `${to}T23:59:59`);
+
+  if (error) return badRequest(res, error.message);
+
+  const days: string[] = [];
+  for (const d = new Date(from); d <= new Date(to); d.setDate(d.getDate() + 1)) {
+    days.push(isoDate(new Date(d)));
+  }
+
+  const byDay: Record<string, { tff: number; engagements: number }> = {};
+  days.forEach(d => byDay[d] = { tff: 0, engagements: 0 });
+
+  (data || []).forEach(s => {
+    const d = isoDate(toIST(new Date(s.submitted_at)));
+    if (byDay[d]) {
+      byDay[d].engagements++;
+      if (s.is_converted) byDay[d].tff++;
+    }
+  });
+
+  const trend = days.map(d => ({
+    date: d,
+    tff: byDay[d].tff,
+    engagements: byDay[d].engagements,
+    label: new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+  }));
+
+  return ok(res, trend);
 });
 
 /* ── GET /api/v1/analytics/activity-feed ─────────────────── */

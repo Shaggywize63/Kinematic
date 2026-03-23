@@ -91,6 +91,18 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { badRequest(res, error.message); return; }
+
+  // Phase 2: Create a work_activity record on check-in to track first location
+  await supabaseAdmin.from('work_activity').insert({
+    org_id: user.org_id,
+    user_id: user.id,
+    attendance_id: data.id,
+    activity_type: 'check_in',
+    lat: latitude,
+    lng: longitude,
+    captured_at: data.checkin_at
+  });
+
   created(res, data, 'Checked in successfully');
 });
 

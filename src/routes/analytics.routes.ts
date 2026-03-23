@@ -5,12 +5,14 @@ import {
   getContactHeatmap, getWeeklyContacts,
   getLiveLocations, getAttendanceToday,
   getOutletCoverage, getCityPerformance,
+  getTffTrends,
 } from '../controllers/analytics.controller';
 
 const router = Router();
 router.use(requireAuth);
 
 router.get('/summary',          getSummary);
+router.get('/tff-trends',       getTffTrends);
 router.get('/activity-feed',    getActivityFeed);
 router.get('/hourly',           getHourly);
 router.get('/contact-heatmap',  getContactHeatmap);
