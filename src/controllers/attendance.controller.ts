@@ -55,20 +55,14 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
       .single();
 
     if (zone) {
-      const { withinFence, distanceMetres: dist } = isWithinGeofence(
+      const { distanceMetres: dist } = isWithinGeofence(
         latitude, longitude,
         zone.meeting_lat, zone.meeting_lng,
         zone.geofence_radius
       );
       distanceMetres = dist;
-
-      if (!withinFence) {
-        badRequest(res,
-          `You are ${dist}m away from ${zone.name}. Must be within ${zone.geofence_radius}m to check in.`,
-          { distance: dist, required: zone.geofence_radius }
-        );
-        return;
-      }
+      // Note: We no longer block check-in based on distance for primary attendance.
+      // We only record the distance for reporting purposes.
     }
   }
 
