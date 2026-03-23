@@ -228,20 +228,24 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
 })
 
 export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'app_password']
+  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role']
   const updates: any = {}
   for (const key of allowed) { if (req.body[key] !== undefined) updates[key] = req.body[key] }
 
+  // Always set updated_at
+  updates.updated_at = new Date().toISOString()
+
   // Sync app_password with Supabase Auth if provided
-  if (req.body.app_password) {
+  if (req.body.app_password && req.body.app_password.length >= 6) {
     const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: req.body.app_password })
-    if (authErr) throw new AppError(400, authErr.message, 'AUTH_ERROR')
+    if (authErr) throw new AppError(400, `Auth password update failed: ${authErr.message}`, 'AUTH_ERROR')
     updates.app_password = req.body.app_password
   }
 
   const { data, error } = await supabaseAdmin.from('users')
     .update(updates).eq('id', req.params.id).eq('org_id', req.user!.org_id).select().single()
-  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  if (error) throw new AppError(500, `DB update failed: ${error.message} (code: ${error.code})`, 'DB_ERROR')
+  if (!data) throw new AppError(404, 'User not found or access denied', 'NOT_FOUND')
   sendSuccess(res, data, 'User updated')
 })
 
