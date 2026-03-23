@@ -232,14 +232,18 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
   const updates: any = {}
   for (const key of allowed) { if (req.body[key] !== undefined) updates[key] = req.body[key] }
 
-  // Always set updated_at
-  updates.updated_at = new Date().toISOString()
-
   // Sync app_password with Supabase Auth if provided
-  if (req.body.app_password && req.body.app_password.length >= 6) {
-    const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: req.body.app_password })
+  if (req.body.app_password) {
+    const pw = req.body.app_password.trim()
+    if (pw.length < 6) throw new AppError(400, 'App password must be at least 6 characters', 'VALIDATION_ERROR')
+    const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: pw })
     if (authErr) throw new AppError(400, `Auth password update failed: ${authErr.message}`, 'AUTH_ERROR')
-    updates.app_password = req.body.app_password
+    updates.app_password = pw
+  }
+
+  // Only run DB update if there's something to update
+  if (Object.keys(updates).length === 0) {
+    return sendSuccess(res, null, 'Nothing to update')
   }
 
   const { data, error } = await supabaseAdmin.from('users')
