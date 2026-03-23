@@ -37,10 +37,10 @@ router.post('/chat', requireAuth, asyncHandler(async (req: Request, res: Respons
     throw new AppError(response.status, msg, 'AI_ERROR');
   }
 
-  const data = await response.json();
+  const data: any = await response.json();
   const text = data?.content?.[0]?.text || '';
 
-  return res.json({ success: true, data: { text } });
+  res.json({ success: true, data: { text } });
 }));
 
 export default router;

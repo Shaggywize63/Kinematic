@@ -18,7 +18,7 @@ export function validate(schema: ZodSchema, target: ValidateTarget = 'body') {
       });
     }
     // Replace with parsed/coerced data
-    (req as Record<string, unknown>)[target] = result.data;
+    (req as any)[target] = result.data;
     next();
   };
 }

@@ -2,8 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, notFound } from '../utils/response';
-import { asyncHandler } from '../utils/asyncHandler';
+import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
 
 const allocateSchema = z.object({
   user_id: z.string().uuid(),
@@ -38,15 +37,15 @@ export const getMyAllocation = asyncHandler(async (req: AuthRequest, res: Respon
     .eq('date', date)
     .single();
 
-  if (error && error.code !== 'PGRST116') return badRequest(res, error.message);
-  return ok(res, data || null);
+  if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }
+  ok(res, data || null);
 });
 
 // POST /api/v1/stock/allocate  (admin+)
 export const allocate = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const body = allocateSchema.safeParse(req.body);
-  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
+  if (!body.success) { badRequest(res, 'Validation failed', body.error.errors); return; }
 
   const { items, ...allocData } = body.data;
 
@@ -56,13 +55,13 @@ export const allocate = asyncHandler(async (req: AuthRequest, res: Response) => 
     .select()
     .single();
 
-  if (error) return badRequest(res, error.message);
+  if (error) { badRequest(res, error.message); return; }
 
   const { error: itemsErr } = await supabaseAdmin
     .from('stock_items')
     .insert(items.map((i) => ({ ...i, allocation_id: alloc.id })));
 
-  if (itemsErr) return badRequest(res, itemsErr.message);
+  if (itemsErr) { badRequest(res, itemsErr.message); return; }
 
   const { data: full } = await supabaseAdmin
     .from('stock_allocations')
@@ -70,7 +69,7 @@ export const allocate = asyncHandler(async (req: AuthRequest, res: Response) => 
     .eq('id', alloc.id)
     .single();
 
-  return created(res, full, 'Stock allocated');
+  created(res, full, 'Stock allocated');
 });
 
 // PATCH /api/v1/stock/items/:id  — exec accepts/rejects individual item
@@ -78,7 +77,7 @@ export const reviewItem = asyncHandler(async (req: AuthRequest, res: Response) =
   const user = req.user!;
   const { id } = req.params;
   const body = reviewItemSchema.safeParse(req.body);
-  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
+  if (!body.success) { badRequest(res, 'Validation failed', body.error.errors); return; }
 
   // Verify item belongs to user's allocation
   const { data: item } = await supabaseAdmin
@@ -87,11 +86,12 @@ export const reviewItem = asyncHandler(async (req: AuthRequest, res: Response) =
     .eq('id', id)
     .single();
 
-  if (!item) return notFound(res, 'Stock item not found');
+  if (!item) { notFound(res, 'Stock item not found'); return; }
   
-  const alloc = item.stock_allocations as { user_id: string } | null;
+  const alloc = (item.stock_allocations as any) as { user_id: string } | null;
   if (alloc?.user_id !== user.id && !['admin','city_manager','super_admin'].includes(user.role)) {
-    return badRequest(res, 'Not authorised to review this item');
+    badRequest(res, 'Not authorised to review this item');
+    return;
   }
 
   const updateData: Record<string, unknown> = {
@@ -107,7 +107,7 @@ export const reviewItem = asyncHandler(async (req: AuthRequest, res: Response) =
     .select()
     .single();
 
-  if (error) return badRequest(res, error.message);
+  if (error) { badRequest(res, error.message); return; }
 
   // Update parent allocation status
   const { data: siblings } = await supabaseAdmin
@@ -126,7 +126,7 @@ export const reviewItem = asyncHandler(async (req: AuthRequest, res: Response) =
     .update({ status: allocStatus, reviewed_at: new Date().toISOString() })
     .eq('id', item.allocation_id);
 
-  return ok(res, data, 'Item updated');
+  ok(res, data, 'Item updated');
 });
 
 // GET /api/v1/stock/team  (supervisor+)
@@ -141,6 +141,6 @@ export const getTeamAllocations = asyncHandler(async (req: AuthRequest, res: Res
     .eq('date', date)
     .order('created_at', { ascending: false });
 
-  if (error) return badRequest(res, error.message);
-  return ok(res, data);
+  if (error) { badRequest(res, error.message); return; }
+  ok(res, data);
 });
