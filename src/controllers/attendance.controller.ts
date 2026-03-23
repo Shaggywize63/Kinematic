@@ -21,7 +21,7 @@ const checkoutSchema = z.object({
 });
 
 // POST /api/v1/attendance/checkin
-export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const today = new Date().toISOString().split('T')[0];
   const { latitude, longitude, selfie_url, activity_id, zone_id, date: passedDate } = req.body;
