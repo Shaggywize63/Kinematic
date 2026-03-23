@@ -7,7 +7,8 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  // Accept either email or mobile number (or mobile@kinematic.app constructed by app)
+  email: z.string().min(6),
   password: z.string().min(6),
   fcm_token: z.string().optional(),
   device_id: z.string().optional(),
@@ -22,7 +23,26 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const body = loginSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
-  const { email, password, fcm_token, device_id } = body.data;
+  let { email, password, fcm_token, device_id } = body.data;
+
+  // If login identifier is a mobile number or an @kinematic.app email, resolve to real email
+  const isMobile = /^\d{10,15}$/.test(email.trim());
+  const isAppEmail = email.endsWith('@kinematic.app');
+
+  if (isMobile || isAppEmail) {
+    const mobile = isMobile ? email.trim() : email.replace('@kinematic.app', '').trim();
+    const { data: userLookup } = await supabaseAdmin
+      .from('users')
+      .select('email, mobile')
+      .or(`mobile.eq.${mobile},mobile.eq.+91${mobile},mobile.eq.0${mobile}`)
+      .single();
+
+    if (!userLookup?.email) {
+      return res.status(401).json({ success: false, error: 'No account found for this mobile number. Contact your admin.' });
+    }
+    email = userLookup.email;
+    logger.info(`Mobile login resolved: ${mobile} → ${email}`);
+  }
 
   // Sign in directly with email + password via Supabase Auth
   let { data: session, error: signInError } = await supabase.auth.signInWithPassword({
