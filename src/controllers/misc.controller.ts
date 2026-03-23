@@ -1,9 +1,10 @@
 import { Request, Response } from 'express'
 import { supabaseAdmin } from '../lib/supabase'
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate } from '../utils'
+import { AuthRequest } from '../types'
 
 // VISIT LOGS
-export const getVisitLogs = asyncHandler(async (req: Request, res: Response) => {
+export const getVisitLogs = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const date = (req.query.date as string) || todayDate()
   let query = supabaseAdmin
@@ -18,7 +19,7 @@ export const getVisitLogs = asyncHandler(async (req: Request, res: Response) => 
   sendSuccess(res, data)
 })
 
-export const createVisitLog = asyncHandler(async (req: Request, res: Response) => {
+export const createVisitLog = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { executive_id, rating, remarks, photo_url, latitude, longitude } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('visit_logs')
@@ -29,7 +30,7 @@ export const createVisitLog = asyncHandler(async (req: Request, res: Response) =
 })
 
 // GRIEVANCES
-export const submitGrievance = asyncHandler(async (req: Request, res: Response) => {
+export const submitGrievance = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { category, against_role, incident_date, description, is_anonymous } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('grievances')
@@ -39,7 +40,7 @@ export const submitGrievance = asyncHandler(async (req: Request, res: Response) 
   sendSuccess(res, data, 'Grievance submitted. HR will review within 48 hours.', 201)
 })
 
-export const getMyGrievances = asyncHandler(async (req: Request, res: Response) => {
+export const getMyGrievances = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabaseAdmin.from('grievances')
     .select('id, reference_no, category, status, created_at, resolution')
     .eq('submitted_by', req.user!.id).eq('is_anonymous', false)
@@ -48,7 +49,7 @@ export const getMyGrievances = asyncHandler(async (req: Request, res: Response) 
   sendSuccess(res, data)
 })
 
-export const getAllGrievances = asyncHandler(async (req: Request, res: Response) => {
+export const getAllGrievances = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const { status } = req.query
   const { page, limit, offset } = getPagination(
@@ -65,7 +66,7 @@ export const getAllGrievances = asyncHandler(async (req: Request, res: Response)
   sendPaginated(res, data || [], count || 0, page, limit)
 })
 
-export const updateGrievance = asyncHandler(async (req: Request, res: Response) => {
+export const updateGrievance = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { status, resolution } = req.body
   const { data, error } = await supabaseAdmin.from('grievances')
     .update({ status, resolution: resolution || null, reviewed_by: req.user!.id, reviewed_at: new Date().toISOString() })
@@ -75,7 +76,7 @@ export const updateGrievance = asyncHandler(async (req: Request, res: Response) 
 })
 
 // LEARNING CENTER
-export const getMaterials = asyncHandler(async (req: Request, res: Response) => {
+export const getMaterials = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('learning_materials')
     .select('*, learning_progress(is_completed, progress_pct, completed_at, last_accessed)')
@@ -86,7 +87,7 @@ export const getMaterials = asyncHandler(async (req: Request, res: Response) => 
   sendSuccess(res, enriched)
 })
 
-export const updateProgress = asyncHandler(async (req: Request, res: Response) => {
+export const updateProgress = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { progress_pct, is_completed } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('learning_progress')
@@ -96,7 +97,7 @@ export const updateProgress = asyncHandler(async (req: Request, res: Response) =
   sendSuccess(res, data, 'Progress updated')
 })
 
-export const createMaterial = asyncHandler(async (req: Request, res: Response) => {
+export const createMaterial = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { title, description, category, type, file_url, thumbnail_url, duration_min, page_count, target_roles, is_mandatory } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('learning_materials')
@@ -107,7 +108,7 @@ export const createMaterial = asyncHandler(async (req: Request, res: Response) =
 })
 
 // NOTIFICATIONS
-export const getNotifications = asyncHandler(async (req: Request, res: Response) => {
+export const getNotifications = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const { page, limit, offset } = getPagination(
     parseInt(req.query.page as string) || 1,
@@ -120,7 +121,7 @@ export const getNotifications = asyncHandler(async (req: Request, res: Response)
   sendPaginated(res, data || [], count || 0, page, limit)
 })
 
-export const markRead = asyncHandler(async (req: Request, res: Response) => {
+export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { ids } = req.body
   let query = supabaseAdmin.from('notifications')
     .update({ is_read: true, read_at: new Date().toISOString() }).eq('user_id', req.user!.id)
@@ -131,7 +132,7 @@ export const markRead = asyncHandler(async (req: Request, res: Response) => {
 })
 
 // USERS
-export const getUsers = asyncHandler(async (req: Request, res: Response) => {
+export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const { role, zone_id, is_active } = req.query
   const { page, limit, offset } = getPagination(
@@ -150,7 +151,7 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   sendPaginated(res, data || [], count || 0, page, limit)
 })
 
-export const getUserById = asyncHandler(async (req: Request, res: Response) => {
+export const getUserById = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabaseAdmin.from('users')
     .select('*, zones(name)')
     .eq('id', req.params.id).eq('org_id', req.user!.org_id).single()
@@ -159,7 +160,7 @@ export const getUserById = asyncHandler(async (req: Request, res: Response) => {
   sendSuccess(res, data)
 })
 
-export const createUser = asyncHandler(async (req: Request, res: Response) => {
+export const createUser = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { name, mobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email } = req.body
   const admin = req.user!
 
@@ -190,9 +191,7 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
 
   const authId = authData.user.id
 
-  // 2. Insert into public.users
-  const { data, error } = await supabaseAdmin.from('users')
-    .insert({
+    const userData: any = {
       id:            authId,
       org_id:        admin.org_id,
       name:          name.trim(),
@@ -204,11 +203,16 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
       employee_id:   employee_id   || null,
       joined_date:   joined_date   || null,
       city:          city          || null,
-      app_password:  app_password  || password || null,
       is_active:     true,
-    })
-    .select('*, zones(name)')
-    .single()
+    }
+
+    // Only set app_password if it's explicitly allowed/configured
+    if (app_password || password) userData.app_password = app_password || password
+
+    const { data, error } = await supabaseAdmin.from('users')
+      .insert(userData)
+      .select('*, zones(name)')
+      .single()
 
   if (error) {
     // Rollback: delete the auth user we just created
@@ -223,7 +227,7 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
   sendSuccess(res, data, 'User created', 201)
 })
 
-export const updateUser = asyncHandler(async (req: Request, res: Response) => {
+export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) => {
   const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'app_password']
   const updates: any = {}
   for (const key of allowed) { if (req.body[key] !== undefined) updates[key] = req.body[key] }
@@ -232,6 +236,7 @@ export const updateUser = asyncHandler(async (req: Request, res: Response) => {
   if (req.body.app_password) {
     const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: req.body.app_password })
     if (authErr) throw new AppError(400, authErr.message, 'AUTH_ERROR')
+    updates.app_password = req.body.app_password
   }
 
   const { data, error } = await supabaseAdmin.from('users')
@@ -240,25 +245,29 @@ export const updateUser = asyncHandler(async (req: Request, res: Response) => {
   sendSuccess(res, data, 'User updated')
 })
 
-export const resetUserPassword = asyncHandler(async (req: Request, res: Response) => {
+export const resetUserPassword = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { password } = req.body
   if (!password || password.length < 6) {
     throw new AppError(400, 'Password must be at least 6 characters', 'VALIDATION_ERROR')
   }
-  const { error } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password })
-  if (error) throw new AppError(500, error.message, 'AUTH_ERROR')
+  const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password })
+  if (authErr) throw new AppError(500, authErr.message, 'AUTH_ERROR')
+
+  // Also update app_password in users table
+  await supabaseAdmin.from('users').update({ app_password: password }).eq('id', req.params.id)
+
   sendSuccess(res, { message: 'Password reset successfully' })
 })
 
 // ZONES
-export const getZones = asyncHandler(async (req: Request, res: Response) => {
+export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabaseAdmin.from('zones')
     .select('*').eq('org_id', req.user!.org_id).eq('is_active', true).order('name')
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data)
 })
 
-export const createZone = asyncHandler(async (req: Request, res: Response) => {
+export const createZone = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { name, city, meeting_lat, meeting_lng, meeting_address, geofence_radius } = req.body
   const { data, error } = await supabaseAdmin.from('zones')
     .insert({ org_id: req.user!.org_id, name, city, meeting_lat, meeting_lng, meeting_address, geofence_radius: geofence_radius || 100 })
@@ -268,7 +277,7 @@ export const createZone = asyncHandler(async (req: Request, res: Response) => {
 })
 
 // ANALYTICS
-export const getDashboardSummary = asyncHandler(async (req: Request, res: Response) => {
+export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const date = (req.query.date as string) || todayDate()
   const [attRes, subRes, sosRes] = await Promise.all([
@@ -289,7 +298,7 @@ export const getDashboardSummary = asyncHandler(async (req: Request, res: Respon
   })
 })
 
-export const getActivityFeed = asyncHandler(async (req: Request, res: Response) => {
+export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const [attRes, subRes, sosRes] = await Promise.all([
     supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users(name, zones(name))').eq('org_id', user.org_id).order('checkin_at', { ascending: false }).limit(10),
