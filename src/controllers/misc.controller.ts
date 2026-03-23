@@ -206,8 +206,8 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
       is_active:     true,
     }
 
-    // Only set app_password if it's explicitly allowed/configured
-    if (app_password || password) userData.app_password = app_password || password
+    // NOTE: We do NOT set app_password in the users table because the column does not exist.
+    // The Supabase Auth password (handled above) IS the app password.
 
     const { data, error } = await supabaseAdmin.from('users')
       .insert(userData)
@@ -240,7 +240,8 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
     try {
       const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: pw })
       if (authErr) throw new AppError(400, `Auth password update failed: ${authErr.message}`, 'AUTH_ERROR')
-      updates.app_password = pw
+      // NOTE: We do NOT update app_password in the users table because the column does not exist.
+      // The Supabase Auth password IS the app password.
     } catch (e: any) {
       if (e instanceof AppError) throw e
       throw new AppError(500, `Auth identity update crashed: ${e.message}`, 'AUTH_CRASH')
