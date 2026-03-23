@@ -34,11 +34,11 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     // If standard login fails, check for app_password in users table
     const { data: userProfile } = await supabaseAdmin
       .from('users')
-      .select('id, app_password, role')
+      .select('id, role')
       .eq('email', email)
       .single();
 
-    if (userProfile && userProfile.app_password && userProfile.app_password === password) {
+    if (userProfile && false) { // Skip app_password check for now
       logger.info(`Valid app_password login for email: ${email}`);
       
       // Use magiclink OTP to sign the user in without their main password
@@ -141,7 +141,7 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
     .select(`
       id, org_id, name, mobile, role, employee_id,
       zone_id, supervisor_id, city, state, avatar_url,
-      is_active, joined_date, created_at, app_password,
+      is_active, joined_date, created_at,
       zones(id, name, city, meeting_lat, meeting_lng, geofence_radius),
       organisations(id, name, logo_url)
     `)
