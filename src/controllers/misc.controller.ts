@@ -286,9 +286,6 @@ export const resetUserPassword = asyncHandler(async (req: AuthRequest, res: Resp
   const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password })
   if (authErr) throw new AppError(500, authErr.message, 'AUTH_ERROR')
 
-  // Also update app_password in users table
-  await supabaseAdmin.from('users').update({ app_password: password }).eq('id', req.params.id)
-
   sendSuccess(res, { message: 'Password reset successfully' })
 })
 
