@@ -3,11 +3,9 @@ import { z } from 'zod';
 import { supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest, conflict, notFound, forbidden } from '../utils/response';
-import { asyncHandler } from '../utils/asyncHandler';
+import { asyncHandler, AppError, sendSuccess } from '../utils';
 import { isWithinGeofence } from '../lib/haversine';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
-import { AppError } from '../utils/AppError';
-import { sendSuccess } from '../utils/response';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),

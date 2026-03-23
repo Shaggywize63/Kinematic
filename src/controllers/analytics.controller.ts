@@ -179,7 +179,7 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
 
   const { data: execs, error: execErr } = await supabaseAdmin
     .from('users').select('id, name, employee_id, zone_id, zones(name, city, meeting_lat, meeting_lng)')
-    .eq('org_id', user.org_id).in('role', ['executive', 'field_executive', 'field-executive']).eq('is_active', true);
+    .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
 
   if (execErr) return badRequest(res, execErr.message);
 
@@ -226,7 +226,7 @@ export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Res
 
   const { data: execs, error: execErr } = await supabaseAdmin
     .from('users').select('id, name, employee_id, zone_id, zones(name)')
-    .eq('org_id', user.org_id).in('role', ['executive', 'field_executive', 'field-executive']).eq('is_active', true);
+    .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
 
   if (execErr) return badRequest(res, execErr.message);
 

@@ -141,11 +141,7 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   let query = supabaseAdmin.from('users')
     .select('id, name, mobile, email, role, employee_id, zone_id, city, supervisor_id, is_active, joined_date, app_password, zones(name)', { count: 'exact' })
     .eq('org_id', user.org_id).order('name').range(offset, offset + limit - 1)
-  if (role) {
-    if (role === 'executive') query = query.in('role', ['executive', 'field_executive', 'field-executive'])
-    else if (role === 'supervisor') query = query.in('role', ['supervisor', 'city_manager', 'program_manager'])
-    else query = query.eq('role', role as string)
-  }
+  if (role) query = query.eq('role', role as string)
   if (zone_id) query = query.eq('zone_id', zone_id as string)
   if (is_active !== undefined) query = query.eq('is_active', is_active === 'true')
   if (['supervisor', 'city_manager', 'program_manager'].includes(user.role)) query = query.eq('supervisor_id', user.id)
