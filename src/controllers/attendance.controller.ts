@@ -1,13 +1,10 @@
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, conflict, notFound, forbidden } from '../utils/response';
-import { asyncHandler } from '../utils/asyncHandler';
+import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess } from '../utils';
 import { isWithinGeofence } from '../lib/haversine';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
-import { AppError } from '../utils/AppError';
-import { sendSuccess } from '../utils/response';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -27,7 +24,7 @@ const checkoutSchema = z.object({
 export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const body = checkinSchema.safeParse(req.body);
-  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
+  if (!body.success) { badRequest(res, 'Validation failed', body.error.errors); return; }
 
   const { latitude, longitude, selfie_url, activity_id, zone_id } = body.data;
   const today = new Date().toISOString().split('T')[0];
@@ -39,11 +36,12 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
     .eq('date', today)
     .single();
 
-  if (existing) return conflict(res, 'Already checked in today');
+  if (existing) { conflict(res, 'Already checked in today'); return; }
 
   // Enforce selfie for field executives
   if (user.role === 'executive' && !selfie_url) {
-    return badRequest(res, 'Selfie is mandatory for check-in');
+    badRequest(res, 'Selfie is mandatory for check-in');
+    return;
   }
 
   const resolvedZoneId = zone_id || user.zone_id;
@@ -65,10 +63,11 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
       distanceMetres = dist;
 
       if (!withinFence) {
-        return badRequest(res,
+        badRequest(res,
           `You are ${dist}m away from ${zone.name}. Must be within ${zone.geofence_radius}m to check in.`,
           { distance: dist, required: zone.geofence_radius }
         );
+        return;
       }
     }
   }
@@ -91,15 +90,15 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
     .select()
     .single();
 
-  if (error) return badRequest(res, error.message);
-  return created(res, data, 'Checked in successfully');
+  if (error) { badRequest(res, error.message); return; }
+  created(res, data, 'Checked in successfully');
 });
 
 // POST /api/v1/attendance/checkout
 export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const body = checkoutSchema.safeParse(req.body);
-  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
+  if (!body.success) { badRequest(res, 'Validation failed', body.error.errors); return; }
 
   const { latitude, longitude, selfie_url } = body.data;
   const today = new Date().toISOString().split('T')[0];
@@ -111,12 +110,13 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
     .eq('date', today)
     .single();
 
-  if (!record) return badRequest(res, 'No check-in found for today');
-  if (record.status === 'checked_out') return conflict(res, 'Already checked out today');
+  if (!record) { badRequest(res, 'No check-in found for today'); return; }
+  if (record.status === 'checked_out') { conflict(res, 'Already checked out today'); return; }
 
   // Enforce selfie for field executives
   if (user.role === 'executive' && !selfie_url) {
-    return badRequest(res, 'Selfie is mandatory for check-out');
+    badRequest(res, 'Selfie is mandatory for check-out');
+    return;
   }
 
   const checkoutTime = new Date();
@@ -138,8 +138,8 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
     .select()
     .single();
 
-  if (error) return badRequest(res, error.message);
-  return ok(res, data, 'Checked out successfully');
+  if (error) { badRequest(res, error.message); return; }
+  ok(res, data, 'Checked out successfully');
 });
 
 // POST /api/v1/attendance/break/start
@@ -154,8 +154,8 @@ export const startBreak = asyncHandler(async (req: AuthRequest, res: Response) =
     .eq('date', today)
     .single();
 
-  if (!record) return badRequest(res, 'Not checked in today');
-  if (record.status !== 'checked_in') return conflict(res, 'Cannot start break in current status');
+  if (!record) { badRequest(res, 'Not checked in today'); return; }
+  if (record.status !== 'checked_in') { conflict(res, 'Cannot start break in current status'); return; }
 
   await supabaseAdmin.from('attendance').update({ status: 'on_break' }).eq('id', record.id);
 
@@ -165,8 +165,8 @@ export const startBreak = asyncHandler(async (req: AuthRequest, res: Response) =
     .select()
     .single();
 
-  if (error) return badRequest(res, error.message);
-  return created(res, breakRecord, 'Break started');
+  if (error) { badRequest(res, error.message); return; }
+  created(res, breakRecord, 'Break started');
 });
 
 // POST /api/v1/attendance/break/end
@@ -181,8 +181,8 @@ export const endBreak = asyncHandler(async (req: AuthRequest, res: Response) => 
     .eq('date', today)
     .single();
 
-  if (!record) return badRequest(res, 'Not checked in today');
-  if (record.status !== 'on_break') return conflict(res, 'Not currently on break');
+  if (!record) { badRequest(res, 'Not checked in today'); return; }
+  if (record.status !== 'on_break') { conflict(res, 'Not currently on break'); return; }
 
   const { data: openBreak } = await supabaseAdmin
     .from('breaks')
@@ -191,7 +191,7 @@ export const endBreak = asyncHandler(async (req: AuthRequest, res: Response) => 
     .is('ended_at', null)
     .single();
 
-  if (!openBreak) return badRequest(res, 'No open break found');
+  if (!openBreak) { badRequest(res, 'No open break found'); return; }
 
   const endTime = new Date();
   const breakMins = Math.round((endTime.getTime() - new Date(openBreak.started_at).getTime()) / 60000);
@@ -202,7 +202,7 @@ export const endBreak = asyncHandler(async (req: AuthRequest, res: Response) => 
     break_minutes: (record.break_minutes || 0) + breakMins,
   }).eq('id', record.id);
 
-  return ok(res, { break_duration_minutes: breakMins }, 'Break ended');
+  ok(res, { break_duration_minutes: breakMins }, 'Break ended');
 });
 
 // GET /api/v1/attendance/today
@@ -217,8 +217,8 @@ export const getToday = asyncHandler(async (req: AuthRequest, res: Response) => 
     .eq('date', today)
     .single();
 
-  if (error && error.code !== 'PGRST116') return badRequest(res, error.message);
-  return ok(res, data || null);
+  if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }
+  ok(res, data || null);
 });
 
 // GET /api/v1/attendance/history
@@ -236,8 +236,8 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
     .order('date', { ascending: false })
     .range(from, to);
 
-  if (error) return badRequest(res, error.message);
-  return ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
+  if (error) { badRequest(res, error.message); return; }
+  ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
 });
 
 // GET /api/v1/attendance/team  (supervisor+)
@@ -267,12 +267,12 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
       .eq('supervisor_id', user.id);
     const ids = (teamIds || []).map((u: { id: string }) => u.id);
     if (ids.length) query = query.in('user_id', ids);
-    else return ok(res, []);
+    else { ok(res, []); return; }
   }
 
   const { data, error } = await query.order('checkin_at', { ascending: true, nullsFirst: false });
-  if (error) return badRequest(res, error.message);
-  return ok(res, data || []);
+  if (error) { badRequest(res, error.message); return; }
+  ok(res, data || []);
 });
 
 // POST /api/v1/attendance/override  (admin+)
@@ -286,7 +286,8 @@ export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Res
   } = req.body;
 
   if (!user_id || !date || !status) {
-    return badRequest(res, 'user_id, date and status are required');
+    badRequest(res, 'user_id, date and status are required');
+    return;
   }
 
   let total_hours: number | null = null;
@@ -359,8 +360,8 @@ export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Res
     }
   }
 
-  if (result.error) return badRequest(res, result.error.message);
-  return created(res, result.data, 'Attendance record saved');
+  if (result.error) { badRequest(res, result.error.message); return; }
+  created(res, result.data, 'Attendance record saved');
 });
 
 // PATCH /api/v1/attendance/:id/override  (admin+)
@@ -380,7 +381,7 @@ export const updateAttendanceOverride = asyncHandler(async (req: AuthRequest, re
     .eq('org_id', admin.org_id)
     .single();
 
-  if (fetchErr || !existing) return notFound(res, 'Attendance record not found');
+  if (fetchErr || !existing) { notFound(res, 'Attendance record not found'); return; }
 
   const newCheckin  = checkin_at  || existing.checkin_at;
   const newCheckout = checkout_at || existing.checkout_at;
@@ -439,6 +440,6 @@ export const updateAttendanceOverride = asyncHandler(async (req: AuthRequest, re
       .single();
   }
 
-  if (result.error) return badRequest(res, result.error.message);
-  return ok(res, result.data, 'Attendance updated');
+  if (result.error) { badRequest(res, result.error.message); return; }
+  ok(res, result.data, 'Attendance updated');
 });

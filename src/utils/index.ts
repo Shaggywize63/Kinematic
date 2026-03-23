@@ -78,3 +78,21 @@ export function sendPaginated(
 export function todayDate(): string {
   return new Date().toISOString().split('T')[0]
 }
+
+export const ok = <T>(res: Response, data: T, message?: string) =>
+  res.status(200).json({ success: true, data, ...(message && { message }) });
+
+export const created = <T>(res: Response, data: T, message?: string) =>
+  res.status(201).json({ success: true, data, ...(message && { message }) });
+
+export const badRequest = (res: Response, error: string, details?: unknown) =>
+  res.status(400).json({ success: false, error, ...(details && { details }) });
+
+export const notFound = (res: Response, error = 'Not found') =>
+  res.status(404).json({ success: false, error });
+
+export const forbidden = (res: Response, error = 'Forbidden') =>
+  res.status(403).json({ success: false, error });
+
+export const conflict = (res: Response, error: string) =>
+  res.status(409).json({ success: false, error });
