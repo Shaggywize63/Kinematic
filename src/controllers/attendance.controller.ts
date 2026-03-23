@@ -41,6 +41,11 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
 
   if (existing) return conflict(res, 'Already checked in today');
 
+  // Enforce selfie for field executives
+  if (user.role === 'executive' && !selfie_url) {
+    return badRequest(res, 'Selfie is mandatory for check-in');
+  }
+
   const resolvedZoneId = zone_id || user.zone_id;
 
   let distanceMetres = 0;
@@ -108,6 +113,11 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
 
   if (!record) return badRequest(res, 'No check-in found for today');
   if (record.status === 'checked_out') return conflict(res, 'Already checked out today');
+
+  // Enforce selfie for field executives
+  if (user.role === 'executive' && !selfie_url) {
+    return badRequest(res, 'Selfie is mandatory for check-out');
+  }
 
   const checkoutTime = new Date();
   const checkinTime = new Date(record.checkin_at!);

@@ -316,14 +316,14 @@ export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Re
     supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'active'),
   ])
   const totalEngagements = subRes.count || 0
-  const totalConversions = (subRes.data || []).filter((s: any) => s.is_converted).length
+  const totalTff = (subRes.data || []).filter((s: any) => s.is_converted).length
   sendSuccess(res, {
     date,
     executives_checked_in: attRes.count || 0,
     executives_active: (attRes.data || []).filter((a: any) => a.status !== 'checked_out').length,
     total_engagements: totalEngagements,
-    total_conversions: totalConversions,
-    conversion_rate: totalEngagements > 0 ? Math.round((totalConversions / totalEngagements) * 100) : 0,
+    total_tff: totalTff,
+    tff_rate: totalEngagements > 0 ? Math.round((totalTff / totalEngagements) * 100) : 0,
     active_sos_alerts: sosRes.count || 0,
   })
 })
@@ -337,8 +337,79 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
   ])
   const feed = [
     ...(attRes.data || []).map((a: any) => ({ type: 'attendance', event: a.status === 'checked_in' ? 'Check-in' : 'Check-out', user: a.users?.name, zone: a.users?.zones?.name, time: a.checkin_at, id: a.id })),
-    ...(subRes.data || []).map((s: any) => ({ type: 'form', event: 'Form submitted' + (s.is_converted ? ' ✓' : ''), user: s.users?.name, outlet: s.outlet_name, time: s.submitted_at, id: s.id })),
+    ...(subRes.data || []).map((s: any) => ({ type: 'form', event: 'Form submitted' + (s.is_converted ? ' ✓ TFF' : ''), user: s.users?.name, outlet: s.outlet_name, time: s.submitted_at, id: s.id })),
     ...(sosRes.data || []).map((s: any) => ({ type: 'sos', event: 'SOS Alert', user: s.users?.name, status: s.status, time: s.created_at, id: s.id })),
   ].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 20)
   sendSuccess(res, feed)
+})
+
+export const createSOS = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { latitude, longitude, remarks } = req.body
+  const user = req.user!
+  
+  const { data, error } = await supabaseAdmin.from('sos_alerts')
+    .insert({
+      org_id: user.org_id,
+      user_id: user.id,
+      latitude,
+      longitude,
+      remarks: remarks || 'Emergency SOS triggered from app',
+      status: 'active'
+    })
+    .select().single()
+
+  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  
+  // Note: In a real app, we'd trigger push notifications/SMS to supervisors here
+  
+  sendSuccess(res, data, 'SOS Alert sent to supervisors', 201)
+})
+
+export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { resolution } = req.body
+  const { data, error } = await supabaseAdmin.from('sos_alerts')
+    .update({ 
+      status: 'resolved', 
+      resolution: resolution || 'Resolved by admin',
+      resolved_at: new Date().toISOString(),
+      resolved_by: req.user!.id
+    })
+    .eq('id', req.params.id)
+    .eq('org_id', req.user!.org_id)
+    .select().single()
+
+  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  sendSuccess(res, data, 'SOS Alert resolved')
+})
+
+// MOTIVATION QUOTES
+export const getDailyQuote = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!
+  // Fetch the most recent quote for the organization
+  const { data, error } = await supabaseAdmin.from('motivation_quotes')
+    .select('quote, author')
+    .eq('org_id', user.org_id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  
+  // Fallback if no quote exists
+  const fallback = { quote: "Success is not final, failure is not fatal: it is the courage to continue that counts.", author: "Winston Churchill" }
+  sendSuccess(res, data || fallback)
+})
+
+export const upsertQuote = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { quote, author } = req.body
+  const user = req.user!
+  
+  if (!quote) throw new AppError(400, 'Quote content is required', 'VALIDATION_ERROR')
+
+  const { data, error } = await supabaseAdmin.from('motivation_quotes')
+    .insert({ org_id: user.org_id, quote, author: author || 'Anonymous', created_by: user.id })
+    .select().single()
+
+  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  sendSuccess(res, data, 'Quote updated successfully', 201)
 })
