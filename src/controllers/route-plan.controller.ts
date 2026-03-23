@@ -122,80 +122,80 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
 /* ─────────────────────────────────────────────────────────────
    POST /api/v1/route-plans
    Admin / Supervisor — create plan for an FE
-   Body: { user_id, plan_date, notes?, frequency?, territory_label?, outlets: [{store_id, target_type, target_notes?, target_value?, visit_order?, geofence_radius_m?, planned_duration_min?}] }
+   Body: { user_id, plan_date, notes?, frequency?, territory_label?, activity_ids: string[], outlets: [{store_id, target_type, target_notes?, target_value?, visit_order?, geofence_radius_m?, planned_duration_min?}] }
 ───────────────────────────────────────────────────────────── */
 export const createRoutePlan = asyncHandler(async (req: Request, res: Response) => {
   const org   = orgId(req);
   const by    = userId(req);
   const {
-    user_id, plan_date, outlets, notes, activity_id,
+    user_id, plan_date, outlets, notes, activity_id, activity_ids,
     frequency = 'daily', territory_label,
   } = req.body;
 
-  if (!user_id || !plan_date || !activity_id) return badRequest(res, 'user_id, activity_id and plan_date are required');
+  const acts = activity_ids && activity_ids.length > 0 ? activity_ids : (activity_id ? [activity_id] : []);
+
+  if (!user_id || !plan_date || acts.length === 0) return badRequest(res, 'user_id, activity_ids and plan_date are required');
   if (!Array.isArray(outlets) || outlets.length === 0) return badRequest(res, 'outlets[] must be a non-empty array');
 
   // Validate all store_ids provided
   if (outlets.some((o: any) => !o.store_id)) return badRequest(res, 'Every outlet must have a store_id');
 
-  // Check for duplicate plan
-  const { data: existing } = await supabase
-    .from('route_plans')
-    .select('id')
-    .eq('user_id', user_id)
-    .eq('plan_date', plan_date)
-    .maybeSingle();
+  const createdPlans = [];
 
-  if (existing) return badRequest(res, `A route plan already exists for this FE on ${plan_date}. Use PATCH to update it.`);
+  for (const aid of acts) {
+    // Check for duplicate plan for the SAME activity
+    const { data: existing } = await supabase
+      .from('route_plans')
+      .select('id')
+      .eq('user_id', user_id)
+      .eq('plan_date', plan_date)
+      .eq('activity_id', aid)
+      .maybeSingle();
 
-  // FE-Activity mapping check removed as per user request
+    if (existing) {
+      continue; // Skip if already exists for this activity
+    }
 
-  // Insert plan
-  const { data: plan, error: planErr } = await supabase
-    .from('route_plans')
-    .insert({ org_id: org, user_id, plan_date, notes, frequency, territory_label, activity_id, created_by: by, total_outlets: outlets.length })
-    .select()
-    .single();
+    // Insert plan
+    const { data: plan, error: planErr } = await supabase
+      .from('route_plans')
+      .insert({ org_id: org, user_id, plan_date, notes, frequency, territory_label, activity_id: aid, created_by: by, total_outlets: outlets.length })
+      .select()
+      .single();
 
-  if (planErr) return badRequest(res, planErr.message);
+    if (planErr) return badRequest(res, planErr.message);
 
-  // Insert outlets
-  const outletRows = outlets.map((o: any, idx: number) => ({
-    route_plan_id:       plan.id,
-    store_id:            o.store_id,
-    org_id:              org,
-    visit_order:         o.visit_order ?? idx + 1,
-    target_type:         o.target_type ?? 'general',
-    target_notes:        o.target_notes ?? null,
-    target_value:        o.target_value ?? null,
-    geofence_radius_m:   o.geofence_radius_m ?? 100,
-    planned_duration_min:o.planned_duration_min ?? null,
-  }));
+    // Insert outlets
+    const outletRows = outlets.map((o: any, idx: number) => ({
+      route_plan_id:       plan.id,
+      store_id:            o.store_id,
+      org_id:              org,
+      visit_order:         o.visit_order ?? idx + 1,
+      target_type:         o.target_type ?? 'general',
+      target_notes:        o.target_notes ?? null,
+      target_value:        o.target_value ?? null,
+      geofence_radius_m:   o.geofence_radius_m ?? 100,
+      planned_duration_min:o.planned_duration_min ?? null,
+    }));
 
-  const { error: outletsErr } = await supabase
-    .from('route_plan_outlets')
-    .insert(outletRows);
+    const { error: outletsErr } = await supabase
+      .from('route_plan_outlets')
+      .insert(outletRows);
 
-  if (outletsErr) {
-    // Clean up the plan if outlets fail
-    await supabase.from('route_plans').delete().eq('id', plan.id);
-    return badRequest(res, outletsErr.message);
+    if (outletsErr) {
+      // Clean up the plan if outlets fail
+      await supabase.from('route_plans').delete().eq('id', plan.id);
+      return badRequest(res, outletsErr.message);
+    }
+    
+    createdPlans.push(plan.id);
   }
 
-  // Return full plan with outlets
-  const { data: full } = await supabase
-    .from('route_plans')
-    .select('id, plan_date, status, total_outlets, notes, frequency, territory_label')
-    .eq('id', plan.id)
-    .single();
+  if (createdPlans.length === 0) {
+     return badRequest(res, `Route plans already exist for this FE on ${plan_date} for the selected activities.`);
+  }
 
-  const { data: outletsFull } = await supabase
-    .from('v_route_outlet_detail')
-    .select('*')
-    .eq('route_plan_id', plan.id)
-    .order('visit_order', { ascending: true });
-
-  return created(res, { ...full, outlets: outletsFull || [] });
+  return created(res, { created: createdPlans.length, plan_ids: createdPlans });
 });
 
 /* ─────────────────────────────────────────────────────────────
