@@ -132,7 +132,7 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
     frequency = 'daily', territory_label,
   } = req.body;
 
-  if (!user_id || !plan_date) return badRequest(res, 'user_id and plan_date are required');
+  if (!user_id || !plan_date || !activity_id) return badRequest(res, 'user_id, activity_id and plan_date are required');
   if (!Array.isArray(outlets) || outlets.length === 0) return badRequest(res, 'outlets[] must be a non-empty array');
 
   // Validate all store_ids provided
@@ -148,19 +148,7 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
 
   if (existing) return badRequest(res, `A route plan already exists for this FE on ${plan_date}. Use PATCH to update it.`);
 
-  // Validate FE-Activity mapping
-  if (activity_id) {
-    const { data: mapping, error: mapErr } = await supabase
-      .from('activity_users')
-      .select('id')
-      .eq('activity_id', activity_id)
-      .eq('user_id', user_id)
-      .eq('org_id', org)
-      .maybeSingle();
-
-    if (mapErr) return badRequest(res, mapErr.message);
-    if (!mapping) return badRequest(res, `This FE is not linked to the selected activity.`);
-  }
+  // FE-Activity mapping check removed as per user request
 
   // Insert plan
   const { data: plan, error: planErr } = await supabase
@@ -350,32 +338,59 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
     successRows++;
   });
 
-  // Upsert plans and outlets per FE
+  // Upsert plans and outlets per FE and Activity
   for (const [fe_user_id, feRows] of Object.entries(byFE)) {
-    // Upsert plan
-    const { data: plan } = await supabase
-      .from('route_plans')
-      .upsert({ org_id: org, user_id: fe_user_id, plan_date, created_by: by, total_outlets: feRows.length }, { onConflict: 'user_id,plan_date' })
-      .select('id')
-      .single();
+    // Group rows for this FE by Activity ID to handle multiple activities per day if needed
+    const byActivity: Record<string, any[]> = {};
+    feRows.forEach((r: any) => {
+      const aid = r.activity_id || '';
+      if (!byActivity[aid]) byActivity[aid] = [];
+      byActivity[aid].push(r);
+    });
 
-    if (!plan) continue;
+    for (const [aid, actRows] of Object.entries(byActivity)) {
+      if (!aid) {
+        errorLog.push({ row: 'N/A', error: `Missing activity for FE ${fe_user_id}` });
+        continue;
+      }
 
-    // Delete existing outlets for this plan (re-import replaces)
-    await supabase.from('route_plan_outlets').delete().eq('route_plan_id', plan.id);
+      // FE-Activity mapping check removed as per user request
 
-    // Insert new outlets
-    const outletRows = feRows.map((r: any, i: number) => ({
-      route_plan_id:       plan.id,
-      store_id:            r.resolved_store_id,
-      org_id:              org,
-      visit_order:         r.visit_order ? Number(r.visit_order) : i + 1,
-      target_type:         r.target_type || 'general',
-      target_notes:        r.target_notes || null,
-      target_value:        r.target_value ? Number(r.target_value) : null,
-    }));
+      // Upsert plan
+      const { data: plan, error: upsertErr } = await supabase
+        .from('route_plans')
+        .upsert({ 
+          org_id: org, 
+          user_id: fe_user_id, 
+          plan_date, 
+          activity_id: aid,
+          created_by: by, 
+          total_outlets: actRows.length 
+        }, { onConflict: 'user_id,plan_date,activity_id' })
+        .select('id')
+        .single();
 
-    await supabase.from('route_plan_outlets').insert(outletRows);
+      if (upsertErr || !plan) {
+        errorLog.push({ row: 'N/A', error: `Failed to upsert plan: ${upsertErr?.message || 'Unknown error'}` });
+        continue;
+      }
+
+      // Delete existing outlets for this specific plan
+      await supabase.from('route_plan_outlets').delete().eq('route_plan_id', plan.id);
+
+      // Insert new outlets
+      const outletRows = actRows.map((r: any, i: number) => ({
+        route_plan_id:       plan.id,
+        store_id:            r.resolved_store_id,
+        org_id:              org,
+        visit_order:         r.visit_order ? Number(r.visit_order) : i + 1,
+        target_type:         r.target_type || 'general',
+        target_notes:        r.target_notes || null,
+        target_value:        r.target_value ? Number(r.target_value) : null,
+      }));
+
+      await supabase.from('route_plan_outlets').insert(outletRows);
+    }
   }
 
   // Update import log
