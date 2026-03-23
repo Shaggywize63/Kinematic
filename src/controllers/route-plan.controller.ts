@@ -128,7 +128,7 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
   const org   = orgId(req);
   const by    = userId(req);
   const {
-    user_id, plan_date, outlets, notes,
+    user_id, plan_date, outlets, notes, activity_id,
     frequency = 'daily', territory_label,
   } = req.body;
 
@@ -148,10 +148,24 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
 
   if (existing) return badRequest(res, `A route plan already exists for this FE on ${plan_date}. Use PATCH to update it.`);
 
+  // Validate FE-Activity mapping
+  if (activity_id) {
+    const { data: mapping, error: mapErr } = await supabase
+      .from('activity_users')
+      .select('id')
+      .eq('activity_id', activity_id)
+      .eq('user_id', user_id)
+      .eq('org_id', org)
+      .maybeSingle();
+
+    if (mapErr) return badRequest(res, mapErr.message);
+    if (!mapping) return badRequest(res, `This FE is not linked to the selected activity.`);
+  }
+
   // Insert plan
   const { data: plan, error: planErr } = await supabase
     .from('route_plans')
-    .insert({ org_id: org, user_id, plan_date, notes, frequency, territory_label, created_by: by, total_outlets: outlets.length })
+    .insert({ org_id: org, user_id, plan_date, notes, frequency, territory_label, activity_id, created_by: by, total_outlets: outlets.length })
     .select()
     .single();
 
