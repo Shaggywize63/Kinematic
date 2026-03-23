@@ -101,15 +101,22 @@ router.delete(
     if (!orgId) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
 
     // Manual cascade delete due to lack of FK ON DELETE CASCADE
-    await supabaseAdmin.from("builder_submissions").delete().eq("form_id", req.params.id);
-    await supabaseAdmin.from("builder_questions").delete().eq("form_id", req.params.id);
-    await supabaseAdmin.from("builder_pages").delete().eq("form_id", req.params.id);
+    const { error: e1 } = await supabaseAdmin.from("builder_submissions").delete().eq("form_id", req.params.id);
+    if (e1) throw new AppError(500, e1.message, "DB_ERROR");
+
+    const { error: e2 } = await supabaseAdmin.from("builder_questions").delete().eq("form_id", req.params.id);
+    if (e2) throw new AppError(500, e2.message, "DB_ERROR");
+
+    const { error: e3 } = await supabaseAdmin.from("builder_pages").delete().eq("form_id", req.params.id);
+    if (e3) throw new AppError(500, e3.message, "DB_ERROR");
     
-    await supabaseAdmin
+    const { error: e4 } = await supabaseAdmin
       .from("builder_forms")
       .delete()
       .eq("id", req.params.id)
       .eq("org_id", orgId);
+    
+    if (e4) throw new AppError(500, e4.message, "DB_ERROR");
 
     return sendSuccess(res, { deleted: true });
   })
