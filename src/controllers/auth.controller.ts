@@ -37,10 +37,12 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
       .or(`mobile.eq.${mobile},mobile.eq.+91${mobile},mobile.eq.0${mobile}`)
       .single();
 
-    if (!userLookup?.email) {
+    if (!userLookup) {
       return res.status(401).json({ success: false, error: 'No account found for this mobile number. Contact your admin.' });
     }
-    email = userLookup.email;
+
+    // If the user has no real email set, fallback to the internal mobile@kinematic.app format
+    email = userLookup.email || `${userLookup.mobile}@kinematic.app`;
     logger.info(`Mobile login resolved: ${mobile} → ${email}`);
   }
 
