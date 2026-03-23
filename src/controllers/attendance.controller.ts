@@ -250,7 +250,7 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
     .eq('date', date);
 
   if (zoneId) query = query.eq('zone_id', zoneId);
-  if (user.role === 'supervisor') {
+  if (['supervisor', 'city_manager', 'program_manager'].includes(user.role)) {
     const { data: teamIds } = await supabaseAdmin
       .from('users')
       .select('id')
