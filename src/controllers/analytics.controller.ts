@@ -34,7 +34,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     date,
     kpis: kpis || {
       executives_active: 0, executives_submitted: 0,
-      total_engagements: 0, total_conversions: 0, avg_hours_worked: 0,
+      total_engagements: 0, total_tff: 0, avg_hours_worked: 0,
     },
     total_executives: totalExecs || 0,
     active_sos_alerts: activeSos || 0,
@@ -65,7 +65,7 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
       const u = s.users as unknown as { name: string } | null;
       const a = s.activities as unknown as { name: string } | null;
       return { id: s.id, type: 'form_submission' as const, time: s.submitted_at,
-        description: `${u?.name || 'Unknown'} submitted form${s.is_converted ? ' ✓ Converted' : ''}`,
+        description: `${u?.name || 'Unknown'} submitted form${s.is_converted ? ' ✓ TFF' : ''}`,
         meta: { activity: a?.name, outlet: s.outlet_name } };
     }),
     ...(checkins || []).map((c) => {
@@ -92,8 +92,8 @@ export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) =>
 
   if (error) return badRequest(res, error.message);
 
-  const hourly = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: `${h.toString().padStart(2,'0')}:00`, engagements: 0, conversions: 0 }));
-  (data || []).forEach((s) => { const h = new Date(s.submitted_at).getHours(); hourly[h].engagements++; if (s.is_converted) hourly[h].conversions++; });
+  const hourly = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: `${h.toString().padStart(2,'0')}:00`, engagements: 0, tff: 0 }));
+  (data || []).forEach((s) => { const h = new Date(s.submitted_at).getHours(); hourly[h].engagements++; if (s.is_converted) hourly[h].tff++; });
   return ok(res, hourly.filter((h) => h.engagements > 0 || (h.hour >= 8 && h.hour <= 20)));
 });
 
@@ -108,19 +108,19 @@ export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Resp
 
   if (error) return badRequest(res, error.message);
 
-  const grid: { cc: number; ecc: number }[][] = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ cc: 0, ecc: 0 })));
+  const grid: { engagements: number; tff: number }[][] = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ engagements: 0, tff: 0 })));
   (data || []).forEach((s) => {
     const ist = toIST(new Date(s.submitted_at));
     const dow = (ist.getDay() + 6) % 7;
     const hr  = ist.getHours();
-    grid[dow][hr].cc++;
-    if (s.is_converted) grid[dow][hr].ecc++;
+    grid[dow][hr].engagements++;
+    if (s.is_converted) grid[dow][hr].tff++;
   });
 
   const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   return ok(res, {
     since: since.toISOString(), total_records: data?.length || 0,
-    grid: grid.map((hours, d) => ({ day: days[d], day_index: d, hours: hours.map((cell, h) => ({ hour: h, ...cell, total: cell.cc })) })),
+    grid: grid.map((hours, d) => ({ day: days[d], day_index: d, hours: hours.map((cell, h) => ({ hour: h, ...cell, total: cell.engagements })) })),
   });
 });
 
@@ -150,25 +150,25 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 
   if (error) return badRequest(res, error.message);
 
-  const byDay: Record<string, { cc: number; ecc: number }> = {};
-  days.forEach((d) => { byDay[d] = { cc: 0, ecc: 0 }; });
+  const byDay: Record<string, { engagements: number; tff: number }> = {};
+  days.forEach((d) => { byDay[d] = { engagements: 0, tff: 0 }; });
   (data || []).forEach((s) => {
     const d = isoDate(toIST(new Date(s.submitted_at)));
-    if (byDay[d]) { byDay[d].cc++; if (s.is_converted) byDay[d].ecc++; }
+    if (byDay[d]) { byDay[d].engagements++; if (s.is_converted) byDay[d].tff++; }
   });
 
   const result = days.map((d) => ({
     date: d,
     label: new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }),
     short_label: new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short' }),
-    cc: byDay[d].cc, ecc: byDay[d].ecc,
-    ecc_rate: byDay[d].cc > 0 ? Math.round((byDay[d].ecc / byDay[d].cc) * 100) : 0,
+    engagements: byDay[d].engagements, tff: byDay[d].tff,
+    tff_rate: byDay[d].engagements > 0 ? Math.round((byDay[d].tff / byDay[d].engagements) * 100) : 0,
   }));
 
   return ok(res, {
     days: result,
-    total_cc:  result.reduce((s, d) => s + d.cc,  0),
-    total_ecc: result.reduce((s, d) => s + d.ecc, 0),
+    total_engagements: result.reduce((s, d) => s + d.engagements, 0),
+    total_tff: result.reduce((s, d) => s + d.tff, 0),
   });
 });
 
@@ -307,27 +307,27 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   });
 
   const outlets = Array.from(outletMap.entries())
-    .map(([name, d]) => ({ name, ...d, ecc_rate: d.visits > 0 ? Math.round((d.conversions / d.visits) * 100) : 0 }))
+    .map(([name, d]) => ({ name, ...d, tff_rate: d.visits > 0 ? Math.round((d.conversions / d.visits) * 100) : 0 }))
     .sort((a, b) => b.visits - a.visits);
 
   // City breakdown
-  const cityMap = new Map<string, { outlets: Set<string>; cc: number; ecc: number }>();
+  const cityMap = new Map<string, { outlets: Set<string>; engagements: number; tff: number }>();
   (forms || []).forEach((f) => {
     const u = f.users as unknown as { zones?: { city?: string } } | null;
     const city = u?.zones?.city || 'Unknown';
-    if (!cityMap.has(city)) cityMap.set(city, { outlets: new Set(), cc: 0, ecc: 0 });
+    if (!cityMap.has(city)) cityMap.set(city, { outlets: new Set(), engagements: 0, tff: 0 });
     const c = cityMap.get(city)!;
     if (f.outlet_name) c.outlets.add(f.outlet_name);
-    c.cc++;
-    if (f.is_converted) c.ecc++;
+    c.engagements++;
+    if (f.is_converted) c.tff++;
   });
 
   const cities = Array.from(cityMap.entries())
     .map(([name, d]) => ({
-      city: name, unique_outlets: d.outlets.size, cc: d.cc, ecc: d.ecc,
-      ecc_rate: d.cc > 0 ? Math.round((d.ecc / d.cc) * 100) : 0,
+      city: name, unique_outlets: d.outlets.size, engagements: d.engagements, tff: d.tff,
+      tff_rate: d.engagements > 0 ? Math.round((d.tff / d.engagements) * 100) : 0,
     }))
-    .sort((a, b) => b.cc - a.cc);
+    .sort((a, b) => b.engagements - a.engagements);
 
   return ok(res, {
     from, to,
@@ -370,7 +370,7 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   // Aggregate by city
   const cityAgg = new Map<string, {
     zones: Set<string>; fes: Set<string>; checkins: number;
-    total_hours: number; cc: number; ecc: number; outlets: Set<string>;
+    total_hours: number; engagements: number; tff: number; outlets: Set<string>;
     lat: number | null; lng: number | null;
   }>();
 
@@ -380,7 +380,7 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   (att || []).forEach((a) => {
     const zInfo = zoneToCity.get(a.zone_id || '');
     const city = zInfo?.city || 'Unknown';
-    if (!cityAgg.has(city)) cityAgg.set(city, { zones: new Set(), fes: new Set(), checkins: 0, total_hours: 0, cc: 0, ecc: 0, outlets: new Set(), lat: zInfo?.lat || null, lng: zInfo?.lng || null });
+    if (!cityAgg.has(city)) cityAgg.set(city, { zones: new Set(), fes: new Set(), checkins: 0, total_hours: 0, engagements: 0, tff: 0, outlets: new Set(), lat: zInfo?.lat || null, lng: zInfo?.lng || null });
     const c = cityAgg.get(city)!;
     c.fes.add(a.user_id); c.checkins++;
     c.total_hours += a.total_hours || 0;
@@ -392,19 +392,19 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
     const zoneId = execZoneMap.get(f.user_id) || '';
     const zInfo  = zoneToCity.get(zoneId);
     const city   = zInfo?.city || 'Unknown';
-    if (!cityAgg.has(city)) cityAgg.set(city, { zones: new Set(), fes: new Set(), checkins: 0, total_hours: 0, cc: 0, ecc: 0, outlets: new Set(), lat: zInfo?.lat || null, lng: zInfo?.lng || null });
+    if (!cityAgg.has(city)) cityAgg.set(city, { zones: new Set(), fes: new Set(), checkins: 0, total_hours: 0, engagements: 0, tff: 0, outlets: new Set(), lat: zInfo?.lat || null, lng: zInfo?.lng || null });
     const c = cityAgg.get(city)!;
-    c.cc++; if (f.is_converted) c.ecc++;
+    c.engagements++; if (f.is_converted) c.tff++;
     if (f.outlet_name) c.outlets.add(f.outlet_name);
   });
 
   const result = Array.from(cityAgg.entries()).map(([city, d]) => ({
     city, zones: d.zones.size, active_fes: d.fes.size, checkins: d.checkins,
-    cc: d.cc, ecc: d.ecc, ecc_rate: d.cc > 0 ? Math.round((d.ecc / d.cc) * 100) : 0,
+    engagements: d.engagements, tff: d.tff, tff_rate: d.engagements > 0 ? Math.round((d.tff / d.engagements) * 100) : 0,
     unique_outlets: d.outlets.size,
     avg_hours: d.fes.size > 0 ? +(d.total_hours / d.fes.size).toFixed(1) : 0,
     lat: d.lat, lng: d.lng,
-  })).sort((a, b) => b.cc - a.cc);
+  })).sort((a, b) => b.engagements - a.engagements);
 
   return ok(res, { from, to, cities: result });
 });
