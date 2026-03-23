@@ -35,7 +35,7 @@ router.post(
     const orgId = req.user?.org_id;
     if (!orgId) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
 
-    const { title, description, icon, cover_color } = req.body;
+    const { title, description, icon, cover_color, activity_id } = req.body;
 
     if (!title?.trim())
       throw new AppError(400, "title is required", "VALIDATION_ERROR");
@@ -48,6 +48,7 @@ router.post(
         description,
         icon: icon || "📋",
         cover_color: cover_color || "#E01E2C",
+        activity_id: activity_id || null,
         status: "draft",
         version: 1,
       })
@@ -99,6 +100,11 @@ router.delete(
     const orgId = req.user?.org_id;
     if (!orgId) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
 
+    // Manual cascade delete due to lack of FK ON DELETE CASCADE
+    await supabaseAdmin.from("builder_submissions").delete().eq("form_id", req.params.id);
+    await supabaseAdmin.from("builder_questions").delete().eq("form_id", req.params.id);
+    await supabaseAdmin.from("builder_pages").delete().eq("form_id", req.params.id);
+    
     await supabaseAdmin
       .from("builder_forms")
       .delete()

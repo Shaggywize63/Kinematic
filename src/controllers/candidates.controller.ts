@@ -128,38 +128,6 @@ export const addCandidateDocument = asyncHandler(async (req: Request, res: Respo
 
 /* ── PATCH /api/v1/candidates/:id/documents/:docId ── */
 export const updateCandidateDocument = asyncHandler(async (req: Request, res: Response) => {
-  const { doc_value, file_url, file_name } = req.body;
-  const updates: any = {};
-  if (doc_value  !== undefined) updates.doc_value  = doc_value;
-  if (file_url   !== undefined) updates.file_url   = file_url;
-  if (file_name  !== undefined) updates.file_name  = file_name;
-
-  const { data, error } = await supabaseAdmin
-    .from('candidate_documents')
-    .update(updates)
-    .eq('id', req.params.docId)
-    .eq('candidate_id', req.params.id)
-    .select()
-    .single();
-
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  sendSuccess(res, data, 'Document updated');
-});
-
-/* ── DELETE /api/v1/candidates/:id/documents/:docId ── */
-export const deleteCandidateDocument = asyncHandler(async (req: Request, res: Response) => {
-  const { error } = await supabaseAdmin
-    .from('candidate_documents')
-    .delete()
-    .eq('id', req.params.docId)
-    .eq('candidate_id', req.params.id);
-
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  sendSuccess(res, null, 'Document deleted');
-});
-
-/* ── PATCH /api/v1/candidates/:id/documents/:docId ── */
-export const updateCandidateDocument = asyncHandler(async (req: Request, res: Response) => {
   const { doc_value, file_url, file_name, is_verified } = req.body;
   const updates: any = {};
   if (doc_value  !== undefined) updates.doc_value  = doc_value;
