@@ -41,9 +41,10 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, error: 'No account found for this mobile number. Contact your admin.' });
     }
 
-    // If the user has no real email set, fallback to the internal mobile@kinematic.app format
-    email = userLookup.email || `${userLookup.mobile}@kinematic.app`;
-    logger.info(`Mobile login resolved: ${mobile} → ${email}`);
+    // If no real email set, fallback to internal mobile@kinematic.app format
+    const resolvedEmail = userLookup.email || `${userLookup.mobile}@kinematic.app`;
+    logger.info(`Resolved ${email} → ${resolvedEmail}`);
+    email = resolvedEmail;
   }
 
   // Sign in directly with email + password via Supabase Auth
