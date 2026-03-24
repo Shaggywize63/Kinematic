@@ -9,6 +9,25 @@ const toIST = (utcDate: Date): Date =>
 
 const isoDate = (d: Date) => d.toISOString().split('T')[0];
 
+const enrichWithHours = (r: any) => {
+  if (r && r.total_hours == null && r.checkin_at) {
+    const start = new Date(r.checkin_at).getTime();
+    let end: number;
+    if (r.status === 'checked_out' && r.checkout_at) {
+      end = new Date(r.checkout_at).getTime();
+    } else if (r.status === 'checked_in' || r.status === 'on_break') {
+      end = new Date().getTime();
+    } else {
+      return r;
+    }
+    let durationMs = end - start;
+    if (durationMs < 0) durationMs += 24 * 60 * 60 * 1000;
+    const hours = (durationMs / 3600000) - ((r.break_minutes || 0) / 60);
+    r.total_hours = parseFloat(Math.max(0, hours).toFixed(2));
+  }
+  return r;
+};
+
 /* ── GET /api/v1/analytics/summary ───────────────────────── */
 export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
@@ -47,15 +66,9 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
 
   // Calculate total hours worked (including real-time for active shifts)
   let totalHoursWorked = 0;
-  const now = new Date().getTime();
   attArr.forEach(a => {
-    if (a.total_hours) {
-      totalHoursWorked += a.total_hours;
-    } else if (a.status === 'checked_in' && a.checkin_at) {
-      const start = new Date(a.checkin_at).getTime();
-      const diff = Math.max(0, now - start) / 3600000;
-      totalHoursWorked += diff;
-    }
+    enrichWithHours(a);
+    if (a.total_hours) totalHoursWorked += a.total_hours;
   });
 
   return ok(res, {
@@ -275,7 +288,7 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
       checkin_at: rec?.checkin_at || null, checkout_at: rec?.checkout_at || null,
       lat, lng,
       address:      rec?.checkin_address || null,
-      total_hours:  rec?.total_hours || null,
+      total_hours:  enrichWithHours(rec)?.total_hours || null,
       is_regularised: rec?.is_regularised || false,
     };
   });
@@ -327,14 +340,10 @@ export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Res
       if (rec.is_regularised)      display_status = 'regularised';
       else if (rec.checkout_at)    display_status = 'checked_out';
       else if (rec.status === 'on_break') display_status = 'on_break';
-      else {
-        display_status = 'present';
-        // Calculate real-time if checked-in but not out
-        if (rec.status === 'checked_in' && rec.checkin_at && !rec.total_hours) {
-          const start = new Date(rec.checkin_at).getTime();
-          total_hours = Math.max(0, now - start) / 3600000;
-        }
-      }
+      else                        display_status = 'present';
+
+      enrichWithHours(rec);
+      total_hours = rec.total_hours || 0;
     }
     return {
       id: fe.id, name: fe.name, employee_id: fe.employee_id,

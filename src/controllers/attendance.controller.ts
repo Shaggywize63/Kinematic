@@ -227,6 +227,28 @@ export const endBreak = asyncHandler(async (req: AuthRequest, res: Response) => 
   ok(res, { break_duration_minutes: breakMins }, 'Break ended');
 });
 
+// Helper to calculate total_hours if missing from DB (handles active shifts and historical missing data)
+const enrichWithHours = (r: any) => {
+  if (r && r.total_hours == null && r.checkin_at) {
+    const start = new Date(r.checkin_at).getTime();
+    let end: number;
+
+    if (r.status === 'checked_out' && r.checkout_at) {
+      end = new Date(r.checkout_at).getTime();
+    } else if (r.status === 'checked_in' || r.status === 'on_break') {
+      end = new Date().getTime();
+    } else {
+      return r;
+    }
+
+    let durationMs = end - start;
+    if (durationMs < 0) durationMs += 24 * 60 * 60 * 1000; // crossover
+    const hours = (durationMs / 3600000) - ((r.break_minutes || 0) / 60);
+    r.total_hours = parseFloat(Math.max(0, hours).toFixed(2));
+  }
+  return r;
+};
+
 // GET /api/v1/attendance/today
 export const getToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
@@ -242,15 +264,7 @@ export const getToday = asyncHandler(async (req: AuthRequest, res: Response) => 
     .maybeSingle();
 
   if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }
-  
-  const record = data as any;
-  if (record && record.status === 'checked_in' && record.checkin_at && !record.total_hours) {
-    const start = new Date(record.checkin_at).getTime();
-    const now = new Date().getTime();
-    record.total_hours = parseFloat((Math.max(0, now - start) / 3600000).toFixed(2));
-  }
-
-  ok(res, record || null);
+  ok(res, enrichWithHours(data));
 });
 
 // GET /api/v1/attendance/history
@@ -269,16 +283,7 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
     .range(from, to);
 
   if (error) { badRequest(res, error.message); return; }
-
-  const now = new Date().getTime();
-  const results = (data || []).map((r: any) => {
-    if (r.status === 'checked_in' && r.checkin_at && !r.total_hours) {
-      const start = new Date(r.checkin_at).getTime();
-      r.total_hours = parseFloat((Math.max(0, now - start) / 3600000).toFixed(2));
-    }
-    return r;
-  });
-
+  const results = (data || []).map(enrichWithHours);
   ok(res, buildPaginatedResult(results, count || 0, page, limit));
 });
 
@@ -314,16 +319,7 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
 
   const { data, error } = await query.order('checkin_at', { ascending: true, nullsFirst: false });
   if (error) { badRequest(res, error.message); return; }
-
-  const now = new Date().getTime();
-  const results = (data || []).map((r: any) => {
-    if (r.status === 'checked_in' && r.checkin_at && !r.total_hours) {
-      const start = new Date(r.checkin_at).getTime();
-      r.total_hours = parseFloat((Math.max(0, now - start) / 3600000).toFixed(2));
-    }
-    return r;
-  });
-
+  const results = (data || []).map(enrichWithHours);
   ok(res, results);
 });
 
