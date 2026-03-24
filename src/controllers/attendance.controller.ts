@@ -120,7 +120,7 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
   if (findError && findError.code !== 'PGRST116') { badRequest(res, findError.message); return; }
 
   if (!record) { badRequest(res, 'No check-in found for today'); return; }
-  if (record.status === 'CHECKED_OUT') { conflict(res, 'Already checked out today'); return; }
+  if (record.status === 'checked_out') { conflict(res, 'Already checked out today'); return; }
 
   // Enforce selfie for field executives
   if (user.role === 'executive' && !selfie_url) {
