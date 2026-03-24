@@ -242,7 +242,15 @@ export const getToday = asyncHandler(async (req: AuthRequest, res: Response) => 
     .maybeSingle();
 
   if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }
-  ok(res, data || null);
+  
+  const record = data as any;
+  if (record && record.status === 'checked_in' && record.checkin_at && !record.total_hours) {
+    const start = new Date(record.checkin_at).getTime();
+    const now = new Date().getTime();
+    record.total_hours = parseFloat((Math.max(0, now - start) / 3600000).toFixed(2));
+  }
+
+  ok(res, record || null);
 });
 
 // GET /api/v1/attendance/history
@@ -261,7 +269,17 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
     .range(from, to);
 
   if (error) { badRequest(res, error.message); return; }
-  ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
+
+  const now = new Date().getTime();
+  const results = (data || []).map((r: any) => {
+    if (r.status === 'checked_in' && r.checkin_at && !r.total_hours) {
+      const start = new Date(r.checkin_at).getTime();
+      r.total_hours = parseFloat((Math.max(0, now - start) / 3600000).toFixed(2));
+    }
+    return r;
+  });
+
+  ok(res, buildPaginatedResult(results, count || 0, page, limit));
 });
 
 // GET /api/v1/attendance/team  (supervisor+)
@@ -296,7 +314,17 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
 
   const { data, error } = await query.order('checkin_at', { ascending: true, nullsFirst: false });
   if (error) { badRequest(res, error.message); return; }
-  ok(res, data || []);
+
+  const now = new Date().getTime();
+  const results = (data || []).map((r: any) => {
+    if (r.status === 'checked_in' && r.checkin_at && !r.total_hours) {
+      const start = new Date(r.checkin_at).getTime();
+      r.total_hours = parseFloat((Math.max(0, now - start) / 3600000).toFixed(2));
+    }
+    return r;
+  });
+
+  ok(res, results);
 });
 
 // POST /api/v1/attendance/override  (admin+)
