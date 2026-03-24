@@ -142,6 +142,7 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
       checkout_lng: longitude,
       checkout_selfie_url: selfie_url,
       working_minutes: Math.max(0, workingMinutes),
+      total_hours: Number((Math.max(0, workingMinutes) / 60).toFixed(2))
     })
     .eq('id', record.id)
     .select()
