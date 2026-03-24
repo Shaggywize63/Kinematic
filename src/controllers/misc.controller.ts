@@ -148,8 +148,42 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
   if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id)
   const { data, error, count } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
+
+  // Enrich with today's real-time hours_worked
+  const userIds = (data || []).map((u: any) => u.id)
+  if (userIds.length > 0) {
+    const { data: attData } = await supabaseAdmin
+      .from('attendance')
+      .select('user_id, total_hours, status, checkin_at')
+      .eq('org_id', user.org_id)
+      .eq('date', todayDate())
+      .in('user_id', userIds)
+    
+    const attMap = new Map((attData || []).map((a: any) => [a.user_id, a]))
+    const now = new Date().getTime()
+
+    ;(data || []).forEach((u: any) => {
+      const att: any = attMap.get(u.id)
+      if (att) {
+        if (att.total_hours) {
+          u.hours_worked = att.total_hours
+        } else if (att.status === 'checked_in' && att.checkin_at) {
+          const start = new Date(att.checkin_at).getTime()
+          u.hours_worked = Math.max(0, now - start) / 3600000
+        } else {
+          u.hours_worked = 0
+        }
+        u.is_checked_in = att.status === 'checked_in'
+      } else {
+        u.hours_worked = 0
+        u.is_checked_in = false
+      }
+    })
+  }
+
   sendPaginated(res, data || [], count || 0, page, limit)
 })
+
 
 export const getUserById = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabaseAdmin.from('users')

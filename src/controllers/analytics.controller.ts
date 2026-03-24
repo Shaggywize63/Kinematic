@@ -31,17 +31,32 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     .eq('org_id', user.org_id).eq('status', 'submitted');
 
   // New Metrics: Days Worked & Leaves (Last 30 days)
-  const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const thirtyDaysAgo = new Date(); 
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
   const { data: attStats } = await supabaseAdmin
     .from('attendance')
-    .select('status, user_id')
+    .select('status, user_id, total_hours, checkin_at')
     .eq('org_id', user.org_id)
     .gte('date', isoDate(thirtyDaysAgo));
 
-  const totalDaysWorked = (attStats || []).filter(a => a.status === 'present' || a.status === 'checked_out').length;
+  const attArr = attStats || [];
+  const totalDaysWorked = attArr.filter(a => a.status === 'present' || a.status === 'checked_out').length;
   // Approximation of leaves: if we assumed everyone worked every day, this would be complex.
-  // For now, let's treat any attendance record with status 'absent' as a leave.
-  const totalLeaves = (attStats || []).filter(a => a.status === 'absent').length;
+  const totalLeaves = attArr.filter(a => a.status === 'absent').length;
+
+  // Calculate total hours worked (including real-time for active shifts)
+  let totalHoursWorked = 0;
+  const now = new Date().getTime();
+  attArr.forEach(a => {
+    if (a.total_hours) {
+      totalHoursWorked += a.total_hours;
+    } else if (a.status === 'checked_in' && a.checkin_at) {
+      const start = new Date(a.checkin_at).getTime();
+      const diff = Math.max(0, now - start) / 3600000;
+      totalHoursWorked += diff;
+    }
+  });
 
   return ok(res, {
     date,
@@ -54,6 +69,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     open_grievances: openGrievances || 0,
     total_days_worked: totalDaysWorked || 0,
     total_leaves: totalLeaves || 0,
+    total_hours_worked: +totalHoursWorked.toFixed(1),
   });
 });
 
@@ -299,22 +315,32 @@ export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Res
     brkMap.get(b.attendance_id)!.push(b);
   });
 
+  const now = new Date().getTime();
   const rows = (execs || []).map((fe) => {
-    const rec = attMap.get(fe.id);
+    const rec = attMap.get(fe.id) as any;
     const zone = fe.zones as unknown as { name: string } | null;
     const feBreaks = rec ? (brkMap.get(rec.id) || []) : [];
     let display_status: 'present' | 'absent' | 'regularised' | 'checked_out' | 'on_break' = 'absent';
+    
+    let total_hours = rec?.total_hours || 0;
     if (rec) {
       if (rec.is_regularised)      display_status = 'regularised';
       else if (rec.checkout_at)    display_status = 'checked_out';
       else if (rec.status === 'on_break') display_status = 'on_break';
-      else                         display_status = 'present';
+      else {
+        display_status = 'present';
+        // Calculate real-time if checked-in but not out
+        if (rec.status === 'checked_in' && rec.checkin_at && !rec.total_hours) {
+          const start = new Date(rec.checkin_at).getTime();
+          total_hours = Math.max(0, now - start) / 3600000;
+        }
+      }
     }
     return {
       id: fe.id, name: fe.name, employee_id: fe.employee_id,
       zone_name: zone?.name || null, display_status,
       checkin_at: rec?.checkin_at || null, checkout_at: rec?.checkout_at || null,
-      total_hours: rec?.total_hours || null, working_minutes: rec?.working_minutes || null,
+      total_hours: +total_hours.toFixed(1), working_minutes: rec?.working_minutes || null,
       break_minutes: rec?.break_minutes || null, break_count: feBreaks.length,
       checkin_lat: rec?.checkin_lat || null, checkin_lng: rec?.checkin_lng || null,
       checkin_address: rec?.checkin_address || null, is_regularised: rec?.is_regularised || false,
