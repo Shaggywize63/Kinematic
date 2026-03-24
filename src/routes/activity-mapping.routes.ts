@@ -6,6 +6,7 @@ const router = Router();
 
 router.use(requireAuth);
 
+router.get('/',                     ctrl.listAllMappings);
 router.get('/activity/:activityId', ctrl.getFEsByActivity);
 router.get('/user/:userId',         ctrl.getActivitiesByUser);
 router.post('/',                     ctrl.mapActivityUser);
