@@ -2,6 +2,18 @@ import { Request, Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { asyncHandler, sendSuccess, AppError } from '../utils';
 
+/* ── GET /api/v1/activity-mappings ── */
+export const listAllMappings = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { data, error } = await supabaseAdmin
+    .from('activity_users')
+    .select('activity_id, user_id')
+    .eq('org_id', user.org_id);
+
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  sendSuccess(res, data || []);
+});
+
 /* ── GET /api/v1/activity-mappings/activity/:activityId ── */
 export const getFEsByActivity = asyncHandler(async (req: Request, res: Response) => {
   const { activityId } = req.params;
