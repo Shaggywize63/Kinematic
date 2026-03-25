@@ -90,8 +90,8 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
       activity_id: f.activity_id,
       name: f.title,
       description: f.description,
-      requires_photo: false, 
-      requires_gps: true,    
+      requires_photo: f.requires_photo || false, 
+      requires_gps: f.requires_gps !== false,    
       form_fields: formQuestions.map((q: any) => {
         // Map qtype to field_type for mobile app compatibility
         let fieldType = 'text';
