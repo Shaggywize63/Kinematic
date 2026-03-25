@@ -102,6 +102,8 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         else if (['radio', 'checkbox', 'dropdown', 'select', 'choice', 'multiple_choice'].some(t => qt.includes(t))) fieldType = 'select';
         else if (['image', 'photo', 'camera'].some(t => qt.includes(t))) fieldType = 'photo';
         else if (qt === 'date') fieldType = 'date';
+
+        console.log(`Mapping question ${q.id}: qtype="${q.qtype}", type="${q.type}", resolved qt="${qt}", mapped to fieldType="${fieldType}"`);
         
         return {
           id: q.id,
