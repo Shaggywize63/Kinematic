@@ -1,9 +1,12 @@
 -- Migration to include activity_id in route plan views
 -- Run this in the Supabase SQL Editor
 
--- Update v_route_plan_daily to include activity_id and activity_name
--- This ensures the dashboard and mobile app can see which activity is linked to a plan.
-CREATE OR REPLACE VIEW v_route_plan_daily AS
+-- 1. Drop the existing view first to avoid "cannot change name of view column" errors
+-- This is necessary because the column order or names may have changed with the addition of activity_id.
+DROP VIEW IF EXISTS v_route_plan_daily;
+
+-- 2. Create the view again with the new columns
+CREATE VIEW v_route_plan_daily AS
 SELECT 
     rp.*,
     u.name as fe_name,
@@ -18,5 +21,5 @@ LEFT JOIN zones z ON u.zone_id = z.id
 LEFT JOIN cities c ON z.city_id = c.id
 LEFT JOIN activities a ON rp.activity_id = a.id;
 
--- Reload schema cache after running this:
+-- 3. Reload schema cache after running this:
 -- Settings -> API -> PostgREST -> Reload Schema Cache

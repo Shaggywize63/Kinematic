@@ -57,18 +57,51 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
   const user = req.user!;
   const activityId = req.query.activity_id as string | undefined;
 
+  // Query from builder_forms (Dynamic Form Builder)
   let query = supabaseAdmin
-    .from('form_templates')
-    .select('*, form_fields(*), activities(id, name, type, color)')
+    .from('builder_forms')
+    .select('*, builder_questions(*)')
     .eq('org_id', user.org_id)
-    .eq('is_active', true)
+    .eq('status', 'published')
     .order('created_at', { ascending: false });
 
   if (activityId) query = query.eq('activity_id', activityId);
 
   const { data, error } = await query;
   if (error) return badRequest(res, error.message);
-  return ok(res, data);
+
+  // Map builder_forms to FormTemplate format for the mobile app
+  const mappedTemplates = (data || []).map((f: any) => ({
+    id: f.id,
+    activityId: f.activity_id,
+    name: f.title,
+    description: f.description,
+    requiresPhoto: false, // Default
+    requiresGps: true,    // Default
+    fields: (f.builder_questions || []).map((q: any) => {
+      // Map qtype to field_type for mobile app compatibility
+      let fieldType = 'text';
+      const qt = (q.qtype || '').toLowerCase();
+      if (['short_text', 'long_text', 'email', 'phone', 'text', 'textarea'].includes(qt)) fieldType = 'text';
+      else if (qt === 'number') fieldType = 'number';
+      else if (['radio', 'checkbox', 'dropdown', 'select'].includes(qt)) fieldType = 'select';
+      else if (['image', 'photo'].includes(qt)) fieldType = 'photo';
+      
+      return {
+        id: q.id,
+        label: q.label,
+        field_key: q.id, // Using ID as key if missing in builder
+        field_type: fieldType,
+        placeholder: q.placeholder,
+        help_text: q.helper_text,
+        is_required: q.is_required,
+        sort_order: q.q_order,
+        options: q.options || []
+      };
+    }).sort((a: any, b: any) => a.sort_order - b.sort_order)
+  }));
+
+  return ok(res, mappedTemplates);
 });
 
 // GET /api/v1/forms/templates/:id
