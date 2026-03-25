@@ -64,15 +64,19 @@ app.use(cors({
 // ── Rate limiting ─────────────────────────────────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
-  max: parseInt(process.env.RATE_LIMIT_MAX || '1000', 10),
+  max: parseInt(process.env.RATE_LIMIT_MAX || '5000', 10),
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (req, res, _next, options) => {
+    logger.warn(`Rate limit exceeded for IP: ${req.ip}, Path: ${req.path}`);
+    res.status(options.statusCode).send(options.message);
+  },
   message: { success: false, error: 'Too many requests. Please slow down.' },
 });
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10,                   // 10 login attempts per window
+  max: 20,                   // 20 login attempts per window
   message: { success: false, error: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
