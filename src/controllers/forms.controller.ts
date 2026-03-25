@@ -103,14 +103,18 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         
         return {
           id: q.id,
-          label: q.label,
-          field_key: q.id, 
+          field_key: q.field_key || `field_${q.id}`,
+          label: q.title || q.label || "",
           field_type: fieldType,
-          placeholder: q.placeholder,
-          help_text: q.helper_text,
-          is_required: q.is_required,
-          sort_order: q.q_order,
-          options: q.options || []
+          is_required: q.required || q.is_required || false,
+          options: Array.isArray(q.options) ? q.options.map((opt: any) => {
+            if (typeof opt === 'string') {
+              return { id: opt, label: opt, value: opt };
+            }
+            return opt;
+          }) : [],
+          placeholder: q.placeholder || "",
+          help_text: q.helper_text || ""
         };
       })
     };
