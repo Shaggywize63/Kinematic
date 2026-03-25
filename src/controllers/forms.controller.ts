@@ -29,12 +29,10 @@ const templateSchema = z.object({
 
 const responseSchema = z.object({
   field_id: z.string().uuid(),
-  field_key: z.string(),
-  value_text: z.string().nullable().optional(),
-  value_number: z.number().nullable().optional(),
-  value_bool: z.boolean().nullable().optional(),
-  value_json: z.unknown().nullable().optional(),
-  photo_url: z.string().url().nullable().optional(),
+  field_key: z.string().optional().nullable(),
+  value: z.any().optional().nullable(),
+  photo: z.string().optional().nullable(),
+  gps: z.string().optional().nullable(),
 });
 
 const submissionSchema = z.object({
@@ -111,14 +109,19 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
           label: q.title || q.label || "",
           field_type: fieldType,
           is_required: q.required || q.is_required || false,
-          options: Array.isArray(q.options) ? q.options.map((opt: any) => {
-            if (typeof opt === 'string') {
-              return { id: opt, label: opt, value: opt };
-            }
-            return opt;
-          }) : [],
+          options: (() => {
+            const opts = typeof q.options === 'string' ? JSON.parse(q.options) : (q.options || []);
+            return Array.isArray(opts) ? opts.map((opt: any, idx: number) => {
+              if (typeof opt === 'string') return { id: `opt_${idx}`, label: opt, value: opt };
+              return {
+                id: opt.id || opt.value || `opt_${idx}`,
+                label: opt.label || opt.name || opt.value || opt.toString(),
+                value: opt.value || opt.toString()
+              };
+            }) : [];
+          })(),
           placeholder: q.placeholder || "",
-          help_text: q.helper_text || ""
+          helper_text: q.helper_text || ""
         };
       })
     };
@@ -206,11 +209,12 @@ export const addField = asyncHandler(async (req: AuthRequest, res: Response) => 
 
 // POST /api/v1/forms/submit
 export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) => {
+  console.log("Received form submission:", JSON.stringify(req.body, null, 2));
   const user = req.user!;
   const result = submissionSchema.safeParse(req.body);
   if (!result.success) {
     console.error('Validation failed:', JSON.stringify(result.error.format(), null, 2));
-    return badRequest(res, 'Validation failed', result.error.errors);
+    return badRequest(res, 'Validation failed: ' + JSON.stringify(result.error.format()), result.error.errors);
   }
   const { responses, ...submissionData } = result.data;
 
@@ -229,16 +233,20 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
     .select('id, field_key, required')
     .eq('form_id', template.id);
 
-  // 3. Validate required fields are present
-  const requiredFields = (questions || [])
-    .filter((q) => q.required)
-    .map((q) => q.field_key || q.id);
-  
-  const submittedKeys = responses.map((r) => r.field_key);
-  const missing = requiredFields.filter((k) => !submittedKeys.includes(k));
-  if (missing.length) return badRequest(res, `Missing required fields: ${missing.join(', ')}`);
+  // 3. Map responses to DB format
+  const submittedResponses = responses.map(r => {
+    const q = (questions || []).find(q => q.id === r.field_id);
+    return {
+      submission_id: '', // Will be set after insert
+      question_id: r.field_id,
+      field_key: r.field_key || q?.field_key || '',
+      value: r.value,
+      photo_url: r.photo,
+      gps: r.gps
+    };
+  });
 
-  // Get today's attendance
+  // 4. Get today's attendance
   const today = new Date().toISOString().split('T')[0];
   const { data: attendance } = await supabaseAdmin
     .from('attendance')
@@ -261,10 +269,10 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
 
   if (subError) return badRequest(res, subError.message);
 
-  // Insert responses
+  // 5. Insert responses
   const { error: respError } = await supabaseAdmin
     .from('form_responses')
-    .insert(responses.map((r) => ({ ...r, submission_id: submission.id })));
+    .insert(submittedResponses.map((r) => ({ ...r, submission_id: submission.id })));
 
   if (respError) return badRequest(res, respError.message);
 
