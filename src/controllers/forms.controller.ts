@@ -30,11 +30,11 @@ const templateSchema = z.object({
 const responseSchema = z.object({
   field_id: z.string().uuid(),
   field_key: z.string(),
-  value_text: z.string().optional(),
-  value_number: z.number().optional(),
-  value_bool: z.boolean().optional(),
-  value_json: z.unknown().optional(),
-  photo_url: z.string().url().optional(),
+  value_text: z.string().nullable().optional(),
+  value_number: z.number().nullable().optional(),
+  value_bool: z.boolean().nullable().optional(),
+  value_json: z.unknown().nullable().optional(),
+  photo_url: z.string().url().nullable().optional(),
 });
 
 const submissionSchema = z.object({
@@ -44,9 +44,10 @@ const submissionSchema = z.object({
   longitude: z.number().optional(),
   address: z.string().optional(),
   is_converted: z.boolean().default(false),
+  outlet_id: z.string().uuid().optional(),
   outlet_name: z.string().optional(),
-  consumer_age: z.string().optional(),
-  consumer_gender: z.string().optional(),
+  consumer_age: z.string().nullable().optional(),
+  consumer_gender: z.string().nullable().optional(),
   responses: z.array(responseSchema).min(1),
 });
 
@@ -98,8 +99,9 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         const qt = (q.type || q.qtype || '').toLowerCase();
         if (['short_text', 'long_text', 'email', 'phone', 'text', 'textarea'].includes(qt)) fieldType = 'text';
         else if (qt === 'number') fieldType = 'number';
-        else if (['radio', 'checkbox', 'dropdown', 'select'].includes(qt)) fieldType = 'select';
-        else if (['image', 'photo'].includes(qt)) fieldType = 'photo';
+        else if (['radio', 'checkbox', 'dropdown', 'select', 'choice', 'multiple_choice'].some(t => qt.includes(t))) fieldType = 'select';
+        else if (['image', 'photo', 'camera'].some(t => qt.includes(t))) fieldType = 'photo';
+        else if (qt === 'date') fieldType = 'date';
         
         return {
           id: q.id,
@@ -203,10 +205,12 @@ export const addField = asyncHandler(async (req: AuthRequest, res: Response) => 
 // POST /api/v1/forms/submit
 export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const body = submissionSchema.safeParse(req.body);
-  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
-
-  const { responses, ...submissionData } = body.data;
+  const result = submissionSchema.safeParse(req.body);
+  if (!result.success) {
+    console.error('Validation failed:', JSON.stringify(result.error.format(), null, 2));
+    return badRequest(res, 'Validation failed', result.error.errors);
+  }
+  const { responses, ...submissionData } = result.data;
 
   // 1. Verify template exists in builder_forms
   const { data: template } = await supabaseAdmin
