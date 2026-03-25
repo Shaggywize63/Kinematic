@@ -95,7 +95,7 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
       form_fields: formQuestions.map((q: any) => {
         // Map qtype to field_type for mobile app compatibility
         let fieldType = 'text';
-        const qt = (q.qtype || '').toLowerCase();
+        const qt = (q.type || q.qtype || '').toLowerCase();
         if (['short_text', 'long_text', 'email', 'phone', 'text', 'textarea'].includes(qt)) fieldType = 'text';
         else if (qt === 'number') fieldType = 'number';
         else if (['radio', 'checkbox', 'dropdown', 'select'].includes(qt)) fieldType = 'select';
@@ -208,20 +208,26 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
 
   const { responses, ...submissionData } = body.data;
 
-  // Verify template exists in org
+  // 1. Verify template exists in builder_forms
   const { data: template } = await supabaseAdmin
-    .from('form_templates')
-    .select('id, form_fields(id, field_key, is_required)')
+    .from('builder_forms')
+    .select('id')
     .eq('id', submissionData.template_id)
     .eq('org_id', user.org_id)
     .single();
-
   if (!template) return notFound(res, 'Form template not found');
 
-  // Validate required fields are present
-  const requiredFields = (template.form_fields as { id: string; field_key: string; is_required: boolean }[])
-    .filter((f) => f.is_required)
-    .map((f) => f.field_key);
+  // 2. Fetch questions for validation
+  const { data: questions } = await supabaseAdmin
+    .from('builder_questions')
+    .select('id, field_key, required')
+    .eq('form_id', template.id);
+
+  // 3. Validate required fields are present
+  const requiredFields = (questions || [])
+    .filter((q) => q.required)
+    .map((q) => q.field_key || q.id);
+  
   const submittedKeys = responses.map((r) => r.field_key);
   const missing = requiredFields.filter((k) => !submittedKeys.includes(k));
   if (missing.length) return badRequest(res, `Missing required fields: ${missing.join(', ')}`);
