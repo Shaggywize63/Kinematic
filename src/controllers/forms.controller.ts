@@ -57,49 +57,64 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
   const user = req.user!;
   const activityId = req.query.activity_id as string | undefined;
 
-  // Query from builder_forms (Dynamic Form Builder)
+  // 1. Fetch from builder_forms (Dynamic Form Builder)
   let query = supabaseAdmin
     .from('builder_forms')
-    .select('*, builder_questions(*)')
+    .select('*')
     .eq('org_id', user.org_id)
     .eq('status', 'published')
     .order('created_at', { ascending: false });
 
   if (activityId) query = query.eq('activity_id', activityId);
 
-  const { data, error } = await query;
-  if (error) return badRequest(res, error.message);
+  const { data: forms, error: formsError } = await query;
+  if (formsError) return badRequest(res, formsError.message);
+  if (!forms || forms.length === 0) return ok(res, []);
 
-  // Map builder_forms to FormTemplate format for the mobile app
-  const mappedTemplates = (data || []).map((f: any) => ({
-    id: f.id,
-    activityId: f.activity_id,
-    name: f.title,
-    description: f.description,
-    requiresPhoto: false, // Default
-    requiresGps: true,    // Default
-    fields: (f.builder_questions || []).map((q: any) => {
-      // Map qtype to field_type for mobile app compatibility
-      let fieldType = 'text';
-      const qt = (q.qtype || '').toLowerCase();
-      if (['short_text', 'long_text', 'email', 'phone', 'text', 'textarea'].includes(qt)) fieldType = 'text';
-      else if (qt === 'number') fieldType = 'number';
-      else if (['radio', 'checkbox', 'dropdown', 'select'].includes(qt)) fieldType = 'select';
-      else if (['image', 'photo'].includes(qt)) fieldType = 'photo';
-      
-      return {
-        id: q.id,
-        label: q.label,
-        field_key: q.id, // Using ID as key if missing in builder
-        field_type: fieldType,
-        placeholder: q.placeholder,
-        help_text: q.helper_text,
-        is_required: q.is_required,
-        sort_order: q.q_order,
-        options: q.options || []
-      };
-    }).sort((a: any, b: any) => a.sort_order - b.sort_order)
-  }));
+  // 2. Fetch all questions for these forms separately to avoid nested join issues
+  const formIds = forms.map(f => f.id);
+  const { data: allQuestions, error: qError } = await supabaseAdmin
+    .from('builder_questions')
+    .select('*')
+    .in('form_id', formIds)
+    .order('q_order', { ascending: true });
+
+  if (qError) return badRequest(res, qError.message);
+
+  // 3. Map builder_forms to FormTemplate format for the mobile app
+  const mappedTemplates = forms.map((f: any) => {
+    const formQuestions = (allQuestions || []).filter(q => q.form_id === f.id);
+    
+    return {
+      id: f.id,
+      activityId: f.activity_id,
+      name: f.title,
+      description: f.description,
+      requiresPhoto: false, 
+      requiresGps: true,    
+      fields: formQuestions.map((q: any) => {
+        // Map qtype to field_type for mobile app compatibility
+        let fieldType = 'text';
+        const qt = (q.qtype || '').toLowerCase();
+        if (['short_text', 'long_text', 'email', 'phone', 'text', 'textarea'].includes(qt)) fieldType = 'text';
+        else if (qt === 'number') fieldType = 'number';
+        else if (['radio', 'checkbox', 'dropdown', 'select'].includes(qt)) fieldType = 'select';
+        else if (['image', 'photo'].includes(qt)) fieldType = 'photo';
+        
+        return {
+          id: q.id,
+          label: q.label,
+          field_key: q.id, 
+          field_type: fieldType,
+          placeholder: q.placeholder,
+          help_text: q.helper_text,
+          is_required: q.is_required,
+          sort_order: q.q_order,
+          options: q.options || []
+        };
+      })
+    };
+  });
 
   return ok(res, mappedTemplates);
 });
