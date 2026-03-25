@@ -102,7 +102,7 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
 
   const { data: plan, error } = await supabase
     .from('route_plans')
-    .select('id, plan_date, status, total_outlets, visited_outlets, missed_outlets, completion_pct, notes, frequency, territory_label')
+    .select('id, plan_date, status, total_outlets, visited_outlets, missed_outlets, completion_pct, notes, frequency, territory_label, activity_id')
     .eq('user_id', uid)
     .eq('plan_date', date)
     .maybeSingle();
