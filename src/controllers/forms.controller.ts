@@ -97,7 +97,7 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         const qt = (q.type || q.qtype || '').toLowerCase();
         if (['short_text', 'long_text', 'email', 'phone', 'text', 'textarea'].includes(qt)) fieldType = 'text';
         else if (qt === 'number') fieldType = 'number';
-        else if (['radio', 'checkbox', 'dropdown', 'select', 'choice', 'multiple_choice'].some(t => qt.includes(t))) fieldType = 'select';
+        else if (['radio', 'checkbox', 'dropdown', 'select', 'choice', 'multiple_choice', 'yes_no', 'boolean', 'toggle', 'rating', 'dropdown_search'].some(t => qt.includes(t))) fieldType = 'select';
         else if (['image', 'photo', 'camera'].some(t => qt.includes(t))) fieldType = 'photo';
         else if (qt === 'date') fieldType = 'date';
 
@@ -213,8 +213,9 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
   const user = req.user!;
   const result = submissionSchema.safeParse(req.body);
   if (!result.success) {
-    console.error('Validation failed:', JSON.stringify(result.error.format(), null, 2));
-    return badRequest(res, 'Validation failed: ' + JSON.stringify(result.error.format()), result.error.errors);
+    const errorMsg = JSON.stringify(result.error.format(), null, 2);
+    console.error('Validation failed:', errorMsg);
+    return badRequest(res, 'Validation failed: ' + errorMsg, result.error.errors);
   }
   const { responses, ...submissionData } = result.data;
 
