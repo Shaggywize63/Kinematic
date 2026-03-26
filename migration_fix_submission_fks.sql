@@ -40,3 +40,6 @@ ALTER TABLE form_responses ADD CONSTRAINT form_responses_field_id_fkey
 -- 4. Ensure outlet_id exists in form_submissions
 ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS outlet_id UUID REFERENCES stores(id);
 ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT now();
+
+-- 5. Ensure gps column exists in form_responses
+ALTER TABLE form_responses ADD COLUMN IF NOT EXISTS gps TEXT;
