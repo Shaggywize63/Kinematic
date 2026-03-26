@@ -46,6 +46,7 @@ const submissionSchema = z.object({
   outlet_name: z.string().optional(),
   consumer_age: z.string().nullable().optional(),
   consumer_gender: z.string().nullable().optional(),
+  submitted_at: z.string().optional(),
   responses: z.array(responseSchema).min(1),
 });
 
@@ -306,6 +307,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
       org_id: user.org_id,
       user_id: user.id,
       attendance_id: attendance?.id,
+      submitted_at: submissionData.submitted_at || new Date().toISOString(),
     })
     .select()
     .single();
