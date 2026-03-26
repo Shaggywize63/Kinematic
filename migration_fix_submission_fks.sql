@@ -37,9 +37,10 @@ ALTER TABLE form_responses ADD CONSTRAINT form_responses_submission_id_fkey
 ALTER TABLE form_responses ADD CONSTRAINT form_responses_field_id_fkey 
     FOREIGN KEY (field_id) REFERENCES builder_questions(id) ON DELETE CASCADE;
 
--- 4. Ensure outlet_id exists in form_submissions
+-- 4. Ensure metadata columns exist in form_submissions
 ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS outlet_id UUID REFERENCES stores(id);
 ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS gps TEXT;
 
 -- 5. Ensure gps column exists in form_responses
 ALTER TABLE form_responses ADD COLUMN IF NOT EXISTS gps TEXT;
