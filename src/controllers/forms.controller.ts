@@ -280,11 +280,26 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
   // 3. Map responses to DB format
   const submittedResponses = responses.map(r => {
     const q = (questions || []).find(q => q.id === r.field_id);
+    
+    // Determine which value column to use based on the value type
+    let value_text: string | null = null;
+    let value_number: number | null = null;
+    let value_bool: boolean | null = null;
+    let value_json: any | null = null;
+
+    if (typeof r.value === 'number') value_number = r.value;
+    else if (typeof r.value === 'boolean') value_bool = r.value;
+    else if (typeof r.value === 'object' && r.value !== null) value_json = r.value;
+    else value_text = r.value ? String(r.value) : null;
+
     return {
       submission_id: '', // Will be set after insert
       field_id: r.field_id,
       field_key: r.field_key || q?.field_key || '',
-      value: r.value,
+      value_text,
+      value_number,
+      value_bool,
+      value_json,
       photo_url: r.photo,
       gps: r.gps
     };
