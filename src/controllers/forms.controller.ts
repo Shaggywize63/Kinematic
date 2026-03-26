@@ -98,8 +98,8 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         if (['short_text', 'text', 'email', 'phone', 'url'].includes(qt)) fieldType = 'text';
         else if (['long_text', 'textarea'].includes(qt)) fieldType = 'textarea';
         else if (['number', 'integer', 'decimal'].includes(qt)) fieldType = 'number';
-        else if (['single_select', 'choice', 'select', 'dropdown', 'dropdown_search'].includes(qt)) fieldType = 'select';
-        else if (['multi_select', 'checkbox_group', 'tags'].includes(qt)) fieldType = 'multi_select';
+        else if (['single_select', 'choice', 'select', 'dropdown', 'dropdown_search', 'radio'].includes(qt)) fieldType = 'select';
+        else if (['multi_select', 'checkbox_group', 'tags', 'checkbox'].includes(qt)) fieldType = 'multi_select';
         else if (['yes_no', 'boolean', 'toggle'].includes(qt)) fieldType = 'yes_no';
         else if (['rating', 'star_rating'].includes(qt)) fieldType = 'rating';
         else if (['image_upload', 'photo', 'image', 'camera'].includes(qt)) fieldType = 'photo';
@@ -108,9 +108,9 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         else if (['date_time', 'datetime'].includes(qt)) fieldType = 'datetime';
         else if (['location', 'gps', 'map'].includes(qt)) fieldType = 'gps';
         else if (['signature'].includes(qt)) fieldType = 'signature';
-        else if (['file_upload'].includes(qt)) fieldType = 'file';
+        else if (['file_upload', 'file'].includes(qt)) fieldType = 'file';
         else if (['consent'].includes(qt)) fieldType = 'consent';
-        else if (['section'].includes(qt)) fieldType = 'section';
+        else if (['section', 'section_header'].includes(qt)) fieldType = 'section';
         else fieldType = 'text';
 
         console.log(`Mapping question ${q.id}: qtype="${q.qtype}", type="${q.type}", resolved qt="${qt}", mapped to fieldType="${fieldType}"`);
