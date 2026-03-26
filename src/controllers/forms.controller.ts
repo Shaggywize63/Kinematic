@@ -95,10 +95,14 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         // Map qtype to field_type for mobile app compatibility
         let fieldType = 'text';
         const qt = (q.type || q.qtype || '').toLowerCase();
-        if (['short_text', 'long_text', 'email', 'phone', 'text', 'textarea'].includes(qt)) fieldType = 'text';
-        else if (qt === 'number') fieldType = 'number';
-        else if (['radio', 'checkbox', 'dropdown', 'select', 'choice', 'multiple_choice', 'yes_no', 'boolean', 'toggle', 'rating', 'dropdown_search'].some(t => qt.includes(t))) fieldType = 'select';
-        else if (['image', 'photo', 'camera'].some(t => qt.includes(t))) fieldType = 'photo';
+        if (['text', 'textarea', 'email', 'phone', 'url'].includes(qt)) fieldType = qt === 'textarea' ? 'textarea' : 'text';
+        else if (['number', 'integer', 'decimal'].includes(qt)) fieldType = 'number';
+        else if (['choice', 'select', 'dropdown', 'yes_no', 'boolean', 'toggle', 'dropdown_search'].includes(qt)) fieldType = 'select';
+        else if (['multi_select', 'checkbox_group', 'tags'].includes(qt)) fieldType = 'multi_select';
+        else if (['rating', 'star_rating'].includes(qt)) fieldType = 'rating';
+        else if (['photo', 'image', 'camera'].includes(qt)) fieldType = 'photo';
+        else if (['gps', 'location', 'map'].includes(qt)) fieldType = 'gps';
+        else if (['date', 'time', 'datetime'].includes(qt)) fieldType = qt;
         else if (qt === 'date') fieldType = 'date';
 
         console.log(`Mapping question ${q.id}: qtype="${q.qtype}", type="${q.type}", resolved qt="${qt}", mapped to fieldType="${fieldType}"`);
@@ -108,16 +112,25 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         if (q.options) {
           try {
             const opts = typeof q.options === 'string' ? JSON.parse(q.options) : q.options;
-            options = Array.isArray(opts) ? opts.map((opt: any, i: number) => {
-              if (typeof opt === 'string') return { id: `opt_${i}`, label: opt, value: opt };
-              return {
-                id: opt.id || opt.value || `opt_${i}`,
-                label: opt.label || opt.name || opt.value || opt.toString(),
-                value: opt.value || opt.toString()
-              };
-            }) : [];
+            if (Array.isArray(opts)) {
+              options = opts.map((opt: any, i: number) => {
+                if (typeof opt === 'string') return { id: `opt_${i}`, label: opt, value: opt };
+                return {
+                  id: opt.id || `opt_${i}`,
+                  label: opt.label || opt.text || opt.value || `Option ${i+1}`,
+                  value: opt.value || opt.id || opt.label || ''
+                };
+              });
+            } else if (typeof opts === 'object' && opts !== null) {
+              // Handle object-based options { "key": "label" }
+              options = Object.entries(opts).map(([val, label], i) => ({
+                id: `opt_${i}`,
+                label: String(label),
+                value: String(val)
+              }));
+            }
           } catch (e) {
-            console.warn('Failed to parse options for question', q.id);
+            console.error(`Error parsing options for question ${q.id}:`, e);
           }
         }
 
