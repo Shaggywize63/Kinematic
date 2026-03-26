@@ -1,21 +1,42 @@
--- Migration to fix foreign keys for form submissions
--- This ensures that submissions and responses point to the new Form Builder tables
+-- Robust migration to fix foreign key constraints for forms
+-- This script drops ALL existing FKs on the target tables first to avoid naming/dependency issues.
 
--- 1. Fix template_id in form_submissions to point to builder_forms
-ALTER TABLE form_submissions DROP CONSTRAINT IF EXISTS form_submissions_template_id_fkey;
+DO $$ 
+DECLARE 
+    r RECORD;
+BEGIN
+    -- 1. Drop ALL foreign keys on form_responses
+    FOR r IN (SELECT constraint_name 
+              FROM information_schema.table_constraints 
+              WHERE table_name = 'form_responses' 
+              AND constraint_type = 'FOREIGN KEY') 
+    LOOP
+        EXECUTE 'ALTER TABLE form_responses DROP CONSTRAINT IF EXISTS ' || r.constraint_name;
+    END LOOP;
+
+    -- 2. Drop ALL foreign keys on form_submissions
+    FOR r IN (SELECT constraint_name 
+              FROM information_schema.table_constraints 
+              WHERE table_name = 'form_submissions' 
+              AND constraint_type = 'FOREIGN KEY') 
+    LOOP
+        EXECUTE 'ALTER TABLE form_submissions DROP CONSTRAINT IF EXISTS ' || r.constraint_name;
+    END LOOP;
+END $$;
+
+-- 3. Add the correct foreign keys
+-- Link form_submissions to builder_forms
 ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_template_id_fkey 
     FOREIGN KEY (template_id) REFERENCES builder_forms(id) ON DELETE CASCADE;
 
--- 2. Fix field_id in form_responses to point to builder_questions
-ALTER TABLE form_responses DROP CONSTRAINT IF EXISTS form_responses_question_id_fkey;
-ALTER TABLE form_responses DROP CONSTRAINT IF EXISTS form_responses_field_id_fkey;
+-- Link form_responses to form_submissions
+ALTER TABLE form_responses ADD CONSTRAINT form_responses_submission_id_fkey 
+    FOREIGN KEY (submission_id) REFERENCES form_submissions(id) ON DELETE CASCADE;
+
+-- Link form_responses to builder_questions (using field_id)
 ALTER TABLE form_responses ADD CONSTRAINT form_responses_field_id_fkey 
     FOREIGN KEY (field_id) REFERENCES builder_questions(id) ON DELETE CASCADE;
 
--- 3. Ensure outlet_id exists and points to stores(id)
--- First check if it exists, if not add it. Then fix the FK.
-ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS outlet_id UUID;
-
-ALTER TABLE form_submissions DROP CONSTRAINT IF EXISTS form_submissions_outlet_id_fkey;
-ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_outlet_id_fkey 
-    FOREIGN KEY (outlet_id) REFERENCES stores(id) ON DELETE SET NULL;
+-- 4. Ensure outlet_id exists in form_submissions
+ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS outlet_id UUID REFERENCES stores(id);
+ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT now();
