@@ -390,7 +390,7 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   let query = supabaseAdmin
     .from('form_submissions')
     .select(`
-      id, submitted_at, is_converted, outlet_name, user_id, activity_id,
+      id, submitted_at, is_converted, outlet_name, user_id, activity_id, gps,
       users(name, employee_id),
       activities(name),
       form_templates(name)
