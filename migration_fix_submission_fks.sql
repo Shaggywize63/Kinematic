@@ -29,6 +29,14 @@ END $$;
 ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_template_id_fkey 
     FOREIGN KEY (template_id) REFERENCES builder_forms(id) ON DELETE CASCADE;
 
+-- Link form_submissions to users
+ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_user_id_fkey 
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+
+-- Link form_submissions to activities
+ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_activity_id_fkey 
+    FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE CASCADE;
+
 -- Link form_responses to form_submissions
 ALTER TABLE form_responses ADD CONSTRAINT form_responses_submission_id_fkey 
     FOREIGN KEY (submission_id) REFERENCES form_submissions(id) ON DELETE CASCADE;
