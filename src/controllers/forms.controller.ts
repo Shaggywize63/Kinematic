@@ -142,6 +142,11 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
           }
         }
 
+        console.log(`Mapped question ${q.id}: type=${fieldType}, optionsCount=${options.length}`);
+        if (options.length > 0) {
+          console.log(`Options for ${q.id}:`, JSON.stringify(options));
+        }
+
         // Fallback for yes_no
         if (options.length === 0 && qt === 'yes_no') {
           options = [
