@@ -367,7 +367,7 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
 
   const { data, error } = await supabaseAdmin
     .from('form_submissions')
-    .select('*, form_responses(*, form_fields(label, field_type)), form_templates(name), activities(name)')
+    .select('*, form_responses(*, form_fields(label, qtype)), form_templates(title), activities(name)')
     .eq('id', id)
     .single();
 
@@ -393,7 +393,7 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
       id, submitted_at, is_converted, outlet_name, user_id, activity_id, gps,
       users(name, employee_id),
       activities(name),
-      form_templates(name)
+      form_templates(title)
     `, { count: 'exact' })
     .eq('org_id', user.org_id)
     .order('submitted_at', { ascending: false })
