@@ -44,6 +44,7 @@ const submissionSchema = z.object({
   is_converted: z.boolean().default(false),
   outlet_id: z.string().uuid().optional(),
   outlet_name: z.string().optional(),
+  gps: z.string().optional(),
   consumer_age: z.string().nullable().optional(),
   consumer_gender: z.string().nullable().optional(),
   submitted_at: z.string().optional(),
@@ -319,6 +320,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
     .from('form_submissions')
     .insert({
       ...submissionData,
+      gps: submissionData.gps || (submissionData.latitude && submissionData.longitude ? `${submissionData.latitude},${submissionData.longitude}` : null),
       org_id: user.org_id,
       user_id: user.id,
       attendance_id: attendance?.id,
