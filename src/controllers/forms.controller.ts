@@ -281,7 +281,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
     const q = (questions || []).find(q => q.id === r.field_id);
     return {
       submission_id: '', // Will be set after insert
-      question_id: r.field_id,
+      field_id: r.field_id,
       field_key: r.field_key || q?.field_key || '',
       value: r.value,
       photo_url: r.photo,
