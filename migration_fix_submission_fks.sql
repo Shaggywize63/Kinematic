@@ -24,25 +24,25 @@ BEGIN
     END LOOP;
 END $$;
 
--- 3. Add the correct foreign keys
--- Link form_submissions to builder_forms
-ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_template_id_fkey 
+-- 3. Add the correct foreign keys with names matching the backend join queries
+-- Link form_submissions to builder_forms (Backend expects 'form_templates')
+ALTER TABLE form_submissions ADD CONSTRAINT form_templates 
     FOREIGN KEY (template_id) REFERENCES builder_forms(id) ON DELETE CASCADE;
 
--- Link form_submissions to users
-ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_user_id_fkey 
+-- Link form_submissions to users (Backend expects 'users')
+ALTER TABLE form_submissions ADD CONSTRAINT users 
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
 
--- Link form_submissions to activities
-ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_activity_id_fkey 
+-- Link form_submissions to activities (Backend expects 'activities')
+ALTER TABLE form_submissions ADD CONSTRAINT activities 
     FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE CASCADE;
 
 -- Link form_responses to form_submissions
-ALTER TABLE form_responses ADD CONSTRAINT form_responses_submission_id_fkey 
+ALTER TABLE form_responses ADD CONSTRAINT submission 
     FOREIGN KEY (submission_id) REFERENCES form_submissions(id) ON DELETE CASCADE;
 
--- Link form_responses to builder_questions (using field_id)
-ALTER TABLE form_responses ADD CONSTRAINT form_responses_field_id_fkey 
+-- Link form_responses to builder_questions (Backend expects 'form_fields')
+ALTER TABLE form_responses ADD CONSTRAINT form_fields 
     FOREIGN KEY (field_id) REFERENCES builder_questions(id) ON DELETE CASCADE;
 
 -- 4. Ensure metadata columns exist in form_submissions
