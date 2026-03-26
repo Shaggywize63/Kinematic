@@ -357,7 +357,7 @@ export const getMySubmissions = asyncHandler(async (req: AuthRequest, res: Respo
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
-  return ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
+  const result = buildPaginatedResult(data || [], count || 0, page, limit); return res.status(200).json({ success: true, ...result });
 });
 
 // GET /api/v1/forms/submissions/:id
@@ -405,5 +405,5 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
-  return ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
+  const result = buildPaginatedResult(data || [], count || 0, page, limit); return res.status(200).json({ success: true, ...result });
 });
