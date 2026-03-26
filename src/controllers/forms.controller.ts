@@ -103,23 +103,39 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
 
         console.log(`Mapping question ${q.id}: qtype="${q.qtype}", type="${q.type}", resolved qt="${qt}", mapped to fieldType="${fieldType}"`);
         
+        // Map options
+        let options: any[] = [];
+        if (q.options) {
+          try {
+            const opts = typeof q.options === 'string' ? JSON.parse(q.options) : q.options;
+            options = Array.isArray(opts) ? opts.map((opt: any, i: number) => {
+              if (typeof opt === 'string') return { id: `opt_${i}`, label: opt, value: opt };
+              return {
+                id: opt.id || opt.value || `opt_${i}`,
+                label: opt.label || opt.name || opt.value || opt.toString(),
+                value: opt.value || opt.toString()
+              };
+            }) : [];
+          } catch (e) {
+            console.warn('Failed to parse options for question', q.id);
+          }
+        }
+
+        // Fallback for yes_no
+        if (options.length === 0 && qt === 'yes_no') {
+          options = [
+            { id: 'opt_yes', label: 'Yes', value: 'Yes' },
+            { id: 'opt_no', label: 'No', value: 'No' },
+          ];
+        }
+        
         return {
           id: q.id,
           field_key: q.field_key || `field_${q.id}`,
           label: q.title || q.label || "",
           field_type: fieldType,
           is_required: q.required || q.is_required || false,
-          options: (() => {
-            const opts = typeof q.options === 'string' ? JSON.parse(q.options) : (q.options || []);
-            return Array.isArray(opts) ? opts.map((opt: any, idx: number) => {
-              if (typeof opt === 'string') return { id: `opt_${idx}`, label: opt, value: opt };
-              return {
-                id: opt.id || opt.value || `opt_${idx}`,
-                label: opt.label || opt.name || opt.value || opt.toString(),
-                value: opt.value || opt.toString()
-              };
-            }) : [];
-          })(),
+          options: options,
           placeholder: q.placeholder || "",
           helper_text: q.helper_text || ""
         };
