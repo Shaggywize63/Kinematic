@@ -52,3 +52,9 @@ ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS gps TEXT;
 
 -- 5. Ensure gps column exists in form_responses
 ALTER TABLE form_responses ADD COLUMN IF NOT EXISTS gps TEXT;
+-- 6. Backfill org_id from users table if it's NULL
+UPDATE form_submissions fs
+SET org_id = u.org_id
+FROM users u
+WHERE fs.user_id = u.id
+  AND fs.org_id IS NULL;
