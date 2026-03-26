@@ -95,15 +95,23 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
         // Map qtype to field_type for mobile app compatibility
         let fieldType = 'text';
         const qt = (q.type || q.qtype || '').toLowerCase();
-        if (['text', 'textarea', 'email', 'phone', 'url'].includes(qt)) fieldType = qt === 'textarea' ? 'textarea' : 'text';
+        if (['short_text', 'text', 'email', 'phone', 'url'].includes(qt)) fieldType = 'text';
+        else if (['long_text', 'textarea'].includes(qt)) fieldType = 'textarea';
         else if (['number', 'integer', 'decimal'].includes(qt)) fieldType = 'number';
-        else if (['choice', 'select', 'dropdown', 'yes_no', 'boolean', 'toggle', 'dropdown_search'].includes(qt)) fieldType = 'select';
+        else if (['single_select', 'choice', 'select', 'dropdown', 'dropdown_search'].includes(qt)) fieldType = 'select';
         else if (['multi_select', 'checkbox_group', 'tags'].includes(qt)) fieldType = 'multi_select';
+        else if (['yes_no', 'boolean', 'toggle'].includes(qt)) fieldType = 'yes_no';
         else if (['rating', 'star_rating'].includes(qt)) fieldType = 'rating';
-        else if (['photo', 'image', 'camera'].includes(qt)) fieldType = 'photo';
-        else if (['gps', 'location', 'map'].includes(qt)) fieldType = 'gps';
-        else if (['date', 'time', 'datetime'].includes(qt)) fieldType = qt;
-        else if (qt === 'date') fieldType = 'date';
+        else if (['image_upload', 'photo', 'image', 'camera'].includes(qt)) fieldType = 'photo';
+        else if (['date'].includes(qt)) fieldType = 'date';
+        else if (['time'].includes(qt)) fieldType = 'time';
+        else if (['date_time', 'datetime'].includes(qt)) fieldType = 'datetime';
+        else if (['location', 'gps', 'map'].includes(qt)) fieldType = 'gps';
+        else if (['signature'].includes(qt)) fieldType = 'signature';
+        else if (['file_upload'].includes(qt)) fieldType = 'file';
+        else if (['consent'].includes(qt)) fieldType = 'consent';
+        else if (['section'].includes(qt)) fieldType = 'section';
+        else fieldType = 'text';
 
         console.log(`Mapping question ${q.id}: qtype="${q.qtype}", type="${q.type}", resolved qt="${qt}", mapped to fieldType="${fieldType}"`);
         
