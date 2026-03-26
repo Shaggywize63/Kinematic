@@ -6,10 +6,11 @@ ALTER TABLE form_submissions DROP CONSTRAINT IF EXISTS form_submissions_template
 ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_template_id_fkey 
     FOREIGN KEY (template_id) REFERENCES builder_forms(id) ON DELETE CASCADE;
 
--- 2. Fix question_id in form_responses to point to builder_questions
+-- 2. Fix field_id in form_responses to point to builder_questions
 ALTER TABLE form_responses DROP CONSTRAINT IF EXISTS form_responses_question_id_fkey;
-ALTER TABLE form_responses ADD CONSTRAINT form_responses_question_id_fkey 
-    FOREIGN KEY (question_id) REFERENCES builder_questions(id) ON DELETE CASCADE;
+ALTER TABLE form_responses DROP CONSTRAINT IF EXISTS form_responses_field_id_fkey;
+ALTER TABLE form_responses ADD CONSTRAINT form_responses_field_id_fkey 
+    FOREIGN KEY (field_id) REFERENCES builder_questions(id) ON DELETE CASCADE;
 
 -- 3. Ensure outlet_id exists and points to stores(id)
 -- First check if it exists, if not add it. Then fix the FK.
