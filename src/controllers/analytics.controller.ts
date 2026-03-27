@@ -106,7 +106,6 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     if (a.total_hours) totalHoursWorked += a.total_hours;
   });
 
-  const debug = `Real-time: eng=${totalEngagements}, tff=${totalTff}, role=${user.role}, date=${date}, monthStart=${monthStartStr}, attCount=${attArr.length}, distinctWorked=${totalDaysWorked}, subErr=${subErr?.message || 'none'}`;
 
   return ok(res, {
     date,
@@ -121,7 +120,6 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     avg_hours: kpis?.avg_hours_worked || 0,
     total_hours_worked: +totalHoursWorked.toFixed(1),
     total_visits: totalVisits || 0,
-    debug,
   });
 });
 
