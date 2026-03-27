@@ -6,7 +6,9 @@ import { ok, created, badRequest } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const visitSchema = z.object({
-  visitor_id: z.string().uuid(),
+  visitor_id: z.string().uuid().optional(),
+  executive_id: z.string().uuid().optional(),
+  outlet_id: z.string().uuid().optional(),
   rating: z.enum(['excellent','good','average','poor']).default('good'),
   remarks: z.string().optional(),
   photo_url: z.string().url().optional(),
@@ -22,8 +24,15 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
 
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .insert({ ...body.data, org_id: user.org_id, executive_id: user.id, zone_id: user.zone_id })
-    .select('*, users!visitor_id(name, role)')
+    .insert({ 
+      ...body.data, 
+      org_id: user.org_id, 
+      visitor_id: user.id, 
+      zone_id: user.zone_id,
+      date: new Date().toISOString().split('T')[0],
+      visited_at: new Date().toISOString()
+    })
+    .select('*, users!visitor_id(name, role), stores(name)')
     .single();
 
   if (error) return badRequest(res, error.message);
@@ -37,8 +46,8 @@ export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) 
 
   let query = supabaseAdmin
     .from('visit_logs')
-    .select('*, users!visitor_id(name, role)')
-    .eq('executive_id', user.id)
+    .select('*, users!visitor_id(name, role), stores(name)')
+    .eq('visitor_id', user.id)
     .order('visited_at', { ascending: false });
 
   if (date) query = query.eq('date', date);
@@ -55,7 +64,7 @@ export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response
 
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .select('*, users!executive_id(name), users!visitor_id(name, role), zones(name)')
+    .select('*, users!visitor_id(name, role), stores(name), zones(name)')
     .eq('org_id', user.org_id)
     .eq('date', date)
     .order('visited_at', { ascending: false });
