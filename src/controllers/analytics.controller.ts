@@ -57,35 +57,46 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, is_converted', { count: 'exact' })
+    .select('id, is_converted, user_id, date', { count: 'exact' })
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${date}T00:00:00+05:30`)
-    .lte('submitted_at', `${date}T23:59:59+05:30`);
+    .eq('date', date);
 
-  if (user.role === 'executive' || user.role === 'field-executive') {
+  const userRole = (user.role || '').toLowerCase();
+  const isFE = userRole.includes('executive');
+  
+  if (isFE) {
     submissionsQuery = submissionsQuery.eq('user_id', user.id);
   }
 
-  const { data: subs, count: subCount } = await submissionsQuery;
+  const { data: subs, count: subCount, error: subErr } = await submissionsQuery;
   const totalEngagements = subCount || 0;
   // For executives, treat all their submissions for today as TFF for real-time feedback
-  const totalTff = (user.role === 'executive' || user.role === 'field-executive') ? totalEngagements : (subs || []).filter(s => s.is_converted).length;
+  const totalTff = isFE ? totalEngagements : (subs || []).filter(s => s.is_converted).length;
 
-  const debug = `Real-time: engagements=${totalEngagements}, tff=${totalTff}, role=${user.role}, date=${date}`;
+  // New Metrics: Days Worked & Leaves (Current Month)
+  const now = toIST(new Date());
+  const monthStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 
-  // New Metrics: Days Worked & Leaves (Last 30 days)
-  const thirtyDaysAgo = new Date(); 
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-  const { data: attStats } = await supabaseAdmin
+  let attendanceQuery = supabaseAdmin
     .from('attendance')
-    .select('status, user_id, total_hours, checkin_at')
+    .select('status, user_id, date, total_hours, checkin_at')
     .eq('org_id', user.org_id)
-    .gte('date', isoDate(thirtyDaysAgo));
+    .gte('date', monthStartStr);
+
+  if (isFE) {
+    attendanceQuery = attendanceQuery.eq('user_id', user.id);
+  }
+
+  const { data: attStats, error: attErr } = await attendanceQuery;
 
   const attArr = attStats || [];
-  const totalDaysWorked = attArr.filter(a => a.status === 'present' || a.status === 'checked_out').length;
-  // Approximation of leaves: if we assumed everyone worked every day, this would be complex.
+  // Count distinct days worked in the current month
+  const workedDaysSet = new Set(
+    attArr
+      .filter(a => a.status === 'present' || a.status === 'checked_out' || a.status === 'checked_in')
+      .map(a => a.date)
+  );
+  const totalDaysWorked = workedDaysSet.size;
   const totalLeaves = attArr.filter(a => a.status === 'absent').length;
 
   // Calculate total hours worked (including real-time for active shifts)
@@ -95,21 +106,19 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     if (a.total_hours) totalHoursWorked += a.total_hours;
   });
 
+  const debug = `Real-time: eng=${totalEngagements}, tff=${totalTff}, role=${user.role}, date=${date}, monthStart=${monthStartStr}, attCount=${attArr.length}, distinctWorked=${totalDaysWorked}, subErr=${subErr?.message || 'none'}`;
+
   return ok(res, {
     date,
-    kpis: {
-      ...(kpis || {}),
-      total_engagements: totalEngagements,
-      total_tff: totalTff,
-      executives_active: kpis?.executives_active || 0,
-      executives_submitted: kpis?.executives_submitted || 0,
-      avg_hours_worked: kpis?.avg_hours_worked || 0,
-    },
+    total_contacts: totalEngagements,
+    tff_count: totalTff,
+    effective_contacts: totalTff, // Approximation
     total_executives: totalExecs || 0,
     active_sos_alerts: activeSos || 0,
     open_grievances: openGrievances || 0,
     total_days_worked: totalDaysWorked || 0,
     total_leaves: totalLeaves || 0,
+    avg_hours: kpis?.avg_hours_worked || 0,
     total_hours_worked: +totalHoursWorked.toFixed(1),
     total_visits: totalVisits || 0,
     debug,
