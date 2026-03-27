@@ -6,11 +6,13 @@ import { ok, created, badRequest } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const visitSchema = z.object({
-  visitor_id: z.string().uuid().optional(),
+  visitor_role: z.string().optional(),
+  visitor_name: z.string().optional(),
   executive_id: z.string().uuid().optional(),
   outlet_id: z.string().uuid().optional(),
   rating: z.enum(['excellent','good','average','poor']).default('good'),
   remarks: z.string().optional(),
+  fe_feedback: z.string().optional(),
   photo_url: z.string().url().optional(),
   latitude: z.number().optional(),
   longitude: z.number().optional(),
@@ -31,7 +33,8 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
     .insert({ 
       ...body.data, 
       org_id: user.org_id, 
-      visitor_id: user.id, 
+      visitor_id: user.id, // The person logging it (The FE)
+      executive_id: user.id, // In this case, it's about the FE themselves
       zone_id: user.zone_id,
       date: new Date().toISOString().split('T')[0],
       visited_at: new Date().toISOString()
@@ -50,8 +53,8 @@ export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) 
 
   let query = supabaseAdmin
     .from('visit_logs')
-    .select('*, users!visitor_id(name, role), stores(name)')
-    .eq('visitor_id', user.id)
+    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores(name)')
+    .or(`visitor_id.eq.${user.id},executive_id.eq.${user.id}`)
     .order('visited_at', { ascending: false });
 
   if (date) query = query.eq('date', date);
