@@ -325,6 +325,8 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
       user_id: user.id,
       attendance_id: attendance?.id,
       submitted_at: submissionData.submitted_at || new Date().toISOString(),
+      date: (submissionData as any).date || today,
+      is_converted: true,
     })
     .select()
     .single();
