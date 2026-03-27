@@ -36,7 +36,7 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
       date: new Date().toISOString().split('T')[0],
       visited_at: new Date().toISOString()
     })
-    .select('*, users!visitor_id(name, role), stores(name)')
+    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores(name)')
     .single();
 
   if (error) return badRequest(res, error.message);
@@ -103,7 +103,7 @@ export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response
 
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .select('*, users!visitor_id(name, role), stores(name), zones(name)')
+    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores(name), zones(name)')
     .eq('org_id', user.org_id)
     .eq('date', date)
     .order('visited_at', { ascending: false });
