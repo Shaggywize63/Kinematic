@@ -31,7 +31,7 @@ const enrichWithHours = (r: any) => {
 /* ── GET /api/v1/analytics/summary ───────────────────────── */
 export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const date = (req.query.date as string) || isoDate(new Date());
+  const date = (req.query.date as string) || isoDate(toIST(new Date()));
 
   const { data: kpis } = await supabaseAdmin
     .from('v_daily_kpis').select('*')
@@ -48,6 +48,25 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   const { count: openGrievances } = await supabaseAdmin
     .from('grievances').select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id).eq('status', 'submitted');
+
+  // Real-time metrics from form_submissions
+  let submissionsQuery = supabaseAdmin
+    .from('form_submissions')
+    .select('id, is_converted', { count: 'exact' })
+    .eq('org_id', user.org_id)
+    .gte('submitted_at', `${date}T00:00:00+05:30`)
+    .lte('submitted_at', `${date}T23:59:59+05:30`);
+
+  if (user.role === 'executive' || user.role === 'field-executive') {
+    submissionsQuery = submissionsQuery.eq('user_id', user.id);
+  }
+
+  const { data: subs, count: subCount } = await submissionsQuery;
+  const totalEngagements = subCount || 0;
+  // For executives, treat all their submissions for today as TFF for real-time feedback
+  const totalTff = (user.role === 'executive' || user.role === 'field-executive') ? totalEngagements : (subs || []).filter(s => s.is_converted).length;
+
+  const debug = `Real-time: engagements=${totalEngagements}, tff=${totalTff}, role=${user.role}, date=${date}`;
 
   // New Metrics: Days Worked & Leaves (Last 30 days)
   const thirtyDaysAgo = new Date(); 
@@ -73,9 +92,13 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
 
   return ok(res, {
     date,
-    kpis: kpis || {
-      executives_active: 0, executives_submitted: 0,
-      total_engagements: 0, total_tff: 0, avg_hours_worked: 0,
+    kpis: {
+      ...(kpis || {}),
+      total_engagements: totalEngagements,
+      total_tff: totalTff,
+      executives_active: kpis?.executives_active || 0,
+      executives_submitted: kpis?.executives_submitted || 0,
+      avg_hours_worked: kpis?.avg_hours_worked || 0,
     },
     total_executives: totalExecs || 0,
     active_sos_alerts: activeSos || 0,
@@ -83,6 +106,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     total_days_worked: totalDaysWorked || 0,
     total_leaves: totalLeaves || 0,
     total_hours_worked: +totalHoursWorked.toFixed(1),
+    debug,
   });
 });
 
@@ -168,7 +192,7 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 /* ── GET /api/v1/analytics/hourly ────────────────────────── */
 export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const date = (req.query.date as string) || isoDate(new Date());
+  const date = (req.query.date as string) || isoDate(toIST(new Date()));
 
   const { data, error } = await supabaseAdmin
     .from('form_submissions').select('submitted_at, is_converted')
@@ -432,8 +456,8 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 /* Zone+city-wise KPIs for date range */
 export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const from = (req.query.from as string) || isoDate(new Date());
-  const to   = (req.query.to   as string) || isoDate(new Date());
+  const from = (req.query.from as string) || isoDate(toIST(new Date()));
+  const to   = (req.query.to   as string) || isoDate(toIST(new Date()));
 
   // Fetch zones with city info
   const { data: zones } = await supabaseAdmin

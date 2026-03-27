@@ -346,7 +346,7 @@ export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Re
   const date = (req.query.date as string) || todayDate()
   const [attRes, subRes, sosRes] = await Promise.all([
     supabaseAdmin.from('attendance').select('user_id, status', { count: 'exact' }).eq('org_id', user.org_id).eq('date', date),
-    supabaseAdmin.from('form_submissions').select('id, is_converted', { count: 'exact' }).eq('org_id', user.org_id).gte('submitted_at', date + 'T00:00:00').lte('submitted_at', date + 'T23:59:59'),
+    supabaseAdmin.from('form_submissions').select('id, is_converted', { count: 'exact' }).eq('org_id', user.org_id).gte('submitted_at', date + 'T00:00:00+05:30').lte('submitted_at', date + 'T23:59:59+05:30'),
     supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'active'),
   ])
   const totalEngagements = subRes.count || 0
