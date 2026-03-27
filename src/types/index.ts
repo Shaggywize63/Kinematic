@@ -1,5 +1,5 @@
 import { Request } from 'express';
-export type UserRole = 'super_admin' | 'admin' | 'city_manager' | 'supervisor' | 'executive' | 'hr';
+export type UserRole = 'super_admin' | 'admin' | 'city_manager' | 'supervisor' | 'executive' | 'field-executive' | 'hr';
 
 export interface AuthUser {
   id: string;
