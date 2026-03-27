@@ -49,6 +49,11 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     .from('grievances').select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id).eq('status', 'submitted');
 
+  const { count: totalVisits } = await supabaseAdmin
+    .from('visit_logs').select('id', { count: 'exact', head: true })
+    .eq('org_id', user.org_id)
+    .eq('date', date);
+
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
@@ -106,6 +111,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     total_days_worked: totalDaysWorked || 0,
     total_leaves: totalLeaves || 0,
     total_hours_worked: +totalHoursWorked.toFixed(1),
+    total_visits: totalVisits || 0,
     debug,
   });
 });
