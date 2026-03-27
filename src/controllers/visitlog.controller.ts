@@ -16,6 +16,10 @@ const visitSchema = z.object({
   longitude: z.number().optional(),
 });
 
+const feedbackSchema = z.object({
+  feedback: z.string().min(1),
+});
+
 // POST /api/v1/visits
 export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
@@ -55,6 +59,41 @@ export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) 
   const { data, error } = await query;
   if (error) return badRequest(res, error.message);
   return ok(res, data);
+});
+
+// GET /api/v1/visits/received
+export const getReceivedVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { data, error } = await supabaseAdmin
+    .from('visit_logs')
+    .select('*, users!visitor_id(name, role), stores(name)')
+    .eq('executive_id', user.id)
+    .order('visited_at', { ascending: false });
+
+  if (error) return badRequest(res, error.message);
+  return ok(res, data);
+});
+
+// PATCH /api/v1/visits/:id/feedback
+export const updateFEFeedback = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  const body = feedbackSchema.safeParse(req.body);
+  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
+
+  const { data, error } = await supabaseAdmin
+    .from('visit_logs')
+    .update({ 
+      fe_feedback: body.data.feedback, 
+      fe_feedback_at: new Date().toISOString() 
+    })
+    .eq('id', id)
+    .eq('executive_id', user.id)
+    .select()
+    .single();
+
+  if (error) return badRequest(res, error.message);
+  return ok(res, data, 'Feedback updated');
 });
 
 // GET /api/v1/visits/team  (supervisor+)
