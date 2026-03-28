@@ -22,13 +22,8 @@ const feedbackSchema = z.object({
   feedback: z.string().min(1),
 });
 
-/**
- * Manual Enrichment Helper: Bypasses PostgREST join relationship errors
- * Fetches related data (users, stores, zones) in separate queries and maps them back.
- */
 async function enrichVisitLogs(logs: any[]) {
   if (!logs || logs.length === 0) return [];
-
   const visitorIds  = [...new Set(logs.map(l => l.visitor_id).filter(Boolean))];
   const executiveIds = [...new Set(logs.map(l => l.executive_id).filter(Boolean))];
   const outletIds   = [...new Set(logs.map(l => l.outlet_id).filter(Boolean))];
@@ -50,19 +45,14 @@ async function enrichVisitLogs(logs: any[]) {
     executive: userMap.get(l.executive_id) || null,
     stores:    storeMap.get(l.outlet_id) || null,
     zones:     zoneMap.get(l.zone_id) || null,
-    // Alias for app compatibility if needed
     users:     userMap.get(l.visitor_id) || null 
   }));
 }
 
-// POST /api/v1/visits
 export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const body = visitSchema.safeParse(req.body);
-  if (!body.success) {
-    console.error('[VisitLog] Validation failed:', body.error.errors);
-    return badRequest(res, 'Validation failed', body.error.errors);
-  }
+  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
   const { data: inserted, error } = await supabaseAdmin
     .from('visit_logs')
@@ -74,90 +64,48 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
       zone_id: user.zone_id,
       date: new Date().toISOString().split('T')[0],
       visited_at: new Date().toISOString()
-    })
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
-    .single();
+    }).select('id, org_id, visitor_id, executive_id, zone_id, outlet_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at').single();
 
   if (error) return badRequest(res, error.message);
-
   const enriched = await enrichVisitLogs([inserted]);
   return created(res, enriched[0], 'Visit logged');
 });
 
-// GET /api/v1/visits/mine
 export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const date = req.query.date as string | undefined;
-
-  let query = supabaseAdmin
-    .from('visit_logs')
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
-    .or(`visitor_id.eq.${user.id},executive_id.eq.${user.id}`)
-    .order('visited_at', { ascending: false });
-
-  if (date) query = query.eq('date', date);
-
-  const { data, error } = await query;
+  let q = supabaseAdmin.from('visit_logs').select('id, org_id, visitor_id, executive_id, zone_id, outlet_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
+    .or(`visitor_id.eq.${user.id},executive_id.eq.${user.id}`).order('visited_at', { ascending: false });
+  if (date) q = q.eq('date', date);
+  const { data, error } = await q;
   if (error) return badRequest(res, error.message);
-
-  const enriched = await enrichVisitLogs(data || []);
-  return ok(res, enriched);
+  return ok(res, await enrichVisitLogs(data || []));
 });
 
-// GET /api/v1/visits/received
 export const getReceivedVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { data, error } = await supabaseAdmin
-    .from('visit_logs')
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
-    .eq('executive_id', user.id)
-    .order('visited_at', { ascending: false });
-
+  const { data, error } = await supabaseAdmin.from('visit_logs').select('id, org_id, visitor_id, executive_id, zone_id, outlet_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
+    .eq('executive_id', user.id).order('visited_at', { ascending: false });
   if (error) return badRequest(res, error.message);
-
-  const enriched = await enrichVisitLogs(data || []);
-  return ok(res, enriched);
+  return ok(res, await enrichVisitLogs(data || []));
 });
 
-// PATCH /api/v1/visits/:id/feedback
 export const updateFEFeedback = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
   const body = feedbackSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
-
-  const { data, error } = await supabaseAdmin
-    .from('visit_logs')
-    .update({ 
-      fe_feedback: body.data.feedback, 
-      fe_feedback_at: new Date().toISOString() 
-    })
-    .eq('id', id)
-    .eq('executive_id', user.id)
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
-    .single();
-
+  const { data, error } = await supabaseAdmin.from('visit_logs').update({ fe_feedback: body.data.feedback, fe_feedback_at: new Date().toISOString() })
+    .eq('id', id).eq('executive_id', user.id).select('id, org_id, visitor_id, executive_id, zone_id, outlet_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at').single();
   if (error) return badRequest(res, error.message);
   return ok(res, data, 'Feedback updated');
 });
 
-// GET /api/v1/visits/team  (supervisor+)
 export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
-
-  const { data, error } = await supabaseAdmin
-    .from('visit_logs')
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
-    .eq('org_id', user.org_id)
-    .eq('date', date)
-    .order('visited_at', { ascending: false });
-
-  if (error) {
-    console.error('[VisitLog] Fetch failed:', error);
-    return badRequest(res, error.message);
-  }
-
-  const enriched = await enrichVisitLogs(data || []);
-  return ok(res, enriched);
+  const { data, error } = await supabaseAdmin.from('visit_logs').select('id, org_id, visitor_id, executive_id, zone_id, outlet_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
+    .eq('org_id', user.org_id).eq('date', date).order('visited_at', { ascending: false });
+  if (error) return badRequest(res, error.message);
+  return ok(res, await enrichVisitLogs(data || []));
 });
