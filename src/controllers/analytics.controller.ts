@@ -222,27 +222,105 @@ export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) =>
 /* ── GET /api/v1/analytics/contact-heatmap ───────────────── */
 export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const since = new Date(); since.setDate(since.getDate() - 6); since.setHours(0,0,0,0);
+  const { from, to } = req.query;
+
+  let startDate: Date;
+  let endDate: Date;
+
+  if (from && typeof from === 'string') {
+    startDate = new Date(from);
+    startDate.setHours(0, 0, 0, 0);
+  } else {
+    startDate = toIST(new Date());
+    startDate.setDate(startDate.getDate() - 6);
+    startDate.setHours(0, 0, 0, 0);
+  }
+
+  if (to && typeof to === 'string') {
+    endDate = new Date(to);
+    endDate.setHours(23, 59, 59, 999);
+  } else {
+    endDate = new Date();
+  }
 
   const { data, error } = await supabaseAdmin
-    .from('form_submissions').select('submitted_at, is_converted')
-    .eq('org_id', user.org_id).gte('submitted_at', since.toISOString());
+    .from('form_submissions')
+    .select('submitted_at, is_converted')
+    .eq('org_id', user.org_id)
+    .gte('submitted_at', startDate.toISOString())
+    .lte('submitted_at', endDate.toISOString());
 
   if (error) return badRequest(res, error.message);
 
-  const grid: { engagements: number; tff: number }[][] = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ engagements: 0, tff: 0 })));
+  const daysArr = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  
+  // Dynamically build the grid based on the date range
+  const diffTime = Math.abs(endDate.getTime() - startDate.getTime());
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
+  const numDays  = Math.min(diffDays, 31); // Safety cap
+
+  const grid: any[] = [];
+  for (let i = 0; i < numDays; i++) {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() + i);
+    // Use manual formatting to avoid toISOString() timezone shift back to UTC
+    const dateStr = `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
+    const iDay = (d.getDay() + 6) % 7; // Mon=0
+    grid.push({
+      date: dateStr,
+      day: daysArr[iDay],
+      hours: Array.from({ length: 24 }, (_, h) => ({ hour: h, count: 0 })),
+      total: 0
+    });
+  }
+
+  const hourCounts = new Array(24).fill(0);
+  const dayCounts: Record<string, number> = {};
+  daysArr.forEach(d => { dayCounts[d] = 0; });
+
   (data || []).forEach((s) => {
+    // Convert to IST representation for correct bucket matching
     const ist = toIST(new Date(s.submitted_at));
-    const dow = (ist.getDay() + 6) % 7;
-    const hr  = ist.getHours();
-    grid[dow][hr].engagements++;
-    if (s.is_converted) grid[dow][hr].tff++;
+    const dateStr = `${ist.getFullYear()}-${(ist.getMonth() + 1).toString().padStart(2, '0')}-${ist.getDate().toString().padStart(2, '0')}`;
+    const hr = ist.getHours();
+    
+    const row = grid.find(g => g.date === dateStr);
+    if (row) {
+      row.hours[hr].count++;
+      row.total++;
+      hourCounts[hr]++;
+      dayCounts[row.day]++;
+    }
   });
 
-  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  // Find peak hour and peak day
+  let peakHr = 0; 
+  let maxHrVal = 0;
+  hourCounts.forEach((c, h) => {
+    if (c > maxHrVal) {
+      maxHrVal = c;
+      peakHr = h;
+    }
+  });
+
+  let peakDayName = '—';
+  let maxDayVal = 0;
+  Object.entries(dayCounts).forEach(([name, count]) => {
+    if (count > maxDayVal) {
+      maxDayVal = count;
+      peakDayName = name;
+    }
+  });
+
   return ok(res, {
-    since: since.toISOString(), total_records: data?.length || 0,
-    grid: grid.map((hours, d) => ({ day: days[d], day_index: d, hours: hours.map((cell, h) => ({ hour: h, ...cell, total: cell.engagements })) })),
+    rows: grid,
+    summary: {
+      peak_hour: maxHrVal > 0 ? `${peakHr.toString().padStart(2, '0')}:00` : '—',
+      peak_hour_count: maxHrVal,
+      peak_day: peakDayName,
+      peak_day_count: maxDayVal,
+      total_contacts: data?.length || 0
+    }
   });
 });
 
