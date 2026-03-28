@@ -224,39 +224,40 @@ export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Resp
   const user = req.user!;
   const { from, to } = req.query;
 
-  let startDate: Date;
-  let endDate: Date;
+  let startStr: string;
+  let endStr: string;
 
   if (from && typeof from === 'string') {
-    startDate = new Date(from);
-    startDate.setHours(0, 0, 0, 0);
+    startStr = from;
   } else {
-    startDate = toIST(new Date());
-    startDate.setDate(startDate.getDate() - 6);
-    startDate.setHours(0, 0, 0, 0);
+    const d = new Date();
+    d.setDate(d.getDate() - 6);
+    startStr = isoDate(toIST(d));
   }
 
   if (to && typeof to === 'string') {
-    endDate = new Date(to);
-    endDate.setHours(23, 59, 59, 999);
+    endStr = to;
   } else {
-    endDate = new Date();
+    endStr = isoDate(toIST(new Date()));
   }
 
+  // Filter by 'date' column (YYYY-MM-DD) which is more reliable than submitted_at ISO strings in this app
   const { data, error } = await supabaseAdmin
     .from('form_submissions')
-    .select('submitted_at, is_converted')
+    .select('submitted_at, is_converted, date')
     .eq('org_id', user.org_id)
-    .gte('submitted_at', startDate.toISOString())
-    .lte('submitted_at', endDate.toISOString());
+    .gte('date', startStr)
+    .lte('date', endStr);
 
   if (error) return badRequest(res, error.message);
 
-  const daysArr = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const startDate = new Date(startStr);
+  const endDate   = new Date(endStr);
+  const daysArr   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   
   // Dynamically build the grid based on the date range
   const diffTime = Math.abs(endDate.getTime() - startDate.getTime());
-  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
   const numDays  = Math.min(diffDays, 31); // Safety cap
 
   const grid: any[] = [];
