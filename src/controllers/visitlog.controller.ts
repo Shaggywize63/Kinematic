@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, internalError } from '../utils/response';
+import { ok, created, badRequest } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const visitSchema = z.object({
@@ -12,7 +12,7 @@ const visitSchema = z.object({
   outlet_id: z.string().uuid().optional().nullable(),
   rating: z.enum(['excellent','good','average','poor']).default('good'),
   remarks: z.string().optional().nullable(),
-  fe_feedback: z.string().optional().nullable(),
+  visit_response: z.string().optional().nullable(), // RENAME
   photo_url: z.string().url().optional().nullable(),
   latitude: z.number().optional().nullable(),
   longitude: z.number().optional().nullable(),
@@ -23,8 +23,7 @@ const feedbackSchema = z.object({
 });
 
 /**
- * ULTRA STABLE ENRICHMENT
- * No joins, no wildcard selects. Manual lookups only.
+ * ULTRA STABLE ENRICHMENT - NO JOINS
  */
 async function enrichVisitLogs(logs: any[]) {
   if (!logs || logs.length === 0) return [];
@@ -54,9 +53,11 @@ async function enrichVisitLogs(logs: any[]) {
     }));
   } catch (e) {
     console.error('[VisitLog] Enrichment Failed:', e);
-    return logs; // Return unenriched logs as fallback
+    return logs;
   }
 }
+
+const ALL_COLUMNS = 'id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, visit_response, visit_response_at, photo_url, latitude, longitude, date, visited_at';
 
 // POST /api/v1/visits
 export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -64,9 +65,7 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
   const body = visitSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
-  console.log('[VisitLog] Logging visit for user:', user.id);
-
-  // STEP 1: Insert without select to avoid relationship errors during write
+  // Use the new column name in Insert
   const { data: insertData, error: insertError } = await supabaseAdmin
     .from('visit_logs')
     .insert({ 
@@ -78,25 +77,16 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
       date: new Date().toISOString().split('T')[0],
       visited_at: new Date().toISOString()
     })
-    .select('id') // Only select ID first to minimize relationship confusion
+    .select('id')
     .single();
 
-  if (insertError) {
-    console.error('[VisitLog] Insert error:', insertError);
-    return badRequest(res, insertError.message);
-  }
+  if (insertError) return badRequest(res, insertError.message);
 
-  // STEP 2: Fetch the full record with a clean select
-  const { data: fullRecord, error: fetchError } = await supabaseAdmin
+  const { data: fullRecord } = await supabaseAdmin
     .from('visit_logs')
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
+    .select(ALL_COLUMNS)
     .eq('id', insertData.id)
     .single();
-
-  if (fetchError) {
-    console.error('[VisitLog] Fetch after insert error:', fetchError);
-    return created(res, insertData, 'Visit logged (but enrichment failed)');
-  }
 
   const enriched = await enrichVisitLogs([fullRecord]);
   return created(res, enriched[0], 'Visit logged');
@@ -109,17 +99,14 @@ export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) 
 
   let query = supabaseAdmin
     .from('visit_logs')
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
+    .select(ALL_COLUMNS)
     .or(`visitor_id.eq.${user.id},executive_id.eq.${user.id}`)
     .order('visited_at', { ascending: false });
 
   if (date) query = query.eq('date', date);
 
   const { data, error } = await query;
-  if (error) {
-    console.error('[VisitLog] getMyVisits error:', error);
-    return badRequest(res, error.message);
-  }
+  if (error) return badRequest(res, error.message);
 
   return ok(res, await enrichVisitLogs(data || []));
 });
@@ -129,15 +116,11 @@ export const getReceivedVisits = asyncHandler(async (req: AuthRequest, res: Resp
   const user = req.user!;
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
+    .select(ALL_COLUMNS)
     .eq('executive_id', user.id)
     .order('visited_at', { ascending: false });
 
-  if (error) {
-    console.error('[VisitLog] getReceivedVisits error:', error);
-    return badRequest(res, error.message);
-  }
-
+  if (error) return badRequest(res, error.message);
   return ok(res, await enrichVisitLogs(data || []));
 });
 
@@ -151,37 +134,30 @@ export const updateFEFeedback = asyncHandler(async (req: AuthRequest, res: Respo
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
     .update({ 
-      fe_feedback: body.data.feedback, 
-      fe_feedback_at: new Date().toISOString() 
+      visit_response: body.data.feedback, 
+      visit_response_at: new Date().toISOString() 
     })
     .eq('id', id)
     .eq('executive_id', user.id)
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
+    .select(ALL_COLUMNS)
     .single();
 
-  if (error) {
-    console.error('[VisitLog] Update feedback error:', error);
-    return badRequest(res, error.message);
-  }
+  if (error) return badRequest(res, error.message);
   return ok(res, data, 'Feedback updated');
 });
 
-// GET /api/v1/visits/team  (supervisor+)
+// GET /api/v1/visits/team
 export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
+    .select(ALL_COLUMNS)
     .eq('org_id', user.org_id)
     .eq('date', date)
     .order('visited_at', { ascending: false });
 
-  if (error) {
-    console.error('[VisitLog] getTeamVisits error:', error);
-    return badRequest(res, error.message);
-  }
-
+  if (error) return badRequest(res, error.message);
   return ok(res, await enrichVisitLogs(data || []));
 });
