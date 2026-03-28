@@ -9,7 +9,7 @@ const visitSchema = z.object({
   visitor_role: z.string().optional(),
   visitor_name: z.string().optional(),
   executive_id: z.string().uuid().optional().nullable(),
-  outlet_id: z.string().uuid().optional().nullable(),
+  visit_outlet_id: z.string().uuid().optional().nullable(),
   rating: z.enum(['excellent','good','average','poor']).default('good'),
   remarks: z.string().optional().nullable(),
   visit_response: z.string().optional().nullable(), // RENAME
@@ -30,7 +30,7 @@ async function enrichVisitLogs(logs: any[]) {
   try {
     const visitorIds  = [...new Set(logs.map(l => l.visitor_id).filter(Boolean))];
     const executiveIds = [...new Set(logs.map(l => l.executive_id).filter(Boolean))];
-    const outletIds   = [...new Set(logs.map(l => l.outlet_id).filter(Boolean))];
+    const outletIds   = [...new Set(logs.map(l => l.visit_outlet_id).filter(Boolean))];
     const zoneIds     = [...new Set(logs.map(l => l.zone_id).filter(Boolean))];
 
     const [usersRes, storesRes, zonesRes] = await Promise.all([
@@ -47,7 +47,7 @@ async function enrichVisitLogs(logs: any[]) {
       ...l,
       visitor:   userMap.get(l.visitor_id) || null,
       executive: userMap.get(l.executive_id) || null,
-      stores:    storeMap.get(l.outlet_id) || null,
+      stores:    storeMap.get(l.visit_outlet_id) || null,
       zones:     zoneMap.get(l.zone_id) || null,
       users:     userMap.get(l.visitor_id) || null 
     }));
@@ -57,7 +57,7 @@ async function enrichVisitLogs(logs: any[]) {
   }
 }
 
-const ALL_COLUMNS = 'id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, visit_response, visit_response_at, photo_url, latitude, longitude, date, visited_at';
+const ALL_COLUMNS = 'id, visitor_id, executive_id, zone_id, visit_outlet_id, org_id, rating, remarks, visit_response, visit_response_at, photo_url, latitude, longitude, date, visited_at';
 
 // POST /api/v1/visits
 export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => {
