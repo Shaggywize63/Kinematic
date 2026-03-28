@@ -75,7 +75,7 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
       date: new Date().toISOString().split('T')[0],
       visited_at: new Date().toISOString()
     })
-    .select('*')
+    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
     .single();
 
   if (error) return badRequest(res, error.message);
@@ -91,7 +91,7 @@ export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) 
 
   let query = supabaseAdmin
     .from('visit_logs')
-    .select('*')
+    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
     .or(`visitor_id.eq.${user.id},executive_id.eq.${user.id}`)
     .order('visited_at', { ascending: false });
 
@@ -109,7 +109,7 @@ export const getReceivedVisits = asyncHandler(async (req: AuthRequest, res: Resp
   const user = req.user!;
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .select('*')
+    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
     .eq('executive_id', user.id)
     .order('visited_at', { ascending: false });
 
@@ -134,7 +134,7 @@ export const updateFEFeedback = asyncHandler(async (req: AuthRequest, res: Respo
     })
     .eq('id', id)
     .eq('executive_id', user.id)
-    .select()
+    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
     .single();
 
   if (error) return badRequest(res, error.message);
@@ -148,7 +148,7 @@ export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response
 
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .select('*')
+    .select('id, visitor_id, executive_id, zone_id, outlet_id, org_id, rating, remarks, fe_feedback, fe_feedback_at, photo_url, latitude, longitude, date, visited_at')
     .eq('org_id', user.org_id)
     .eq('date', date)
     .order('visited_at', { ascending: false });
