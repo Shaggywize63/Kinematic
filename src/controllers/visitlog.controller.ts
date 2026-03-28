@@ -42,7 +42,7 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
       date: new Date().toISOString().split('T')[0],
       visited_at: new Date().toISOString()
     })
-    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores(name)')
+    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores!outlet_id(name)')
     .single();
 
   if (error) return badRequest(res, error.message);
@@ -56,7 +56,7 @@ export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) 
 
   let query = supabaseAdmin
     .from('visit_logs')
-    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores(name)')
+    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores!outlet_id(name)')
     .or(`visitor_id.eq.${user.id},executive_id.eq.${user.id}`)
     .order('visited_at', { ascending: false });
 
@@ -72,7 +72,7 @@ export const getReceivedVisits = asyncHandler(async (req: AuthRequest, res: Resp
   const user = req.user!;
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .select('*, users!visitor_id(name, role), stores(name)')
+    .select('*, visitor:users!visitor_id(name, role), stores!outlet_id(name)')
     .eq('executive_id', user.id)
     .order('visited_at', { ascending: false });
 
@@ -109,7 +109,7 @@ export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response
 
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
-    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores(name), zones(name)')
+    .select('*, visitor:users!visitor_id(name, role), executive:users!executive_id(name), stores!outlet_id(name), zones!zone_id(name)')
     .eq('org_id', user.org_id)
     .eq('date', date)
     .order('visited_at', { ascending: false });
