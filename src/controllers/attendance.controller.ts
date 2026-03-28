@@ -25,6 +25,8 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const today = new Date().toISOString().split('T')[0];
   const { latitude, longitude, selfie_url, activity_id, zone_id, date: passedDate } = req.body;
+  
+  console.log(`[Attendance] Check-in attempt by ${user.name} (${user.role}). Selfie: ${selfie_url ? 'YES' : 'NO'}`);
   const attendanceDate = passedDate || today;
 
   if (latitude == null || longitude == null) return badRequest(res, 'Latitude and longitude are required');
@@ -105,6 +107,8 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
 export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { latitude, longitude, selfie_url, date: passedDate } = req.body;
+  
+  console.log(`[Attendance] Check-out attempt by ${user.name}. Selfie: ${selfie_url ? 'YES' : 'NO'}`);
   const today = new Date().toISOString().split('T')[0];
   const attendanceDate = passedDate || today;
 
