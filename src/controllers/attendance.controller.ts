@@ -26,7 +26,8 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
   const today = new Date().toISOString().split('T')[0];
   const { latitude, longitude, selfie_url, activity_id, zone_id, date: passedDate } = req.body;
   
-  console.log(`[Attendance] Check-in attempt by ${user.name} (${user.role}). Selfie: ${selfie_url ? 'YES' : 'NO'}`);
+  console.log(`[Attendance] Check-in: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
+  if (selfie_url) console.log(`[Attendance] Selfie URL: ${selfie_url}`);
   const attendanceDate = passedDate || today;
 
   if (latitude == null || longitude == null) return badRequest(res, 'Latitude and longitude are required');
@@ -69,6 +70,7 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
     }
   }
 
+  console.log(`[Attendance] Inserting check-in record for ${user.id}`);
   const { data, error } = await supabaseAdmin
     .from('attendance')
     .insert({
@@ -86,6 +88,11 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
     })
     .select()
     .single();
+
+  if (data) {
+    console.log(`[Attendance] Stored Check-in Selfie: ${data.checkin_selfie_url || 'NULL'}`);
+  }
+  console.log(`[Attendance] Check-in record inserted: ${!!data}`);
 
   if (error) { badRequest(res, error.message); return; }
 
@@ -108,7 +115,8 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
   const user = req.user!;
   const { latitude, longitude, selfie_url, date: passedDate } = req.body;
   
-  console.log(`[Attendance] Check-out attempt by ${user.name}. Selfie: ${selfie_url ? 'YES' : 'NO'}`);
+  console.log(`[Attendance] Check-out: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
+  if (selfie_url) console.log(`[Attendance] Selfie URL: ${selfie_url}`);
   const today = new Date().toISOString().split('T')[0];
   const attendanceDate = passedDate || today;
 
@@ -151,6 +159,10 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
     .eq('id', record.id)
     .select()
     .single();
+
+  if (updatedRecord) {
+    console.log(`[Attendance] Stored Check-out Selfie: ${updatedRecord.checkout_selfie_url || 'NULL'}`);
+  }
 
   if (error) { badRequest(res, error.message); return; }
 
