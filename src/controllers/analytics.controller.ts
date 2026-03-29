@@ -57,10 +57,9 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, is_converted, user_id, submitted_at', { count: 'exact' })
+    .select('id, is_converted, user_id, date', { count: 'exact' })
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${date}T00:00:00`)
-    .lte('submitted_at', `${date}T23:59:59`);
+    .eq('date', date);
 
   const userRole = (user.role || '').toLowerCase();
   const isFE = userRole.includes('executive');
@@ -381,16 +380,18 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
   for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) days.push(isoDate(new Date(d)));
 
   const { data, error } = await supabaseAdmin
-    .from('form_submissions').select('submitted_at, is_converted')
+    .from('form_submissions')
+    .select('date, is_converted')
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${from}T00:00:00`).lte('submitted_at', `${to}T23:59:59`);
+    .gte('date', from)
+    .lte('date', to);
 
   if (error) return badRequest(res, error.message);
 
   const byDay: Record<string, { engagements: number; tff: number }> = {};
   days.forEach((d) => { byDay[d] = { engagements: 0, tff: 0 }; });
-  (data || []).forEach((s) => {
-    const d = isoDate(toIST(new Date(s.submitted_at)));
+  (data || []).forEach((s: any) => {
+    const d = s.date;
     if (byDay[d]) { byDay[d].engagements++; if (s.is_converted) byDay[d].tff++; }
   });
 
@@ -530,10 +531,10 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   // All unique outlets from form_submissions in range
   const { data: forms, error } = await supabaseAdmin
     .from('form_submissions')
-    .select('outlet_name, is_converted, user_id, submitted_at, users(name, zones(name, city))')
+    .select('outlet_name, is_converted, user_id, date, users(name, zones(name, city))')
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${from}T00:00:00`)
-    .lte('submitted_at', `${to}T23:59:59`);
+    .gte('date', from)
+    .lte('date', to);
 
   if (error) return badRequest(res, error.message);
 
