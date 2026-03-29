@@ -129,7 +129,6 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
 
   const tpMap = new Map<string, { name: string; zone: string; tff: number }>();
   (topPerf || []).forEach((s) => {
-    if (!s.is_converted) return; // Top performer based on TFF
     const u = s.users as any;
     if (!tpMap.has(s.user_id)) tpMap.set(s.user_id, { name: u?.name || 'Unknown', zone: u?.zones?.name || 'Unknown', tff: 0 });
     tpMap.get(s.user_id)!.tff++;
@@ -144,12 +143,17 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
 
   const zpMap = new Map<string, { zone: string; tff: number; target: number }>();
   (zones || []).forEach((z) => zpMap.set(z.id, { zone: z.name, tff: 0, target: z.tff_target || 0 }));
-  
+  // Add unassigned bucket for users without a hub
+  zpMap.set('unassigned', { zone: 'Unassigned', tff: 0, target: 0 });
+
   (topPerf || []).forEach((s) => {
-    if (!s.is_converted) return; // Zone breakdown based on TFF
     const u = s.users as any;
-    const zoneId = u?.zone_id || u?.zones?.id; // Fallback to nested
-    if (zoneId && zpMap.has(zoneId)) zpMap.get(zoneId)!.tff++;
+    const zoneId = u?.zone_id || u?.zones?.id;
+    if (zoneId && zpMap.has(zoneId)) {
+      zpMap.get(zoneId)!.tff++;
+    } else {
+      zpMap.get('unassigned')!.tff++;
+    }
   });
   const zonePerformance = Array.from(zpMap.values()).filter(z => z.target > 0 || z.tff > 0);
 
