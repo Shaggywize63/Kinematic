@@ -502,19 +502,19 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   if (error) return badRequest(res, error.message);
 
   // Count unique outlets & conversions
-  const outletMap = new Map<string, { visits: number; conversions: number; city: string | null }>();
+  const outletMap = new Map<string, { visits: number; tff: number; city: string | null }>();
   (forms || []).forEach((f) => {
     const outlet = f.outlet_name || 'Unknown Outlet';
     const u = f.users as unknown as { zones?: { city?: string } } | null;
     const city = u?.zones?.city || null;
-    if (!outletMap.has(outlet)) outletMap.set(outlet, { visits: 0, conversions: 0, city });
+    if (!outletMap.has(outlet)) outletMap.set(outlet, { visits: 0, tff: 0, city });
     const entry = outletMap.get(outlet)!;
     entry.visits++;
-    if (f.is_converted) entry.conversions++;
+    if (f.is_converted) entry.tff++;
   });
 
   const outlets = Array.from(outletMap.entries())
-    .map(([name, d]) => ({ name, ...d, tff_rate: d.visits > 0 ? Math.round((d.conversions / d.visits) * 100) : 0 }))
+    .map(([name, d]) => ({ name, ...d, tff_rate: d.visits > 0 ? Math.round((d.tff / d.visits) * 100) : 0 }))
     .sort((a, b) => b.visits - a.visits);
 
   // City breakdown
@@ -606,7 +606,7 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   });
 
   const result = Array.from(cityAgg.entries()).map(([city, d]) => ({
-    city, zones: d.zones.size, active_fes: d.fes.size, checkins: d.checkins,
+    city, zones: d.zones.size, active_fes: d.fes.size, checkins: d.engagements, 
     engagements: d.engagements, tff: d.tff, tff_rate: d.engagements > 0 ? Math.round((d.tff / d.engagements) * 100) : 0,
     unique_outlets: d.outlets.size,
     avg_hours: d.fes.size > 0 ? +(d.total_hours / d.fes.size).toFixed(1) : 0,
