@@ -385,10 +385,12 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
   const byDay: Record<string, { engagements: number; tff: number }> = {};
   days.forEach((d) => { byDay[d] = { engagements: 0, tff: 0 }; });
   (data || []).forEach((s: any) => {
-    // Revert to deriving date from submitted_at to ensure accuracy for records missing the 'date' column
-    const ist = toIST(new Date(s.submitted_at));
-    const d = `${ist.getFullYear()}-${(ist.getMonth() + 1).toString().padStart(2, '0')}-${ist.getDate().toString().padStart(2, '0')}`;
-    if (byDay[d]) { byDay[d].engagements++; if (s.is_converted) byDay[d].tff++; }
+    // Favor the 'date' column which matches Supabase SQL DATE grouping (UTC as ground truth for this app)
+    const d = s.date || s.submitted_at.split('T')[0];
+    if (byDay[d]) { 
+      byDay[d].engagements++; 
+      if (s.is_converted) byDay[d].tff++; 
+    }
   });
 
   const result = days.map((d) => ({
