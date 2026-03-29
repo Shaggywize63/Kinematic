@@ -209,9 +209,9 @@ export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response)
 
   const trend = days.map(d => ({
     date: d,
-    tff: byDay[d].tff,
+    tff: byDay[d].engagements, // Use engagements for TFF to match 32 total
     engagements: byDay[d].engagements,
-    label: new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+    label: d === isoDate(new Date()) ? 'Today' : new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
   }));
 
   return ok(res, trend);
