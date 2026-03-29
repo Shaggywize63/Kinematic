@@ -389,12 +389,12 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
 export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
-  const { date, zone_id, activity_id, user_id } = req.query as Record<string, string>;
+  const { date, zone_id, activity_id, user_id, outlet_id } = req.query as Record<string, string>;
 
   let query = supabaseAdmin
     .from('form_submissions')
     .select(`
-      id, submitted_at, is_converted, outlet_name, user_id, activity_id, gps,
+      id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps,
       users(name, employee_id),
       activities(name),
       form_templates(title)
@@ -406,8 +406,28 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   if (date) query = query.gte('submitted_at', `${date}T00:00:00`).lte('submitted_at', `${date}T23:59:59`);
   if (activity_id) query = query.eq('activity_id', activity_id);
   if (user_id) query = query.eq('user_id', user_id);
+  if (outlet_id) query = query.eq('outlet_id', outlet_id);
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
-  const result = buildPaginatedResult(data || [], count || 0, page, limit); return res.status(200).json({ success: true, ...result });
+
+  // Fetch first photo for each submission for checkin_photo display
+  const submissionIds = (data || []).map((s) => s.id);
+  const { data: photos } = submissionIds.length
+    ? await supabaseAdmin
+        .from('form_responses')
+        .select('submission_id, photo_url')
+        .in('submission_id', submissionIds)
+        .not('photo_url', 'is', null)
+        .order('created_at', { ascending: true })
+    : { data: [] };
+
+  const photoMap = new Map<string, string>();
+  for (const p of photos || []) {
+    if (!photoMap.has(p.submission_id)) photoMap.set(p.submission_id, p.photo_url);
+  }
+
+  const enriched = (data || []).map((s) => ({ ...s, checkin_photo: photoMap.get(s.id) || null }));
+  const result = buildPaginatedResult(enriched, count || 0, page, limit);
+  return res.status(200).json({ success: true, ...result });
 });
