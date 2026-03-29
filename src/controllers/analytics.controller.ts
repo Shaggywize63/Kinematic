@@ -31,11 +31,13 @@ const enrichWithHours = (r: any) => {
 /* ── GET /api/v1/analytics/summary ───────────────────────── */
 export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const date = (req.query.date as string) || isoDate(toIST(new Date()));
+  const from = (req.query.from as string) || (req.query.date as string) || isoDate(toIST(new Date()));
+  const to   = (req.query.to   as string) || (req.query.date as string) || isoDate(toIST(new Date()));
+  const date = to; // For backwards compatibility
 
   const { data: kpis } = await supabaseAdmin
     .from('v_daily_kpis').select('*')
-    .eq('org_id', user.org_id).eq('date', date).single();
+    .eq('org_id', user.org_id).eq('date', to).single();
 
   const { count: totalExecs } = await supabaseAdmin
     .from('users').select('id', { count: 'exact', head: true })
@@ -59,7 +61,8 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     .from('form_submissions')
     .select('id, is_converted, user_id, date', { count: 'exact' })
     .eq('org_id', user.org_id)
-    .eq('date', date);
+    .gte('date', from)
+    .lte('date', to);
 
   const userRole = (user.role || '').toLowerCase();
   const isFE = userRole.includes('executive');
@@ -81,7 +84,8 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     .from('attendance')
     .select('status, user_id, date, total_hours, checkin_at')
     .eq('org_id', user.org_id)
-    .gte('date', monthStartStr);
+    .gte('date', from)
+    .lte('date', to);
 
   if (isFE) {
     attendanceQuery = attendanceQuery.eq('user_id', user.id);
@@ -110,9 +114,10 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Fetch top performers (Top 5 by TFF today)
   const { data: topPerf } = await supabaseAdmin
     .from('form_submissions')
-    .select('user_id, users(name, zones(name))')
+    .select('user_id, users(name, zones(id, name))') // Fetch zone info correctly
     .eq('org_id', user.org_id)
-    .eq('date', date);
+    .gte('date', from)
+    .lte('date', to);
 
   const tpMap = new Map<string, { name: string; zone: string; tff: number }>();
   (topPerf || []).forEach((s) => {
@@ -133,7 +138,8 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   
   (topPerf || []).forEach((s) => {
     const u = s.users as any;
-    if (u?.zones?.name && zpMap.has(u.zone_id)) zpMap.get(u.zone_id)!.tff++;
+    const zoneId = u?.zones?.id;
+    if (zoneId && zpMap.has(zoneId)) zpMap.get(zoneId)!.tff++;
   });
   const zonePerformance = Array.from(zpMap.values()).filter(z => z.target > 0 || z.tff > 0);
 
