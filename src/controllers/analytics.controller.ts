@@ -400,7 +400,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
   return ok(res, {
     days: result,
     total_engagements: result.reduce((s, d) => s + d.engagements, 0),
-    total_tff: result.reduce((s, d) => s + d.engagements, 0), // Use total forms for TFF
+    total_tff: result.reduce((s, d) => s + d.tff, 0),
   });
 });
 
