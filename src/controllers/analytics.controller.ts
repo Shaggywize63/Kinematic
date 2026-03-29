@@ -144,7 +144,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   return ok(res, {
     date,
     kpis: {
-      total_tff: totalEngagements, // User: TFF = Total Form Filled
+      total_tff: totalEngagements, // User: Total Forms Filled = Total Submissions
       avg_attendance: kpis?.avg_attendance || (attendancePct > 100 ? 100 : attendancePct),
       total_leaves: totalLeaves || 0,
       total_days_worked: totalDaysWorked || 0,
