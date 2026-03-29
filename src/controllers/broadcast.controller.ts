@@ -65,31 +65,47 @@ export const getQuestions = asyncHandler(async (req: AuthRequest, res: Response)
 export const getAdminQuestions = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
 
-  const { data, error } = await supabaseAdmin
+  const { data: questions, error } = await supabaseAdmin
     .from('broadcast_questions')
     .select(`
       id, question, options, correct_option, is_urgent, deadline_at,
-      status, target_roles, target_zone_ids, target_cities, created_at, updated_at,
-      broadcast_answers(id, selected, is_correct, answered_at, user_id)
+      status, target_roles, target_zone_ids, target_cities, created_at, updated_at
     `)
     .eq('org_id', user.org_id)
     .order('created_at', { ascending: false });
 
   if (error) return serverError(res, error.message);
 
+  // Fetch answers separately to avoid FK/join ambiguity issues
+  const questionIds = (questions || []).map((q) => q.id);
+  const { data: answers } = questionIds.length
+    ? await supabaseAdmin
+        .from('broadcast_answers')
+        .select('question_id, selected, is_correct')
+        .in('question_id', questionIds)
+    : { data: [] };
+
+  const answersByQuestion = (answers || []).reduce<Record<string, { selected: number; is_correct: boolean | null }[]>>(
+    (acc, a) => {
+      if (!acc[a.question_id]) acc[a.question_id] = [];
+      acc[a.question_id].push(a);
+      return acc;
+    },
+    {}
+  );
+
   // Enrich with response counts
-  const enriched = (data || []).map((q) => {
-    const answers = (q.broadcast_answers || []) as { selected: number; is_correct: boolean }[];
+  const enriched = (questions || []).map((q) => {
+    const qAnswers = answersByQuestion[q.id] || [];
     const tally = (q.options as { label: string }[]).map((opt, i) => ({
       ...opt,
       index: i,
-      count: answers.filter((a) => a.selected === i).length,
+      count: qAnswers.filter((a) => a.selected === i).length,
     }));
     return {
       ...q,
-      response_count: answers.length,
+      response_count: qAnswers.length,
       tally,
-      broadcast_answers: undefined,
     };
   });
 
