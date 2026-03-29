@@ -411,23 +411,30 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
 
-  // Fetch first photo for each submission for checkin_photo display
-  const submissionIds = (data || []).map((s) => s.id);
-  const { data: photos } = submissionIds.length
+  // Fetch checkin data from route_plan_outlets (outlet_id = route_plan_outlets.id)
+  const outletIds = [...new Set((data || []).map((s) => s.outlet_id).filter(Boolean))];
+  const { data: outletCheckins } = outletIds.length
     ? await supabaseAdmin
-        .from('form_responses')
-        .select('submission_id, photo_url')
-        .in('submission_id', submissionIds)
-        .not('photo_url', 'is', null)
-        .order('created_at', { ascending: true })
+        .from('route_plan_outlets')
+        .select('id, photo_url, checkin_at, checkin_lat, checkin_lng, store_id, stores(name, address)')
+        .in('id', outletIds)
     : { data: [] };
 
-  const photoMap = new Map<string, string>();
-  for (const p of photos || []) {
-    if (!photoMap.has(p.submission_id)) photoMap.set(p.submission_id, p.photo_url);
-  }
+  const outletCheckinMap = new Map<string, any>();
+  for (const o of outletCheckins || []) outletCheckinMap.set(o.id, o);
 
-  const enriched = (data || []).map((s) => ({ ...s, checkin_photo: photoMap.get(s.id) || null }));
+  const enriched = (data || []).map((s) => {
+    const checkin = outletCheckinMap.get(s.outlet_id) || null;
+    return {
+      ...s,
+      store_name: (checkin?.stores as any)?.name || s.outlet_name || null,
+      checkin_photo: checkin?.photo_url || null,
+      checkin_at: checkin?.checkin_at || null,
+      checkin_lat: checkin?.checkin_lat || null,
+      checkin_lng: checkin?.checkin_lng || null,
+    };
+  });
+
   const result = buildPaginatedResult(enriched, count || 0, page, limit);
   return res.status(200).json({ success: true, ...result });
 });
