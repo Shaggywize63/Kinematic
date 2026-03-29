@@ -154,9 +154,9 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   return ok(res, {
     date,
     kpis: {
-      total_tff: totalTff, // User: TFF (8)
-      total_engagements: totalEngagements, // Total (32)
-      tff_rate: tffRate,
+      total_tff: totalEngagements, // User: TFF is the total count (32)
+      total_engagements: totalEngagements,
+      tff_rate: 100, // Default to 100% if TFF is the total
       avg_attendance: kpis?.avg_attendance || (attendancePct > 100 ? 100 : attendancePct),
       total_leaves: totalLeaves || 0,
       total_days_worked: totalDaysWorked || 0,
@@ -400,7 +400,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
   return ok(res, {
     days: result,
     total_engagements: result.reduce((s, d) => s + d.engagements, 0),
-    total_tff: result.reduce((s, d) => s + d.tff, 0),
+    total_tff: result.reduce((s, d) => s + d.engagements, 0),
   });
 });
 
@@ -568,9 +568,9 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
     summary: { 
       total_outlets: outletMap.size, 
       total_checkins: totalFEsVisited,
-      total_tff: tffCount,
+      total_tff: totalEngage, // Set TFF to total submissions (32)
       total_engagements: totalEngage,
-      tff_rate: totalEngage > 0 ? Math.round((tffCount / totalEngage) * 100) : 0
+      tff_rate: 100
     },
     outlets: outlets.slice(0, 50),
     cities: [], // Placeholder if cities breakdown not needed here
