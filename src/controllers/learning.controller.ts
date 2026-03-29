@@ -95,3 +95,21 @@ export const updateProgress = asyncHandler(async (req: AuthRequest, res: Respons
   if (error) return badRequest(res, error.message);
   return ok(res, data);
 });
+// DELETE /api/v1/learning/:id (admin+)
+export const deleteMaterial = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+
+  const { data, error } = await supabaseAdmin
+    .from('learning_materials')
+    .update({ is_active: false })
+    .eq('id', id)
+    .eq('org_id', user.org_id)
+    .select()
+    .single();
+
+  if (error) return badRequest(res, error.message);
+  if (!data) return notFound(res, 'Material not found');
+
+  return ok(res, null, 'Material deleted');
+});

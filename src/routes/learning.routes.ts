@@ -8,5 +8,7 @@ router.use(requireAuth);
 router.get('/',                   ctrl.getMaterials);
 router.post('/',                  requireAdminOrAbove, ctrl.createMaterial);
 router.post('/:id/progress',      ctrl.updateProgress);
+router.delete('/:id',            requireAdminOrAbove, ctrl.deleteMaterial);
+
 
 export default router;
