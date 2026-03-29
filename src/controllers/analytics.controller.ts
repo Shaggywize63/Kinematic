@@ -253,7 +253,7 @@ export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Resp
 
   const startDate = new Date(startStr);
   const endDate   = new Date(endStr);
-  const daysArr   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const daysArr   = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   
   // Dynamically build the grid based on the date range
   const diffTime = Math.abs(endDate.getTime() - startDate.getTime());
