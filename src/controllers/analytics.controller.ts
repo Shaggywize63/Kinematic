@@ -7,7 +7,13 @@ import { asyncHandler } from '../utils/asyncHandler';
 const toIST = (utcDate: Date): Date =>
   new Date(utcDate.getTime() + 5.5 * 60 * 60 * 1000);
 
-const isoDate = (d: Date) => d.toISOString().split('T')[0];
+const isoDate = (d: Date) => {
+  // Use local-friendly ISO string to avoid UTC shift
+  const Y = d.getFullYear();
+  const M = (d.getMonth() + 1).toString().padStart(2, '0');
+  const D = d.getDate().toString().padStart(2, '0');
+  return `${Y}-${M}-${D}`;
+};
 
 const enrichWithHours = (r: any) => {
   if (r && r.total_hours == null && r.checkin_at) {
@@ -368,10 +374,15 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
     from = days7[0]; to = days7[6];
   }
 
-  // Build date range array
-  const start = new Date(from + 'T00:00:00'); const end = new Date(to + 'T23:59:59');
+  // Build date range array using stable local date generation
+  const start = new Date(from + 'T00:00:00');
+  const end = new Date(to + 'T23:59:59');
   const days: string[] = [];
-  for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) days.push(isoDate(new Date(d)));
+  const curr = new Date(start);
+  while (curr <= end) {
+    days.push(isoDate(new Date(curr)));
+    curr.setDate(curr.getDate() + 1);
+  }
 
   const { data, error } = await supabaseAdmin
     .from('form_submissions')
