@@ -81,31 +81,59 @@ export const getAdminQuestions = asyncHandler(async (req: AuthRequest, res: Resp
   const { data: answers } = questionIds.length
     ? await supabaseAdmin
         .from('broadcast_answers')
-        .select('question_id, selected, is_correct')
+        .select('question_id, user_id, selected, is_correct, answered_at')
         .in('question_id', questionIds)
+        .order('answered_at', { ascending: true })
     : { data: [] };
 
-  const answersByQuestion = (answers || []).reduce<Record<string, { selected: number; is_correct: boolean | null }[]>>(
+  // Fetch user names for all respondents
+  const userIds = [...new Set((answers || []).map((a) => a.user_id).filter(Boolean))];
+  const { data: users } = userIds.length
+    ? await supabaseAdmin
+        .from('users')
+        .select('id, name, employee_id')
+        .in('id', userIds)
+    : { data: [] };
+
+  const userMap = (users || []).reduce<Record<string, { name: string; employee_id: string }>>(
+    (acc, u) => { acc[u.id] = { name: u.name, employee_id: u.employee_id }; return acc; },
+    {}
+  );
+
+  const answersByQuestion = (answers || []).reduce<
+    Record<string, { user_id: string; user_name: string; employee_id: string; selected: number; is_correct: boolean | null; answered_at: string }[]>
+  >(
     (acc, a) => {
       if (!acc[a.question_id]) acc[a.question_id] = [];
-      acc[a.question_id].push(a);
+      const u = userMap[a.user_id] || { name: 'Unknown', employee_id: '' };
+      acc[a.question_id].push({ ...a, user_name: u.name, employee_id: u.employee_id });
       return acc;
     },
     {}
   );
 
-  // Enrich with response counts
+  // Enrich with response counts and per-responder list
   const enriched = (questions || []).map((q) => {
     const qAnswers = answersByQuestion[q.id] || [];
-    const tally = (q.options as { label: string }[]).map((opt, i) => ({
+    const opts = q.options as { label: string }[];
+    const tally = opts.map((opt, i) => ({
       ...opt,
       index: i,
       count: qAnswers.filter((a) => a.selected === i).length,
+    }));
+    const responses = qAnswers.map((a) => ({
+      user_name: a.user_name,
+      employee_id: a.employee_id,
+      selected_label: opts[a.selected]?.label ?? `Option ${a.selected + 1}`,
+      selected_index: a.selected,
+      is_correct: a.is_correct,
+      answered_at: a.answered_at,
     }));
     return {
       ...q,
       response_count: qAnswers.length,
       tally,
+      responses,
     };
   });
 
