@@ -107,19 +107,52 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   });
 
 
+  // Fetch top performers (Top 5 by TFF today)
+  const { data: topPerf } = await supabaseAdmin
+    .from('form_submissions')
+    .select('user_id, users(name, zones(name))')
+    .eq('org_id', user.org_id)
+    .eq('date', date);
+
+  const tpMap = new Map<string, { name: string; zone: string; tff: number }>();
+  (topPerf || []).forEach((s) => {
+    const u = s.users as any;
+    if (!tpMap.has(s.user_id)) tpMap.set(s.user_id, { name: u?.name || 'Unknown', zone: u?.zones?.name || 'Unknown', tff: 0 });
+    tpMap.get(s.user_id)!.tff++;
+  });
+  const topPerformers = Array.from(tpMap.values()).sort((a, b) => b.tff - a.tff).slice(0, 5);
+
+  // Fetch zone performance (TFF vs Target)
+  const { data: zones } = await supabaseAdmin
+    .from('zones')
+    .select('id, name, tff_target')
+    .eq('org_id', user.org_id);
+
+  const zpMap = new Map<string, { zone: string; tff: number; target: number }>();
+  (zones || []).forEach((z) => zpMap.set(z.id, { zone: z.name, tff: 0, target: z.tff_target || 0 }));
+  
+  (topPerf || []).forEach((s) => {
+    const u = s.users as any;
+    if (u?.zones?.name && zpMap.has(u.zone_id)) zpMap.get(u.zone_id)!.tff++;
+  });
+  const zonePerformance = Array.from(zpMap.values()).filter(z => z.target > 0 || z.tff > 0);
+
   return ok(res, {
     date,
-    total_contacts: totalEngagements,
-    tff_count: totalTff,
-    effective_contacts: totalTff, // Approximation
+    kpis: {
+      total_tff: totalEngagements, // User: TFF = Total Form Filled
+      tff_count: totalEngagements,
+      avg_attendance: kpis?.avg_attendance || 0,
+      total_leaves: totalLeaves || 0,
+      total_days_worked: totalDaysWorked || 0,
+      total_hours_worked: +totalHoursWorked.toFixed(1),
+      total_visits: totalEngagements,
+      active_sos: activeSos || 0,
+      open_grievances: openGrievances || 0,
+    },
+    top_performers: topPerformers,
+    zone_performance: zonePerformance,
     total_executives: totalExecs || 0,
-    active_sos_alerts: activeSos || 0,
-    open_grievances: openGrievances || 0,
-    total_days_worked: totalDaysWorked || 0,
-    total_leaves: totalLeaves || 0,
-    avg_hours: kpis?.avg_hours_worked || 0,
-    total_hours_worked: +totalHoursWorked.toFixed(1),
-    total_visits: totalVisits || 0,
   });
 });
 
@@ -369,7 +402,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
   return ok(res, {
     days: result,
     total_engagements: result.reduce((s, d) => s + d.engagements, 0),
-    total_tff: result.reduce((s, d) => s + d.tff, 0),
+    total_tff: result.reduce((s, d) => s + d.engagements, 0), // Use total forms for TFF
   });
 });
 
@@ -514,7 +547,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   });
 
   const outlets = Array.from(outletMap.entries())
-    .map(([name, d]) => ({ name, ...d, tff_rate: d.visits > 0 ? Math.round((d.tff / d.visits) * 100) : 0 }))
+    .map(([name, d]) => ({ name, ...d, tff: d.visits, tff_rate: 100 }))
     .sort((a, b) => b.visits - a.visits);
 
   // City breakdown
@@ -606,8 +639,9 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   });
 
   const result = Array.from(cityAgg.entries()).map(([city, d]) => ({
-    city, zones: d.zones.size, active_fes: d.fes.size, checkins: d.engagements, 
-    engagements: d.engagements, tff: d.tff, tff_rate: d.engagements > 0 ? Math.round((d.tff / d.engagements) * 100) : 0,
+    city, zones: d.zones.size, active_fes: d.fes.size, checkins: d.checkins,
+    engagements: d.engagements, tff: d.engagements, // User: TFF = Total Form Filled
+    tff_rate: 100, // or other calculation if needed
     unique_outlets: d.outlets.size,
     avg_hours: d.fes.size > 0 ? +(d.total_hours / d.fes.size).toFixed(1) : 0,
     lat: d.lat, lng: d.lng,
