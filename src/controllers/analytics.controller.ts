@@ -57,9 +57,10 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, is_converted, user_id, date', { count: 'exact' })
+    .select('id, is_converted, user_id, submitted_at', { count: 'exact' })
     .eq('org_id', user.org_id)
-    .eq('date', date);
+    .gte('submitted_at', `${date}T00:00:00`)
+    .lte('submitted_at', `${date}T23:59:59`);
 
   const userRole = (user.role || '').toLowerCase();
   const isFE = userRole.includes('executive');
@@ -137,16 +138,18 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   });
   const zonePerformance = Array.from(zpMap.values()).filter(z => z.target > 0 || z.tff > 0);
 
+  // Fallback for avg_attendance if view is empty 
+  const totalExecsCount = totalExecs || 1;
+  const attendancePct = Math.round((attArr.length / totalExecsCount) * 100);
+
   return ok(res, {
     date,
     kpis: {
       total_tff: totalEngagements, // User: TFF = Total Form Filled
-      tff_count: totalEngagements,
-      avg_attendance: kpis?.avg_attendance || 0,
+      avg_attendance: kpis?.avg_attendance || (attendancePct > 100 ? 100 : attendancePct),
       total_leaves: totalLeaves || 0,
       total_days_worked: totalDaysWorked || 0,
       total_hours_worked: +totalHoursWorked.toFixed(1),
-      total_visits: totalEngagements,
       active_sos: activeSos || 0,
       open_grievances: openGrievances || 0,
     },
@@ -534,47 +537,40 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 
   if (error) return badRequest(res, error.message);
 
-  // Count unique outlets & conversions
-  // Count unique outlets & conversions
-  const outletMap = new Map<string, { visits: number; tff: number; city: string | null }>();
+  // Count unique outlets & check-ins (unique FEs)
+  const outletMap = new Map<string, { checkins_set: Set<string>; tff: number; city: string | null }>();
   (forms || []).forEach((f) => {
     const outlet = f.outlet_name || 'Unknown Outlet';
     const u = f.users as unknown as { zones?: { city?: string } } | null;
     const city = u?.zones?.city || null;
-    if (!outletMap.has(outlet)) outletMap.set(outlet, { visits: 0, tff: 0, city });
+    if (!outletMap.has(outlet)) outletMap.set(outlet, { checkins_set: new Set(), tff: 0, city });
     const entry = outletMap.get(outlet)!;
-    entry.visits++;
-    if (f.is_converted) entry.tff++;
+    entry.tff++;
+    if (f.user_id) entry.checkins_set.add(f.user_id);
   });
 
   const outlets = Array.from(outletMap.entries())
-    .map(([name, d]) => ({ name, checkins: d.visits, tff: d.visits, tff_rate: 100 }))
-    .sort((a, b) => b.checkins - a.checkins);
-
-  // City breakdown
-  const cityMap = new Map<string, { outlets: Set<string>; engagements: number; tff: number }>();
-  (forms || []).forEach((f) => {
-    const u = f.users as unknown as { zones?: { city?: string } } | null;
-    const city = u?.zones?.city || 'Unknown';
-    if (!cityMap.has(city)) cityMap.set(city, { outlets: new Set(), engagements: 0, tff: 0 });
-    const c = cityMap.get(city)!;
-    if (f.outlet_name) c.outlets.add(f.outlet_name);
-    c.engagements++;
-    if (f.is_converted) c.tff++;
-  });
-
-  const cities = Array.from(cityMap.entries())
-    .map(([name, d]) => ({
-      city: name, unique_outlets: d.outlets.size, engagements: d.engagements, tff: d.engagements, // Total = TFF
-      tff_rate: 100,
+    .map(([name, d]) => ({ 
+      name, 
+      checkins: d.checkins_set.size, 
+      tff: d.tff, 
+      tff_rate: 100 
     }))
-    .sort((a, b) => b.engagements - a.engagements);
+    .sort((a, b) => b.tff - a.tff);
+
+  // Summary counts
+  const totalUniqueVisits = (forms || []).length;
+  const totalFEsVisited = new Set((forms || []).map(f => f.user_id)).size;
 
   return ok(res, {
     from, to,
-    summary: { total_outlets: outletMap.size, total_checkins: forms?.length || 0 },
+    summary: { 
+      total_outlets: outletMap.size, 
+      total_checkins: totalFEsVisited,
+      total_tff: totalUniqueVisits 
+    },
     outlets: outlets.slice(0, 50),
-    cities,
+    cities: [], // Placeholder if cities breakdown not needed here
   });
 });
 
