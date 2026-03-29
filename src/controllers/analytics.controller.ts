@@ -59,10 +59,10 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, is_converted, user_id, date', { count: 'exact' })
+    .select('id, is_converted, user_id, submitted_at, date', { count: 'exact' })
     .eq('org_id', user.org_id)
-    .gte('date', from)
-    .lte('date', to);
+    .gte('submitted_at', `${from}T00:00:00`)
+    .lte('submitted_at', `${to}T23:59:59`);
 
   const userRole = (user.role || '').toLowerCase();
   const isFE = userRole.includes('executive');
@@ -113,13 +113,13 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   });
 
 
-  // Fetch top performers (Top 5 by TFF in range)
+  // Fetch top performers (Top 5 by TFF in range) - reverting to submitted_at for completeness
   const { data: topPerf } = await supabaseAdmin
     .from('form_submissions')
-    .select('user_id, is_converted, users(name, zone_id, zones(id, name))')
+    .select('user_id, is_converted, submitted_at, users(name, zone_id, zones(id, name))')
     .eq('org_id', user.org_id)
-    .gte('date', from)
-    .lte('date', to);
+    .gte('submitted_at', `${from}T00:00:00`)
+    .lte('submitted_at', `${to}T23:59:59`);
 
   const tpMap = new Map<string, { name: string; zone: string; tff: number }>();
   (topPerf || []).forEach((s) => {
@@ -375,17 +375,19 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 
   const { data, error } = await supabaseAdmin
     .from('form_submissions')
-    .select('date, is_converted')
+    .select('submitted_at, is_converted, date')
     .eq('org_id', user.org_id)
-    .gte('date', from)
-    .lte('date', to);
+    .gte('submitted_at', `${from}T00:00:00`)
+    .lte('submitted_at', `${to}T23:59:59`);
 
   if (error) return badRequest(res, error.message);
 
   const byDay: Record<string, { engagements: number; tff: number }> = {};
   days.forEach((d) => { byDay[d] = { engagements: 0, tff: 0 }; });
   (data || []).forEach((s: any) => {
-    const d = s.date;
+    // Revert to deriving date from submitted_at to ensure accuracy for records missing the 'date' column
+    const ist = toIST(new Date(s.submitted_at));
+    const d = `${ist.getFullYear()}-${(ist.getMonth() + 1).toString().padStart(2, '0')}-${ist.getDate().toString().padStart(2, '0')}`;
     if (byDay[d]) { byDay[d].engagements++; if (s.is_converted) byDay[d].tff++; }
   });
 
@@ -523,13 +525,13 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   const from  = (req.query.from  as string) || isoDate(new Date());
   const to    = (req.query.to    as string) || isoDate(new Date());
 
-  // All unique outlets from form_submissions in range
+  // All unique outlets from form_submissions in range - reverting to submitted_at
   const { data: forms, error } = await supabaseAdmin
     .from('form_submissions')
-    .select('outlet_name, is_converted, user_id, date, users(name, zones(name, city))')
+    .select('outlet_name, is_converted, user_id, submitted_at, date, users(name, zones(name, city))')
     .eq('org_id', user.org_id)
-    .gte('date', from)
-    .lte('date', to);
+    .gte('submitted_at', `${from}T00:00:00`)
+    .lte('submitted_at', `${to}T23:59:59`);
 
   if (error) return badRequest(res, error.message);
 
