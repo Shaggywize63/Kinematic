@@ -20,7 +20,16 @@ export const uploadFile = asyncHandler(async (req: AuthRequest, res: Response) =
   if (!BUCKET_MAP[type]) return badRequest(res, `Invalid upload type. Valid: ${Object.keys(BUCKET_MAP).join(', ')}`);
   if (!req.file) return badRequest(res, 'No file provided');
 
-  const ext = req.file.mimetype.split('/')[1].replace('jpeg', 'jpg');
+  const MIME_TO_EXT: Record<string, string> = {
+    'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/heic': 'heic',
+    'application/pdf': 'pdf',
+    'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/x-msvideo': 'avi', 'video/webm': 'webm',
+    'application/vnd.ms-powerpoint': 'ppt',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  };
+  const ext = MIME_TO_EXT[req.file.mimetype] ?? req.file.mimetype.split('/')[1]?.replace('jpeg', 'jpg') ?? 'bin';
   const path = `${user.org_id}/${user.id}/${uuidv4()}.${ext}`;
   const bucket = BUCKET_MAP[type];
 

@@ -9,7 +9,7 @@ const materialSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
   category: z.string().optional(),
-  type: z.enum(['video','pdf','slides','document','link']),
+  type: z.enum(['video','pdf','slides','document','link','image']),
   file_url: z.string().url(),
   thumbnail_url: z.string().url().optional(),
   duration_min: z.number().int().optional(),
