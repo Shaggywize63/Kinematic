@@ -535,6 +535,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   if (error) return badRequest(res, error.message);
 
   // Count unique outlets & conversions
+  // Count unique outlets & conversions
   const outletMap = new Map<string, { visits: number; tff: number; city: string | null }>();
   (forms || []).forEach((f) => {
     const outlet = f.outlet_name || 'Unknown Outlet';
@@ -547,8 +548,8 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   });
 
   const outlets = Array.from(outletMap.entries())
-    .map(([name, d]) => ({ name, ...d, tff: d.visits, tff_rate: 100 }))
-    .sort((a, b) => b.visits - a.visits);
+    .map(([name, d]) => ({ name, checkins: d.visits, tff: d.visits, tff_rate: 100 }))
+    .sort((a, b) => b.checkins - a.checkins);
 
   // City breakdown
   const cityMap = new Map<string, { outlets: Set<string>; engagements: number; tff: number }>();
@@ -564,14 +565,14 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 
   const cities = Array.from(cityMap.entries())
     .map(([name, d]) => ({
-      city: name, unique_outlets: d.outlets.size, engagements: d.engagements, tff: d.tff,
-      tff_rate: d.engagements > 0 ? Math.round((d.tff / d.engagements) * 100) : 0,
+      city: name, unique_outlets: d.outlets.size, engagements: d.engagements, tff: d.engagements, // Total = TFF
+      tff_rate: 100,
     }))
     .sort((a, b) => b.engagements - a.engagements);
 
   return ok(res, {
     from, to,
-    summary: { total_outlets: outletMap.size, total_visits: forms?.length || 0 },
+    summary: { total_outlets: outletMap.size, total_checkins: forms?.length || 0 },
     outlets: outlets.slice(0, 50),
     cities,
   });
