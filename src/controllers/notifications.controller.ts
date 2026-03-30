@@ -207,6 +207,20 @@ export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => 
   return ok(res, null, 'Marked as read');
 });
 
+// PATCH /api/v1/notifications/fcm-token
+export const updateFcmToken = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { token } = req.body;
+  if (!token) return badRequest(res, 'Token is required');
+
+  const { error } = await supabaseAdmin
+    .from('users')
+    .update({ fcm_token: token })
+    .eq('id', req.user!.id);
+
+  if (error) return badRequest(res, error.message);
+  return ok(res, null, 'FCM token updated');
+});
+
 // PATCH /api/v1/notifications/read-all
 export const markAllRead = asyncHandler(async (req: AuthRequest, res: Response) => {
   await supabaseAdmin
