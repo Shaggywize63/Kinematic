@@ -567,9 +567,6 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 
   const outlets = Array.from(outletMap.entries())
     .map(([name, d]) => {
-      const rate = d.tff > 0 ? (d.tff / d.tff) * 100 : 0; // Placeholder fix or correct if d.engagements exists
-      // If engagements not in map, default to tff/tff = 100 for now. 
-      // User says d.tff should be 8 and d.engagements should be 32 globally.
       return { 
         name, 
         checkins: d.checkins_set.size, 
@@ -581,7 +578,6 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 
   // Summary counts
   const totalEngage = (forms || []).length;
-  const tffCount = (forms || []).filter(f => f.is_converted).length;
   const totalFEsVisited = new Set((forms || []).map(f => f.user_id)).size;
 
   return ok(res, {
@@ -595,6 +591,103 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
     },
     outlets: outlets.slice(0, 50),
     cities: [], // Placeholder if cities breakdown not needed here
+  });
+});
+
+/* ── GET /api/v1/analytics/dashboard-init ────────────────── */
+export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const today = isoDate(toIST(new Date()));
+  const sevenDaysAgo = isoDate(new Date(Date.now() - 6 * 86400000));
+
+  // 1. Attendance Today (Minimal summary)
+  const { data: att } = await supabaseAdmin.from('attendance').select('status, is_regularised, checkout_at').eq('org_id', user.org_id).eq('date', today);
+  const { count: totalExecs } = await supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+
+  const attSummary = {
+    total: totalExecs || 0,
+    present: (att || []).filter(a => (a.status === 'checked_in' || a.status === 'present') && !a.checkout_at).length,
+    on_break: (att || []).filter(a => a.status === 'on_break').length,
+    checked_out: (att || []).filter(a => a.checkout_at).length,
+    absent: (totalExecs || 0) - (att || []).length,
+    regularised: (att || []).filter(a => a.is_regularised).length,
+  };
+
+  // 2. Main KPIs (Summary logic)
+  const { data: kpisView } = await supabaseAdmin.from('v_daily_kpis').select('*').eq('org_id', user.org_id).eq('date', today).single();
+  const { count: openGrievances } = await supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'submitted');
+  
+  // 3. Weekly Trends
+  const { data: weekSubs } = await supabaseAdmin.from('form_submissions').select('submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${sevenDaysAgo}T00:00:00`);
+  const dayMap: Record<string, number> = {};
+  for(let i=0; i<7; i++) {
+    const d = isoDate(new Date(Date.now() - i * 86400000));
+    dayMap[d] = 0;
+  }
+  (weekSubs || []).forEach(s => {
+    const d = isoDate(toIST(new Date(s.submitted_at)));
+    if (dayMap[d] !== undefined) dayMap[d]++;
+  });
+
+  const weeklyDays = Object.entries(dayMap).map(([date, tff]) => ({
+    date,
+    label: new Date(date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }),
+    short_label: new Date(date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short' }),
+    tff
+  })).sort((a,b) => a.date.localeCompare(b.date));
+
+  return ok(res, {
+    attendance: attSummary,
+    kpis: {
+      total_tff: (weekSubs || []).filter(s => isoDate(toIST(new Date(s.submitted_at))) === today).length,
+      avg_attendance: kpisView?.avg_attendance || Math.round(((att?.length || 0) / (totalExecs || 1)) * 100),
+      open_grievances: openGrievances || 0
+    },
+    weekly: { days: weeklyDays, total_tff: weekSubs?.length || 0 }
+  });
+});
+
+/* ── GET /api/v1/analytics/mobile-home ───────────────────── */
+export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const today = isoDate(toIST(new Date()));
+
+  // 1. Today Attendance Status (Crucial for flicker fix)
+  const { data: attRecord } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('user_id', user.id).eq('date', today).maybeSingle();
+  if (attRecord) enrichWithHours(attRecord);
+
+  // 2. Summary Stats (FE-specific)
+  const { count: myTff } = await supabaseAdmin.from('form_submissions').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('date', today);
+  
+  // 3. Today's Route Plan
+  const { data: plan } = await supabaseAdmin.from('v_route_plan_daily').select('*').eq('user_id', user.id).eq('plan_date', today).maybeSingle();
+  let outlets = [];
+  if (plan) {
+    const { data: out } = await supabaseAdmin.from('v_route_outlet_detail').select('*').eq('route_plan_id', plan.id).order('visit_order', { ascending: true });
+    outlets = out || [];
+  }
+
+  // 4. Notifications (Unread count)
+  const { count: unread } = await supabaseAdmin.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('is_read', false);
+
+  // 5. Quote
+  const { data: quote } = await supabaseAdmin.from('motivation_quotes').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
+
+  // 6. Broadcast
+  const { data: broadcast } = await supabaseAdmin.from('notification_broadcasts').select('*').eq('org_id', user.org_id).order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (broadcast) {
+    const { data: ans } = await supabaseAdmin.from('notifications').select('id').eq('broadcast_id', broadcast.id).eq('user_id', user.id).eq('is_interacted', true).maybeSingle();
+    (broadcast as any).alreadyAnswered = !!ans;
+  }
+
+  return ok(res, {
+    today: attRecord || null,
+    summary: { tffCount: myTff || 0 },
+    routePlan: plan ? [{ ...plan, outlets }] : [],
+    unreadCount: unread || 0,
+    quote: quote || null,
+    broadcast: broadcast || null,
+    timestamp: new Date().toISOString()
   });
 });
 
