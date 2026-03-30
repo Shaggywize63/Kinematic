@@ -5,6 +5,8 @@ import { AuthRequest } from '../types';
 import { ok, badRequest } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
+import { messaging } from '../lib/firebase';
+import { logger } from '../lib/logger';
 
 const fcmSchema = z.object({ fcm_token: z.string().min(10) });
 
@@ -35,6 +37,132 @@ export const getNotifications = asyncHandler(async (req: AuthRequest, res: Respo
   if (error) return badRequest(res, error.message);
   return ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
 });
+
+// GET /api/v1/notifications/history (Admin/Supervisor Only)
+export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  
+  const { data, error } = await supabaseAdmin
+    .from('notification_broadcasts')
+    .select('*')
+    .eq('org_id', user.org_id)
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  if (error) return badRequest(res, error.message);
+  return ok(res, data || []);
+});
+
+// POST /api/v1/notifications/send (Admin/Supervisor Only)
+export const sendNotification = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { title, body: content, priority, targeting } = req.body;
+  const user = req.user!;
+
+  if (!title || !content) return badRequest(res, 'Title and message are required');
+
+  // Targeting Logic
+  const { city, supervisor_id, fe_id } = targeting || {};
+  let targetUserIds: string[] = [];
+
+  const baseQuery = supabaseAdmin.from('users').select('id').eq('org_id', user.org_id).eq('is_active', true);
+
+  if (fe_id) {
+    targetUserIds = [fe_id];
+  } else if (supervisor_id) {
+    // Both supervisor and their FEs
+    const { data: feData } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .or(`id.eq.${supervisor_id},supervisor_id.eq.${supervisor_id}`)
+      .eq('org_id', user.org_id);
+    targetUserIds = (feData || []).map(u => u.id);
+  } else if (city) {
+    const { data: cityData } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('city', city)
+      .eq('org_id', user.org_id);
+    targetUserIds = (cityData || []).map(u => u.id);
+  } else {
+    // All users in org
+    const { data: allData } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('org_id', user.org_id);
+    targetUserIds = (allData || []).map(u => u.id);
+  }
+
+  if (targetUserIds.length === 0) return badRequest(res, 'No recipients found for the selected target');
+
+  // audience_summary for history
+  const audience_summary = fe_id ? '1 Individual' : supervisor_id ? 'Supervisor & Team' : city ? `City: ${city}` : 'All Users';
+
+  // 1. Create the broadcast history record
+  const { data: broadcast, error: bErr } = await supabaseAdmin
+    .from('notification_broadcasts')
+    .insert({
+      org_id: user.org_id,
+      title,
+      body: content,
+      priority: priority || 'info',
+      audience_summary,
+      recipients_count: targetUserIds.length,
+      targeting
+    })
+    .select().single();
+
+  if (bErr) return badRequest(res, bErr.message);
+
+  // 2. Insert notifications for each recipient
+  const notifications = targetUserIds.map(uid => ({
+    user_id: uid,
+    org_id: user.org_id,
+    title,
+    body: content,
+    type: 'broadcast',
+    is_read: false
+  }));
+
+  // Batch insert in chunks of 100 to avoid query size limits
+  const chunkSize = 100;
+  for (let i = 0; i < notifications.length; i += chunkSize) {
+    const chunk = notifications.slice(i, i + chunkSize);
+    await supabaseAdmin.from('notifications').insert(chunk);
+  }
+
+  // 3. Trigger FCM Push Notifications
+  if (messaging && targetUserIds.length > 0) {
+    try {
+      // Fetch FCM tokens for the target users
+      const { data: userData } = await supabaseAdmin
+        .from('users')
+        .select('fcm_token')
+        .in('id', targetUserIds)
+        .not('fcm_token', 'is', null);
+
+      const tokens = (userData || [])
+        .map(u => u.fcm_token)
+        .filter(t => t && t.length > 10) as string[];
+
+      if (tokens.length > 0) {
+        const message = {
+          notification: { title, body: content },
+          data: { type: 'broadcast', priority: priority || 'info' },
+          tokens: tokens,
+        };
+
+        const response = await messaging.sendEachForMulticast(message);
+        logger.info(`FCM: Sent to ${response.successCount} users, failed for ${response.failureCount} users`);
+      }
+    } catch (fcmErr: any) {
+      logger.error('FCM Multicast error: ' + fcmErr.message);
+    }
+  }
+
+  return ok(res, broadcast, 'Notification sent to ' + targetUserIds.length + ' recipients');
+});
+
+
 
 // PATCH /api/v1/notifications/:id/read
 export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => {

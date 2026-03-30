@@ -34,7 +34,7 @@ export function getPagination(
   limit = 20
 ): PaginationParams {
   const safePage  = Math.max(1, page)
-  const safeLimit = Math.min(100, Math.max(1, limit))
+  const safeLimit = Math.min(1000, Math.max(1, limit))
   return {
     page: safePage,
     limit: safeLimit,
