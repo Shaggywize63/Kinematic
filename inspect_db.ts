@@ -1,24 +1,19 @@
-import { supabaseAdmin } from './src/lib/supabase';
+import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
+dotenv.config();
 
-async function checkData() {
-  console.log('--- Checking form_submissions data ---');
-  const { data, error } = await supabaseAdmin
-    .from('form_submissions')
-    .select('id, submitted_at, org_id')
-    .limit(10);
+const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+const orgId = '346b9a9d-5969-42b7-a367-5f11550974b2'; // From context
 
-  if (error) {
-    console.error('Error:', error);
-    return;
-  }
+async function inspect() {
+  const today = new Date().toISOString().split('T')[0];
+  console.log('Today:', today);
 
-  console.log('Sample rows:', data);
+  const { data: activities } = await supabase.from('activities').select('id, name');
+  console.log('Activities:', activities);
 
-  const { count, error: countErr } = await supabaseAdmin
-    .from('form_submissions')
-    .select('*', { count: 'exact', head: true });
-
-  console.log('Total count:', count);
+  const { data: cols } = await supabase.from('form_submissions').select('*').limit(1);
+  console.log('Form Submissions Columns:', Object.keys(cols?.[0] || {}));
 }
 
-checkData();
+inspect();
