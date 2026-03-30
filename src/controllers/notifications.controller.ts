@@ -12,9 +12,10 @@ const fcmSchema = z.object({ fcm_token: z.string().min(10) });
 
 // PATCH /api/v1/notifications/fcm-token
 export const updateFcmToken = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const body = fcmSchema.safeParse(req.body);
-  if (!body.success) return badRequest(res, 'fcm_token is required');
-  await supabaseAdmin.from('users').update({ fcm_token: body.data.fcm_token }).eq('id', req.user!.id);
+  const { token } = req.body;
+  if (!token) return badRequest(res, 'token is required');
+  const { error } = await supabaseAdmin.from('users').update({ fcm_token: token }).eq('id', req.user!.id);
+  if (error) return badRequest(res, error.message);
   return ok(res, null, 'FCM token updated');
 });
 
@@ -35,77 +36,57 @@ export const getNotifications = asyncHandler(async (req: AuthRequest, res: Respo
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
-  console.log(`[DIAGNOSTIC] Fetch Notifications: User=${user.id}, Found=${(data || []).length}`);
   return ok(res, data || []);
 });
 
-// GET /api/v1/notifications/history (Admin/Supervisor Only)
+// GET /api/v1/notifications/history (Admin only)
 export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  
-  const { data, error } = await supabaseAdmin
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 10;
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
+
+  console.log(`[DIAGNOSTIC] Fetching notifications history: Page=${page}, Limit=${limit}, Range=${from}-${to}`);
+
+  const { data, error, count } = await supabaseAdmin
     .from('notification_broadcasts')
-    .select('*')
+    .select('*', { count: 'exact' })
     .eq('org_id', user.org_id)
     .order('created_at', { ascending: false })
-    .limit(50);
+    .range(from, to);
 
-  if (error) {
-    console.error('[DIAGNOSTIC] Notification history fetching failed:', error.message);
-    // If table doesn't exist, don't crash the dashboard.
-    return res.status(200).json({ success: true, data: [] });
-  }
-  return ok(res, data || []);
+  if (error) return badRequest(res, error.message);
+  return ok(res, { data: data || [], totalCount: count || 0 });
 });
 
-// POST /api/v1/notifications/send (Admin/Supervisor Only)
+// POST /api/v1/notifications/send
 export const sendNotification = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { title, body: content, priority, targeting, send_push } = req.body;
   const user = req.user!;
 
-  if (!title || !content) return badRequest(res, 'Title and message are required');
+  if (!title || !content) return badRequest(res, 'Title and message (body) are required');
 
-  // Targeting Logic
+  // 1. Identify recipients based on targeting
   const { city, supervisor_id, fe_id } = targeting || {};
-  let targetUsers: { id: string, org_id: string }[] = [];
-
-  const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager'].includes(user.role?.toLowerCase());
+  let usersQuery = supabaseAdmin.from('users').select('id, org_id, fcm_token').eq('org_id', user.org_id);
 
   if (fe_id) {
-    const { data } = await supabaseAdmin.from('users').select('id, org_id').eq('id', fe_id).single();
-    if (data) targetUsers = [data];
-  } else if (supervisor_id) {
-    // Both supervisor and their FEs
-    let q = supabaseAdmin.from('users').select('id, org_id').or(`id.eq.${supervisor_id},supervisor_id.eq.${supervisor_id}`);
-    if (!isPrivileged) q = q.eq('org_id', user.org_id);
-    const { data } = await q;
-    targetUsers = data || [];
-  } else if (city) {
-    let q = supabaseAdmin.from('users').select('id, org_id').eq('city', city).eq('is_active', true);
-    if (!isPrivileged) q = q.eq('org_id', user.org_id);
-    const { data } = await q;
-    targetUsers = data || [];
+    usersQuery = usersQuery.eq('id', fe_id);
   } else {
-    // All users
-    let q = supabaseAdmin.from('users').select('id, org_id').eq('is_active', true);
-    if (!isPrivileged) q = q.eq('org_id', user.org_id);
-    const { data } = await q;
-    targetUsers = data || [];
+    if (city) usersQuery = usersQuery.eq('city', city);
+    if (supervisor_id) usersQuery = usersQuery.eq('supervisor_id', supervisor_id);
   }
 
-  const targetUserIds = targetUsers.map(u => u.id);
+  const { data: targetUsers, error: uErr } = await usersQuery;
+  if (uErr) return badRequest(res, uErr.message);
+  
+  const targetUserIds = (targetUsers || []).map(u => u.id);
+  if (targetUserIds.length === 0) return badRequest(res, 'No recipients found for the selected targeting');
 
-  if (targetUserIds.length === 0) {
-    console.warn(`[DIAGNOSTIC] No recipients found for target. RequesterOrg=${user.org_id}, Privileged=${isPrivileged}`);
-    return badRequest(res, 'No recipients found for the selected target');
-  }
-
-  console.log(`[DIAGNOSTIC] Targeting Success: Found ${targetUserIds.length} users across ${[...new Set(targetUsers.map(u => u.org_id))].length} organizations.`);
-
-  // audience_summary for history
-  const audience_summary = fe_id ? '1 Individual' : supervisor_id ? 'Supervisor & Team' : city ? `City: ${city}` : 'All Users';
-
-  // 1. Create the broadcast history record
+  // Log to Broadcast History first to get a Broadcast ID
+  const audience_summary = fe_id ? 'Individual FE' : (city || supervisor_id) ? `${city || ''} ${supervisor_id ? 'Team' : ''}` : 'All Users';
+  
   const { data: broadcast, error: bErr } = await supabaseAdmin
     .from('notification_broadcasts')
     .insert({
@@ -115,118 +96,139 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
       priority: priority || 'info',
       audience_summary,
       recipients_count: targetUserIds.length,
-      targeting
+      targeting,
+      send_push: send_push || false
     })
     .select().single();
 
   if (bErr) {
-    console.warn('[DIAGNOSTIC] Failed to log broadcast history (table missing?):', bErr.message);
+    console.warn('[DIAGNOSTIC] Failed to log broadcast history:', bErr.message);
   }
 
   // 2. Insert notifications for each recipient
   const notifications = targetUsers.map(target => ({
     user_id: target.id,
-    org_id: target.org_id, // CRITICAL: Tag with recipient's Org ID, not sender's
+    org_id: target.org_id,
     title,
     body: content,
     type: 'broadcast',
-    is_read: false
+    is_read: false,
+    broadcast_id: broadcast?.id || null
   }));
 
-  // Self-ping sender so they can see it too
+  // Self-ping sender
   notifications.push({
     user_id: user.id,
     org_id: user.org_id,
     title: `[PING] ${title}`,
     body: content,
     type: 'broadcast',
-    is_read: false
+    is_read: false,
+    broadcast_id: broadcast?.id || null
   });
 
-  // Batch insert in chunks of 100 to avoid query size limits
-  let totalInserted = 0;
   const chunkSize = 100;
   for (let i = 0; i < notifications.length; i += chunkSize) {
-    const chunk = notifications.slice(i, i + chunkSize);
-    const { error: insErr } = await supabaseAdmin.from('notifications').insert(chunk);
-    if (insErr) {
-      console.error('[DIAGNOSTIC] Notification Insert Failed:', insErr.message);
-    } else {
-      totalInserted += chunk.length;
-    }
+    const { error: iErr } = await supabaseAdmin.from('notifications').insert(notifications.slice(i, i + chunkSize));
+    if (iErr) logger.error('Failed to insert notification chunk: ' + iErr.message);
   }
 
-  console.log(`[DIAGNOSTIC] In-App Feed: Successfully queued ${totalInserted} records (including self-ping).`);
-  if (notifications.length > 0) {
-    console.log(`[DIAGNOSTIC] Sample Record: UserID=${notifications[0].user_id}, OrgID=${notifications[0].org_id}, Type=${notifications[0].type}`);
-  }
-
-  // 3. Trigger FCM Push Notifications
-  // Only attempt to send push if send_push is explicitly true
-  if (send_push === true && messaging && targetUserIds.length > 0) {
-    try {
-      // Fetch FCM tokens for the target users
-      const { data: userData } = await supabaseAdmin
-        .from('users')
-        .select('fcm_token')
-        .in('id', targetUserIds)
-        .not('fcm_token', 'is', null);
-
-      const tokens = (userData || [])
-        .map(u => u.fcm_token)
-        .filter(t => t && t.length > 10) as string[];
-
-      if (tokens.length > 0) {
-        const message = {
-          notification: { title, body: content },
-          data: { type: 'broadcast', priority: priority || 'info' },
-          tokens: tokens,
-        };
-
+  // 3. Send Push Notifications via FCM
+  if (send_push) {
+    const tokens = targetUsers.map(u => u.fcm_token).filter(t => t && t.length > 10);
+    if (tokens.length > 0) {
+      const message = {
+        notification: { title, body: content },
+        tokens: tokens as string[],
+        data: { title, body: content, type: 'broadcast' }
+      };
+      try {
         const response = await messaging.sendEachForMulticast(message);
-        logger.info(`FCM: Sent to ${response.successCount} users, failed for ${response.failureCount} users`);
+        logger.info(`FCM: Sent to ${response.successCount} users, failed for ${response.failureCount}`);
+      } catch (fcmErr: any) {
+        logger.error('FCM Multicast error: ' + fcmErr.message);
       }
-    } catch (fcmErr: any) {
-      logger.error('FCM Multicast error: ' + fcmErr.message);
     }
   }
 
-  return ok(res, broadcast, 'Notification sent to ' + targetUserIds.length + ' recipients');
+  return ok(res, broadcast, 'Notification sent successfully');
 });
-
-
 
 // PATCH /api/v1/notifications/:id/read
 export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
+  
+  const { data: existing } = await supabaseAdmin
+    .from('notifications')
+    .select('is_read, broadcast_id')
+    .eq('id', id)
+    .eq('user_id', req.user!.id)
+    .single();
+
+  if (!existing || existing.is_read) return ok(res, null, 'Already read');
+
   await supabaseAdmin
     .from('notifications')
     .update({ is_read: true, read_at: new Date().toISOString() })
-    .eq('id', id)
-    .eq('user_id', req.user!.id);
+    .eq('id', id);
+
+  if (existing.broadcast_id) {
+    const { error: rpcErr } = await supabaseAdmin.rpc('increment_broadcast_read_count', { b_id: existing.broadcast_id });
+    if (rpcErr) {
+       const { data: bData } = await supabaseAdmin.from('notification_broadcasts').select('read_count').eq('id', existing.broadcast_id).single();
+       if (bData) {
+         await supabaseAdmin.from('notification_broadcasts').update({ read_count: (bData.read_count || 0) + 1 }).eq('id', existing.broadcast_id);
+       }
+    }
+  }
+
   return ok(res, null, 'Marked as read');
-});
-
-// PATCH /api/v1/notifications/fcm-token
-export const updateFcmToken = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { token } = req.body;
-  if (!token) return badRequest(res, 'Token is required');
-
-  const { error } = await supabaseAdmin
-    .from('users')
-    .update({ fcm_token: token })
-    .eq('id', req.user!.id);
-
-  if (error) return badRequest(res, error.message);
-  return ok(res, null, 'FCM token updated');
 });
 
 // PATCH /api/v1/notifications/read-all
 export const markAllRead = asyncHandler(async (req: AuthRequest, res: Response) => {
-  await supabaseAdmin
+  const { data: unread } = await supabaseAdmin
     .from('notifications')
-    .update({ is_read: true, read_at: new Date().toISOString() })
+    .select('id, broadcast_id')
     .eq('user_id', req.user!.id)
     .eq('is_read', false);
+
+  if (unread && unread.length > 0) {
+    await supabaseAdmin
+      .from('notifications')
+      .update({ is_read: true, read_at: new Date().toISOString() })
+      .in('id', unread.map(u => u.id));
+
+    const broadcastIds = [...new Set(unread.map(n => n.broadcast_id).filter(Boolean))];
+    for (const bId of broadcastIds) {
+      if (!bId) continue;
+      const count = unread.filter(n => n.broadcast_id === bId).length;
+      const { error: rpcErr } = await supabaseAdmin.rpc('increment_broadcast_read_count', { b_id: bId });
+      if (rpcErr) {
+         const { data: bData } = await supabaseAdmin.from('notification_broadcasts').select('read_count').eq('id', bId).single();
+         if (bData) {
+           await supabaseAdmin.from('notification_broadcasts')
+             .update({ read_count: (bData.read_count || 0) + count })
+             .eq('id', bId);
+         }
+      }
+    }
+  }
+
   return ok(res, null, 'All notifications marked as read');
+});
+
+// DELETE /api/v1/notifications/history/:id
+export const deleteHistory = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  const user = req.user!;
+
+  const { error } = await supabaseAdmin
+    .from('notification_broadcasts')
+    .delete()
+    .eq('id', id)
+    .eq('org_id', user.org_id);
+
+  if (error) return badRequest(res, 'Failed to delete history');
+  return ok(res, null, 'Broadcast history deleted successfully');
 });
