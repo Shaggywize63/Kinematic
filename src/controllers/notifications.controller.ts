@@ -156,6 +156,9 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
   }
 
   console.log(`[DIAGNOSTIC] In-App Feed: Successfully queued ${totalInserted} records (including self-ping).`);
+  if (notifications.length > 0) {
+    console.log(`[DIAGNOSTIC] Sample Record: UserID=${notifications[0].user_id}, OrgID=${notifications[0].org_id}, Type=${notifications[0].type}`);
+  }
 
   // 3. Trigger FCM Push Notifications
   if (messaging && targetUserIds.length > 0) {
