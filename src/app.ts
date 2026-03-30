@@ -49,13 +49,8 @@ app.use(helmet());
 app.set('trust proxy', 1);
 
 // ── CORS ──────────────────────────────────────────────────────
-// Allow all origins. React Native apps do not send an Origin
-// header at all (or send origin: 'null'), so the old allowedOrigins
-// check caused intermittent 403s on mobile. JWT auth on every
-// protected route already ensures only authenticated users can
-// access data, so opening CORS here is safe.
 app.use(cors({
-  origin: (origin, cb) => cb(null, true),  // ← only line changed
+  origin: (origin, cb) => cb(null, true),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -75,8 +70,8 @@ const limiter = rateLimit({
 });
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,                   // 20 login attempts per window
+  windowMs: 15 * 60 * 1000, 
+  max: 20,                   
   message: { success: false, error: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
@@ -99,7 +94,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'kinematic-api',
-    version: process.env.npm_package_version || '1.0.0',
+    version: '1.0.1-notif-fix-V3',
     timestamp: new Date().toISOString(),
   });
 });
