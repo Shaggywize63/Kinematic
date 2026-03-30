@@ -35,6 +35,7 @@ export const getNotifications = asyncHandler(async (req: AuthRequest, res: Respo
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
+  console.log(`[DIAGNOSTIC] Fetch Notifications: User=${user.id}, Found=${(data || []).length}`);
   return ok(res, data || []);
 });
 
