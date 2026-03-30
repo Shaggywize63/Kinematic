@@ -35,7 +35,7 @@ export const getNotifications = asyncHandler(async (req: AuthRequest, res: Respo
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
-  return ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
+  return ok(res, data || []);
 });
 
 // GET /api/v1/notifications/history (Admin/Supervisor Only)
