@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { supabase } from '../lib/supabase';
+import { supabaseAdmin as supabase } from '../lib/supabase';
 import { ok, created, badRequest, notFound } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 
