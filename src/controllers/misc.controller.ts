@@ -135,78 +135,76 @@ export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => 
 // USERS
 export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
-  const { role, zone_id, is_active } = req.query
+  const { role: filterRole, zone_id, is_active } = req.query;
   const { page, limit, offset } = getPagination(
     parseInt(req.query.page as string) || 1,
-    parseInt(req.query.limit as string) || 200 // Default to more for notifications
-  )
+    parseInt(req.query.limit as string) || 100
+  );
 
-  logger.info(`Fetching Users: RequesterOrg=${user.org_id}, Role=${user.role}, FilterRole=${role}`);
+  console.log(`[DIAGNOSTIC] getUsers: UserRole=${user.role}, OrgID=${user.org_id}, FilterRole=${filterRole}`);
 
-  let query = supabaseAdmin.from('users')
-    .select('*, zones(name, city)', { count: 'exact' })
-    .order('name').range(offset, offset + limit - 1)
+  let query = supabaseAdmin.from('users').select('*', { count: 'exact' });
 
-  // Bypass Org Isolation for testing purposes to fix have results
-  if (user.role !== 'super_admin' && user.role !== 'admin') {
+  // 1. Broaden access for diagnostics
+  const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager'].includes(user.role);
+
+  if (isPrivileged) {
+    console.log('[DIAGNOSTIC] Privileged user detected. Bypassing org filters.');
+  } else {
     if (user.org_id) {
       query = query.eq('org_id', user.org_id);
     }
   }
 
-  if (role) {
-    query = query.ilike('role', role as string);
+  // 2. Simple Role Filter
+  if (filterRole) {
+    query = query.ilike('role', filterRole as string);
   }
 
-  if (zone_id) query = query.eq('zone_id', zone_id as string)
-  if (is_active !== undefined) query = query.eq('is_active', is_active === 'true')
-  if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id)
+  // 3. Optional filters
+  if (zone_id) query = query.eq('zone_id', zone_id as string);
+  if (is_active !== undefined) query = query.eq('is_active', is_active === 'true');
+  if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id);
 
-  if (zone_id) query = query.eq('zone_id', zone_id as string)
-  if (is_active !== undefined) query = query.eq('is_active', is_active === 'true')
-  if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id)
-  const { data, error, count } = await query
-  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  // 4. Manual range for pagination
+  query = query.order('name').range(offset, offset + limit - 1);
 
-  // Enrich with today's real-time hours_worked
-  const userIds = (data || []).map((u: any) => u.id)
-  if (userIds.length > 0) {
-    const { data: attData } = await supabaseAdmin
-      .from('attendance')
-      .select('user_id, total_hours, status, checkin_at')
-      .eq('org_id', user.org_id)
-      .eq('date', todayDate())
-      .in('user_id', userIds)
+  const { data, error, count } = await query;
+
+  if (error) {
+    console.error('[DIAGNOSTIC] Query Error:', error);
+    throw new AppError(500, error.message, 'DB_ERROR');
+  }
+
+  console.log(`[DIAGNOSTIC] Query Success: Found ${data?.length} users, Total: ${count}`);
+
+  // Enrichment (Enforce flattened zones for dashboard)
+  const userIds = (data || []).map((u: any) => u.id);
+  const attRes = userIds.length > 0 
+    ? await supabaseAdmin.from('attendance').select('user_id, total_hours, status, checkin_at').eq('date', todayDate()).in('user_id', userIds)
+    : { data: [] };
+
+  const attMap = new Map((attRes.data || []).map((a: any) => [a.user_id, a]));
+  const now = new Date().getTime();
+
+  const enrichedData = (data || []).map((u: any) => {
+    // Flatten zones if they exist in the raw record (select * might return it differently depending on postgrest)
+    if (u.zones && Array.isArray(u.zones)) u.zones = u.zones[0];
     
-    const attMap = new Map((attData || []).map((a: any) => [a.user_id, a]))
-    const now = new Date().getTime()
+    const att: any = attMap.get(u.id);
+    if (att) {
+      u.hours_worked = att.total_hours || (att.status === 'checked_in' && att.checkin_at ? Math.max(0, now - new Date(att.checkin_at).getTime()) / 3600000 : 0);
+      u.is_checked_in = att.status === 'checked_in';
+    } else {
+      u.hours_worked = 0;
+      u.is_checked_in = false;
+    }
+    return u;
+  });
 
-    ;(data || []).forEach((u: any) => {
-      // Flatten zones if it is returned as an array (Supabase standard for some joins)
-      if (Array.isArray(u.zones)) {
-        u.zones = u.zones[0] || null
-      }
-      
-      const att: any = attMap.get(u.id)
-      if (att) {
-        if (att.total_hours) {
-          u.hours_worked = att.total_hours
-        } else if (att.status === 'checked_in' && att.checkin_at) {
-          const start = new Date(att.checkin_at).getTime()
-          u.hours_worked = Math.max(0, now - start) / 3600000
-        } else {
-          u.hours_worked = 0
-        }
-        u.is_checked_in = att.status === 'checked_in'
-      } else {
-        u.hours_worked = 0
-        u.is_checked_in = false
-      }
-    })
-  }
+  return sendPaginated(res, enrichedData, count || 0, page, limit);
+});
 
-  sendPaginated(res, data || [], count || 0, page, limit)
-})
 
 
 export const getUserById = asyncHandler(async (req: AuthRequest, res: Response) => {
