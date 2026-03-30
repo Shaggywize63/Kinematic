@@ -420,16 +420,21 @@ export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) =
 export const getDailyQuote = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   // Fetch the most recent quote for the organization
-  const { data, error } = await supabaseAdmin.from('motivation_quotes')
-    .select('quote, author')
-    .eq('org_id', user.org_id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
+  let data = null
+  try {
+    const { data: quoteData, error } = await supabaseAdmin.from('motivation_quotes')
+      .select('quote, author')
+      .eq('org_id', user.org_id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    
+    if (!error) data = quoteData
+  } catch (e) {
+    console.error('[Fallback] Motivation quotes table check failed')
+  }
 
-  if (error) throw new AppError(500, error.message, 'DB_ERROR')
-  
-  // Fallback if no quote exists
+  // Fallback if no quote exists or table is missing
   const fallback = { quote: "Success is not final, failure is not fatal: it is the courage to continue that counts.", author: "Winston Churchill" }
   sendSuccess(res, data || fallback)
 })
