@@ -201,18 +201,26 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     return u;
   });
 
-  // EMERGENCY DIAGNOSTIC INJECTION: Add a fake user to see if API is working
-  const diagnosticUser = {
-    id: '00000000-0000-0000-0000-000000000000',
-    name: 'SYSTEM DIAGNOSTIC CHECK (API ACTIVE)',
-    role: 'supervisor', // Shows in supervisor list
+  // EMERGENCY DIAGNOSTIC INJECTION: Add fake users to see if API is working
+  const diagnosticSup = {
+    id: '00000000-0000-0000-0000-000000000001',
+    name: 'DIAGNOSTIC SUPERVISOR (JOINED)',
+    role: 'supervisor',
+    city: 'DIAGNOSTIC',
+    is_active: true
+  };
+
+  const diagnosticFE = {
+    id: '00000000-0000-0000-0000-000000000002',
+    name: 'DIAGNOSTIC EXECUTIVE (JOINED)',
+    role: 'field_executive',
     city: 'DIAGNOSTIC',
     is_active: true
   };
   
-  const finalResults = [diagnosticUser, ...enrichedData];
+  const finalResults = [diagnosticSup, diagnosticFE, ...enrichedData];
 
-  return sendPaginated(res, finalResults, (count || 0) + 1, page, limit);
+  return sendPaginated(res, finalResults, (count || 0) + 2, page, limit);
 });
 
 
