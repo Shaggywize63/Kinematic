@@ -127,6 +127,9 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
   }
 
   console.log('[Diagnostic] Outlets found:', outlets?.length || 0);
+  if (outlets?.length) {
+    console.log('[Diagnostic] Outlet Names:', outlets.map((o: any) => o.store_name).join(', '));
+  }
   
   // Distribute outlets back to their respective plans
   const outletsByPlan: Record<string, any[]> = {};
