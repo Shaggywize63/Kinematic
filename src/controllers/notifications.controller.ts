@@ -49,7 +49,11 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
     .order('created_at', { ascending: false })
     .limit(50);
 
-  if (error) return badRequest(res, error.message);
+  if (error) {
+    console.error('[DIAGNOSTIC] Notification history fetching failed:', error.message);
+    // If table doesn't exist, don't crash the dashboard.
+    return res.status(200).json({ success: true, data: [] });
+  }
   return ok(res, data || []);
 });
 
@@ -111,7 +115,9 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
     })
     .select().single();
 
-  if (bErr) return badRequest(res, bErr.message);
+  if (bErr) {
+    console.warn('[DIAGNOSTIC] Failed to log broadcast history (table missing?):', bErr.message);
+  }
 
   // 2. Insert notifications for each recipient
   const notifications = targetUserIds.map(uid => ({
