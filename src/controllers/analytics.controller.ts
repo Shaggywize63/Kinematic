@@ -682,7 +682,7 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
 
   return ok(res, {
     today: attRecord || null,
-    summary: { tffCount: myTff || 0 },
+    summary: { tff_count: myTff || 0 },
     routePlan: plan ? [{ ...plan, outlets }] : [],
     unreadCount: unread || 0,
     quote: quote || null,
