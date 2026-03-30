@@ -157,7 +157,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
 
   // 2. Simple Role Filter
   if (filterRole) {
-    query = query.ilike('role', filterRole as string);
+    query = query.eq('role', filterRole as string);
   }
 
   // 3. Optional filters
