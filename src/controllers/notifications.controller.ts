@@ -132,12 +132,30 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
     is_read: false
   }));
 
+  // Self-ping sender so they can see it too
+  notifications.push({
+    user_id: user.id,
+    org_id: user.org_id,
+    title: `[PING] ${title}`,
+    body: content,
+    type: 'broadcast',
+    is_read: false
+  });
+
   // Batch insert in chunks of 100 to avoid query size limits
+  let totalInserted = 0;
   const chunkSize = 100;
   for (let i = 0; i < notifications.length; i += chunkSize) {
     const chunk = notifications.slice(i, i + chunkSize);
-    await supabaseAdmin.from('notifications').insert(chunk);
+    const { error: insErr } = await supabaseAdmin.from('notifications').insert(chunk);
+    if (insErr) {
+      console.error('[DIAGNOSTIC] Notification Insert Failed:', insErr.message);
+    } else {
+      totalInserted += chunk.length;
+    }
   }
+
+  console.log(`[DIAGNOSTIC] In-App Feed: Successfully queued ${totalInserted} records (including self-ping).`);
 
   // 3. Trigger FCM Push Notifications
   if (messaging && targetUserIds.length > 0) {
