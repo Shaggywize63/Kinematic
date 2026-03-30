@@ -101,8 +101,8 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
   const date = (req.query.date as string) || today();
 
   const { data: plan, error } = await supabase
-    .from('route_plans')
-    .select('id, plan_date, status, total_outlets, visited_outlets, missed_outlets, completion_pct, notes, frequency, territory_label, activity_id')
+    .from('v_route_plan_daily')
+    .select('*')
     .eq('user_id', uid)
     .eq('plan_date', date);
 
@@ -111,11 +111,19 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
 
   // Combine outlets for all plans of the day
   const planIds = plan.map((p: any) => p.id);
-  const { data: outlets } = await supabase
+  console.log('[Diagnostic] Plan IDs:', planIds);
+  const { data: outlets, error: outErr } = await supabase
     .from('v_route_outlet_detail')
     .select('*')
     .in('route_plan_id', planIds)
     .order('visit_order', { ascending: true });
+  
+  if (outErr) {
+    console.error('[Diagnostic] Outlet Query Error:', outErr.message);
+    return badRequest(res, outErr.message);
+  }
+
+  console.log('[Diagnostic] Outlets found:', outlets?.length || 0);
   
   // Distribute outlets back to their respective plans
   const outletsByPlan: Record<string, any[]> = {};
