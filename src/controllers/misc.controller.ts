@@ -155,10 +155,8 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     }
   }
 
-  // 2. Simple Role Filter
-  if (filterRole) {
-    query = query.eq('role', filterRole as string);
-  }
+  // 2. Role filtering moved to JS for Enum compatibility/case-insensitivity
+  console.log(`[DIAGNOSTIC] Applying JS filters for role=${filterRole}`);
 
   // 3. Optional filters
   if (zone_id) query = query.eq('zone_id', zone_id as string);
@@ -201,6 +199,22 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     return u;
   });
 
+  // 4. Robust Javascript Filtering
+  let filteredData = enrichedData;
+  if (filterRole) {
+    const target = (filterRole as string).toLowerCase();
+    filteredData = enrichedData.filter((u: any) => {
+      const uRole = (u.role || '').toLowerCase();
+      // Handle 'executive' vs 'field_executive' mapping if needed, 
+      // but for now just direct match or partial match
+      return uRole === target || (target === 'field_executive' && uRole === 'executive');
+    });
+    console.log(`[DIAGNOSTIC] JS Filter: Request=${target}, ResultCount=${filteredData.length}`);
+    if (filteredData.length === 0) {
+      console.log(`[DIAGNOSTIC] ALL ROLES IN DB: ${[...new Set(enrichedData.map((u:any) => u.role))]}`);
+    }
+  }
+
   // EMERGENCY DIAGNOSTIC INJECTION: Add fake users to see if API is working
   const diagnosticSup = {
     id: '00000000-0000-0000-0000-000000000001',
@@ -218,7 +232,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     is_active: true
   };
   
-  const finalResults = [diagnosticSup, diagnosticFE, ...enrichedData];
+  const finalResults = [diagnosticSup, diagnosticFE, ...filteredData];
 
   return sendPaginated(res, finalResults, (count || 0) + 2, page, limit);
 });
