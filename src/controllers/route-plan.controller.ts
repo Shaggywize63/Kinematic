@@ -104,19 +104,32 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
     .from('route_plans')
     .select('id, plan_date, status, total_outlets, visited_outlets, missed_outlets, completion_pct, notes, frequency, territory_label, activity_id')
     .eq('user_id', uid)
-    .eq('plan_date', date)
-    .maybeSingle();
+    .eq('plan_date', date);
 
   if (error) return badRequest(res, error.message);
-  if (!plan) return ok(res, null);
+  if (!plan?.length) return ok(res, []);
 
+  // Combine outlets for all plans of the day
+  const planIds = plan.map((p: any) => p.id);
   const { data: outlets } = await supabase
     .from('v_route_outlet_detail')
     .select('*')
-    .eq('route_plan_id', plan.id)
+    .in('route_plan_id', planIds)
     .order('visit_order', { ascending: true });
+  
+  // Distribute outlets back to their respective plans
+  const outletsByPlan: Record<string, any[]> = {};
+  (outlets || []).forEach((o: any) => {
+    if (!outletsByPlan[o.route_plan_id]) outletsByPlan[o.route_plan_id] = [];
+    outletsByPlan[o.route_plan_id].push(o);
+  });
 
-  return ok(res, { ...plan, outlets: outlets || [] });
+  const result = plan.map((p: any) => ({
+    ...p,
+    outlets: outletsByPlan[p.id] || []
+  }));
+
+  return ok(res, result);
 });
 
 /* ─────────────────────────────────────────────────────────────
@@ -143,18 +156,7 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
   const createdPlans = [];
 
   for (const aid of acts) {
-    // Check for duplicate plan for the SAME activity
-    const { data: existing } = await supabase
-      .from('route_plans')
-      .select('id')
-      .eq('user_id', user_id)
-      .eq('plan_date', plan_date)
-      .eq('activity_id', aid)
-      .maybeSingle();
-
-    if (existing) {
-      continue; // Skip if already exists for this activity
-    }
+    // Insert plan (no more duplicate check)
 
     // Insert plan
     const { data: plan, error: planErr } = await supabase
@@ -189,10 +191,6 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
     }
     
     createdPlans.push(plan.id);
-  }
-
-  if (createdPlans.length === 0) {
-     return badRequest(res, `Route plans already exist for this FE on ${plan_date} for the selected activities.`);
   }
 
   return created(res, { created: createdPlans.length, plan_ids: createdPlans });
@@ -356,22 +354,22 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
 
       // FE-Activity mapping check removed as per user request
 
-      // Upsert plan
+      // Insert plan (changed from upsert to allow multiple)
       const { data: plan, error: upsertErr } = await supabase
         .from('route_plans')
-        .upsert({ 
+        .insert({ 
           org_id: org, 
           user_id: fe_user_id, 
           plan_date, 
           activity_id: aid,
           created_by: by, 
           total_outlets: actRows.length 
-        }, { onConflict: 'user_id,plan_date,activity_id' })
+        })
         .select('id')
         .single();
 
       if (upsertErr || !plan) {
-        errorLog.push({ row: 'N/A', error: `Failed to upsert plan: ${upsertErr?.message || 'Unknown error'}` });
+        errorLog.push({ row: 'N/A', error: `Failed to create plan: ${upsertErr?.message || 'Unknown error'}. Check for unique constraint if this is a duplicate.` });
         continue;
       }
 
