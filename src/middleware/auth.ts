@@ -32,6 +32,11 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     return forbidden(res, 'Account is deactivated');
   }
 
+  // Normalize role to lowercase for consistent permission checks
+  if (profile.role) {
+    profile.role = profile.role.toLowerCase();
+  }
+
   req.user = profile as AuthRequest['user'];
   req.accessToken = token;
   next();
@@ -39,8 +44,10 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
 export function requireRole(...roles: UserRole[]) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
-    if (!req.user) return unauthorized(res);
-    if (!roles.includes(req.user.role)) {
+    const userRole = req.user.role?.toLowerCase();
+    const allowedRoles = roles.map(r => r.toLowerCase());
+    
+    if (!allowedRoles.includes(userRole)) {
       return forbidden(res, `Requires one of: ${roles.join(', ')}`);
     }
     next();
