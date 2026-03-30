@@ -686,7 +686,15 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
     routePlan: plan ? [{ ...plan, outlets }] : [],
     unreadCount: unread || 0,
     quote: quote || null,
-    broadcast: broadcast || null,
+    broadcast: broadcast ? { 
+      id: broadcast.id, 
+      question: broadcast.body, 
+      is_urgent: broadcast.priority === 'high',
+      options: [
+        { label: "Understood", value: 1 },
+        { label: "Need Clarification", value: 0 }
+      ]
+    } : null,
     timestamp: new Date().toISOString()
   });
 });
