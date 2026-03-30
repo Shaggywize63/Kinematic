@@ -100,6 +100,9 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
   const uid  = userId(req);
   const date = (req.query.date as string) || today();
 
+  console.log(`[Diagnostic] Authenticated UID: ${uid}`);
+  console.log(`[Diagnostic] Requested Date: ${date}`);
+
   const { data: plan, error } = await supabase
     .from('v_route_plan_daily')
     .select('*')
