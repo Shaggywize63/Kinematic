@@ -60,7 +60,7 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
 
 // POST /api/v1/notifications/send (Admin/Supervisor Only)
 export const sendNotification = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { title, body: content, priority, targeting } = req.body;
+  const { title, body: content, priority, targeting, send_push } = req.body;
   const user = req.user!;
 
   if (!title || !content) return badRequest(res, 'Title and message are required');
@@ -162,7 +162,8 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
   }
 
   // 3. Trigger FCM Push Notifications
-  if (messaging && targetUserIds.length > 0) {
+  // Only attempt to send push if send_push is explicitly true
+  if (send_push === true && messaging && targetUserIds.length > 0) {
     try {
       // Fetch FCM tokens for the target users
       const { data: userData } = await supabaseAdmin
