@@ -140,7 +140,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     parseInt(req.query.limit as string) || 20
   )
   let query = supabaseAdmin.from('users')
-    .select('id, name, mobile, email, role, employee_id, zone_id, city, supervisor_id, is_active, joined_date, zones(name)', { count: 'exact' })
+    .select('id, name, mobile, email, role, employee_id, zone_id, city, supervisor_id, is_active, joined_date, zones(name, city)', { count: 'exact' })
     .eq('org_id', user.org_id).order('name').range(offset, offset + limit - 1)
   if (role) query = query.eq('role', role as string)
   if (zone_id) query = query.eq('zone_id', zone_id as string)
@@ -163,6 +163,11 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     const now = new Date().getTime()
 
     ;(data || []).forEach((u: any) => {
+      // Flatten zones if it is returned as an array (Supabase standard for some joins)
+      if (Array.isArray(u.zones)) {
+        u.zones = u.zones[0] || null
+      }
+      
       const att: any = attMap.get(u.id)
       if (att) {
         if (att.total_hours) {
