@@ -66,37 +66,40 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
 
   // Targeting Logic
   const { city, supervisor_id, fe_id } = targeting || {};
-  let targetUserIds: string[] = [];
+  let targetUsers: { id: string, org_id: string }[] = [];
 
-  const baseQuery = supabaseAdmin.from('users').select('id').eq('org_id', user.org_id).eq('is_active', true);
+  const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager'].includes(user.role?.toLowerCase());
 
   if (fe_id) {
-    targetUserIds = [fe_id];
+    const { data } = await supabaseAdmin.from('users').select('id, org_id').eq('id', fe_id).single();
+    if (data) targetUsers = [data];
   } else if (supervisor_id) {
     // Both supervisor and their FEs
-    const { data: feData } = await supabaseAdmin
-      .from('users')
-      .select('id')
-      .or(`id.eq.${supervisor_id},supervisor_id.eq.${supervisor_id}`)
-      .eq('org_id', user.org_id);
-    targetUserIds = (feData || []).map(u => u.id);
+    let q = supabaseAdmin.from('users').select('id, org_id').or(`id.eq.${supervisor_id},supervisor_id.eq.${supervisor_id}`);
+    if (!isPrivileged) q = q.eq('org_id', user.org_id);
+    const { data } = await q;
+    targetUsers = data || [];
   } else if (city) {
-    const { data: cityData } = await supabaseAdmin
-      .from('users')
-      .select('id')
-      .eq('city', city)
-      .eq('org_id', user.org_id);
-    targetUserIds = (cityData || []).map(u => u.id);
+    let q = supabaseAdmin.from('users').select('id, org_id').eq('city', city).eq('is_active', true);
+    if (!isPrivileged) q = q.eq('org_id', user.org_id);
+    const { data } = await q;
+    targetUsers = data || [];
   } else {
-    // All users in org
-    const { data: allData } = await supabaseAdmin
-      .from('users')
-      .select('id')
-      .eq('org_id', user.org_id);
-    targetUserIds = (allData || []).map(u => u.id);
+    // All users
+    let q = supabaseAdmin.from('users').select('id, org_id').eq('is_active', true);
+    if (!isPrivileged) q = q.eq('org_id', user.org_id);
+    const { data } = await q;
+    targetUsers = data || [];
   }
 
-  if (targetUserIds.length === 0) return badRequest(res, 'No recipients found for the selected target');
+  const targetUserIds = targetUsers.map(u => u.id);
+
+  if (targetUserIds.length === 0) {
+    console.warn(`[DIAGNOSTIC] No recipients found for target. RequesterOrg=${user.org_id}, Privileged=${isPrivileged}`);
+    return badRequest(res, 'No recipients found for the selected target');
+  }
+
+  console.log(`[DIAGNOSTIC] Targeting Success: Found ${targetUserIds.length} users across ${[...new Set(targetUsers.map(u => u.org_id))].length} organizations.`);
 
   // audience_summary for history
   const audience_summary = fe_id ? '1 Individual' : supervisor_id ? 'Supervisor & Team' : city ? `City: ${city}` : 'All Users';
@@ -120,9 +123,9 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
   }
 
   // 2. Insert notifications for each recipient
-  const notifications = targetUserIds.map(uid => ({
-    user_id: uid,
-    org_id: user.org_id,
+  const notifications = targetUsers.map(target => ({
+    user_id: target.id,
+    org_id: target.org_id, // CRITICAL: Tag with recipient's Org ID, not sender's
     title,
     body: content,
     type: 'broadcast',
