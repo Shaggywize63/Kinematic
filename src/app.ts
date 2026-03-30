@@ -94,7 +94,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'kinematic-api',
-    version: '1.0.1-notif-fix-V5',
+    version: '1.0.1-perf-V6',
     timestamp: new Date().toISOString(),
   });
 });

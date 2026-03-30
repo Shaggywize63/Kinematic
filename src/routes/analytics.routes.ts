@@ -5,12 +5,14 @@ import {
   getContactHeatmap, getWeeklyContacts,
   getLiveLocations, getAttendanceToday,
   getOutletCoverage, getCityPerformance,
-  getTffTrends,
+  getTffTrends, getDashboardInit, getMobileHome
 } from '../controllers/analytics.controller';
 
 const router = Router();
 router.use(requireAuth);
 
+router.get('/dashboard-init',   getDashboardInit);
+router.get('/mobile-home',      getMobileHome);
 router.get('/summary',          getSummary);
 router.get('/tff-trends',       getTffTrends);
 router.get('/activity-feed',    getActivityFeed);
