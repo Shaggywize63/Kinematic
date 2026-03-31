@@ -166,7 +166,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     parseInt(req.query.limit as string) || 100
   );
 
-  console.log(`[DIAGNOSTIC] getUsers: UserRole=${user.role}, OrgID=${user.org_id}, FilterRole=${filterRole}`);
+  console.log(`[DIAGNOSTIC] getUsers: UserRole=${user.role}, UserOrgID=${user.org_id}, UserClientID=${user.client_id}, FilterRole=${filterRole}`);
 
   let query = supabaseAdmin.from('users').select('*', { count: 'exact' });
 
@@ -272,6 +272,38 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
   return sendPaginated(res, finalResults, (count || 0) + 2, page, limit);
 });
 
+
+
+export const debugCheckUser = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { mobile } = req.params;
+  
+  console.log(`[DIAGNOSTIC] debugCheckUser: searching for mobile=${mobile}`);
+  
+  // 1. Search in profiles/users table across ALL organizations
+  const { data: userRecords, error: userError } = await supabaseAdmin
+    .from('users')
+    .select('*')
+    .eq('mobile', mobile);
+
+  // 2. Search in Supabase Auth (to see if they exist but no profile)
+  const { data: authRecords } = await supabaseAdmin.auth.admin.listUsers();
+  const authMatch = (authRecords?.users as any[])?.find(u => 
+    u.phone === mobile || u.user_metadata?.mobile === mobile || u.email?.includes(mobile)
+  );
+
+  sendSuccess(res, {
+    searchingFor: mobile,
+    profileFound: userRecords && userRecords.length > 0 ? userRecords : null,
+    profileError: userError,
+    authFound: authMatch ? {
+      id: authMatch.id,
+      email: authMatch.email,
+      lastSignIn: authMatch.last_sign_in_at,
+      metadata: authMatch.user_metadata
+    } : null,
+    message: "This is a global search bypassing org_id and client_id filters."
+  });
+});
 
 
 export const getUserById = asyncHandler(async (req: AuthRequest, res: Response) => {
