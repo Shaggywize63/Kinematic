@@ -7,6 +7,7 @@ import { asyncHandler } from '../utils/asyncHandler';
    HELPERS
 ───────────────────────────────────────────────────────────── */
 const orgId  = (req: Request) => (req as any).user.org_id as string;
+const clientId = (req: Request) => (req as any).user.client_id as string | undefined;
 const userId = (req: Request) => (req as any).user.id as string;
 const today  = () => new Date().toISOString().split('T')[0];
 
@@ -26,6 +27,9 @@ export const getRoutePlans = asyncHandler(async (req: Request, res: Response) =>
     .select('*')
     .eq('org_id', org)
     .eq('plan_date', date);
+
+  const cid = clientId(req);
+  if (cid) q = q.eq('client_id', cid);
 
   if (uid)  q = q.eq('user_id', uid);
   if (stat) q = q.eq('status', stat);
@@ -66,11 +70,16 @@ export const getRoutePlanSummary = asyncHandler(async (req: Request, res: Respon
   const org  = orgId(req);
   const date = (req.query.date as string) || today();
 
-  const { data, error } = await supabase
+  let q = supabase
     .from('route_plans')
     .select('id, status, total_outlets, visited_outlets, missed_outlets, completion_pct')
     .eq('org_id', org)
     .eq('plan_date', date);
+
+  const cid = clientId(req);
+  if (cid) q = q.eq('client_id', cid);
+
+  const { data, error } = await q;
 
   if (error) return badRequest(res, error.message);
 
@@ -175,7 +184,12 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
     // Insert plan
     const { data: plan, error: planErr } = await supabase
       .from('route_plans')
-      .insert({ org_id: org, user_id, plan_date, notes, frequency, territory_label, activity_id: aid, created_by: by, total_outlets: outlets.length })
+      .insert({ 
+        org_id: org, 
+        client_id: clientId(req),
+        user_id, plan_date, notes, frequency, territory_label, 
+        activity_id: aid, created_by: by, total_outlets: outlets.length 
+      })
       .select()
       .single();
 
@@ -186,6 +200,7 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
       route_plan_id:       plan.id,
       store_id:            o.store_id,
       org_id:              org,
+      client_id:           clientId(req),
       visit_order:         o.visit_order ?? idx + 1,
       target_type:         o.target_type ?? 'general',
       target_notes:        o.target_notes ?? null,
@@ -218,13 +233,16 @@ export const updateRoutePlan = asyncHandler(async (req: Request, res: Response) 
   const { id } = req.params;
   const { notes, status, territory_label, frequency } = req.body;
 
-  const { data, error } = await supabase
+  let q = supabase
     .from('route_plans')
     .update({ notes, status, territory_label, frequency })
     .eq('id', id)
-    .eq('org_id', orgId(req))
-    .select()
-    .single();
+    .eq('org_id', orgId(req));
+
+  const cid = clientId(req);
+  if (cid) q = q.eq('client_id', cid);
+
+  const { data, error } = await q.select().single();
 
   if (error)  return badRequest(res, error.message);
   if (!data)  return notFound(res, 'Route plan not found');
@@ -318,9 +336,18 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
   if (logErr) return badRequest(res, logErr.message);
 
   // Fetch all FEs and stores for this org (for matching)
+  let fesQuery = supabase.from('users').select('id, employee_id, name').eq('org_id', org).eq('role', 'executive');
+  let storesQuery = supabase.from('stores').select('id, store_code, name').eq('org_id', org);
+
+  const cid = clientId(req);
+  if (cid) {
+    fesQuery = fesQuery.eq('client_id', cid);
+    storesQuery = storesQuery.eq('client_id', cid);
+  }
+
   const [{ data: fes }, { data: stores }] = await Promise.all([
-    supabase.from('users').select('id, employee_id, name').eq('org_id', org).eq('role', 'executive'),
-    supabase.from('stores').select('id, store_code, name').eq('org_id', org),
+    fesQuery,
+    storesQuery,
   ]);
 
   const feMap: Record<string, string>    = {};
@@ -373,6 +400,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
         .from('route_plans')
         .insert({ 
           org_id: org, 
+          client_id: clientId(req),
           user_id: fe_user_id, 
           plan_date, 
           activity_id: aid,
@@ -395,6 +423,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
         route_plan_id:       plan.id,
         store_id:            r.resolved_store_id,
         org_id:              org,
+        client_id:           clientId(req),
         visit_order:         r.visit_order ? Number(r.visit_order) : i + 1,
         target_type:         r.target_type || 'general',
         target_notes:        r.target_notes || null,
@@ -422,16 +451,21 @@ export const getImports = asyncHandler(async (req: Request, res: Response) => {
   const org  = orgId(req);
   const date = (req.query.date as string) || today();
 
-  const { data, error } = await supabase
+  let q = supabase
     .from('route_plan_imports')
     .select('id, filename, total_rows, success_rows, failed_rows, status, plan_date, created_at, users(name)')
     .eq('org_id', org)
-    .eq('plan_date', date)
+    .eq('plan_date', date);
+
+  const cid = clientId(req);
+  if (cid) q = q.eq('client_id', cid);
+
+  const { data: importData, error: importError } = await q
     .order('created_at', { ascending: false })
     .limit(10);
 
-  if (error) return badRequest(res, error.message);
-  return ok(res, data || []);
+  if (importError) return badRequest(res, importError.message);
+  return ok(res, importData || []);
 });
 
 /* ─────────────────────────────────────────────────────────────

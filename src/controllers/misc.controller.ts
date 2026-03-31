@@ -11,10 +11,11 @@ export const getVisitLogs = asyncHandler(async (req: AuthRequest, res: Response)
   let query = supabaseAdmin
     .from('visit_logs')
     .select('*, visitor:visitor_id(id, name, role), executive:executive_id(id, name, zone_id, zones(name))')
-    .eq('org_id', user.org_id).eq('date', date)
-    .order('visited_at', { ascending: false })
-  if (user.role === 'executive') query = query.eq('executive_id', user.id)
-  if (user.role === 'supervisor') query = query.eq('visitor_id', user.id)
+    .eq('org_id', user.org_id).eq('date', date);
+
+  if (user.client_id) query = query.eq('client_id', user.client_id);
+  if (user.role === 'executive') query = query.eq('executive_id', user.id);
+  if (user.role === 'supervisor') query = query.eq('visitor_id', user.id);
   const { data, error } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data)
@@ -24,7 +25,20 @@ export const createVisitLog = asyncHandler(async (req: AuthRequest, res: Respons
   const { executive_id, rating, remarks, photo_url, latitude, longitude } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('visit_logs')
-    .insert({ org_id: user.org_id, executive_id: executive_id || user.id, visitor_id: user.id, zone_id: user.zone_id, date: todayDate(), visited_at: new Date().toISOString(), rating, remarks: remarks || null, photo_url: photo_url || null, latitude: latitude || null, longitude: longitude || null })
+    .insert({ 
+      org_id: user.org_id, 
+      client_id: user.client_id,
+      executive_id: executive_id || user.id, 
+      visitor_id: user.id, 
+      zone_id: user.zone_id, 
+      date: todayDate(), 
+      visited_at: new Date().toISOString(), 
+      rating, 
+      remarks: remarks || null, 
+      photo_url: photo_url || null, 
+      latitude: latitude || null, 
+      longitude: longitude || null 
+    })
     .select().single()
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data, 'Visit logged', 201)
@@ -35,7 +49,17 @@ export const submitGrievance = asyncHandler(async (req: AuthRequest, res: Respon
   const { category, against_role, incident_date, description, is_anonymous } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('grievances')
-    .insert({ org_id: user.org_id, submitted_by: user.id, category, against_role: against_role || null, incident_date: incident_date || null, description, is_anonymous: is_anonymous || false, status: 'submitted' })
+    .insert({ 
+      org_id: user.org_id, 
+      client_id: user.client_id,
+      submitted_by: user.id, 
+      category, 
+      against_role: against_role || null, 
+      incident_date: incident_date || null, 
+      description, 
+      is_anonymous: is_anonymous || false, 
+      status: 'submitted' 
+    })
     .select('id, reference_no, status, created_at').single()
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data, 'Grievance submitted. HR will review within 48 hours.', 201)
@@ -59,9 +83,10 @@ export const getAllGrievances = asyncHandler(async (req: AuthRequest, res: Respo
   )
   let query = supabaseAdmin.from('grievances')
     .select('*, submitted_by_user:submitted_by(id, name, zone_id)', { count: 'exact' })
-    .eq('org_id', user.org_id).order('created_at', { ascending: false })
-    .range(offset, offset + limit - 1)
-  if (status) query = query.eq('status', status as string)
+    .eq('org_id', user.org_id);
+
+  if (user.client_id) query = query.eq('client_id', user.client_id);
+  if (status) query = query.eq('status', status as string);
   const { data, error, count } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendPaginated(res, data || [], count || 0, page, limit)
@@ -135,7 +160,7 @@ export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => 
 // USERS
 export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
-  const { role: filterRole, zone_id, is_active } = req.query;
+  const { role: filterRole, zone_id, is_active, client_id } = req.query;
   const { page, limit, offset } = getPagination(
     parseInt(req.query.page as string) || 1,
     parseInt(req.query.limit as string) || 100
@@ -145,14 +170,19 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
 
   let query = supabaseAdmin.from('users').select('*', { count: 'exact' });
 
-  const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager'].includes(user.role?.toLowerCase());
+  const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager', 'sub_admin'].includes(user.role?.toLowerCase());
+  const isSuper = user.role?.toLowerCase() === 'super_admin';
 
-  if (isPrivileged) {
-    console.log(`[DIAGNOSTIC] Privileged ${user.role} detected. Bypassing org filters.`);
-  } else {
+  if (!isSuper) {
     if (user.org_id) {
       query = query.eq('org_id', user.org_id);
     }
+  }
+
+  if (user.client_id) {
+    query = query.eq('client_id', user.client_id);
+  } else if (client_id) {
+    query = query.eq('client_id', client_id as string);
   }
 
   // 2. Role filtering moved to JS for Enum compatibility/case-insensitivity
@@ -287,6 +317,7 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
     const userData: any = {
       id:            authId,
       org_id:        admin.org_id,
+      client_id:     req.body.client_id || admin.client_id || null,
       name:          name.trim(),
       mobile:        mobile.trim(),
       email:         email?.trim() || null,
@@ -309,7 +340,38 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
 
   const { permissions, assigned_cities } = req.body
 
-  // 4. Privilege escalation check for Sub-Admin
+  // 4. Save Permissions and City Assignments
+  const tasks = [];
+
+  if (Array.isArray(permissions) && permissions.length > 0) {
+    tasks.push(
+      supabaseAdmin.from('user_module_permissions').insert(
+        permissions.map((p: string) => ({
+          user_id: authId,
+          module_id: p,
+          org_id: admin.org_id
+        }))
+      )
+    );
+  }
+
+  if (Array.isArray(assigned_cities) && assigned_cities.length > 0) {
+    tasks.push(
+      supabaseAdmin.from('user_city_assignments').insert(
+        assigned_cities.map((c: string) => ({
+          user_id: authId,
+          city_id: c,
+          org_id: admin.org_id
+        }))
+      )
+    );
+  }
+
+  if (tasks.length > 0) {
+    await Promise.all(tasks);
+  }
+
+  // 5. Privilege escalation check for Sub-Admin
   if (admin.role === 'sub_admin' && permissions) {
     const unauthorized = permissions.filter((p: string) => !admin.permissions?.includes(p))
     if (unauthorized.length > 0) {
@@ -334,7 +396,7 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
 })
 
 export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role']
+  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id']
   const updates: any = {}
   for (const key of allowed) { if (req.body[key] !== undefined) updates[key] = req.body[key] }
 
@@ -365,6 +427,7 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
     // Scoped update unless super_admin
     if (req.user?.role !== 'super_admin' && req.user?.role !== 'admin') {
       query.eq('org_id', req.user!.org_id)
+      if (req.user?.client_id) query.eq('client_id', req.user!.client_id)
     }
 
     const { data, error } = await query.select()
@@ -428,6 +491,10 @@ export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => 
   let query = supabaseAdmin.from('zones')
     .select('*').eq('org_id', user.org_id).eq('is_active', true);
 
+  if (user.client_id) {
+    query = query.eq('client_id', user.client_id);
+  }
+
   if (user.role === 'city_manager' && user.assigned_cities?.length) {
     query = query.in('city', user.assigned_cities);
   }
@@ -440,7 +507,12 @@ export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => 
 export const createZone = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { name, city, meeting_lat, meeting_lng, meeting_address, geofence_radius } = req.body
   const { data, error } = await supabaseAdmin.from('zones')
-    .insert({ org_id: req.user!.org_id, name, city, meeting_lat, meeting_lng, meeting_address, geofence_radius: geofence_radius || 100 })
+    .insert({ 
+      org_id: req.user!.org_id, 
+      client_id: req.user!.client_id || req.body.client_id || null,
+      name, city, meeting_lat, meeting_lng, meeting_address, 
+      geofence_radius: geofence_radius || 100 
+    })
     .select().single()
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data, 'Zone created', 201)
@@ -451,9 +523,9 @@ export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Re
   const user = req.user!
   const date = (req.query.date as string) || todayDate()
   const [attRes, subRes, sosRes] = await Promise.all([
-    supabaseAdmin.from('attendance').select('user_id, status', { count: 'exact' }).eq('org_id', user.org_id).eq('date', date),
-    supabaseAdmin.from('form_submissions').select('id, is_converted', { count: 'exact' }).eq('org_id', user.org_id).gte('submitted_at', date + 'T00:00:00+05:30').lte('submitted_at', date + 'T23:59:59+05:30'),
-    supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'active'),
+    supabaseAdmin.from('attendance').select('user_id, status', { count: 'exact' }).eq('org_id', user.org_id).eq('date', date).filter('client_id', 'eq', user.client_id || undefined),
+    supabaseAdmin.from('form_submissions').select('id, is_converted', { count: 'exact' }).eq('org_id', user.org_id).gte('submitted_at', date + 'T00:00:00+05:30').lte('submitted_at', date + 'T23:59:59+05:30').filter('client_id', 'eq', user.client_id || undefined),
+    supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'active').filter('client_id', 'eq', user.client_id || undefined),
   ])
   const totalEngagements = subRes.count || 0
   const totalTff = (subRes.data || []).filter((s: any) => s.is_converted).length
@@ -471,9 +543,9 @@ export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Re
 export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const [attRes, subRes, sosRes] = await Promise.all([
-    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users(name, zones(name))').eq('org_id', user.org_id).order('checkin_at', { ascending: false }).limit(10),
-    supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users(name)').eq('org_id', user.org_id).order('submitted_at', { ascending: false }).limit(10),
-    supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users(name)').eq('org_id', user.org_id).order('created_at', { ascending: false }).limit(5),
+    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users(name, zones(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
+    supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('submitted_at', { ascending: false }).limit(10),
+    supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('created_at', { ascending: false }).limit(5),
   ])
   const feed = [
     ...(attRes.data || []).map((a: any) => ({ type: 'attendance', event: a.status === 'checked_in' ? 'Check-in' : 'Check-out', user: a.users?.name, zone: a.users?.zones?.name, time: a.checkin_at, id: a.id })),
@@ -490,6 +562,7 @@ export const createSOS = asyncHandler(async (req: AuthRequest, res: Response) =>
   const { data, error } = await supabaseAdmin.from('sos_alerts')
     .insert({
       org_id: user.org_id,
+      client_id: user.client_id,
       user_id: user.id,
       latitude,
       longitude,

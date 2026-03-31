@@ -21,7 +21,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('users')
     .select(`
-      id, org_id, name, mobile, role, zone_id, supervisor_id, fcm_token, is_active,
+      id, org_id, client_id, name, mobile, role, zone_id, supervisor_id, fcm_token, is_active,
       permissions:user_module_permissions(module_id),
       cities:user_city_assignments(city_id)
     `)

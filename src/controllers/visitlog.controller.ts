@@ -57,7 +57,7 @@ async function enrichVisitLogs(logs: any[]) {
   }
 }
 
-const ALL_COLUMNS = 'id, visitor_id, executive_id, zone_id, visit_outlet_id, org_id, rating, remarks, visit_response, visit_response_at, photo_url, latitude, longitude, date, visited_at';
+const ALL_COLUMNS = 'id, visitor_id, executive_id, zone_id, client_id, visit_outlet_id, org_id, rating, remarks, visit_response, visit_response_at, photo_url, latitude, longitude, date, visited_at';
 
 // POST /api/v1/visits
 export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -71,6 +71,7 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
     .insert({ 
       ...body.data, 
       org_id: user.org_id, 
+      client_id: user.client_id,
       visitor_id: user.id, 
       executive_id: body.data.executive_id || user.id, 
       zone_id: user.zone_id,
@@ -151,13 +152,17 @@ export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response
   const user = req.user!;
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
-  const { data, error } = await supabaseAdmin
+  let query = supabaseAdmin
     .from('visit_logs')
     .select(ALL_COLUMNS)
     .eq('org_id', user.org_id)
-    .eq('date', date)
-    .order('visited_at', { ascending: false });
+    .eq('date', date);
 
+  if (user.client_id) {
+    query = query.eq('client_id', user.client_id);
+  }
+
+  const { data, error } = await query.order('visited_at', { ascending: false });
   if (error) return badRequest(res, error.message);
   return ok(res, await enrichVisitLogs(data || []));
 });

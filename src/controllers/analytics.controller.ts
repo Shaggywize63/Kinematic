@@ -41,26 +41,41 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   const to   = (req.query.to   as string) || (req.query.date as string) || isoDate(toIST(new Date()));
   const date = to; // For backwards compatibility
 
-  const { data: kpis } = await supabaseAdmin
+  let kpiQuery = supabaseAdmin
     .from('v_daily_kpis').select('*')
-    .eq('org_id', user.org_id).eq('date', to).single();
+    .eq('org_id', user.org_id).eq('date', to);
+  
+  if (user.client_id) kpiQuery = kpiQuery.eq('client_id', user.client_id);
+  const { data: kpis } = await kpiQuery.single();
 
-  const { count: totalExecs } = await supabaseAdmin
+  let execQuery = supabaseAdmin
     .from('users').select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+  
+  if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
+  const { count: totalExecs } = await execQuery;
 
-  const { count: activeSos } = await supabaseAdmin
+  let sosQuery = supabaseAdmin
     .from('sos_alerts').select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id).eq('status', 'active');
+  
+  if (user.client_id) sosQuery = sosQuery.eq('client_id', user.client_id);
+  const { count: activeSos } = await sosQuery;
 
-  const { count: openGrievances } = await supabaseAdmin
+  let grievanceQuery = supabaseAdmin
     .from('grievances').select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id).eq('status', 'submitted');
+  
+  if (user.client_id) grievanceQuery = grievanceQuery.eq('client_id', user.client_id);
+  const { count: openGrievances } = await grievanceQuery;
 
-  const { count: totalVisits } = await supabaseAdmin
+  let visitQuery = supabaseAdmin
     .from('visit_logs').select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id)
     .eq('date', date);
+  
+  if (user.client_id) visitQuery = visitQuery.eq('client_id', user.client_id);
+  const { count: totalVisits } = await visitQuery;
 
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
@@ -69,6 +84,8 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
+
+  if (user.client_id) submissionsQuery = submissionsQuery.eq('client_id', user.client_id);
 
   const userRole = (user.role || '').toLowerCase();
   const isFE = userRole.includes('executive');
@@ -98,6 +115,8 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
     .gte('date', from)
     .lte('date', to);
 
+  if (user.client_id) attendanceQuery = attendanceQuery.eq('client_id', user.client_id);
+
   if (isFE) {
     attendanceQuery = attendanceQuery.eq('user_id', user.id);
   }
@@ -123,12 +142,15 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
 
 
   // Fetch top performers (Top 5 by TFF in range) - reverting to submitted_at for completeness
-  const { data: topPerf } = await supabaseAdmin
+  let topPerfQuery = supabaseAdmin
     .from('form_submissions')
     .select('user_id, is_converted, submitted_at, users(name, zone_id, zones(id, name))')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
+  
+  if (user.client_id) topPerfQuery = topPerfQuery.eq('client_id', user.client_id);
+  const { data: topPerf } = await topPerfQuery;
 
   const tpMap = new Map<string, { name: string; zone: string; tff: number }>();
   (topPerf || []).forEach((s) => {
@@ -139,10 +161,13 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   const topPerformers = Array.from(tpMap.values()).sort((a, b) => b.tff - a.tff).slice(0, 5);
 
   // Fetch zone performance (TFF vs Target)
-  const { data: zones } = await supabaseAdmin
+  let zonesQuery = supabaseAdmin
     .from('zones')
     .select('id, name, tff_target')
     .eq('org_id', user.org_id);
+  
+  if (user.client_id) zonesQuery = zonesQuery.eq('client_id', user.client_id);
+  const { data: zones } = await zonesQuery;
 
   const zpMap = new Map<string, { zone: string; tff: number; target: number }>();
   (zones || []).forEach((z) => zpMap.set(z.id, { zone: z.name, tff: 0, target: z.tff_target || 0 }));
@@ -189,12 +214,15 @@ export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response)
   const from = (req.query.from as string) || isoDate(new Date(Date.now() - 7 * 86400000));
   const to   = (req.query.to   as string) || isoDate(new Date());
 
-  const { data, error } = await supabaseAdmin
+  let trendQuery = supabaseAdmin
     .from('form_submissions')
     .select('submitted_at, is_converted')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
+  
+  if (user.client_id) trendQuery = trendQuery.eq('client_id', user.client_id);
+  const { data, error } = await trendQuery;
 
   if (error) return badRequest(res, error.message);
 
@@ -236,11 +264,15 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
     .select('id, submitted_at, is_converted, outlet_name, users!inner(name, city), activities(name)')
     .eq('org_id', user.org_id);
 
+  if (user.client_id) submissionQuery = submissionQuery.eq('client_id', user.client_id);
+
   let checkinQuery = supabaseAdmin
     .from('attendance')
     .select('id, checkin_at, users!inner(name, city), zones(name)')
     .eq('org_id', user.org_id)
     .not('checkin_at', 'is', null);
+
+  if (user.client_id) checkinQuery = checkinQuery.eq('client_id', user.client_id);
 
   if (userRole === 'city_manager' && user.assigned_cities?.length) {
     submissionQuery = submissionQuery.in('users.city', user.assigned_cities);
@@ -275,10 +307,13 @@ export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) =>
   const user = req.user!;
   const date = (req.query.date as string) || isoDate(toIST(new Date()));
 
-  const { data, error } = await supabaseAdmin
+  let hourlyQuery = supabaseAdmin
     .from('form_submissions').select('submitted_at, is_converted')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${date}T00:00:00`).lte('submitted_at', `${date}T23:59:59`);
+  
+  if (user.client_id) hourlyQuery = hourlyQuery.eq('client_id', user.client_id);
+  const { data, error } = await hourlyQuery;
 
   if (error) return badRequest(res, error.message);
 
@@ -296,12 +331,15 @@ export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Resp
   const startStr = isoDate(new Date(toIST(new Date()).getTime() - 6 * 24 * 60 * 60 * 1000));
 
   // Filter by 'date' column (YYYY-MM-DD) which is more reliable than submitted_at ISO strings in this app
-  const { data, error } = await supabaseAdmin
+  let heatmapQuery = supabaseAdmin
     .from('form_submissions')
     .select('submitted_at, is_converted, date')
     .eq('org_id', user.org_id)
     .gte('date', startStr)
     .lte('date', endStr);
+  
+  if (user.client_id) heatmapQuery = heatmapQuery.eq('client_id', user.client_id);
+  const { data, error } = await heatmapQuery;
 
   if (error) return badRequest(res, error.message);
 
@@ -399,12 +437,15 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
     curr.setDate(curr.getDate() + 1);
   }
 
-  const { data, error } = await supabaseAdmin
+  let weeklyQuery = supabaseAdmin
     .from('form_submissions')
     .select('submitted_at, is_converted, date')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
+  
+  if (user.client_id) weeklyQuery = weeklyQuery.eq('client_id', user.client_id);
+  const { data, error } = await weeklyQuery;
 
   if (error) return badRequest(res, error.message);
 
@@ -441,16 +482,22 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
   const user = req.user!;
   const today = isoDate(new Date());
 
-  const { data: execs, error: execErr } = await supabaseAdmin
+  let execQuery = supabaseAdmin
     .from('users').select('id, name, employee_id, zone_id, zones(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+  
+  if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
+  const { data: execs, error: execErr } = await execQuery;
 
   if (execErr) return badRequest(res, execErr.message);
 
-  const { data: att } = await supabaseAdmin
+  let attQuery = supabaseAdmin
     .from('attendance')
     .select('user_id, checkin_at, checkout_at, checkin_lat, checkin_lng, checkin_address, total_hours, status, is_regularised')
     .eq('org_id', user.org_id).eq('date', today);
+  
+  if (user.client_id) attQuery = attQuery.eq('client_id', user.client_id);
+  const { data: att } = await attQuery;
 
   const attMap = new Map((att || []).map((a) => [a.user_id, a]));
 
@@ -555,12 +602,15 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   const to    = (req.query.to    as string) || isoDate(new Date());
 
   // All unique outlets from form_submissions in range - reverting to submitted_at
-  const { data: forms, error } = await supabaseAdmin
+  let formsQuery = supabaseAdmin
     .from('form_submissions')
     .select('outlet_name, is_converted, user_id, submitted_at, date, users(name, zones(name, city))')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
+  
+  if (user.client_id) formsQuery = formsQuery.eq('client_id', user.client_id);
+  const { data: forms, error } = await formsQuery;
 
   if (error) return badRequest(res, error.message);
 
