@@ -446,9 +446,13 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
 })
 
 export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const allowed = ['name', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id']
+  const allowed = ['name', 'mobile', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id']
   const updates: any = {}
-  for (const key of allowed) { if (req.body[key] !== undefined) updates[key] = req.body[key] }
+  for (const key of allowed) { 
+    if (req.body[key] !== undefined && req.body[key] !== '') {
+      updates[key] = req.body[key] 
+    }
+  }
 
   // Sync app_password with Supabase Auth if provided
   if (req.body.app_password) {
