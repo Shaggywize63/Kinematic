@@ -96,7 +96,10 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   // Fetch user profile from users table using the auth user id
   const { data: userProfile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select('id, org_id, client_id, name, role, is_active')
+    .select(`
+      id, org_id, client_id, name, role, is_active,
+      permissions:user_module_permissions(module_id)
+    `)
     .eq('id', session.user.id)
     .single();
 
@@ -121,6 +124,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
       client_id: userProfile.client_id,
       name: userProfile.name,
       role: userProfile.role,
+      permissions: (userProfile as any).permissions?.map((p: any) => p.module_id) || []
     },
   });
 });
@@ -163,9 +167,10 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabaseAdmin
     .from('users')
     .select(`
-      id, org_id, name, mobile, role, employee_id,
+      id, org_id, client_id, name, mobile, role, employee_id,
       zone_id, supervisor_id, city, state, avatar_url,
       is_active, joined_date, created_at,
+      permissions:user_module_permissions(module_id),
       zones(id, name, city, meeting_lat, meeting_lng, geofence_radius),
       organisations(id, name, logo_url)
     `)
@@ -173,5 +178,9 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) return serverError(res);
-  return ok(res, data);
+  const result = {
+    ...data,
+    permissions: (data as any).permissions?.map((p: any) => p.module_id) || []
+  };
+  return ok(res, result);
 });

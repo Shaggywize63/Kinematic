@@ -535,13 +535,18 @@ export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Res
   const user = req.user!;
   const today = isoDate(new Date());
 
-  const { data: execs, error: execErr } = await supabaseAdmin
+  let execQuery = supabaseAdmin
     .from('users').select('id, name, employee_id, zone_id, zones(name)')
     .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+  
+  if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
+  const { data: execs, error: execErr } = await execQuery;
 
   if (execErr) return badRequest(res, execErr.message);
 
-  const { data: att } = await supabaseAdmin.from('attendance').select('*').eq('org_id', user.org_id).eq('date', today);
+  let attQuery = supabaseAdmin.from('attendance').select('*').eq('org_id', user.org_id).eq('date', today);
+  if (user.client_id) attQuery = attQuery.eq('client_id', user.client_id);
+  const { data: att } = await attQuery;
 
   const { data: brkData } = await supabaseAdmin
     .from('breaks').select('attendance_id, started_at, ended_at')
@@ -662,8 +667,13 @@ export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Respo
   const sevenDaysAgo = isoDate(new Date(Date.now() - 6 * 86400000));
 
   // 1. Attendance Today (Minimal summary)
-  const { data: att } = await supabaseAdmin.from('attendance').select('status, is_regularised, checkout_at').eq('org_id', user.org_id).eq('date', today);
-  const { count: totalExecs } = await supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+  let attInitQuery = supabaseAdmin.from('attendance').select('status, is_regularised, checkout_at').eq('org_id', user.org_id).eq('date', today);
+  if (user.client_id) attInitQuery = attInitQuery.eq('client_id', user.client_id);
+  const { data: att } = await attInitQuery;
+
+  let execInitQuery = supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+  if (user.client_id) execInitQuery = execInitQuery.eq('client_id', user.client_id);
+  const { count: totalExecs } = await execInitQuery;
 
   const attSummary = {
     total: totalExecs || 0,
@@ -675,11 +685,18 @@ export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Respo
   };
 
   // 2. Main KPIs (Summary logic)
-  const { data: kpisView } = await supabaseAdmin.from('v_daily_kpis').select('*').eq('org_id', user.org_id).eq('date', today).single();
-  const { count: openGrievances } = await supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'submitted');
+  let kpisInitQuery = supabaseAdmin.from('v_daily_kpis').select('*').eq('org_id', user.org_id).eq('date', today);
+  if (user.client_id) kpisInitQuery = kpisInitQuery.eq('client_id', user.client_id);
+  const { data: kpisView } = await kpisInitQuery.single();
+
+  let grievanceInitQuery = supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'submitted');
+  if (user.client_id) grievanceInitQuery = grievanceInitQuery.eq('client_id', user.client_id);
+  const { count: openGrievances } = await grievanceInitQuery;
   
   // 3. Weekly Trends
-  const { data: weekSubs } = await supabaseAdmin.from('form_submissions').select('submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${sevenDaysAgo}T00:00:00`);
+  let weekSubsInitQuery = supabaseAdmin.from('form_submissions').select('submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${sevenDaysAgo}T00:00:00`);
+  if (user.client_id) weekSubsInitQuery = weekSubsInitQuery.eq('client_id', user.client_id);
+  const { data: weekSubs } = await weekSubsInitQuery;
   const dayMap: Record<string, number> = {};
   for(let i=0; i<7; i++) {
     const d = isoDate(new Date(Date.now() - i * 86400000));
@@ -718,7 +735,9 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
   if (attRecord) enrichWithHours(attRecord);
 
   // 2. Summary Stats (FE-specific)
-  const { count: myTff } = await supabaseAdmin.from('form_submissions').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('date', today);
+  let tffHomeQuery = supabaseAdmin.from('form_submissions').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('date', today);
+  if (user.client_id) tffHomeQuery = tffHomeQuery.eq('client_id', user.client_id);
+  const { count: myTff } = await tffHomeQuery;
   
   // 3. Today's Route Plan
   const { data: plan } = await supabaseAdmin.from('v_route_plan_daily').select('*').eq('user_id', user.id).eq('plan_date', today).maybeSingle();
@@ -769,24 +788,24 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   const to   = (req.query.to   as string) || isoDate(toIST(new Date()));
 
   // Fetch zones with city info
-  const { data: zones } = await supabaseAdmin
-    .from('zones').select('id, name, city, meeting_lat, meeting_lng').eq('org_id', user.org_id);
+  let zonesPerfQuery = supabaseAdmin.from('zones').select('id, name, city, meeting_lat, meeting_lng').eq('org_id', user.org_id);
+  if (user.client_id) zonesPerfQuery = zonesPerfQuery.eq('client_id', user.client_id);
+  const { data: zones } = await zonesPerfQuery;
 
   // Fetch executives per zone
-  const { data: execs } = await supabaseAdmin
-    .from('users').select('id, name, zone_id').eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+  let execsPerfQuery = supabaseAdmin.from('users').select('id, name, zone_id').eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+  if (user.client_id) execsPerfQuery = execsPerfQuery.eq('client_id', user.client_id);
+  const { data: execs } = await execsPerfQuery;
 
   // Fetch attendance in range
-  const { data: att } = await supabaseAdmin
-    .from('attendance').select('user_id, zone_id, date, total_hours, checkin_at')
-    .eq('org_id', user.org_id)
-    .gte('date', from).lte('date', to);
+  let attPerfQuery = supabaseAdmin.from('attendance').select('user_id, zone_id, date, total_hours, checkin_at').eq('org_id', user.org_id).gte('date', from).lte('date', to);
+  if (user.client_id) attPerfQuery = attPerfQuery.eq('client_id', user.client_id);
+  const { data: att } = await attPerfQuery;
 
   // Fetch form submissions in range
-  const { data: forms } = await supabaseAdmin
-    .from('form_submissions').select('user_id, is_converted, outlet_name, submitted_at')
-    .eq('org_id', user.org_id)
-    .gte('submitted_at', `${from}T00:00:00`).lte('submitted_at', `${to}T23:59:59`);
+  let formsPerfQuery = supabaseAdmin.from('form_submissions').select('user_id, is_converted, outlet_name, submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${from}T00:00:00`).lte('submitted_at', `${to}T23:59:59`);
+  if (user.client_id) formsPerfQuery = formsPerfQuery.eq('client_id', user.client_id);
+  const { data: forms } = await formsPerfQuery;
 
   // Build exec→zone map
   const execZoneMap = new Map((execs || []).map((e) => [e.id, e.zone_id]));
