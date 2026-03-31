@@ -218,15 +218,29 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
 
   // Enrichment
   const userIds = (data || []).map((u: any) => u.id);
-  const attRes = userIds.length > 0 
-    ? await supabaseAdmin.from('attendance').select('user_id, total_hours, status, checkin_at').eq('date', todayDate()).in('user_id', userIds)
-    : { data: [] };
+  const [attRes, permRes] = await Promise.all([
+    userIds.length > 0 
+      ? supabaseAdmin.from('attendance').select('user_id, total_hours, status, checkin_at').eq('date', todayDate()).in('user_id', userIds)
+      : { data: [] },
+    userIds.length > 0
+      ? supabaseAdmin.from('user_module_permissions').select('user_id, module_id').in('user_id', userIds)
+      : { data: [] }
+  ]);
 
   const attMap = new Map((attRes.data || []).map((a: any) => [a.user_id, a]));
+  const permMap = new Map<string, string[]>();
+  (permRes.data || []).forEach((p: any) => {
+    const list = permMap.get(p.user_id) || [];
+    list.push(p.module_id);
+    permMap.set(p.user_id, list);
+  });
+
   const now = new Date().getTime();
 
   const enrichedData = (data || []).map((u: any) => {
     if (u.zones && Array.isArray(u.zones)) u.zones = u.zones[0];
+    
+    // Attendance
     const att: any = attMap.get(u.id);
     if (att) {
       u.hours_worked = att.total_hours || (att.status === 'checked_in' && att.checkin_at ? Math.max(0, now - new Date(att.checkin_at).getTime()) / 3600000 : 0);
@@ -235,6 +249,10 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
       u.hours_worked = 0;
       u.is_checked_in = false;
     }
+
+    // Permissions
+    u.permissions = permMap.get(u.id) || [];
+
     return u;
   });
 
