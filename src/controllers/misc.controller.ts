@@ -179,13 +179,19 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     }
   }
 
+  // 1. Refined Client Scoping: Admins see client-less users (sub-admins) even if the admin has a client_id
   if (user.client_id) {
-    query = query.eq('client_id', user.client_id);
+    if (isPrivileged) {
+      // Admins see users in their client OR users with NO client (platform users like themselves)
+      query = query.or(`client_id.eq.${user.client_id},client_id.is.null`);
+    } else {
+      query = query.eq('client_id', user.client_id);
+    }
   } else if (client_id) {
     query = query.eq('client_id', client_id as string);
   }
 
-  // 2. Role filtering moved to JS for Enum compatibility/case-insensitivity
+  // 2. Role filtering normalization
   console.log(`[DIAGNOSTIC] Applying JS filters for role=${filterRole}`);
 
   // 3. Optional filters
@@ -210,7 +216,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
 
   console.log(`[DIAGNOSTIC] Query Success: Found ${data?.length} users, Total: ${count}`);
 
-  // Enrichment (Enforce flattened zones for dashboard)
+  // Enrichment
   const userIds = (data || []).map((u: any) => u.id);
   const attRes = userIds.length > 0 
     ? await supabaseAdmin.from('attendance').select('user_id, total_hours, status, checkin_at').eq('date', todayDate()).in('user_id', userIds)
@@ -220,9 +226,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
   const now = new Date().getTime();
 
   const enrichedData = (data || []).map((u: any) => {
-    // Flatten zones if they exist in the raw record
     if (u.zones && Array.isArray(u.zones)) u.zones = u.zones[0];
-    
     const att: any = attMap.get(u.id);
     if (att) {
       u.hours_worked = att.total_hours || (att.status === 'checked_in' && att.checkin_at ? Math.max(0, now - new Date(att.checkin_at).getTime()) / 3600000 : 0);
@@ -234,21 +238,17 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     return u;
   });
 
-  // 4. Robust Javascript Filtering
+  // 4. Robust Javascript Role Filtering (Hyphen/Underscore Agnostic)
   let filteredData = enrichedData;
   if (filterRole) {
-    const target = (filterRole as string).toLowerCase();
+    const target = (filterRole as string).toLowerCase().replace(/-/g, '_');
     filteredData = enrichedData.filter((u: any) => {
-      const uRole = (u.role || '').toLowerCase();
-      // Handle 'executive' vs 'field_executive' mapping if needed, 
-      // but for now just direct match or partial match
+      const uRole = (u.role || '').toLowerCase().replace(/-/g, '_');
       return uRole === target || (target === 'field_executive' && uRole === 'executive');
     });
-    console.log(`[DIAGNOSTIC] JS Filter: Request=${target}, ResultCount=${filteredData.length}`);
-    if (filteredData.length === 0) {
-      console.log(`[DIAGNOSTIC] ALL ROLES IN DB: ${[...new Set(enrichedData.map((u:any) => u.role))]}`);
-    }
+    console.log(`[DIAGNOSTIC] JS Filter Result for ${target}: ${filteredData.length}`);
   }
+
 
   // EMERGENCY DIAGNOSTIC INJECTION: Add fake users to see if API is working
   const diagnosticSup = {
