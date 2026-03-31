@@ -65,7 +65,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, is_converted, user_id, submitted_at, date', { count: 'exact' })
+    .select('id, is_converted, user_id, submitted_at, date, users!inner(city)', { count: 'exact' })
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
@@ -75,6 +75,9 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   
   if (isFE) {
     submissionsQuery = submissionsQuery.eq('user_id', user.id);
+  } else if (userRole === 'city_manager' && user.assigned_cities?.length) {
+    // City Manager: Filter by assigned cities (using city field in users/zones)
+    submissionsQuery = submissionsQuery.in('users.city', user.assigned_cities);
   }
 
   const { data: subs, count: subCount, error: subErr } = await submissionsQuery;
@@ -226,18 +229,26 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
   const user = req.user!;
   const limit = Math.min(50, parseInt(req.query.limit as string || '20', 10));
 
-  const { data: submissions } = await supabaseAdmin
-    .from('form_submissions')
-    .select('id, submitted_at, is_converted, outlet_name, users(name), activities(name)')
-    .eq('org_id', user.org_id)
-    .order('submitted_at', { ascending: false }).limit(limit);
+  const userRole = (user.role || '').toLowerCase();
 
-  const { data: checkins } = await supabaseAdmin
+  let submissionQuery = supabaseAdmin
+    .from('form_submissions')
+    .select('id, submitted_at, is_converted, outlet_name, users!inner(name, city), activities(name)')
+    .eq('org_id', user.org_id);
+
+  let checkinQuery = supabaseAdmin
     .from('attendance')
-    .select('id, checkin_at, users(name), zones(name)')
+    .select('id, checkin_at, users!inner(name, city), zones(name)')
     .eq('org_id', user.org_id)
-    .not('checkin_at', 'is', null)
-    .order('checkin_at', { ascending: false }).limit(limit);
+    .not('checkin_at', 'is', null);
+
+  if (userRole === 'city_manager' && user.assigned_cities?.length) {
+    submissionQuery = submissionQuery.in('users.city', user.assigned_cities);
+    checkinQuery = checkinQuery.in('users.city', user.assigned_cities);
+  }
+
+  const { data: submissions } = await submissionQuery.order('submitted_at', { ascending: false }).limit(limit);
+  const { data: checkins } = await checkinQuery.order('checkin_at', { ascending: false }).limit(limit);
 
   const feed = [
     ...(submissions || []).map((s) => {
@@ -690,6 +701,7 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
       id: broadcast.id, 
       question: broadcast.body, 
       is_urgent: broadcast.priority === 'high',
+      already_answered: (broadcast as any).alreadyAnswered,
       options: [
         { label: "Understood", value: 1 },
         { label: "Need Clarification", value: 0 }

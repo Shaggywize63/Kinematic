@@ -1,5 +1,5 @@
 import { Request } from 'express';
-export type UserRole = 'super_admin' | 'admin' | 'city_manager' | 'supervisor' | 'executive' | 'field_executive' | 'hr';
+export type UserRole = 'super_admin' | 'admin' | 'sub_admin' | 'city_manager' | 'supervisor' | 'executive' | 'field_executive' | 'hr';
 
 export interface AuthUser {
   id: string;
@@ -11,6 +11,8 @@ export interface AuthUser {
   supervisor_id?: string;
   fcm_token?: string;
   is_active: boolean;
+  permissions?: string[];       // module identifiers like 'orders', 'users', etc.
+  assigned_cities?: string[];    // IDs of assigned cities
 }
 
 export interface AuthRequest extends Request {

@@ -9,6 +9,7 @@ import aiRouter from './routes/ai.routes';
 
 import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
+import { requireAuth } from './middleware/auth';
 
 // Routes
 import authRoutes         from './routes/auth.routes';
@@ -102,40 +103,45 @@ app.get('/health', (_req, res) => {
 // ── API routes ────────────────────────────────────────────────
 const V1 = '/api/v1';
 
+import { requireModule, enforceCityScope } from './middleware/rbac';
+
+// Public/Auth routes
 app.use(`${V1}/auth`,          authRoutes);
-app.use(`${V1}/attendance`,    attendanceRoutes);
-app.use(`${V1}/forms`,         formsRoutes);
-app.use(`${V1}/builder`,       builderRoutes);
-app.use(`${V1}/stock`,         stockRoutes);
-app.use(`${V1}/broadcast`,     broadcastRoutes);
-app.use(`${V1}/sos`,           sosRoutes);
-app.use(`${V1}/leaderboard`,   leaderboardRoutes);
-app.use(`${V1}/notifications`, notifRoutes);
-app.use(`${V1}/learning`,      learningRoutes);
-app.use(`${V1}/grievances`,    grievanceRoutes);
-app.use(`${V1}/analytics`,     analyticsRoutes);
-app.use(`${V1}/visits`,        visitlogRoutes);
-app.use(`${V1}/upload`,        uploadRoutes);
-app.use(`${V1}/warehouses`,    wmsRoutes);
-app.use(`${V1}/users`,         usersRoutes);
-app.use(`${V1}/zones`,         zonesRoutes);
-app.use('/api/v1/candidates',  candidatesRouter);
-app.use('/api/v1/ai',          aiRouter);
-app.use(`${V1}/activity-mappings`, activityMappingRoutes);
-app.use(`${V1}/misc`,              miscRoutes);
+
+// Protected routes with RBAC
+app.use(`${V1}/attendance`,    requireAuth, enforceCityScope, requireModule('reports'), attendanceRoutes);
+app.use(`${V1}/forms`,         requireAuth, enforceCityScope, formsRoutes);
+app.use(`${V1}/builder`,       requireAuth, builderRoutes);
+app.use(`${V1}/stock`,         requireAuth, requireModule('inventory'), stockRoutes);
+app.use(`${V1}/broadcast`,     requireAuth, broadcastRoutes);
+app.use(`${V1}/sos`,           requireAuth, sosRoutes);
+app.use(`${V1}/leaderboard`,   requireAuth, leaderboardRoutes);
+app.use(`${V1}/notifications`, requireAuth, notifRoutes);
+app.use(`${V1}/learning`,      requireAuth, learningRoutes);
+app.use(`${V1}/grievances`,    requireAuth, requireModule('reports'), grievanceRoutes);
+app.use(`${V1}/analytics`,     requireAuth, enforceCityScope, requireModule('analytics'), analyticsRoutes);
+app.use(`${V1}/visits`,        requireAuth, enforceCityScope, requireModule('reports'), visitlogRoutes);
+app.use(`${V1}/upload`,        requireAuth, uploadRoutes);
+app.use(`${V1}/warehouses`,    requireAuth, requireModule('inventory'), wmsRoutes);
+app.use(`${V1}/users`,         requireAuth, requireModule('users'), usersRoutes);
+app.use(`${V1}/zones`,         requireAuth, enforceCityScope, zonesRoutes);
+app.use('/api/v1/candidates',  requireAuth, candidatesRouter);
+app.use('/api/v1/ai',          requireAuth, aiRouter);
+app.use(`${V1}/activity-mappings`, requireAuth, activityMappingRoutes);
+app.use(`${V1}/misc`,              requireAuth, miscRoutes);
 
 // Route plan (singular and plural alias)
-app.use(`${V1}/route-plan`,    routePlanRoutes);
-app.use(`${V1}/route-plans`,   routePlanRoutes);
+app.use(`${V1}/route-plan`,    requireAuth, enforceCityScope, requireModule('orders'), routePlanRoutes);
+app.use(`${V1}/route-plans`,   requireAuth, enforceCityScope, requireModule('orders'), routePlanRoutes);
 
 // Other management mounts
-app.use(`${V1}/activities`,    activitiesRoutes);
-app.use(`${V1}/assets`,        assetsRoutes);
-app.use(`${V1}/cities`,        citiesRoutes);
-app.use(`${V1}/management`,    managementRoutes);
-app.use(`${V1}/skus`,          skusRoutes);
-app.use(`${V1}/stores`,        storesRoutes);
-app.use(`${V1}/warehouse`,     warehouseRoutes);
+app.use(`${V1}/activities`,    requireAuth, activitiesRoutes);
+app.use(`${V1}/assets`,        requireAuth, requireModule('inventory'), assetsRoutes);
+app.use(`${V1}/cities`,        requireAuth, citiesRoutes);
+app.use(`${V1}/management`,    requireAuth, managementRoutes);
+app.use(`${V1}/skus`,          requireAuth, requireModule('inventory'), skusRoutes);
+app.use(`${V1}/stores`,        requireAuth, enforceCityScope, storesRoutes);
+app.use(`${V1}/warehouse`,     requireAuth, requireModule('inventory'), warehouseRoutes);
 
 // ── 404 + error handlers ──────────────────────────────────────
 app.use(notFoundHandler);
