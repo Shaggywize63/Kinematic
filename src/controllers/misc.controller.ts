@@ -162,6 +162,11 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
   if (zone_id) query = query.eq('zone_id', zone_id as string);
   if (is_active !== undefined) query = query.eq('is_active', is_active === 'true');
   if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id);
+  
+  // City scope enforcement
+  if (user.role === 'city_manager' && user.assigned_cities?.length) {
+    query = query.in('city', user.assigned_cities);
+  }
 
   // 4. Manual range for pagination
   query = query.order('name').range(offset, offset + limit - 1);
@@ -302,17 +307,30 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
       .select('*, zones(name)')
       .single()
 
-  if (error) {
-    // Rollback: delete the auth user we just created
-    await supabaseAdmin.auth.admin.deleteUser(authId)
-    // Friendly message for duplicate mobile in public.users
-    const msg = error.message.toLowerCase().includes('unique')
-      ? `Mobile ${mobile} is already in use`
-      : error.message
-    throw new AppError(500, msg, 'DB_ERROR')
+  const { permissions, assigned_cities } = req.body
+
+  // 4. Privilege escalation check for Sub-Admin
+  if (admin.role === 'sub_admin' && permissions) {
+    const unauthorized = permissions.filter((p: string) => !admin.permissions?.includes(p))
+    if (unauthorized.length > 0) {
+      await supabaseAdmin.auth.admin.deleteUser(authId)
+      throw new AppError(403, `Cannot assign modules you do not have: ${unauthorized.join(', ')}`, 'FORBIDDEN')
+    }
   }
 
-  sendSuccess(res, data, 'User created', 201)
+  // 5. Insert permissions if provided
+  if (permissions && Array.isArray(permissions)) {
+    const pData = permissions.map((p: string) => ({ user_id: authId, module_id: p }))
+    await supabaseAdmin.from('user_module_permissions').insert(pData)
+  }
+
+  // 6. Insert city assignments if provided
+  if (assigned_cities && Array.isArray(assigned_cities)) {
+    const cData = assigned_cities.map((c: string) => ({ user_id: authId, city_id: c }))
+    await supabaseAdmin.from('user_city_assignments').insert(cData)
+  }
+
+  sendSuccess(res, { ...data, permissions: permissions || [], assigned_cities: assigned_cities || [] }, 'User created', 201)
 })
 
 export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -345,7 +363,7 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
     const query = supabaseAdmin.from('users').update(updates).eq('id', req.params.id)
     
     // Scoped update unless super_admin
-    if (req.user?.role !== 'super_admin') {
+    if (req.user?.role !== 'super_admin' && req.user?.role !== 'admin') {
       query.eq('org_id', req.user!.org_id)
     }
 
@@ -358,8 +376,35 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
     if (!data || data.length === 0) {
       throw new AppError(404, `User not found or you don't have permission to edit them (ID: ${req.params.id})`, 'NOT_FOUND')
     }
+
+    const targetUserId = req.params.id
+    const { permissions, assigned_cities } = req.body
+
+    // Sync Permissions
+    if (permissions && Array.isArray(permissions)) {
+      // Privilege escalation check
+      if (req.user?.role === 'sub_admin') {
+        const unauthorized = permissions.filter((p: string) => !req.user!.permissions?.includes(p))
+        if (unauthorized.length > 0) throw new AppError(403, `Cannot assign modules you do not have: ${unauthorized.join(', ')}`, 'FORBIDDEN')
+      }
+      
+      await supabaseAdmin.from('user_module_permissions').delete().eq('user_id', targetUserId)
+      if (permissions.length > 0) {
+        const pData = permissions.map((p: string) => ({ user_id: targetUserId, module_id: p }))
+        await supabaseAdmin.from('user_module_permissions').insert(pData)
+      }
+    }
+
+    // Sync Cities
+    if (assigned_cities && Array.isArray(assigned_cities)) {
+      await supabaseAdmin.from('user_city_assignments').delete().eq('user_id', targetUserId)
+      if (assigned_cities.length > 0) {
+        const cData = assigned_cities.map((c: string) => ({ user_id: targetUserId, city_id: c }))
+        await supabaseAdmin.from('user_city_assignments').insert(cData)
+      }
+    }
     
-    sendSuccess(res, data[0], 'User updated')
+    sendSuccess(res, { ...data[0], permissions, assigned_cities }, 'User updated')
   } catch (e: any) {
     if (e instanceof AppError) throw e
     throw new AppError(500, `DB update crashed: ${e.message}`, 'DB_CRASH')
@@ -379,8 +424,15 @@ export const resetUserPassword = asyncHandler(async (req: AuthRequest, res: Resp
 
 // ZONES
 export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabaseAdmin.from('zones')
-    .select('*').eq('org_id', req.user!.org_id).eq('is_active', true).order('name')
+  const user = req.user!;
+  let query = supabaseAdmin.from('zones')
+    .select('*').eq('org_id', user.org_id).eq('is_active', true);
+
+  if (user.role === 'city_manager' && user.assigned_cities?.length) {
+    query = query.in('city', user.assigned_cities);
+  }
+
+  const { data, error } = await query.order('name');
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data)
 })

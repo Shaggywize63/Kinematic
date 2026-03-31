@@ -17,16 +17,24 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     return unauthorized(res, 'Invalid or expired token');
   }
 
-  // Fetch user profile from our users table
+  // Fetch user profile from our users table with related permissions and cities
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select('id, org_id, name, mobile, role, zone_id, supervisor_id, fcm_token, is_active')
+    .select(`
+      id, org_id, name, mobile, role, zone_id, supervisor_id, fcm_token, is_active,
+      permissions:user_module_permissions(module_id),
+      cities:user_city_assignments(city_id)
+    `)
     .eq('id', user.id)
     .single();
 
   if (profileError || !profile) {
     return unauthorized(res, 'User profile not found');
   }
+
+  // Flatten the related objects into string arrays for cleaner access
+  const permissions = (profile.permissions as any[])?.map(p => p.module_id) || [];
+  const assigned_cities = (profile.cities as any[])?.map(c => c.city_id) || [];
 
   if (!profile.is_active) {
     return forbidden(res, 'Account is deactivated');
@@ -37,7 +45,11 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     profile.role = profile.role.toLowerCase();
   }
 
-  req.user = profile as AuthRequest['user'];
+  req.user = {
+    ...profile,
+    permissions,
+    assigned_cities
+  } as AuthRequest['user'];
   req.accessToken = token;
   next();
 }
