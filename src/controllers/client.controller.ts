@@ -68,8 +68,10 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
     return;
   }
 
-  // Create an initial user for this client if password/email provided
+  // Create/Sync administrator user for this client if password/email provided
   if (password && email) {
+    let authId: string | undefined;
+
     const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
@@ -78,11 +80,21 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
     });
 
     if (authErr) {
-      // If user already exists in Auth, we'll try to find them or just report error
-      console.error('Auth creation error:', authErr.message);
+      if (authErr.message.toLowerCase().includes('already')) {
+        // Find existing Auth ID by email
+        const { data: { users: listUsers } } = await supabaseAdmin.auth.admin.listUsers();
+        authId = listUsers.find(u => u.email?.toLowerCase() === email.toLowerCase())?.id;
+      } else {
+        console.error('Auth creation error:', authErr.message);
+      }
     } else {
-      await supabaseAdmin.from('users').insert({
-        id: authData.user.id,
+      authId = authData.user.id;
+    }
+
+    if (authId) {
+      // Always upsert to public.users to ensure the profile exists and is linked
+      await supabaseAdmin.from('users').upsert({
+        id: authId,
         org_id: user.org_id,
         client_id: client.id,
         name: contact_person || name,
