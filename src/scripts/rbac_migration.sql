@@ -10,11 +10,17 @@ CREATE TABLE IF NOT EXISTS public.modules (
 
 -- 2. Seed default modules
 INSERT INTO public.modules (id, name, description) VALUES
-('orders', 'Orders Management', 'Control visibility and operations on orders'),
-('users', 'Users Management', 'Control visibility and operations on dashboard users'),
-('analytics', 'Analytics Dashboard', 'Access to data visualization and summaries'),
-('inventory', 'Inventory Management', 'Control stock and warehouse data'),
-('reports', 'Reports Generation', 'Access to exportable data reports')
+  ('analytics', 'Analytics', 'Access to data summaries and live tracking'),
+  ('attendance', 'Attendance', 'Manage and view field executive attendance'),
+  ('route_plan', 'Route Plan', 'Access to route planning and optimization'),
+  ('work_activities', 'Work Activities', 'Monitor real-time work activities and TFF'),
+  ('manpower', 'Manpower', 'Manage field executives and HR records'),
+  ('visit_logs', 'Visit Logs', 'Access to field visit logs and details'),
+  ('inventory', 'Inventory', 'Manage warehouse, stocks, and assets'),
+  ('grievances', 'Grievances', 'Handle and resolve field grievances'),
+  ('form_builder', 'Form Builder', 'Create and manage TFF submission forms'),
+  ('admin', 'Resources', 'Manage cities, zones, outlets, and SKUs'),
+  ('broadcast', 'Broadcast', 'Send and manage broadcast notifications')
 ON CONFLICT (id) DO NOTHING;
 
 -- 3. Mapping for User <-> Modules (Permissions)
