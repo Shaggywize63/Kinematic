@@ -113,6 +113,24 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
       module_id: m
     }));
     await supabaseAdmin.from('client_module_access').insert(accessPayload);
+
+    // Sync to user_module_permissions if we have an authId (administrator account)
+    const { data: adminUser } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('client_id', client.id)
+      .eq('role', 'client')
+      .maybeSingle();
+
+    if (adminUser) {
+      const userPermissionsPayload = modules.map(m => ({
+        user_id: adminUser.id,
+        module_id: m
+      }));
+      // Delete old permissions and insert new ones
+      await supabaseAdmin.from('user_module_permissions').delete().eq('user_id', adminUser.id);
+      await supabaseAdmin.from('user_module_permissions').insert(userPermissionsPayload);
+    }
   }
 
   created(res, { ...client, modules: modules || [] });
@@ -154,6 +172,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
 
   // Sync module access if provided
   if (modules && Array.isArray(modules)) {
+    // 1. Sync Organizational Access
     await supabaseAdmin.from('client_module_access').delete().eq('client_id', id);
     if (modules.length > 0) {
       const accessPayload = modules.map(m => ({
@@ -161,6 +180,25 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
         module_id: m
       }));
       await supabaseAdmin.from('client_module_access').insert(accessPayload);
+    }
+
+    // 2. Sync User-Level Permissions for Client Administrator
+    const { data: adminUser } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('client_id', id)
+      .eq('role', 'client')
+      .maybeSingle();
+
+    if (adminUser) {
+      await supabaseAdmin.from('user_module_permissions').delete().eq('user_id', adminUser.id);
+      if (modules.length > 0) {
+        const userPermissionsPayload = modules.map(m => ({
+          user_id: adminUser.id,
+          module_id: m
+        }));
+        await supabaseAdmin.from('user_module_permissions').insert(userPermissionsPayload);
+      }
     }
   }
 
