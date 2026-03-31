@@ -23,11 +23,14 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
   const list = asyncHandler(async (req: AuthRequest, res: Response) => {
     const user = req.user!;
-    const { data, error } = await supabaseAdmin
+    let q = supabaseAdmin
       .from(tableName)
       .select(getSelect(tableName))
-      .eq('org_id', user.org_id)
-      .order('created_at', { ascending: false });
+      .eq('org_id', user.org_id);
+
+    if (user.client_id) q = q.eq('client_id', user.client_id);
+
+    const { data, error } = await q.order('created_at', { ascending: false });
     if (error) { badRequest(res, error.message); return; }
     ok(res, data || []);
   });
@@ -35,8 +38,12 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const getOne = asyncHandler(async (req: AuthRequest, res: Response) => {
     const user = req.user!;
     const { id } = req.params;
-    const { data, error } = await supabaseAdmin
-      .from(tableName).select('*').eq('id', id).eq('org_id', user.org_id).single();
+    let q = supabaseAdmin
+      .from(tableName).select('*').eq('id', id).eq('org_id', user.org_id);
+    
+    if (user.client_id) q = q.eq('client_id', user.client_id);
+    
+    const { data, error } = await q.single();
     if (error || !data) { notFound(res, `${tableName} record not found`); return; }
     ok(res, data);
   });
@@ -47,7 +54,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     for (const f of requiredFields) {
       if (!body[f]) { badRequest(res, `${f} is required`); return; }
     }
-    const payload = { ...body, org_id: user.org_id };
+    const payload = { ...body, org_id: user.org_id, client_id: user.client_id };
     const { data, error } = await supabaseAdmin.from(tableName).insert(payload).select().single();
     if (error) { badRequest(res, error.message); return; }
     created(res, data);
@@ -56,10 +63,14 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const update = asyncHandler(async (req: AuthRequest, res: Response) => {
     const user = req.user!;
     const { id } = req.params;
-    const { org_id, ...rest } = req.body; // strip org_id
-    const { data, error } = await supabaseAdmin
+    const { org_id, client_id: _, ...rest } = req.body; // strip sensitive IDs
+    let q = supabaseAdmin
       .from(tableName).update({ ...rest, updated_at: new Date().toISOString() })
-      .eq('id', id).eq('org_id', user.org_id).select().single();
+      .eq('id', id).eq('org_id', user.org_id);
+    
+    if (user.client_id) q = q.eq('client_id', user.client_id);
+    
+    const { data, error } = await q.select().single();
     if (error) { badRequest(res, error.message); return; }
     if (!data) { notFound(res, `${tableName} record not found`); return; }
     ok(res, data);
@@ -68,8 +79,12 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const remove = asyncHandler(async (req: AuthRequest, res: Response) => {
     const user = req.user!;
     const { id } = req.params;
-    const { error } = await supabaseAdmin
+    let q = supabaseAdmin
       .from(tableName).delete().eq('id', id).eq('org_id', user.org_id);
+    
+    if (user.client_id) q = q.eq('client_id', user.client_id);
+    
+    const { error } = await q;
     if (error) { badRequest(res, error.message); return; }
     ok(res, { deleted: true });
   });

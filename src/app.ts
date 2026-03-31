@@ -32,6 +32,7 @@ import zonesRoutes        from './routes/zones.routes';
 import routePlanRoutes    from './routes/route-plan.routes';
 import candidatesRouter   from './routes/candidates.routes';
 import activityMappingRoutes from './routes/activity-mapping.routes';
+import clientRoutes          from './routes/client.routes';
 import miscRoutes            from './routes/misc.routes';
 
 // Other management routes (available, now mounted)
@@ -128,6 +129,7 @@ app.use(`${V1}/zones`,         requireAuth, enforceCityScope, zonesRoutes);
 app.use('/api/v1/candidates',  requireAuth, candidatesRouter);
 app.use('/api/v1/ai',          requireAuth, aiRouter);
 app.use(`${V1}/activity-mappings`, requireAuth, activityMappingRoutes);
+app.use(`${V1}/clients`,           requireAuth, clientRoutes);
 app.use(`${V1}/misc`,              requireAuth, miscRoutes);
 
 // Route plan (singular and plural alias)

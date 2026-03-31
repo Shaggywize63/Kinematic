@@ -96,7 +96,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   // Fetch user profile from users table using the auth user id
   const { data: userProfile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select('id, org_id, name, role, is_active')
+    .select('id, org_id, client_id, name, role, is_active')
     .eq('id', session.user.id)
     .single();
 
@@ -118,6 +118,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     user: {
       id: userProfile.id,
       org_id: userProfile.org_id,
+      client_id: userProfile.client_id,
       name: userProfile.name,
       role: userProfile.role,
     },

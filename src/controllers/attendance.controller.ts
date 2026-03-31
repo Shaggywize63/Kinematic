@@ -76,6 +76,7 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
     .insert({
       user_id: user.id,
       org_id: user.org_id,
+      client_id: user.client_id,
       zone_id: resolvedZoneId,
       activity_id,
       date: attendanceDate,
@@ -99,6 +100,7 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
   // Phase 2: Create a work_activity record on check-in to track first location
   await supabaseAdmin.from('work_activity').insert({
     org_id: user.org_id,
+    client_id: user.client_id,
     user_id: user.id,
     attendance_id: data.id,
     activity_type: 'CHECK_IN',
@@ -169,6 +171,7 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
   // Record activity
   await supabaseAdmin.from('work_activity').insert({
     org_id: user.org_id,
+    client_id: user.client_id,
     user_id: user.id,
     attendance_id: record.id,
     activity_type: 'CHECK_OUT',
@@ -312,7 +315,7 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
   let query = supabaseAdmin
     .from('attendance')
     .select(`
-      id, user_id, org_id, zone_id, date, status,
+      id, user_id, org_id, client_id, zone_id, date, status,
       checkin_at, checkin_lat, checkin_lng, checkin_selfie_url, checkin_address, checkin_distance_m,
       checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
       total_hours, break_minutes, working_minutes, notes,
@@ -321,6 +324,10 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
     `)
     .eq('org_id', user.org_id)
     .eq('date', date);
+
+  if (user.client_id) {
+    query = query.eq('client_id', user.client_id);
+  }
 
   if (zoneId) query = query.eq('zone_id', zoneId);
   if (user.role === 'supervisor') {
