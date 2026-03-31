@@ -8,7 +8,10 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint src --ext .ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx -r dotenv/config src/scripts/run_migration.ts",
+    "deploy": "git add . && git commit -m \"deploy: automatic update\" && echo '🚀 Ready to push. Run: git push origin main'",
+    "deploy:direct": "git add . && git commit -m \"deploy: direct automated fix\" && git push origin main && cd ../kinematic-dashboard && git add . && git commit -m \"deploy: direct automated fix\" && git push origin main && cd ../Kinematic"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.1",
