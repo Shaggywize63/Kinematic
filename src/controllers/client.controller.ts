@@ -70,16 +70,28 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
 
   // Create an initial user for this client if password/email provided
   if (password && email) {
-    await supabaseAdmin.from('users').insert({
-      org_id: user.org_id,
-      client_id: client.id,
-      name: contact_person || name,
+    const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
       email,
-      mobile: phone || '',
-      password_hash: password, // Note: In production use Argon2/Bcrypt. Using plain for now as per dashboard pattern.
-      role: 'client',
-      is_active: true
+      password,
+      email_confirm: true,
+      user_metadata: { name: contact_person || name, role: 'client' },
     });
+
+    if (authErr) {
+      // If user already exists in Auth, we'll try to find them or just report error
+      console.error('Auth creation error:', authErr.message);
+    } else {
+      await supabaseAdmin.from('users').insert({
+        id: authData.user.id,
+        org_id: user.org_id,
+        client_id: client.id,
+        name: contact_person || name,
+        email,
+        mobile: phone || '',
+        role: 'client',
+        is_active: true
+      });
+    }
   }
 
   // Add module access if provided
