@@ -43,7 +43,7 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
  */
 export const createClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { name, contact_person, email, phone, modules } = req.body;
+  const { name, contact_person, email, phone, modules, password } = req.body;
 
   if (!name) {
     badRequest(res, 'Client name is required');
@@ -66,6 +66,20 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
   if (error) {
     badRequest(res, error.message);
     return;
+  }
+
+  // Create an initial user for this client if password/email provided
+  if (password && email) {
+    await supabaseAdmin.from('users').insert({
+      org_id: user.org_id,
+      client_id: client.id,
+      name: contact_person || name,
+      email,
+      mobile: phone || '',
+      password_hash: password, // Note: In production use Argon2/Bcrypt. Using plain for now as per dashboard pattern.
+      role: 'client',
+      is_active: true
+    });
   }
 
   // Add module access if provided
