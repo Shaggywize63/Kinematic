@@ -96,15 +96,20 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   // Fetch user profile from users table using the auth user id
   const { data: userProfile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select(`
-      id, org_id, client_id, name, role, is_active,
-      permissions:user_module_permissions(module_id)
-    `)
+    .select('id, org_id, client_id, name, role, is_active')
     .eq('id', session.user.id)
     .single();
 
   if (profileError || !userProfile) return unauthorized(res, 'User profile not found');
   if (!userProfile.is_active) return unauthorized(res, 'Account is deactivated. Contact your admin.');
+
+  // Fetch permissions separately (Bypass join relationship requirements)
+  const { data: permsData } = await supabaseAdmin
+    .from('user_module_permissions')
+    .select('module_id')
+    .eq('user_id', userProfile.id);
+
+  const permissions = permsData?.map(p => p.module_id) || [];
 
   // Update FCM token and device ID if provided
   if (fcm_token || device_id) {
@@ -120,7 +125,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     expires_at: session.session.expires_at,
     user: {
       ...userProfile,
-      permissions: userProfile.permissions?.map((p: any) => p.module_id) || []
+      permissions
     },
   });
 });
