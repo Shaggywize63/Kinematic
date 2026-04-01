@@ -83,12 +83,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const remove = asyncHandler(async (req: AuthRequest, res: Response) => {
     const user = req.user!;
     
-    // Explicit restriction: Clients cannot delete anything
-    if (user.role === 'client') {
-      badRequest(res, 'Client admins do not have permission to delete records. Please contact platform admin.'); 
-      return;
-    }
-
+    // Restriction: Ensure the record belongs to the user's org/client
     const { id } = req.params;
     let q = supabaseAdmin
       .from(tableName).delete().eq('id', id).eq('org_id', user.org_id);

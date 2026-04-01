@@ -495,6 +495,35 @@ export const createZone = asyncHandler(async (req: AuthRequest, res: Response) =
   sendSuccess(res, data, 'Zone created', 201)
 })
 
+export const updateZone = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  const updates = { ...req.body, updated_at: new Date().toISOString() };
+  
+  let query = supabaseAdmin.from('zones').update(updates).eq('id', id).eq('org_id', user.org_id);
+  if (user.client_id) query = query.eq('client_id', user.client_id);
+  
+  const { data, error } = await query.select().single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  if (!data) throw new AppError(404, 'Zone not found or no permission', 'NOT_FOUND');
+  sendSuccess(res, data, 'Zone updated');
+});
+
+export const deleteZone = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  
+  let query = supabaseAdmin.from('zones').delete().eq('id', id).eq('org_id', user.org_id);
+  if (user.client_id) query = query.eq('client_id', user.client_id);
+  
+  const { error } = await query;
+  if (error) {
+    if (error.code === '23503') throw new AppError(400, 'Cannot delete zone: users are assigned to it.', 'REFERENTIAL_INTEGRITY');
+    throw new AppError(500, error.message, 'DB_ERROR');
+  }
+  sendSuccess(res, { deleted: true }, 'Zone deleted');
+});
+
 // ANALYTICS
 export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
