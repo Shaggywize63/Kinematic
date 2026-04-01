@@ -310,7 +310,7 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
 export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
-  const { zone_id, city, user_id, fe_id } = req.query as Record<string, string>;
+  const { zone_id, city, city_id, user_id, fe_id } = req.query as Record<string, string>;
 
   let query = supabaseAdmin
     .from('attendance')
@@ -330,8 +330,13 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
   }
 
   if (zone_id) query = query.eq('users.zone_id', zone_id);
-  if (city) query = query.eq('users.city', city);
   if (user_id || fe_id) query = query.eq('user_id', user_id || fe_id);
+
+  if (city) query = query.eq('users.city', city);
+  if (city_id) {
+    const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
+    if (cityData?.name) query = query.eq('users.city', cityData.name);
+  }
 
   if (user.role === 'supervisor') {
     const { data: teamIds } = await supabaseAdmin

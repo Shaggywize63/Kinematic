@@ -389,7 +389,7 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
 export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
-  const { date, zone_id, activity_id, user_id, fe_id, outlet_id, city } = req.query as Record<string, string>;
+  const { date, date_from, date_to, zone_id, activity_id, user_id, fe_id, outlet_id, city, city_id } = req.query as Record<string, string>;
 
   let query = supabaseAdmin
     .from('form_submissions')
@@ -404,11 +404,19 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
     .range(from, to);
 
   if (date) query = query.gte('submitted_at', `${date}T00:00:00`).lte('submitted_at', `${date}T23:59:59`);
+  if (date_from) query = query.gte('submitted_at', `${date_from}T00:00:00`);
+  if (date_to) query = query.lte('submitted_at', `${date_to}T23:59:59`);
+  
   if (activity_id) query = query.eq('activity_id', activity_id);
   if (user_id || fe_id) query = query.eq('user_id', user_id || fe_id);
   if (outlet_id) query = query.eq('outlet_id', outlet_id);
-  if (city) query = query.eq('users.city', city);
   if (zone_id) query = query.eq('users.zone_id', zone_id);
+
+  if (city) query = query.eq('users.city', city);
+  if (city_id) {
+    const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
+    if (cityData?.name) query = query.eq('users.city', cityData.name);
+  }
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);

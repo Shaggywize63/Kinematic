@@ -481,14 +481,20 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const today = isoDate(new Date());
-  const { city, zone_id, fe_id, user_id } = req.query as Record<string, string>;
+  const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
   let execQuery = supabaseAdmin
     .from('users').select('id, name, employee_id, zone_id, zones(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
   
   if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
+  
   if (city) execQuery = execQuery.eq('city', city);
+  if (city_id) {
+    const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
+    if (cityData?.name) execQuery = execQuery.eq('city', cityData.name);
+  }
+  
   if (zone_id) execQuery = execQuery.eq('zone_id', zone_id);
   if (fe_id || user_id) execQuery = execQuery.eq('id', fe_id || user_id);
   const { data: execs, error: execErr } = await execQuery;
@@ -537,7 +543,7 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
 /* ── GET /api/v1/analytics/attendance-today ──────────────── */
 export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { city, zone_id, fe_id, user_id, date: passedDate } = req.query as Record<string, string>;
+  const { city, city_id, zone_id, fe_id, user_id, date: passedDate } = req.query as Record<string, string>;
   const today = passedDate || isoDate(new Date());
 
   let execQuery = supabaseAdmin
@@ -545,7 +551,13 @@ export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Res
     .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
   
   if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
+  
   if (city) execQuery = execQuery.eq('city', city);
+  if (city_id) {
+    const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
+    if (cityData?.name) execQuery = execQuery.eq('city', cityData.name);
+  }
+
   if (zone_id) execQuery = execQuery.eq('zone_id', zone_id);
   if (fe_id || user_id) execQuery = execQuery.eq('id', fe_id || user_id);
   const { data: execs, error: execErr } = await execQuery;
