@@ -54,7 +54,11 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     for (const f of requiredFields) {
       if (!body[f]) { badRequest(res, `${f} is required`); return; }
     }
-    const payload = { ...body, org_id: user.org_id, client_id: user.client_id };
+    const payload = { 
+      ...body, 
+      org_id: user.org_id, 
+      client_id: body.client_id || user.client_id || null 
+    };
     const { data, error } = await supabaseAdmin.from(tableName).insert(payload).select().single();
     if (error) { badRequest(res, error.message); return; }
     created(res, data);
@@ -78,6 +82,13 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
   const remove = asyncHandler(async (req: AuthRequest, res: Response) => {
     const user = req.user!;
+    
+    // Explicit restriction: Clients cannot delete anything
+    if (user.role === 'client') {
+      badRequest(res, 'Client admins do not have permission to delete records. Please contact platform admin.'); 
+      return;
+    }
+
     const { id } = req.params;
     let q = supabaseAdmin
       .from(tableName).delete().eq('id', id).eq('org_id', user.org_id);
