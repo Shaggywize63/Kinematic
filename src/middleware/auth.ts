@@ -80,3 +80,15 @@ export function requireSupervisorOrAbove(req: AuthRequest, res: Response, next: 
 export function requireAdminOrAbove(req: AuthRequest, res: Response, next: NextFunction) {
   return requireRole('super_admin', 'admin', 'city_manager')(req, res, next);
 }
+
+export function requireModule(moduleName: string) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    const role = req.user.role?.toLowerCase();
+    const permissions = req.user.permissions || [];
+    
+    if (role === 'super_admin') return next();
+    if (permissions.includes(moduleName)) return next();
+    
+    return forbidden(res, `Unauthorized: Missing ${moduleName} module`);
+  };
+}
