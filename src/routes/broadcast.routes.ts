@@ -16,12 +16,12 @@ const router = Router();
 router.use(requireAuth);
 
 // Admin routes
-router.get('/admin', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'city_manager'), getAdminQuestions);
-router.post('/', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'city_manager'), createQuestion);
-router.patch('/:id', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'city_manager'), updateQuestion);
-router.delete('/:id', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'city_manager'), deleteQuestion);
-router.patch('/:id/status', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'city_manager'), updateStatus);
-router.get('/:id/results', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'city_manager'), getResults);
+router.get('/admin', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), getAdminQuestions);
+router.post('/', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), createQuestion);
+router.patch('/:id', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), updateQuestion);
+router.delete('/:id', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), deleteQuestion);
+router.patch('/:id/status', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), updateStatus);
+router.get('/:id/results', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), getResults);
 
 // FE / Supervisor routes
 router.get('/', getQuestions);
