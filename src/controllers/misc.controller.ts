@@ -166,8 +166,6 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     parseInt(req.query.limit as string) || 100
   );
 
-  console.log(`[DIAGNOSTIC] getUsers: UserRole=${user.role}, UserOrgID=${user.org_id}, UserClientID=${user.client_id}, FilterRole=${filterRole}`);
-
   let query = supabaseAdmin.from('users').select('*', { count: 'exact' });
 
   const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager', 'sub_admin', 'main_admin', 'client'].includes(user.role?.toLowerCase());
@@ -179,10 +177,8 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     }
   }
 
-  // 1. Refined Client Scoping: Admins see client-less users (sub-admins) even if the admin has a client_id
   if (user.client_id) {
     if (isPrivileged) {
-      // Admins see users in their client OR users with NO client (platform users like themselves)
       query = query.or(`client_id.eq.${user.client_id},client_id.is.null`);
     } else {
       query = query.eq('client_id', user.client_id);
@@ -191,32 +187,19 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
     query = query.eq('client_id', client_id as string);
   }
 
-  // 2. Role filtering normalization
-  console.log(`[DIAGNOSTIC] Applying JS filters for role=${filterRole}`);
-
-  // 3. Optional filters
   if (zone_id) query = query.eq('zone_id', zone_id as string);
   if (is_active !== undefined) query = query.eq('is_active', is_active === 'true');
   if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id);
   
-  // City scope enforcement
   if (user.role === 'city_manager' && user.assigned_cities?.length) {
     query = query.in('city', user.assigned_cities);
   }
 
-  // 4. Manual range for pagination
   query = query.order('name').range(offset, offset + limit - 1);
 
   const { data, error, count } = await query;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
-  if (error) {
-    console.error('[DIAGNOSTIC] Query Error:', error);
-    throw new AppError(500, error.message, 'DB_ERROR');
-  }
-
-  console.log(`[DIAGNOSTIC] Query Success: Found ${data?.length} users, Total: ${count}`);
-
-  // Enrichment
   const userIds = (data || []).map((u: any) => u.id);
   const [attRes, permRes] = await Promise.all([
     userIds.length > 0 
@@ -236,27 +219,19 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
   });
 
   const now = new Date().getTime();
-
   const enrichedData = (data || []).map((u: any) => {
     if (u.zones && Array.isArray(u.zones)) u.zones = u.zones[0];
-    
-    // Attendance
     const att: any = attMap.get(u.id);
     if (att) {
       u.hours_worked = att.total_hours || (att.status === 'checked_in' && att.checkin_at ? Math.max(0, now - new Date(att.checkin_at).getTime()) / 3600000 : 0);
       u.is_checked_in = att.status === 'checked_in';
     } else {
-      u.hours_worked = 0;
-      u.is_checked_in = false;
+      u.hours_worked = 0; u.is_checked_in = false;
     }
-
-    // Permissions
     u.permissions = permMap.get(u.id) || [];
-
     return u;
   });
 
-  // 4. Robust Javascript Role Filtering (Hyphen/Underscore Agnostic)
   let filteredData = enrichedData;
   if (filterRole) {
     const target = (filterRole as string).toLowerCase().replace(/-/g, '_');
@@ -264,64 +239,12 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
       const uRole = (u.role || '').toLowerCase().replace(/-/g, '_');
       return uRole === target || (target === 'field_executive' && uRole === 'executive');
     });
-    console.log(`[DIAGNOSTIC] JS Filter Result for ${target}: ${filteredData.length}`);
   }
 
-
-  // EMERGENCY DIAGNOSTIC INJECTION: Add fake users to see if API is working
-  const diagnosticSup = {
-    id: '00000000-0000-0000-0000-000000000001',
-    name: 'DIAGNOSTIC SUPERVISOR (JOINED)',
-    role: 'supervisor',
-    city: 'DIAGNOSTIC',
-    is_active: true
-  };
-
-  const diagnosticFE = {
-    id: '00000000-0000-0000-0000-000000000002',
-    name: 'DIAGNOSTIC EXECUTIVE (JOINED)',
-    role: 'field_executive',
-    city: 'DIAGNOSTIC',
-    is_active: true
-  };
-  
-  const finalResults = [diagnosticSup, diagnosticFE, ...filteredData];
-
-  return sendPaginated(res, finalResults, (count || 0) + 2, page, limit);
+  return sendPaginated(res, filteredData, count || 0, page, limit);
 });
 
 
-
-export const debugCheckUser = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { mobile } = req.params;
-  
-  console.log(`[DIAGNOSTIC] debugCheckUser: searching for mobile=${mobile}`);
-  
-  // 1. Search in profiles/users table across ALL organizations
-  const { data: userRecords, error: userError } = await supabaseAdmin
-    .from('users')
-    .select('*')
-    .eq('mobile', mobile);
-
-  // 2. Search in Supabase Auth (to see if they exist but no profile)
-  const { data: authRecords } = await supabaseAdmin.auth.admin.listUsers();
-  const authMatch = (authRecords?.users as any[])?.find(u => 
-    u.phone === mobile || u.user_metadata?.mobile === mobile || u.email?.includes(mobile)
-  );
-
-  sendSuccess(res, {
-    searchingFor: mobile,
-    profileFound: userRecords && userRecords.length > 0 ? userRecords : null,
-    profileError: userError,
-    authFound: authMatch ? {
-      id: authMatch.id,
-      email: authMatch.email,
-      lastSignIn: authMatch.last_sign_in_at,
-      metadata: authMatch.user_metadata
-    } : null,
-    message: "This is a global search bypassing org_id and client_id filters."
-  });
-});
 
 
 export const getUserById = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -471,27 +394,27 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
   }
 
   // Only run DB update if there's something to update
-  if (Object.keys(updates).length === 0) {
+  if (Object.keys(updates).length === 0 && !req.body.app_password) {
     return sendSuccess(res, null, 'Nothing to update')
   }
 
   try {
-    const query = supabaseAdmin.from('users').update(updates).eq('id', req.params.id)
+    let data: any[] | null = null;
     
-    // Scoped update unless super_admin
-    if (req.user?.role !== 'super_admin' && req.user?.role !== 'admin') {
-      query.eq('org_id', req.user!.org_id)
-      if (req.user?.client_id) query.eq('client_id', req.user!.client_id)
-    }
-
-    const { data, error } = await query.select()
-    
-    if (error) {
-      throw new AppError(500, `DB update failed: ${error.message} (code: ${error.code})`, 'DB_ERROR')
-    }
-    
-    if (!data || data.length === 0) {
-      throw new AppError(404, `User not found or you don't have permission to edit them (ID: ${req.params.id})`, 'NOT_FOUND')
+    if (Object.keys(updates).length > 0) {
+      const query = supabaseAdmin.from('users').update(updates).eq('id', req.params.id)
+      if (req.user?.role !== 'super_admin' && req.user?.role !== 'admin') {
+        query.eq('org_id', req.user!.org_id)
+        if (req.user?.client_id) query.eq('client_id', req.user!.client_id)
+      }
+      const { data: dbData, error } = await query.select()
+      if (error) throw new AppError(500, `DB update failed: ${error.message}`, 'DB_ERROR')
+      if (!dbData || dbData.length === 0) throw new AppError(404, 'User not found or no permission', 'NOT_FOUND')
+      data = dbData;
+    } else {
+      // If we are here, it means app_password was updated but no profile fields changed
+      const { data: userData } = await supabaseAdmin.from('users').select('*').eq('id', req.params.id).single()
+      data = [userData];
     }
 
     const targetUserId = req.params.id
