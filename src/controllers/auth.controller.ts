@@ -119,12 +119,8 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     refresh_token: session.session.refresh_token,
     expires_at: session.session.expires_at,
     user: {
-      id: userProfile.id,
-      org_id: userProfile.org_id,
-      client_id: userProfile.client_id,
-      name: userProfile.name,
-      role: userProfile.role,
-      permissions: (userProfile as any).permissions?.map((p: any) => p.module_id) || []
+      ...userProfile,
+      permissions: userProfile.permissions?.map((p: any) => p.module_id) || []
     },
   });
 });

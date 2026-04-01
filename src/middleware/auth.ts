@@ -17,14 +17,10 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     return unauthorized(res, 'Invalid or expired token');
   }
 
-  // Fetch user profile from our users table with related permissions and cities
+  // Fetch user profile
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select(`
-      id, org_id, client_id, name, mobile, role, zone_id, supervisor_id, fcm_token, is_active,
-      permissions:user_module_permissions(module_id),
-      cities:user_city_assignments(city_id)
-    `)
+    .select('id, org_id, client_id, name, mobile, role, zone_id, supervisor_id, fcm_token, is_active')
     .eq('id', user.id)
     .single();
 
@@ -32,9 +28,20 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     return unauthorized(res, 'User profile not found');
   }
 
-  // Flatten the related objects into string arrays for cleaner access
-  const permissions = (profile.permissions as any[])?.map(p => p.module_id) || [];
-  const assigned_cities = (profile.cities as any[])?.map(c => c.city_id) || [];
+  // Fetch permissions separately (Bypass join relationship requirements)
+  const { data: permsData } = await supabaseAdmin
+    .from('user_module_permissions')
+    .select('module_id')
+    .eq('user_id', user.id);
+
+  // Fetch city assignments separately
+  const { data: citiesData } = await supabaseAdmin
+    .from('user_city_assignments')
+    .select('city_id')
+    .eq('user_id', user.id);
+
+  const permissions = permsData?.map(p => p.module_id) || [];
+  const assigned_cities = citiesData?.map(c => c.city_id) || [];
 
   if (!profile.is_active) {
     return forbidden(res, 'Account is deactivated');
