@@ -31,6 +31,7 @@ router.patch('/users/:id', requireAuth, requireRole('admin', 'super_admin', 'hr'
 router.post('/users/:id/reset-password', requireAuth, requireRole('admin', 'super_admin', 'hr'), misc.resetUserPassword);
 router.get('/zones', requireAuth, misc.getZones);
 router.post('/zones', requireAuth, requireRole('admin', 'super_admin'), misc.createZone);
+router.get('/clients', requireAuth, misc.getClients);
 
 // LEARNING
 router.get('/learning', requireAuth, misc.getMaterials);

@@ -649,6 +649,18 @@ export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) =
   sendSuccess(res, data, 'SOS Alert resolved')
 })
 
+// CLIENTS
+export const getClients = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!
+  const { data, error } = await supabaseAdmin.from('clients')
+    .select('id, name')
+    .eq('org_id', user.org_id)
+    .eq('is_active', true)
+    .order('name')
+  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  sendSuccess(res, data)
+})
+
 // MOTIVATION QUOTES
 export const getDailyQuote = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
