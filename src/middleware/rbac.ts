@@ -12,8 +12,9 @@ export function requireModule(moduleName: string) {
 
     const { role, permissions } = req.user;
 
-    // Super Admin and Admin always have full access
-    if (role === 'super_admin' || role === 'admin') {
+    // Only super_admin has full access pass. 
+    // Client admins ('admin' role) should still be restricted by assigned permissions.
+    if (role === 'super_admin') {
       return next();
     }
 
