@@ -482,12 +482,15 @@ export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => 
 })
 
 export const createZone = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { name, city, meeting_lat, meeting_lng, meeting_address, geofence_radius } = req.body
+  const { name, city, city_id, state, meeting_lat, meeting_lng, meeting_address, geofence_radius } = req.body
   const { data, error } = await supabaseAdmin.from('zones')
     .insert({ 
       org_id: req.user!.org_id, 
       client_id: req.user!.client_id || req.body.client_id || null,
-      name, city, meeting_lat, meeting_lng, meeting_address, 
+      name, city, city_id, state, 
+      meeting_lat: meeting_lat || 0.0, 
+      meeting_lng: meeting_lng || 0.0, 
+      meeting_address: meeting_address || '', 
       geofence_radius: geofence_radius || 100 
     })
     .select().single()
@@ -498,7 +501,17 @@ export const createZone = asyncHandler(async (req: AuthRequest, res: Response) =
 export const updateZone = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const updates = { ...req.body, updated_at: new Date().toISOString() };
+  const { name, city, city_id, state, meeting_lat, meeting_lng, meeting_address, geofence_radius, is_active } = req.body;
+  
+  const updates = { 
+    name, city, city_id, state, 
+    meeting_lat: meeting_lat != null ? meeting_lat : 0.0, 
+    meeting_lng: meeting_lng != null ? meeting_lng : 0.0, 
+    meeting_address: meeting_address || '', 
+    geofence_radius: geofence_radius || 100,
+    is_active,
+    updated_at: new Date().toISOString() 
+  };
   
   let query = supabaseAdmin.from('zones').update(updates).eq('id', id).eq('org_id', user.org_id);
   if (user.client_id) query = query.eq('client_id', user.client_id);
