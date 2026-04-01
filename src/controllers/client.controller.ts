@@ -143,8 +143,9 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, modules } = req.body;
+  const { name, contact_person, email, phone, is_active, modules, password } = req.body;
 
+  // 1. Update Core Client Details
   const { data: client, error } = await supabaseAdmin
     .from('clients')
     .update({
@@ -161,28 +162,47 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     .single();
 
   if (error) {
-    badRequest(res, error.message);
+    badRequest(res, `Client update failed: ${error.message}`);
     return;
   }
 
   if (!client) {
-    notFound(res, 'Client not found');
+    notFound(res, 'Client not found or insufficient permissions');
     return;
   }
 
-  // Sync module access if provided
+  // 2. Handle Password Update (if provided)
+  if (password && email) {
+    const { data: adminUser } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('client_id', id)
+      .eq('role', 'client')
+      .maybeSingle();
+
+    if (adminUser) {
+      const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(adminUser.id, { 
+        password,
+        user_metadata: { name: contact_person || name }
+      });
+      if (authErr) console.error('Client password update error:', authErr.message);
+    }
+  }
+
+  // 3. Sync Module Access (Organization Level)
   if (modules && Array.isArray(modules)) {
-    // 1. Sync Organizational Access
+    // We'll do this as a single sequence of delete and insert
     await supabaseAdmin.from('client_module_access').delete().eq('client_id', id);
     if (modules.length > 0) {
-      const accessPayload = modules.map(m => ({
-        client_id: id,
-        module_id: m
-      }));
-      await supabaseAdmin.from('client_module_access').insert(accessPayload);
+      const accessPayload = modules.map(m => ({ client_id: id, module_id: m }));
+      const { error: accessErr } = await supabaseAdmin.from('client_module_access').insert(accessPayload);
+      if (accessErr) {
+        badRequest(res, `Failed to save organizational module access: ${accessErr.message}`);
+        return;
+      }
     }
 
-    // 2. Sync User-Level Permissions for Client Administrator
+    // 4. Sync User-Level Permissions for Client Administrator
     const { data: adminUser } = await supabaseAdmin
       .from('users')
       .select('id')
@@ -193,10 +213,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     if (adminUser) {
       await supabaseAdmin.from('user_module_permissions').delete().eq('user_id', adminUser.id);
       if (modules.length > 0) {
-        const userPermissionsPayload = modules.map(m => ({
-          user_id: adminUser.id,
-          module_id: m
-        }));
+        const userPermissionsPayload = modules.map(m => ({ user_id: adminUser.id, module_id: m }));
         await supabaseAdmin.from('user_module_permissions').insert(userPermissionsPayload);
       }
     }
