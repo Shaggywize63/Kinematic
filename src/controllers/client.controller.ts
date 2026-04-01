@@ -191,10 +191,17 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
 
   // 3. Sync Module Access (Organization Level)
   if (modules && Array.isArray(modules)) {
+    // Hardening: Filter modules against what actually exists in the 'modules' table 
+    // to prevent foreign key violations from legacy or invalid IDs.
+    const { data: validModules } = await supabaseAdmin.from('modules').select('id');
+    const validIds = new Set((validModules || []).map(m => m.id));
+    const filteredModules = modules.filter(m => validIds.has(m));
+
     // We'll do this as a single sequence of delete and insert
     await supabaseAdmin.from('client_module_access').delete().eq('client_id', id);
-    if (modules.length > 0) {
-      const accessPayload = modules.map(m => ({ client_id: id, module_id: m }));
+    if (filteredModules.length > 0) {
+      const accessPayload = filteredModules.map(m => ({ client_id: id, module_id: m }));
+      console.log(`[DEBUG] Syncing ${accessPayload.length} modules for client ${id}:`, JSON.stringify(filteredModules));
       const { error: accessErr } = await supabaseAdmin.from('client_module_access').insert(accessPayload);
       if (accessErr) {
         badRequest(res, `Failed to save organizational module access: ${accessErr.message}`);
@@ -212,8 +219,8 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
 
     if (adminUser) {
       await supabaseAdmin.from('user_module_permissions').delete().eq('user_id', adminUser.id);
-      if (modules.length > 0) {
-        const userPermissionsPayload = modules.map(m => ({ user_id: adminUser.id, module_id: m }));
+      if (filteredModules.length > 0) {
+        const userPermissionsPayload = filteredModules.map(m => ({ user_id: adminUser.id, module_id: m }));
         await supabaseAdmin.from('user_module_permissions').insert(userPermissionsPayload);
       }
     }

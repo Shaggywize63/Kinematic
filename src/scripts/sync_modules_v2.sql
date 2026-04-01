@@ -1,0 +1,1 @@
+INSERT INTO public.modules (id) VALUES ('analytics'),('live_tracking'),('broadcast'),('attendance'),('orders'),('work_activities'),('users'),('hr'),('visit_logs'),('inventory'),('skus'),('assets'),('grievances'),('form_builder'),('cities'),('zones'),('stores'),('activities'),('clients'),('settings') ON CONFLICT (id) DO NOTHING;
