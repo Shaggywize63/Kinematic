@@ -389,13 +389,13 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
 export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
-  const { date, zone_id, activity_id, user_id, outlet_id } = req.query as Record<string, string>;
+  const { date, zone_id, activity_id, user_id, fe_id, outlet_id, city } = req.query as Record<string, string>;
 
   let query = supabaseAdmin
     .from('form_submissions')
     .select(`
       id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps,
-      users(name, employee_id),
+      users!inner(name, employee_id, city, zone_id),
       activities(name),
       form_templates(title)
     `, { count: 'exact' })
@@ -405,8 +405,10 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
 
   if (date) query = query.gte('submitted_at', `${date}T00:00:00`).lte('submitted_at', `${date}T23:59:59`);
   if (activity_id) query = query.eq('activity_id', activity_id);
-  if (user_id) query = query.eq('user_id', user_id);
+  if (user_id || fe_id) query = query.eq('user_id', user_id || fe_id);
   if (outlet_id) query = query.eq('outlet_id', outlet_id);
+  if (city) query = query.eq('users.city', city);
+  if (zone_id) query = query.eq('users.zone_id', zone_id);
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
