@@ -617,11 +617,18 @@ export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) =
 // CLIENTS
 export const getClients = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
-  const { data, error } = await supabaseAdmin.from('clients')
+  let query = supabaseAdmin.from('clients')
     .select('id, name')
-    .eq('org_id', user.org_id)
     .eq('is_active', true)
     .order('name')
+
+  // Platform admins (Admin or Super Admin) can see all clients for mapping attribution
+  const isPlatformAdmin = ['admin', 'super_admin', 'platform_admin'].includes(user.role?.toLowerCase())
+  if (!isPlatformAdmin) {
+    query = query.eq('org_id', user.org_id)
+  }
+
+  const { data, error } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data)
 })
