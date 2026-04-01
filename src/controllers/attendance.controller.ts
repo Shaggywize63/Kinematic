@@ -310,7 +310,7 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
 export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
-  const zoneId = req.query.zone_id as string | undefined;
+  const { zone_id, city, user_id, fe_id } = req.query as Record<string, string>;
 
   let query = supabaseAdmin
     .from('attendance')
@@ -320,7 +320,7 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
       checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
       total_hours, break_minutes, working_minutes, notes,
       is_regularised, created_at, updated_at,
-      users!attendance_user_id_fkey(name, employee_id, zones(name))
+      users!inner(name, employee_id, city, zone_id, zones(name))
     `)
     .eq('org_id', user.org_id)
     .eq('date', date);
@@ -329,7 +329,10 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
     query = query.eq('client_id', user.client_id);
   }
 
-  if (zoneId) query = query.eq('zone_id', zoneId);
+  if (zone_id) query = query.eq('users.zone_id', zone_id);
+  if (city) query = query.eq('users.city', city);
+  if (user_id || fe_id) query = query.eq('user_id', user_id || fe_id);
+
   if (user.role === 'supervisor') {
     const { data: teamIds } = await supabaseAdmin
       .from('users')
