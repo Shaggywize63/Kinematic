@@ -47,7 +47,7 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
-  console.log(`[DIAGNOSTIC] Fetching notifications history: Page=${page}, Limit=${limit}, Range=${from}-${to}`);
+
 
   const { data, error, count } = await supabaseAdmin
     .from('notification_broadcasts')
@@ -101,9 +101,6 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
     })
     .select().single();
 
-  if (bErr) {
-    console.warn('[DIAGNOSTIC] Failed to log broadcast history:', bErr.message);
-  }
 
   // 2. Insert notifications for each recipient
   const notifications = targetUsers.map(target => ({

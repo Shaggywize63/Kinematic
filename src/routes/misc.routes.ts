@@ -24,7 +24,7 @@ router.get('/activity-feed', requireAuth, requireRole('admin', 'super_admin', 's
 
 // USERS & ZONES (Admin)
 router.get('/users', requireAuth, requireRole('admin', 'super_admin', 'supervisor', 'hr'), misc.getUsers);
-router.get('/users/debug/:mobile', requireAuth, requireRole('admin', 'super_admin'), misc.debugCheckUser);
+
 router.get('/users/:id', requireAuth, misc.getUserById);
 router.post('/users', requireAuth, requireRole('admin', 'super_admin', 'hr'), misc.createUser);
 router.patch('/users/:id', requireAuth, requireRole('admin', 'super_admin', 'hr'), misc.updateUser);
