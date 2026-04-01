@@ -83,7 +83,7 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
       if (authErr.message.toLowerCase().includes('already')) {
         // Find existing Auth ID by email
         const { data: { users: listUsers } } = await supabaseAdmin.auth.admin.listUsers();
-        authId = listUsers.find(u => u.email?.toLowerCase() === email.toLowerCase())?.id;
+        authId = listUsers.find((u: any) => u.email?.toLowerCase() === email.toLowerCase())?.id;
       } else {
         console.error('Auth creation error:', authErr.message);
       }
