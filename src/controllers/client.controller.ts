@@ -209,18 +209,24 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
       }
     }
 
-    // 4. Sync User-Level Permissions for Client Administrator
-    const { data: adminUser } = await supabaseAdmin
+    // 4. Sync User-Level Permissions for ALL Client Administrators/Users
+    const { data: clientUsers } = await supabaseAdmin
       .from('users')
       .select('id')
       .eq('client_id', id)
-      .eq('role', 'client')
-      .maybeSingle();
+      .eq('role', 'client');
 
-    if (adminUser) {
-      await supabaseAdmin.from('user_module_permissions').delete().eq('user_id', adminUser.id);
+    if (clientUsers && clientUsers.length > 0) {
+      const allUserIds = clientUsers.map(u => u.id);
+      
+      // Delete old permissions for all these users
+      await supabaseAdmin.from('user_module_permissions').delete().in('user_id', allUserIds);
+      
       if (filteredModules.length > 0) {
-        const userPermissionsPayload = filteredModules.map(m => ({ user_id: adminUser.id, module_id: m }));
+        const userPermissionsPayload = allUserIds.flatMap(uid => 
+          filteredModules.map(m => ({ user_id: uid, module_id: m }))
+        );
+        console.log(`[DEBUG] Syncing ${userPermissionsPayload.length} user-level perms for ${allUserIds.length} users.`);
         await supabaseAdmin.from('user_module_permissions').insert(userPermissionsPayload);
       }
     }
