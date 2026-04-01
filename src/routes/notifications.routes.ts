@@ -7,9 +7,9 @@ const router = Router();
 router.use(requireAuth);
 
 // Admin-specific notification management (History & Send)
-router.delete('/:id',       requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager'), ctrl.deleteHistory);
-router.get('/history',       requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager'), ctrl.getHistory);
-router.post('/send',         requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager'), ctrl.sendNotification);
+router.delete('/:id',       requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.deleteHistory);
+router.get('/history',       requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.getHistory);
+router.post('/send',         requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.sendNotification);
 
 // Generic user notification interactions
 router.get('/',              ctrl.getNotifications);

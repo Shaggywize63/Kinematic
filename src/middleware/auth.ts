@@ -74,11 +74,11 @@ export function requireRole(...roles: UserRole[]) {
 }
 
 export function requireSupervisorOrAbove(req: AuthRequest, res: Response, next: NextFunction) {
-  return requireRole('super_admin', 'admin', 'main_admin', 'sub_admin', 'city_manager', 'supervisor')(req, res, next);
+  return requireRole('super_admin', 'admin', 'main_admin', 'sub_admin', 'client', 'city_manager', 'supervisor')(req, res, next);
 }
 
 export function requireAdminOrAbove(req: AuthRequest, res: Response, next: NextFunction) {
-  return requireRole('super_admin', 'admin', 'main_admin', 'city_manager')(req, res, next);
+  return requireRole('super_admin', 'admin', 'main_admin', 'client', 'city_manager')(req, res, next);
 }
 
 export function requireModule(moduleName: string) {

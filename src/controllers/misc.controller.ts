@@ -170,7 +170,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
 
   let query = supabaseAdmin.from('users').select('*', { count: 'exact' });
 
-  const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager', 'sub_admin', 'main_admin'].includes(user.role?.toLowerCase());
+  const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager', 'sub_admin', 'main_admin', 'client'].includes(user.role?.toLowerCase());
   const isSuper = user.role?.toLowerCase() === 'super_admin';
 
   if (!isSuper) {
