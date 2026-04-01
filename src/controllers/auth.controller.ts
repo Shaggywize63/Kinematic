@@ -171,7 +171,6 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
       id, org_id, client_id, name, mobile, role, employee_id,
       zone_id, supervisor_id, city, state, avatar_url,
       is_active, joined_date, created_at,
-      permissions:user_module_permissions(module_id),
       zones(id, name, city, meeting_lat, meeting_lng, geofence_radius),
       organisations(id, name, logo_url)
     `)
@@ -179,9 +178,18 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) return serverError(res);
+
+  // Fetch permissions separately (Bypass join relationship requirements)
+  const { data: permsData } = await supabaseAdmin
+    .from('user_module_permissions')
+    .select('module_id')
+    .eq('user_id', req.user.id);
+
+  const permissions = permsData?.map(p => p.module_id) || [];
+
   const result = {
     ...data,
-    permissions: (data as any).permissions?.map((p: any) => p.module_id) || []
+    permissions
   };
   return ok(res, result);
 });
