@@ -48,10 +48,15 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // Sign in directly with email + password via Supabase Auth
+  console.log(`[DEBUG] Attempting login for ${email}...`);
   let { data: session, error: signInError } = await supabase.auth.signInWithPassword({
     email,
     password,
   });
+
+  if (signInError) {
+    console.error(`[DEBUG] Auth error for ${email}: ${signInError.message}`);
+  }
 
   if (signInError || !session?.session) {
     // If standard login fails, check for app_password in users table
@@ -94,14 +99,21 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // Fetch user profile from users table using the auth user id
+  console.log(`[DEBUG] Fetching profile for user ID: ${session.user.id}`);
   const { data: userProfile, error: profileError } = await supabaseAdmin
     .from('users')
     .select('id, org_id, client_id, name, role, is_active')
     .eq('id', session.user.id)
     .single();
 
-  if (profileError || !userProfile) return unauthorized(res, 'User profile not found');
-  if (!userProfile.is_active) return unauthorized(res, 'Account is deactivated. Contact your admin.');
+  if (profileError || !userProfile) {
+    console.error(`[DEBUG] Profile fetch error for ${email}: ${profileError?.message || 'Not found'}`);
+    return unauthorized(res, 'User profile not found');
+  }
+  if (!userProfile.is_active) {
+    console.warn(`[DEBUG] Account deactivated for ${email}`);
+    return unauthorized(res, 'Account is deactivated. Contact your admin.');
+  }
 
   // Fetch permissions separately (Bypass join relationship requirements)
   const { data: permsData } = await supabaseAdmin
@@ -110,6 +122,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     .eq('user_id', userProfile.id);
 
   const permissions = permsData?.map(p => p.module_id) || [];
+  console.log(`[DEBUG] Login successful for ${email}. Permissions: ${permissions.length}`);
 
   // Update FCM token and device ID if provided
   if (fcm_token || device_id) {
