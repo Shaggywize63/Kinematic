@@ -660,6 +660,55 @@ export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) =
 })
 
 // CLIENTS
+export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { latitude, longitude, battery_percentage, activity_type } = req.body;
+  const user = req.user!;
+
+  if (!latitude || !longitude) {
+    throw new AppError(400, 'Latitude and longitude are required', 'VALIDATION_ERROR');
+  }
+
+  const now = new Date().toISOString();
+  
+  // 1. Update user record with last known location and battery
+  const { error: userErr } = await supabaseAdmin
+    .from('users')
+    .update({
+      last_latitude: latitude,
+      last_longitude: longitude,
+      battery_percentage: battery_percentage || null,
+      last_location_updated_at: now
+    })
+    .eq('id', user.id);
+
+  if (userErr) throw new AppError(500, userErr.message, 'DB_ERROR');
+
+  // 2. Fetch today's attendance record (if any) to link with work_activity
+  const today = now.split('T')[0];
+  const { data: att } = await supabaseAdmin
+    .from('attendance')
+    .select('id')
+    .eq('user_id', user.id)
+    .eq('date', today)
+    .maybeSingle();
+
+  // 3. Insert into work_activity for history tracking
+  await supabaseAdmin.from('work_activity').insert({
+    org_id: user.org_id,
+    client_id: user.client_id,
+    user_id: user.id,
+    attendance_id: att?.id || null,
+    activity_type: activity_type || 'HEARTBEAT',
+    lat: latitude,
+    lng: longitude,
+    battery_percentage: battery_percentage || null,
+    captured_at: now
+  });
+
+  sendSuccess(res, null, 'Status updated');
+});
+
+// CLIENTS
 export const getClients = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   let query = supabaseAdmin.from('clients')
