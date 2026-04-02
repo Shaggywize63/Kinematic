@@ -35,12 +35,16 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
   // Phase 1: Check existing record for the day to avoid duplicates
   const { data: existing } = await supabaseAdmin
     .from('attendance')
-    .select('id')
+    .select('*, breaks(*)')
     .eq('user_id', user.id)
     .eq('date', attendanceDate)
     .maybeSingle();
 
-  if (existing) { conflict(res, 'Already checked in today'); return; }
+  if (existing) {
+    console.log(`[Attendance] user=${user.id} already checked in. Returning existing record.`);
+    ok(res, enrichWithHours(existing));
+    return;
+  }
 
   // Enforce selfie for field executives
   if (user.role === 'executive' && !selfie_url) {
