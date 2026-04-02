@@ -265,7 +265,23 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
     throw new AppError(400, 'name, mobile and password are required', 'VALIDATION_ERROR')
   }
   if (!/^\d{10}$/.test(mobile)) {
-    throw new AppError(400, 'mobile must be exactly 10 digits', 'VALIDATION_ERROR')
+    throw new AppError(400, 'Mobile number must be exactly 10 digits', 'VALIDATION_ERROR')
+  }
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (email && !emailRegex.test(email)) {
+    throw new AppError(400, 'Please provide a valid email address', 'VALIDATION_ERROR')
+  }
+
+  // Check for duplication
+  const { data: existingUser, error: checkErr } = await supabaseAdmin
+    .from('users')
+    .select('id, name, mobile, email')
+    .or(`mobile.eq.${mobile}${email ? `,email.eq.${email.trim()}` : ''}`)
+    .maybeSingle();
+
+  if (existingUser) {
+    if (existingUser.mobile === mobile) throw new AppError(400, `Mobile ${mobile} is already registered with ${existingUser.name}`, 'DUPLICATE_ERROR');
+    if (email && existingUser.email?.toLowerCase() === email.toLowerCase().trim()) throw new AppError(400, `Email ${email} is already registered with ${existingUser.name}`, 'DUPLICATE_ERROR');
   }
 
   const authEmail = email?.trim() || `${mobile}@kinematic.app`
@@ -374,6 +390,35 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
   for (const key of allowed) { 
     if (req.body[key] !== undefined && req.body[key] !== '') {
       updates[key] = req.body[key] 
+    }
+  }
+
+  // 1. Mobile Format Validation
+  if (updates.mobile && !/^\d{10}$/.test(updates.mobile)) {
+    throw new AppError(400, 'Mobile number must be exactly 10 digits', 'VALIDATION_ERROR')
+  }
+  // 2. Email Validation
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (updates.email && !emailRegex.test(updates.email)) {
+    throw new AppError(400, 'Please provide a valid email address', 'VALIDATION_ERROR')
+  }
+
+  // 3. Duplication Check
+  if (updates.mobile || updates.email) {
+    let orQuery = '';
+    if (updates.mobile) orQuery += `mobile.eq.${updates.mobile}`;
+    if (updates.email) orQuery += (orQuery ? ',' : '') + `email.eq.${updates.email.trim()}`;
+
+    const { data: existingUser } = await supabaseAdmin
+      .from('users')
+      .select('id, name, mobile, email')
+      .neq('id', req.params.id)
+      .or(orQuery)
+      .maybeSingle();
+
+    if (existingUser) {
+      if (updates.mobile && existingUser.mobile === updates.mobile) throw new AppError(400, `Mobile ${updates.mobile} is already registered with ${existingUser.name}`, 'DUPLICATE_ERROR');
+      if (updates.email && existingUser.email?.toLowerCase() === updates.email.toLowerCase().trim()) throw new AppError(400, `Email ${updates.email} is already registered with ${existingUser.name}`, 'DUPLICATE_ERROR');
     }
   }
 
