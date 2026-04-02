@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess } from '../utils';
+import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess, todayDate } from '../utils';
 import { isWithinGeofence } from '../lib/haversine';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 
@@ -23,7 +23,7 @@ const checkoutSchema = z.object({
 // POST /api/v1/attendance/checkin
 export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayDate();
   const { latitude, longitude, selfie_url, activity_id, zone_id, date: passedDate } = req.body;
   
   console.log(`[Attendance] Check-in: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
@@ -119,7 +119,7 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
   
   console.log(`[Attendance] Check-out: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
   if (selfie_url) console.log(`[Attendance] Selfie URL: ${selfie_url}`);
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayDate();
   const attendanceDate = passedDate || today;
 
   const { data: record, error: findError } = await supabaseAdmin
@@ -186,7 +186,7 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
 // POST /api/v1/attendance/break/start
 export const startBreak = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayDate();
 
   const { data: record } = await supabaseAdmin
     .from('attendance')
@@ -213,7 +213,7 @@ export const startBreak = asyncHandler(async (req: AuthRequest, res: Response) =
 // POST /api/v1/attendance/break/end
 export const endBreak = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayDate();
 
   const { data: record } = await supabaseAdmin
     .from('attendance')
