@@ -767,9 +767,14 @@ export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Respo
 export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const today = todayDate();
+  console.log(`[MobileHome] User ${user.id} fetching home. Date=${today}`);
 
   // 1. Today Attendance Status (Crucial for flicker fix)
-  const { data: attRecord } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('user_id', user.id).eq('date', today).maybeSingle();
+  const { data: attRecord, error: attError } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('user_id', user.id).eq('date', today).maybeSingle();
+  
+  if (attError) console.log(`[MobileHome] Error: ${attError.message}`);
+  console.log(`[MobileHome] Attendance Result: ${!!attRecord}, Status=${attRecord?.status}`);
+  
   if (attRecord) enrichWithHours(attRecord);
 
   // 2. Summary Stats (FE-specific)
