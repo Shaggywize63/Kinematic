@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin as supabase } from '../lib/supabase';
 import { ok, created, badRequest, notFound } from '../utils/response';
+import { todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 
 /* ─────────────────────────────────────────────────────────────
@@ -9,7 +10,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const clientId = (req: Request) => (req as any).user.client_id as string | undefined;
 const userId = (req: Request) => (req as any).user.id as string;
-const today  = () => new Date().toISOString().split('T')[0];
+const today  = () => todayDate();
 
 /* ─────────────────────────────────────────────────────────────
    GET /api/v1/route-plan?date=YYYY-MM-DD&user_id=&status=&zone_id=
