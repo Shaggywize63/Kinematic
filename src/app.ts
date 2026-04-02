@@ -110,7 +110,7 @@ import { requireModule, enforceCityScope } from './middleware/rbac';
 app.use(`${V1}/auth`,          authRoutes);
 
 // Protected routes with RBAC
-app.use(`${V1}/attendance`,    requireAuth, enforceCityScope, requireModule('reports'), attendanceRoutes);
+app.use(`${V1}/attendance`,    requireAuth, enforceCityScope, attendanceRoutes);
 app.use(`${V1}/forms`,         requireAuth, enforceCityScope, formsRoutes);
 app.use(`${V1}/builder`,       requireAuth, builderRoutes);
 app.use(`${V1}/stock`,         requireAuth, requireModule('inventory'), stockRoutes);
@@ -121,7 +121,7 @@ app.use(`${V1}/notifications`, requireAuth, notifRoutes);
 app.use(`${V1}/learning`,      requireAuth, learningRoutes);
 app.use(`${V1}/grievances`,    requireAuth, requireModule('reports'), grievanceRoutes);
 app.use(`${V1}/analytics`,     requireAuth, enforceCityScope, requireModule('analytics'), analyticsRoutes);
-app.use(`${V1}/visits`,        requireAuth, enforceCityScope, requireModule('reports'), visitlogRoutes);
+app.use(`${V1}/visits`,        requireAuth, enforceCityScope, visitlogRoutes);
 app.use(`${V1}/upload`,        requireAuth, uploadRoutes);
 app.use(`${V1}/warehouses`,    requireAuth, requireModule('inventory'), wmsRoutes);
 app.use(`${V1}/users`,         requireAuth, requireModule('users'), usersRoutes);
