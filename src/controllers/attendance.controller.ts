@@ -313,7 +313,7 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
 // GET /api/v1/attendance/team  (supervisor+)
 export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
+  const date = (req.query.date as string) || todayDate();
   const { zone_id, city, city_id, user_id, fe_id } = req.query as Record<string, string>;
 
   let query = supabaseAdmin

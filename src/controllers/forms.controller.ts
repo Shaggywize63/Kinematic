@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, notFound, forbidden } from '../utils/response';
+import { ok, created, badRequest, notFound, forbidden, todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 
@@ -308,7 +308,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
   });
 
   // 4. Get today's attendance
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayDate();
   const { data: attendance } = await supabaseAdmin
     .from('attendance')
     .select('id')
@@ -397,8 +397,8 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
     .select(`
       id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps, latitude, longitude, photo_url,
       users!user_id(name, employee_id, city, zone_id),
-      activities(name),
-      form_templates(title)
+      builder_forms(title),
+      activities(name)
     `, { count: 'exact' })
     .eq('org_id', user.org_id)
     .order('submitted_at', { ascending: false })

@@ -1,19 +1,12 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest, todayDate } from '../utils';
+import { ok, badRequest, todayDate, toIST, isoDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 
-const toIST = (utcDate: Date): Date =>
-  new Date(utcDate.getTime() + 5.5 * 60 * 60 * 1000);
-
-const isoDate = (d: Date) => {
-  // Use local-friendly ISO string to avoid UTC shift
-  const Y = d.getFullYear();
-  const M = (d.getMonth() + 1).toString().padStart(2, '0');
-  const D = d.getDate().toString().padStart(2, '0');
-  return `${Y}-${M}-${D}`;
-};
+/* ─────────────────────────────────────────────────────────────
+   HELPERS
+───────────────────────────────────────────────────────────── */
 
 const enrichWithHours = (r: any) => {
   if (r && r.total_hours == null && r.checkin_at) {
