@@ -623,7 +623,7 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
     .order('name')
 
   // Platform admins and management roles can see all client names for dashboard attribution
-  const isManagement = ['admin', 'super_admin', 'main_admin', 'sub_admin', 'platform_admin', 'hr', 'city_manager'].includes(user.role?.toLowerCase())
+  const isManagement = ['admin', 'super_admin', 'main_admin', 'sub_admin', 'platform_admin', 'hr', 'city_manager', 'supervisor'].includes(user.role?.toLowerCase())
   if (!isManagement) {
     query = query.eq('org_id', user.org_id)
   }
