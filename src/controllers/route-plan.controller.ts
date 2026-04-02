@@ -177,6 +177,18 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
   if (outlets.some((o: any) => !o.store_id)) return badRequest(res, 'Every outlet must have a store_id');
 
   const createdPlans = [];
+  
+  // Fetch coordinates for all stores to check if geofencing should be bypassed
+  const storeIds = [...new Set(outlets.map((o: any) => o.store_id))];
+  const { data: storeCoords } = await supabase
+    .from('stores')
+    .select('id, latitude, longitude')
+    .in('id', storeIds);
+  
+  const coordMap: Record<string, boolean> = {};
+  (storeCoords || []).forEach(s => {
+    coordMap[s.id] = !!(s.latitude && s.longitude);
+  });
 
   for (const aid of acts) {
     // Insert plan (no more duplicate check)
@@ -204,6 +216,7 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
       target_notes:        o.target_notes ?? null,
       target_value:        o.target_value ?? null,
       geofence_radius_m:   o.geofence_radius_m ?? 100,
+      is_geofenced:        coordMap[o.store_id] ?? false,
       planned_duration_min:o.planned_duration_min ?? null,
     }));
 
@@ -335,7 +348,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
 
   // Fetch all FEs and stores for this org (for matching)
   let fesQuery = supabase.from('users').select('id, employee_id, name').eq('org_id', org).eq('role', 'executive');
-  let storesQuery = supabase.from('stores').select('id, store_code, name').eq('org_id', org);
+  let storesQuery = supabase.from('stores').select('id, store_code, name, latitude, longitude').eq('org_id', org);
 
   const cid = clientId(req);
   if (cid) {
@@ -350,8 +363,12 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
 
   const feMap: Record<string, string>    = {};
   const storeMap: Record<string, string> = {};
+  const bypassMap: Record<string, boolean> = {}; // store_id -> has_coords
   (fes || []).forEach((f: any)    => { if (f.employee_id) feMap[f.employee_id.toLowerCase()]   = f.id; });
-  (stores || []).forEach((s: any) => { if (s.store_code)  storeMap[s.store_code.toLowerCase()] = s.id; });
+  (stores || []).forEach((s: any) => { 
+    if (s.store_code)  storeMap[s.store_code.toLowerCase()] = s.id; 
+    bypassMap[s.id] = !!(s.latitude && s.longitude);
+  });
 
   // Group rows by FE
   const byFE: Record<string, any[]> = {};
@@ -426,6 +443,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
         target_notes:        r.target_notes || null,
         target_value:        r.target_value ? Number(r.target_value) : null,
         geofence_radius_m:   r.geofence_radius_m ? Number(r.geofence_radius_m) : 100,
+        is_geofenced:        bypassMap[r.resolved_store_id] ?? false,
       }));
 
       await supabase.from('route_plan_outlets').insert(outletRows);
