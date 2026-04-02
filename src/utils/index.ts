@@ -76,7 +76,7 @@ export function sendPaginated(
 
 // ── Today's date as YYYY-MM-DD in IST ──
 export function todayDate(): string {
-  return new Date(new Date().getTime() + 5.5 * 3600000).toISOString().split('T')[0]
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
 
 export const ok = <T>(res: Response, data: T, message?: string) =>
