@@ -8,6 +8,9 @@ import { v4 as uuidv4 } from 'uuid';
 const BUCKET_MAP: Record<string, string> = {
   selfie: process.env.BUCKET_SELFIES || 'kinematic-selfies',
   form_photo: process.env.BUCKET_FORM_PHOTOS || 'kinematic-form-photos',
+  photo: process.env.BUCKET_FORM_PHOTOS || 'kinematic-form-photos',
+  signature: process.env.BUCKET_FORM_PHOTOS || 'kinematic-form-photos',
+  file: process.env.BUCKET_FORM_PHOTOS || 'kinematic-form-photos',
   material: process.env.BUCKET_MATERIALS || 'kinematic-materials',
   avatar: process.env.BUCKET_AVATARS || 'kinematic-avatars',
 };

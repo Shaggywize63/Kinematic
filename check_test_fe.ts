@@ -1,21 +1,11 @@
 import { supabaseAdmin } from './src/lib/supabase';
-
-async function checkIndividual() {
-  const userId = '5a412530-5623-4691-adf6-b6f155059940';
-  const { data, error } = await supabaseAdmin
-    .from('attendance')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    console.error('Error:', error);
-  } else {
-    console.log(`Attendance records for 5a412530...:`);
-    data?.forEach(r => {
-      console.log(`- ID: ${r.id}, Date: ${r.date}, Status: ${r.status}, At: ${r.created_at}`);
-    });
+async function check() {
+  const { data: user } = await supabaseAdmin.from('users').select('*').eq('name', 'Test FE').single();
+  console.log('User:', user?.id, user?.name);
+  if (user) {
+    const today = new Date(new Date().getTime() + 5.5 * 3600000).toISOString().split('T')[0];
+    const { data: att } = await supabaseAdmin.from('attendance').select('*').eq('user_id', user.id).eq('date', today).maybeSingle();
+    console.log('Attendance for today:', !!att, att?.status, att?.date);
   }
 }
-
-checkIndividual();
+check();
