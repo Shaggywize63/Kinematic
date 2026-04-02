@@ -21,7 +21,7 @@ export const getFEsByActivity = asyncHandler(async (req: Request, res: Response)
 
   const { data, error } = await supabaseAdmin
     .from('activity_users')
-    .select('user_id, users(id, name, employee_id, mobile, role)')
+    .select('user_id, users!user_id(id, name, employee_id, mobile, role)')
     .eq('activity_id', activityId)
     .eq('org_id', user.org_id);
 
@@ -36,7 +36,7 @@ export const getActivitiesByUser = asyncHandler(async (req: Request, res: Respon
 
   const { data, error } = await supabaseAdmin
     .from('activity_users')
-    .select('activity_id, activities(id, name)')
+    .select('activity_id, activities!activity_id(id, name)')
     .eq('user_id', userId)
     .eq('org_id', user.org_id);
 

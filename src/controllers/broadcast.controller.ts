@@ -282,7 +282,7 @@ export const getResults = asyncHandler(async (req: AuthRequest, res: Response) =
 
   const { data: question } = await supabaseAdmin
     .from('broadcast_questions')
-    .select('*, broadcast_answers(*, users(name, employee_id))')
+    .select('*, broadcast_answers(*, users!user_id(name, employee_id))')
     .eq('id', id)
     .eq('org_id', user.org_id)
     .single();

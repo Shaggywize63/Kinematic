@@ -80,7 +80,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, is_converted, user_id, submitted_at, date, users!form_submissions_user_id_fkey(city)', { count: 'exact' })
+    .select('id, is_converted, user_id, submitted_at, date, users!user_id(city)', { count: 'exact' })
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
@@ -144,7 +144,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Fetch top performers (Top 5 by TFF in range) - reverting to submitted_at for completeness
   let topPerfQuery = supabaseAdmin
     .from('form_submissions')
-    .select('user_id, is_converted, submitted_at, users(name, zone_id, zones(id, name))')
+    .select('user_id, is_converted, submitted_at, users!user_id(name, zone_id, zones!zone_id(id, name))')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
@@ -261,14 +261,14 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 
   let submissionQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, submitted_at, is_converted, outlet_name, users!form_submissions_user_id_fkey(name, city), activities(name)')
+    .select('id, submitted_at, is_converted, outlet_name, users!user_id(name, city), activities(name)')
     .eq('org_id', user.org_id);
 
   if (user.client_id) submissionQuery = submissionQuery.eq('client_id', user.client_id);
 
   let checkinQuery = supabaseAdmin
     .from('attendance')
-    .select('id, checkin_at, users!attendance_user_id_fkey(name, city), zones(name)')
+    .select('id, checkin_at, users!user_id(name, city), zones!zone_id(name)')
     .eq('org_id', user.org_id)
     .not('checkin_at', 'is', null);
 
@@ -484,7 +484,7 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
   let execQuery = supabaseAdmin
-    .from('users').select('id, name, employee_id, zone_id, zones(name, city, meeting_lat, meeting_lng)')
+    .from('users').select('id, name, employee_id, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
   
   if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
@@ -547,7 +547,7 @@ export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Res
   const today = passedDate || isoDate(new Date());
 
   let execQuery = supabaseAdmin
-    .from('users').select('id, name, employee_id, zone_id, zones(name)')
+    .from('users').select('id, name, employee_id, zone_id, zones!zone_id(name)')
     .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
   
   if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
@@ -629,7 +629,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   // All unique outlets from form_submissions in range - reverting to submitted_at
   let formsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('outlet_name, is_converted, user_id, submitted_at, date, users!form_submissions_user_id_fkey(name, zones(name, city))')
+    .select('outlet_name, is_converted, user_id, submitted_at, date, users!user_id(name, zones!zone_id(name, city))')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);

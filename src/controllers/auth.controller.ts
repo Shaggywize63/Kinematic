@@ -184,8 +184,8 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
       id, org_id, client_id, name, mobile, role, employee_id,
       zone_id, supervisor_id, city, state, avatar_url,
       is_active, joined_date, created_at,
-      zones(id, name, city, meeting_lat, meeting_lng, geofence_radius),
-      organisations(id, name, logo_url)
+      zones!zone_id(id, name, city, meeting_lat, meeting_lng, geofence_radius),
+      organisations!org_id(id, name, logo_url)
     `)
     .eq('id', req.user.id)
     .single();

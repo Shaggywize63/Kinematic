@@ -115,7 +115,7 @@ export const getAlerts = asyncHandler(async (req: AuthRequest, res: Response) =>
 
   let query = supabaseAdmin
     .from('sos_alerts')
-    .select('*, users(name, mobile, employee_id), zones(name)')
+    .select('*, users!user_id(name, mobile, employee_id), zones!zone_id(name)')
     .eq('org_id', user.org_id)
     .order('created_at', { ascending: false });
 

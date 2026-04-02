@@ -99,7 +99,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 }
 
 function getSelect(table: string): string {
-  if (table === 'stores') return '*, zones(name), cities(name)';
+  if (table === 'stores') return '*, zones!zone_id(name), cities!city_id(name)';
   return '*';
 }
 
