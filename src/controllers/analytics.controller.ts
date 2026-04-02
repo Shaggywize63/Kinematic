@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest, todayDate } from '../utils';
+import { ok, badRequest, todayDate, istOffsetDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const toIST = (utcDate: Date): Date =>
@@ -211,8 +211,8 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
 /* ── GET /api/v1/analytics/tff-trends ─────────────────────── */
 export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const from = (req.query.from as string) || isoDate(new Date(Date.now() - 7 * 86400000));
-  const to   = (req.query.to   as string) || isoDate(new Date());
+  const from = (req.query.from as string) || istOffsetDate(-7);
+  const to   = (req.query.to   as string) || todayDate();
 
   let trendQuery = supabaseAdmin
     .from('form_submissions')
@@ -246,7 +246,7 @@ export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response)
     date: d,
     tff: byDay[d].engagements, // Use engagements for TFF to match 32 total
     engagements: byDay[d].engagements,
-    label: d === isoDate(new Date()) ? 'Today' : new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+    label: d === todayDate() ? 'Today' : new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
   }));
 
   return ok(res, trend);
@@ -423,7 +423,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 
   // Default: last 7 days
   if (!from || !to) {
-    const days7 = Array.from({ length: 7 }, (_, i) => { const d = new Date(); d.setDate(d.getDate() - (6 - i)); return isoDate(d); });
+    const days7 = Array.from({ length: 7 }, (_, i) => istOffsetDate(i - 6));
     from = days7[0]; to = days7[6];
   }
 
@@ -480,7 +480,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 /* ── GET /api/v1/analytics/live-locations ────────────────── */
 export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = isoDate(new Date());
+  const today = todayDate();
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
   // Include both executives and supervisors for live tracking as requested
@@ -562,7 +562,7 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
 export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { city, city_id, zone_id, fe_id, user_id, date: passedDate } = req.query as Record<string, string>;
-  const today = passedDate || isoDate(new Date());
+  const today = passedDate || todayDate();
 
   let execQuery = supabaseAdmin
     .from('users').select('id, name, employee_id, zone_id, zones!zone_id(name)')
@@ -641,8 +641,8 @@ export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Res
 /* Unique outlets visited (based on FE check-ins + form submissions) */
 export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const from  = (req.query.from  as string) || isoDate(new Date());
-  const to    = (req.query.to    as string) || isoDate(new Date());
+  const from  = (req.query.from  as string) || todayDate();
+  const to    = (req.query.to    as string) || todayDate();
 
   // All unique outlets from form_submissions in range - reverting to submitted_at
   let formsQuery = supabaseAdmin
@@ -701,8 +701,8 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 /* ── GET /api/v1/analytics/dashboard-init ────────────────── */
 export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = isoDate(toIST(new Date()));
-  const sevenDaysAgo = isoDate(new Date(Date.now() - 6 * 86400000));
+  const today = todayDate();
+  const sevenDaysAgo = istOffsetDate(-6);
 
   // 1. Attendance Today (Minimal summary)
   let attInitQuery = supabaseAdmin.from('attendance').select('status, is_regularised, checkout_at').eq('org_id', user.org_id).eq('date', today);
@@ -737,7 +737,7 @@ export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Respo
   const { data: weekSubs } = await weekSubsInitQuery;
   const dayMap: Record<string, number> = {};
   for(let i=0; i<7; i++) {
-    const d = isoDate(new Date(Date.now() - i * 86400000));
+    const d = istOffsetDate(-i);
     dayMap[d] = 0;
   }
   (weekSubs || []).forEach(s => {

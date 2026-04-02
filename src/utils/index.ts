@@ -74,9 +74,25 @@ export function sendPaginated(
   })
 }
 
+// ── IST offset: +5:30 in milliseconds ──
+const IST_OFFSET_MS = 5.5 * 3600000;
+
+// ── Convert a UTC Date to its IST-shifted equivalent ──
+export function toISTDate(utcDate: Date): Date {
+  return new Date(utcDate.getTime() + IST_OFFSET_MS);
+}
+
 // ── Today's date as YYYY-MM-DD in IST ──
 export function todayDate(): string {
-  return new Date(new Date().getTime() + 5.5 * 3600000).toISOString().split('T')[0]
+  return toISTDate(new Date()).toISOString().split('T')[0];
+}
+
+// ── IST date N days offset from today (negative = past, positive = future) ──
+// Uses IST-aware arithmetic so day boundaries are always correct for IST.
+export function istOffsetDate(daysOffset: number): string {
+  const istNow = toISTDate(new Date());
+  istNow.setUTCDate(istNow.getUTCDate() + daysOffset);
+  return istNow.toISOString().split('T')[0];
 }
 
 export const ok = <T>(res: Response, data: T, message?: string) =>

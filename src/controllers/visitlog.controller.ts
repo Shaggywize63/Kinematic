@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest } from '../utils/response';
+import { todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const visitSchema = z.object({
@@ -75,7 +76,7 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
       visitor_id: user.id, 
       executive_id: body.data.executive_id || user.id, 
       zone_id: user.zone_id,
-      date: new Date().toISOString().split('T')[0],
+      date: todayDate(),
       visited_at: new Date().toISOString()
     })
     .select('id')
@@ -150,7 +151,7 @@ export const updateFEFeedback = asyncHandler(async (req: AuthRequest, res: Respo
 // GET /api/v1/visits/team
 export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
+  const date = (req.query.date as string) || todayDate();
 
   let query = supabaseAdmin
     .from('visit_logs')

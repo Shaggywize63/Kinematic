@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest, notFound, forbidden } from '../utils/response';
+import { todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 
@@ -307,7 +308,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
   });
 
   // 4. Get today's attendance
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayDate();
   const { data: attendance } = await supabaseAdmin
     .from('attendance')
     .select('id')
