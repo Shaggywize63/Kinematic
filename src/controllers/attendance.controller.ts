@@ -320,7 +320,7 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
       checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
       total_hours, break_minutes, working_minutes, notes,
       is_regularised, created_at, updated_at,
-      users!inner(name, employee_id, city, zone_id, zones(name))
+      users!attendance_user_id_fkey(name, employee_id, city, zone_id, zones(name))
     `)
     .eq('org_id', user.org_id)
     .eq('date', date);
