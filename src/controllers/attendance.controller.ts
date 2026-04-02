@@ -271,7 +271,7 @@ const enrichWithHours = (r: any) => {
 // GET /api/v1/attendance/today
 export const getToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = (req.query.date as string) || new Date().toISOString().split('T')[0];
+  const today = (req.query.date as string) || todayDate();
 
   const { data, error } = await supabaseAdmin
     .from('attendance')
