@@ -320,8 +320,8 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
       checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
       total_hours, break_minutes, working_minutes, notes,
       is_regularised, created_at, updated_at,
-      users!user_id(name, employee_id, city, zone_id, zones!zone_id(name))
-    `)
+      users!attendance_user_id_fkey(name, employee_id, city, zone_id, zones(name))
+    `) // Forced redeploy for hint verification c2
     .eq('org_id', user.org_id)
     .eq('date', date);
 
@@ -411,14 +411,14 @@ export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Res
       .from('attendance')
       .update(payload)
       .eq('id', existing.id)
-      .select('*, users!user_id(name, employee_id, zones!zone_id(name))')
+      .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
       .single();
   } else {
     // INSERT — brand new record
     result = await supabaseAdmin
       .from('attendance')
       .insert({ org_id: admin.org_id, user_id, date, ...payload })
-      .select('*, users!user_id(name, employee_id, zones!zone_id(name))')
+      .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
       .single();
   }
 
