@@ -195,18 +195,16 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
 
     if (planErr) return badRequest(res, planErr.message);
 
-    // Insert outlets
-    const outletRows = outlets.map((o: any, idx: number) => ({
-      route_plan_id:       plan.id,
-      store_id:            o.store_id,
-      org_id:              org,
-      client_id:           clientId(req),
-      visit_order:         o.visit_order ?? idx + 1,
-      target_type:         o.target_type ?? 'general',
-      target_notes:        o.target_notes ?? null,
-      target_value:        o.target_value ?? null,
-      geofence_radius_m:   o.geofence_radius_m ?? 100,
-      planned_duration_min:o.planned_duration_min ?? null,
+    const outletRows = outlets.map((o: any) => ({
+      route_plan_id: plan.id,
+      org_id: org,
+      store_id: o.store_id,
+      target_type: o.target_type || 'general',
+      target_notes: o.target_notes,
+      target_value: o.target_value,
+      visit_order: o.visit_order,
+      geofence_radius_m: o.geofence_radius_m,
+      planned_duration_min: o.planned_duration_min
     }));
 
     const { error: outletsErr } = await supabase
@@ -423,7 +421,6 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
         route_plan_id:       plan.id,
         store_id:            r.resolved_store_id,
         org_id:              org,
-        client_id:           clientId(req),
         visit_order:         r.visit_order ? Number(r.visit_order) : i + 1,
         target_type:         r.target_type || 'general',
         target_notes:        r.target_notes || null,
