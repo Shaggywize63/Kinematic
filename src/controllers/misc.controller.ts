@@ -10,7 +10,7 @@ export const getVisitLogs = asyncHandler(async (req: AuthRequest, res: Response)
   const date = (req.query.date as string) || todayDate()
   let query = supabaseAdmin
     .from('visit_logs')
-    .select('*, visitor:visitor_id(id, name, role), executive:executive_id(id, name, zone_id, zones(name))')
+    .select('*, visitor:visitor_id(id, name, role), executive:executive_id(id, name, zone_id, zones!zone_id(name))')
     .eq('org_id', user.org_id).eq('date', date);
 
   if (user.client_id) query = query.eq('client_id', user.client_id);
@@ -249,7 +249,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
 
 export const getUserById = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabaseAdmin.from('users')
-    .select('*, zones(name)')
+    .select('*, zones!zone_id(name)')
     .eq('id', req.params.id).eq('org_id', req.user!.org_id).single()
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   if (!data) throw new AppError(404, 'User not found', 'NOT_FOUND')
@@ -308,7 +308,7 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
 
     const { data, error } = await supabaseAdmin.from('users')
       .insert(userData)
-      .select('*, zones(name)')
+      .select('*, zones!zone_id(name)')
       .single()
 
   const { permissions, assigned_cities } = req.body
@@ -562,9 +562,9 @@ export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Re
 export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const [attRes, subRes, sosRes] = await Promise.all([
-    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!attendance_user_id_fkey(name, zones(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
-    supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users!form_submissions_user_id_fkey(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('submitted_at', { ascending: false }).limit(10),
-    supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users!sos_alerts_user_id_fkey(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('created_at', { ascending: false }).limit(5),
+    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!user_id(name, zones!zone_id(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
+    supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users!user_id(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('submitted_at', { ascending: false }).limit(10),
+    supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users!user_id(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('created_at', { ascending: false }).limit(5),
   ])
   const feed = [
     ...(attRes.data || []).map((a: any) => ({ type: 'attendance', event: a.status === 'checked_in' ? 'Check-in' : 'Check-out', user: a.users?.name, zone: a.users?.zones?.name, time: a.checkin_at, id: a.id })),

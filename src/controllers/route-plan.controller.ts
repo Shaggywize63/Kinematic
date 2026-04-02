@@ -453,7 +453,7 @@ export const getImports = asyncHandler(async (req: Request, res: Response) => {
 
   let q = supabase
     .from('route_plan_imports')
-    .select('id, filename, total_rows, success_rows, failed_rows, status, plan_date, created_at, users(name)')
+    .select('id, filename, total_rows, success_rows, failed_rows, status, plan_date, created_at, users!imported_by(name)')
     .eq('org_id', org)
     .eq('plan_date', date);
 
@@ -476,7 +476,7 @@ export const getOutletFrequency = asyncHandler(async (req: Request, res: Respons
   const org = orgId(req);
   const { data, error } = await supabase
     .from('outlet_visit_frequency')
-    .select('*, stores(name, store_code, address), users(name, employee_id)')
+    .select('*, stores!store_id(name, store_code, address), users!user_id(name, employee_id)')
     .eq('org_id', org)
     .eq('is_active', true)
     .order('created_at', { ascending: false });

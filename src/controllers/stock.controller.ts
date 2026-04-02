@@ -32,7 +32,7 @@ export const getMyAllocation = asyncHandler(async (req: AuthRequest, res: Respon
 
   const { data, error } = await supabaseAdmin
     .from('stock_allocations')
-    .select('*, stock_items(*), activities(name), zones(name)')
+    .select('*, stock_items(*), activities!activity_id(name), zones!zone_id(name)')
     .eq('user_id', user.id)
     .eq('date', date)
     .single();
@@ -82,7 +82,7 @@ export const reviewItem = asyncHandler(async (req: AuthRequest, res: Response) =
   // Verify item belongs to user's allocation
   const { data: item } = await supabaseAdmin
     .from('stock_items')
-    .select('id, allocation_id, quantity_allocated, stock_allocations(user_id)')
+    .select('id, allocation_id, quantity_allocated, stock_allocations!allocation_id(user_id)')
     .eq('id', id)
     .single();
 
@@ -136,7 +136,7 @@ export const getTeamAllocations = asyncHandler(async (req: AuthRequest, res: Res
 
   const { data, error } = await supabaseAdmin
     .from('stock_allocations')
-    .select('*, stock_items(*), users(name, employee_id), zones(name)')
+    .select('*, stock_items(*), users!user_id(name, employee_id), zones!zone_id(name)')
     .eq('org_id', user.org_id)
     .eq('date', date)
     .order('created_at', { ascending: false });

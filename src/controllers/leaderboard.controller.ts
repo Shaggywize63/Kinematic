@@ -26,7 +26,7 @@ export const getLeaderboard = asyncHandler(async (req: AuthRequest, res: Respons
 
   let query = supabaseAdmin
     .from('leaderboard_scores')
-    .select('*, users(id, name, employee_id, avatar_url, zones(name))')
+    .select('*, users!user_id(id, name, employee_id, avatar_url, zones!zone_id(name))')
     .eq('org_id', user.org_id)
     .eq('period', period)
     .eq('period_start', periodStart)
