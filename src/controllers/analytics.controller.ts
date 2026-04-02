@@ -483,9 +483,13 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
   const today = isoDate(new Date());
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
+  // Include both executives and supervisors for live tracking as requested
   let execQuery = supabaseAdmin
-    .from('users').select('id, name, employee_id, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
-    .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+    .from('users')
+    .select('id, name, employee_id, role, battery_percentage, last_latitude, last_longitude, last_location_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
+    .eq('org_id', user.org_id)
+    .in('role', ['executive', 'field_executive', 'supervisor', 'city_manager'])
+    .eq('is_active', true);
   
   if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
   
@@ -514,22 +518,36 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
   const locations = (execs || []).map((fe) => {
     const rec  = attMap.get(fe.id);
     const zone = fe.zones as unknown as { name: string; city: string; meeting_lat: number; meeting_lng: number } | null;
-    // Fall back to zone's meeting point if no GPS on FE
-    const lat = rec?.checkin_lat || zone?.meeting_lat || null;
-    const lng = rec?.checkin_lng || zone?.meeting_lng || null;
+    
+    // Logic: 
+    // 1. If we have a very recent HEARTBEAT/Live location (within last 30 mins), use last_latitude
+    // 2. Otherwise use attendance checkin location
+    // 3. Last fallback is zone meeting point
+    const recentLocation = fe.last_location_updated_at && (new Date().getTime() - new Date(fe.last_location_updated_at).getTime() < 1800000);
+    
+    const lat = (recentLocation && fe.last_latitude) ? fe.last_latitude : (rec?.checkin_lat || zone?.meeting_lat || null);
+    const lng = (recentLocation && fe.last_longitude) ? fe.last_longitude : (rec?.checkin_lng || zone?.meeting_lng || null);
+    
     return {
-      id: fe.id, name: fe.name, employee_id: fe.employee_id,
-      zone_name: zone?.name || null, city: zone?.city || null,
-      status: rec ? (rec.checkout_at ? 'checked_out' : 'active') : 'absent',
-      checkin_at: rec?.checkin_at || null, checkout_at: rec?.checkout_at || null,
-      lat, lng,
-      address:      rec?.checkin_address || null,
-      total_hours:  enrichWithHours(rec)?.total_hours || null,
+      id: fe.id, 
+      name: fe.name, 
+      employee_id: fe.employee_id,
+      role: fe.role,
+      battery_percentage: fe.battery_percentage,
+      zone_name: zone?.name || null, 
+      city: zone?.city || null,
+      status: rec ? (rec.checkout_at ? 'checked_out' : (rec.status === 'on_break' ? 'on_break' : 'active')) : 'absent',
+      checkin_at: rec?.checkin_at || null, 
+      checkout_at: rec?.checkout_at || null,
+      lat, 
+      lng,
+      address: rec?.checkin_address || null,
+      total_hours: enrichWithHours(rec)?.total_hours || null,
       is_regularised: rec?.is_regularised || false,
     };
   });
 
-  const active  = locations.filter((l) => l.status === 'active').length;
+  const active  = locations.filter((l) => l.status === 'active' || l.status === 'on_break').length;
   const out     = locations.filter((l) => l.status === 'checked_out').length;
   const absent  = locations.filter((l) => l.status === 'absent').length;
 
