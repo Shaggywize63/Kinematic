@@ -133,8 +133,8 @@ app.use(`${V1}/clients`,           requireAuth, clientRoutes);
 app.use(`${V1}/misc`,              requireAuth, miscRoutes);
 
 // Route plan (singular and plural alias)
-app.use(`${V1}/route-plan`,    requireAuth, enforceCityScope, requireModule('orders'), routePlanRoutes);
-app.use(`${V1}/route-plans`,   requireAuth, enforceCityScope, requireModule('orders'), routePlanRoutes);
+app.use(`${V1}/route-plan`,    requireAuth, enforceCityScope, routePlanRoutes);
+app.use(`${V1}/route-plans`,   requireAuth, enforceCityScope, routePlanRoutes);
 
 // Other management mounts
 app.use(`${V1}/activities`,    requireAuth, activitiesRoutes);
