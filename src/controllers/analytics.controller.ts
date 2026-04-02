@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest } from '../utils/response';
+import { ok, badRequest, todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const toIST = (utcDate: Date): Date =>
@@ -766,7 +766,7 @@ export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Respo
 /* ── GET /api/v1/analytics/mobile-home ───────────────────── */
 export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const today = isoDate(toIST(new Date()));
+  const today = todayDate();
 
   // 1. Today Attendance Status (Crucial for flicker fix)
   const { data: attRecord } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('user_id', user.id).eq('date', today).maybeSingle();
