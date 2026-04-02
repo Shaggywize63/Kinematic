@@ -372,7 +372,7 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
 
   const { data, error } = await supabaseAdmin
     .from('form_submissions')
-    .select('*, form_responses(*, form_fields(label, qtype)), form_templates(title), activities(name)')
+    .select('*, form_responses(*, builder_questions(title, qtype)), builder_forms(title), activities(name)')
     .eq('id', id)
     .single();
 
