@@ -47,6 +47,7 @@ const submissionSchema = z.object({
   gps: z.string().optional(),
   consumer_age: z.string().nullable().optional(),
   consumer_gender: z.string().nullable().optional(),
+  photo_url: z.string().optional(),
   submitted_at: z.string().optional(),
   responses: z.array(responseSchema).min(1),
 });
@@ -394,7 +395,7 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   let query = supabaseAdmin
     .from('form_submissions')
     .select(`
-      id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps,
+      id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps, latitude, longitude, photo_url,
       users!user_id(name, employee_id, city, zone_id),
       activities(name),
       form_templates(title)
@@ -438,10 +439,10 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
     return {
       ...s,
       store_name: (checkin?.stores as any)?.name || s.outlet_name || null,
-      checkin_photo: checkin?.photo_url || null,
-      checkin_at: checkin?.checkin_at || null,
-      checkin_lat: checkin?.checkin_lat || null,
-      checkin_lng: checkin?.checkin_lng || null,
+      checkin_photo: checkin?.photo_url || s.photo_url || null,
+      checkin_at: checkin?.checkin_at || s.submitted_at || null,
+      checkin_lat: checkin?.checkin_lat || s.latitude || null,
+      checkin_lng: checkin?.checkin_lng || s.longitude || null,
     };
   });
 
