@@ -80,7 +80,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
   // Real-time metrics from form_submissions
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, is_converted, user_id, submitted_at, date, users!inner(city)', { count: 'exact' })
+    .select('id, is_converted, user_id, submitted_at, date, users!form_submissions_user_id_fkey(city)', { count: 'exact' })
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
@@ -261,14 +261,14 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 
   let submissionQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, submitted_at, is_converted, outlet_name, users!inner(name, city), activities(name)')
+    .select('id, submitted_at, is_converted, outlet_name, users!form_submissions_user_id_fkey(name, city), activities(name)')
     .eq('org_id', user.org_id);
 
   if (user.client_id) submissionQuery = submissionQuery.eq('client_id', user.client_id);
 
   let checkinQuery = supabaseAdmin
     .from('attendance')
-    .select('id, checkin_at, users!inner(name, city), zones(name)')
+    .select('id, checkin_at, users!attendance_user_id_fkey(name, city), zones(name)')
     .eq('org_id', user.org_id)
     .not('checkin_at', 'is', null);
 
@@ -629,7 +629,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   // All unique outlets from form_submissions in range - reverting to submitted_at
   let formsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('outlet_name, is_converted, user_id, submitted_at, date, users(name, zones(name, city))')
+    .select('outlet_name, is_converted, user_id, submitted_at, date, users!form_submissions_user_id_fkey(name, zones(name, city))')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);

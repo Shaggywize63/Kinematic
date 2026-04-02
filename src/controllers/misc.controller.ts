@@ -562,9 +562,9 @@ export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Re
 export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const [attRes, subRes, sosRes] = await Promise.all([
-    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users(name, zones(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
-    supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('submitted_at', { ascending: false }).limit(10),
-    supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('created_at', { ascending: false }).limit(5),
+    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!attendance_user_id_fkey(name, zones(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
+    supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users!form_submissions_user_id_fkey(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('submitted_at', { ascending: false }).limit(10),
+    supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users!sos_alerts_user_id_fkey(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('created_at', { ascending: false }).limit(5),
   ])
   const feed = [
     ...(attRes.data || []).map((a: any) => ({ type: 'attendance', event: a.status === 'checked_in' ? 'Check-in' : 'Check-out', user: a.users?.name, zone: a.users?.zones?.name, time: a.checkin_at, id: a.id })),
@@ -622,9 +622,9 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
     .eq('is_active', true)
     .order('name')
 
-  // Platform admins (Admin or Super Admin) can see all clients for mapping attribution
-  const isPlatformAdmin = ['admin', 'super_admin', 'platform_admin'].includes(user.role?.toLowerCase())
-  if (!isPlatformAdmin) {
+  // Platform admins and management roles can see all client names for dashboard attribution
+  const isManagement = ['admin', 'super_admin', 'main_admin', 'sub_admin', 'platform_admin', 'hr', 'city_manager'].includes(user.role?.toLowerCase())
+  if (!isManagement) {
     query = query.eq('org_id', user.org_id)
   }
 

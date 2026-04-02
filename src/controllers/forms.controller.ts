@@ -395,7 +395,7 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
     .from('form_submissions')
     .select(`
       id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps,
-      users!inner(name, employee_id, city, zone_id),
+      users!form_submissions_user_id_fkey(name, employee_id, city, zone_id),
       activities(name),
       form_templates(title)
     `, { count: 'exact' })
