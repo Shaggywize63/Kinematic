@@ -562,7 +562,7 @@ export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Re
 export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
   const [attRes, subRes, sosRes] = await Promise.all([
-    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!user_id(name, zones!zone_id(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
+    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!attendance_user_id_fkey(name, zones(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
     supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users!user_id(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('submitted_at', { ascending: false }).limit(10),
     supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users!user_id(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('created_at', { ascending: false }).limit(5),
   ])

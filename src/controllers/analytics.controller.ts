@@ -268,7 +268,7 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 
   let checkinQuery = supabaseAdmin
     .from('attendance')
-    .select('id, checkin_at, users!user_id(name, city), zones!zone_id(name)')
+    .select('id, checkin_at, users!attendance_user_id_fkey(name, city), zones(name)') // force c2
     .eq('org_id', user.org_id)
     .not('checkin_at', 'is', null);
 
