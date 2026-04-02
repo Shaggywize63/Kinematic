@@ -528,10 +528,25 @@ export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => 
 
 export const createZone = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { name, city, city_id, state, meeting_lat, meeting_lng, meeting_address, geofence_radius } = req.body
+  const user = req.user!
+  const targetClientId = user.client_id || req.body.client_id || null
+
+  // Check for duplication before insert to provide better error or bypass constraint
+  const { data: existing } = await supabaseAdmin.from('zones')
+    .select('id')
+    .eq('org_id', user.org_id)
+    .eq('name', name)
+    .filter('client_id', targetClientId ? 'eq' : 'is', targetClientId || null)
+    .maybeSingle()
+
+  if (existing) {
+    throw new AppError(400, `Zone with name "${name}" already exists.`, 'DUPLICATE_ERROR')
+  }
+
   const { data, error } = await supabaseAdmin.from('zones')
     .insert({ 
-      org_id: req.user!.org_id, 
-      client_id: req.user!.client_id || req.body.client_id || null,
+      org_id: user.org_id, 
+      client_id: targetClientId,
       name, city, city_id, state, 
       meeting_lat: meeting_lat || 0.0, 
       meeting_lng: meeting_lng || 0.0, 
