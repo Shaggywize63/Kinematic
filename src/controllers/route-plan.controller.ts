@@ -348,7 +348,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
 
   // Fetch all FEs and stores for this org (for matching)
   let fesQuery = supabase.from('users').select('id, employee_id, name').eq('org_id', org).eq('role', 'executive');
-  let storesQuery = supabase.from('stores').select('id, store_code, name, latitude, longitude').eq('org_id', org);
+  let storesQuery = supabase.from('stores').select('id, store_code, name, lat, lng').eq('org_id', org);
 
   const cid = clientId(req);
   if (cid) {
@@ -367,7 +367,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
   (fes || []).forEach((f: any)    => { if (f.employee_id) feMap[f.employee_id.toLowerCase()]   = f.id; });
   (stores || []).forEach((s: any) => { 
     if (s.store_code)  storeMap[s.store_code.toLowerCase()] = s.id; 
-    bypassMap[s.id] = !!(s.latitude && s.longitude);
+    bypassMap[s.id] = !!(s.lat && s.lng);
   });
 
   // Group rows by FE
