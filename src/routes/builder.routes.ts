@@ -227,6 +227,12 @@ router.post(
       logic,
       prefill_key,
       media_config,
+      keyboard_type,
+      image_count,
+      camera_only,
+      depends_on_id,
+      depends_on_value,
+      is_consent,
     } = req.body;
 
     if (!qtype)
@@ -248,6 +254,12 @@ router.post(
         logic: logic || [],
         prefill_key,
         media_config: media_config || {},
+        keyboard_type: keyboard_type || 'default',
+        image_count: image_count || 1,
+        camera_only: camera_only || false,
+        depends_on_id: depends_on_id || null,
+        depends_on_value: depends_on_value || null,
+        is_consent: is_consent || false,
       })
       .select()
       .single();
@@ -273,6 +285,12 @@ router.patch(
       "logic",
       "prefill_key",
       "media_config",
+      "keyboard_type",
+      "image_count",
+      "camera_only",
+      "depends_on_id",
+      "depends_on_value",
+      "is_consent",
       "page_id",
     ];
 

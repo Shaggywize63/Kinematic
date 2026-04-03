@@ -166,7 +166,13 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
           is_required: q.required || q.is_required || false,
           options: options,
           placeholder: q.placeholder || "",
-          helper_text: q.helper_text || ""
+          help_text: q.helper_text || q.help_text || "",
+          keyboard_type: q.keyboard_type || null,
+          image_count: q.image_count || 1,
+          camera_only: q.camera_only || false,
+          depends_on_id: q.depends_on_id || null,
+          depends_on_value: q.depends_on_value || null,
+          is_consent: q.is_consent || false
         };
       })
     };
@@ -321,6 +327,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
     .from('form_submissions')
     .insert({
       ...submissionData,
+      outlet_name: submissionData.outlet_name || (submissionData as any).outletName,
       gps: submissionData.gps || (submissionData.latitude && submissionData.longitude ? `${submissionData.latitude},${submissionData.longitude}` : null),
       org_id: user.org_id,
       user_id: user.id,
