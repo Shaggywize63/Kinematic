@@ -327,6 +327,9 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
     .from('form_submissions')
     .insert({
       ...submissionData,
+      template_id: submissionData.template_id || (submissionData as any).templateId,
+      activity_id: submissionData.activity_id || (submissionData as any).activityId,
+      outlet_id: submissionData.outlet_id || (submissionData as any).outletId,
       outlet_name: submissionData.outlet_name || (submissionData as any).outletName,
       gps: submissionData.gps || (submissionData.latitude && submissionData.longitude ? `${submissionData.latitude},${submissionData.longitude}` : null),
       org_id: user.org_id,
@@ -334,7 +337,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
       attendance_id: attendance?.id,
       submitted_at: submissionData.submitted_at || new Date().toISOString(),
       date: (submissionData as any).date || today,
-      is_converted: true,
+      is_converted: submissionData.is_converted !== undefined ? submissionData.is_converted : (submissionData as any).isConverted ?? true,
     })
     .select()
     .single();
