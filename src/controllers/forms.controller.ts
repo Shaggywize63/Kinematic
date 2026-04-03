@@ -314,7 +314,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
     .select('id')
     .eq('user_id', user.id)
     .eq('date', today)
-    .single();
+    .maybeSingle();
 
   // Insert submission
   const { data: submission, error: subError } = await supabaseAdmin
@@ -340,6 +340,18 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
     .insert(submittedResponses.map((r) => ({ ...r, submission_id: submission.id })));
 
   if (respError) return badRequest(res, respError.message);
+  
+  // 6. Update route plan outlet status to 'visited' if outlet_id is provided
+  const oid = submissionData.outlet_id || (submissionData as any).outletId;
+  if (oid) {
+    await supabaseAdmin
+      .from('route_plan_outlets')
+      .update({ 
+        status: 'visited',
+        checkout_at: new Date().toISOString() 
+      })
+      .eq('id', oid);
+  }
 
   return created(res, { submission_id: submission.id, is_converted: submission.is_converted },
     'Form submitted successfully');
