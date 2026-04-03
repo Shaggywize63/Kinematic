@@ -120,7 +120,7 @@ app.use(`${V1}/leaderboard`,   requireAuth, leaderboardRoutes);
 app.use(`${V1}/notifications`, requireAuth, notifRoutes);
 app.use(`${V1}/learning`,      requireAuth, learningRoutes);
 app.use(`${V1}/grievances`,    requireAuth, requireModule('reports'), grievanceRoutes);
-app.use(`${V1}/analytics`,     requireAuth, enforceCityScope, requireModule('analytics'), analyticsRoutes);
+app.use(`${V1}/analytics`,     requireAuth, enforceCityScope, analyticsRoutes);
 app.use(`${V1}/visits`,        requireAuth, enforceCityScope, visitlogRoutes);
 app.use(`${V1}/upload`,        requireAuth, uploadRoutes);
 app.use(`${V1}/warehouses`,    requireAuth, requireModule('inventory'), wmsRoutes);
