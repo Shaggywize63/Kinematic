@@ -789,8 +789,17 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
   // 5. Quote
   const { data: quote } = await supabaseAdmin.from('motivation_quotes').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
 
-  // 6. Broadcast
-  const { data: broadcast } = await supabaseAdmin.from('notification_broadcasts').select('*').eq('org_id', user.org_id).order('created_at', { ascending: false }).limit(1).maybeSingle();
+  // 6. Broadcast (Filter for Today's broadcasts only to avoid ghosting)
+  const startOfToday = new Date(today + 'T00:00:00+05:30').toISOString();
+  const { data: broadcast } = await supabaseAdmin
+    .from('notification_broadcasts')
+    .select('*')
+    .eq('org_id', user.org_id)
+    .gte('created_at', startOfToday)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
   if (broadcast) {
     const { data: ans } = await supabaseAdmin.from('notifications').select('id').eq('broadcast_id', broadcast.id).eq('user_id', user.id).eq('is_interacted', true).maybeSingle();
     (broadcast as any).alreadyAnswered = !!ans;
