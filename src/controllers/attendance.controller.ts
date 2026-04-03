@@ -204,14 +204,19 @@ export const startBreak = asyncHandler(async (req: AuthRequest, res: Response) =
 
   await supabaseAdmin.from('attendance').update({ status: 'on_break' }).eq('id', record.id);
 
-  const { data: breakRecord, error } = await supabaseAdmin
+  const { error } = await supabaseAdmin
     .from('breaks')
-    .insert({ attendance_id: record.id, user_id: user.id, started_at: new Date().toISOString() })
-    .select()
-    .single();
+    .insert({ attendance_id: record.id, user_id: user.id, started_at: new Date().toISOString() });
 
   if (error) { badRequest(res, error.message); return; }
-  created(res, breakRecord, 'Break started');
+
+  const { data: updatedRecord } = await supabaseAdmin
+    .from('attendance')
+    .select('*, breaks(*)')
+    .eq('id', record.id)
+    .single();
+
+  created(res, enrichWithHours(updatedRecord), 'Break started');
 });
 
 // POST /api/v1/attendance/break/end
@@ -247,7 +252,13 @@ export const endBreak = asyncHandler(async (req: AuthRequest, res: Response) => 
     break_minutes: (record.break_minutes || 0) + breakMins,
   }).eq('id', record.id);
 
-  ok(res, { break_duration_minutes: breakMins }, 'Break ended');
+  const { data: updatedRecord } = await supabaseAdmin
+    .from('attendance')
+    .select('*, breaks(*)')
+    .eq('id', record.id)
+    .single();
+
+  ok(res, enrichWithHours(updatedRecord), 'Break ended');
 });
 
 // Helper to calculate total_hours if missing from DB (handles active shifts and historical missing data)
