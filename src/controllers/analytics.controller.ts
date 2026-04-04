@@ -254,7 +254,7 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 
   let submissionQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, submitted_at, is_converted, outlet_name, users!user_id(name, city), activities(name)')
+    .select('id, submitted_at, is_converted, outlet_name, users!user_id(name, city), builder_forms:builder_forms!fk_submission_template(title)')
     .eq('org_id', user.org_id);
 
   if (user.client_id) submissionQuery = submissionQuery.eq('client_id', user.client_id);
@@ -263,10 +263,15 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 
   const feed = (submissions || []).map((s) => {
     const u = s.users as unknown as { name: string } | null;
-    const a = s.activities as unknown as { name: string } | null;
-    return { id: s.id, type: 'form_submission' as const, time: s.submitted_at,
+    const f = s.builder_forms as unknown as { title: string } | null;
+    return { 
+      id: s.id, 
+      type: 'form_submission' as const, 
+      time: s.submitted_at,
       description: `${u?.name || 'Unknown'} submitted form${s.is_converted ? ' ✓ TFF' : ''}`,
-      meta: { activity: a?.name, outlet: s.outlet_name } };
+      form_name: f?.title || 'General Form',
+      meta: { activity: f?.title, outlet: s.outlet_name } 
+    };
   }).sort((a, b) => new Date(b.time!).getTime() - new Date(a.time!).getTime());
 
   return ok(res, feed);
@@ -458,10 +463,11 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
     .from('users')
     .select('id, name, employee_id, role, battery_percentage, last_latitude, last_longitude, last_location_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id)
-    .in('role', ['executive', 'field_executive', 'supervisor', 'city_manager'])
-    .eq('is_active', true);
+    .in('role', ['executive', 'field_executive', 'field-executive', 'fe', 'FE', 'FE-001', 'supervisor', 'sub-admin', 'sub_admin', 'city_manager', 'city-manager', 'program_manager', 'program-manager']);
   
-  if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
+  if (user.client_id) {
+    execQuery = execQuery.or(`client_id.eq.${user.client_id},client_id.is.null`);
+  }
   
   if (city) execQuery = execQuery.eq('city', city);
   if (city_id) {
@@ -745,13 +751,17 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
   if (attError) console.log(`[MobileHome] Error: ${attError.message}`);
   console.log(`[MobileHome] Attendance Result: ${!!attRecord}, Status=${attRecord?.status}`);
   
-  if (attRecord) enrichWithHours(attRecord);
-
-  // 2. Summary Stats (FE-specific)
+  // 2. Summary Stats (FE-specific) - Relaxed client filtering to count all today's submissions for the user
   let tffHomeQuery = supabaseAdmin.from('form_submissions').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('date', today);
-  if (user.client_id) tffHomeQuery = tffHomeQuery.eq('client_id', user.client_id);
+  // We only filter by client_id if we want strict client isolation, 
+  // but for the FE's home screen, we should show all their work for today.
   const { count: myTff } = await tffHomeQuery;
-  
+
+  if (attRecord) {
+    enrichWithHours(attRecord);
+    (attRecord as any).tff_count = myTff || 0;
+  }
+
   // 3. Today's Route Plan
   const { data: plan } = await supabaseAdmin.from('v_route_plan_daily').select('*').eq('user_id', user.id).eq('plan_date', today).maybeSingle();
   let outlets = [];
@@ -766,7 +776,7 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
   // 5. Quote
   const { data: quote } = await supabaseAdmin.from('motivation_quotes').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
 
-  // 6. Broadcast (Filter for Today's broadcasts only to avoid ghosting)
+  // 6. Broadcast (Today only)
   const startOfToday = new Date(today + 'T00:00:00+05:30').toISOString();
   const { data: broadcast } = await supabaseAdmin
     .from('notification_broadcasts')
