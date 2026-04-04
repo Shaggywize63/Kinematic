@@ -420,7 +420,8 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
       id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps, latitude, longitude, photo_url,
       users!user_id(name, employee_id, city, zone_id),
       builder_forms(title),
-      activities(name)
+      activities(name),
+      form_responses(*, builder_questions(title))
     `, { count: 'exact' })
     .eq('org_id', user.org_id)
     .order('submitted_at', { ascending: false })

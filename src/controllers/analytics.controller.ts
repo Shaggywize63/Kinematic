@@ -259,38 +259,15 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 
   if (user.client_id) submissionQuery = submissionQuery.eq('client_id', user.client_id);
 
-  let checkinQuery = supabaseAdmin
-    .from('attendance')
-    .select('id, checkin_at, users!attendance_user_id_fkey(name, city), zones(name)') // force c2
-    .eq('org_id', user.org_id)
-    .not('checkin_at', 'is', null);
-
-  if (user.client_id) checkinQuery = checkinQuery.eq('client_id', user.client_id);
-
-  if (userRole === 'city_manager' && user.assigned_cities?.length) {
-    submissionQuery = submissionQuery.in('users.city', user.assigned_cities);
-    checkinQuery = checkinQuery.in('users.city', user.assigned_cities);
-  }
-
   const { data: submissions } = await submissionQuery.order('submitted_at', { ascending: false }).limit(limit);
-  const { data: checkins } = await checkinQuery.order('checkin_at', { ascending: false }).limit(limit);
 
-  const feed = [
-    ...(submissions || []).map((s) => {
-      const u = s.users as unknown as { name: string } | null;
-      const a = s.activities as unknown as { name: string } | null;
-      return { id: s.id, type: 'form_submission' as const, time: s.submitted_at,
-        description: `${u?.name || 'Unknown'} submitted form${s.is_converted ? ' ✓ TFF' : ''}`,
-        meta: { activity: a?.name, outlet: s.outlet_name } };
-    }),
-    ...(checkins || []).map((c) => {
-      const u = c.users as unknown as { name: string } | null;
-      const z = c.zones as unknown as { name: string } | null;
-      return { id: c.id, type: 'check_in' as const, time: c.checkin_at,
-        description: `${u?.name || 'Unknown'} checked in at ${z?.name || 'Unknown zone'}`,
-        meta: {} };
-    }),
-  ].sort((a, b) => new Date(b.time!).getTime() - new Date(a.time!).getTime()).slice(0, limit);
+  const feed = (submissions || []).map((s) => {
+    const u = s.users as unknown as { name: string } | null;
+    const a = s.activities as unknown as { name: string } | null;
+    return { id: s.id, type: 'form_submission' as const, time: s.submitted_at,
+      description: `${u?.name || 'Unknown'} submitted form${s.is_converted ? ' ✓ TFF' : ''}`,
+      meta: { activity: a?.name, outlet: s.outlet_name } };
+  }).sort((a, b) => new Date(b.time!).getTime() - new Date(a.time!).getTime());
 
   return ok(res, feed);
 });
