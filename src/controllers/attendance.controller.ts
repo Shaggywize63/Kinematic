@@ -113,6 +113,16 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
     captured_at: data.checkin_at
   });
 
+  // Update user's last known location immediately for live tracking
+  await supabaseAdmin
+    .from('users')
+    .update({
+      last_latitude: latitude,
+      last_longitude: longitude,
+      last_location_updated_at: data.checkin_at
+    })
+    .eq('id', user.id);
+
   created(res, data, 'Checked in successfully');
 });
 
@@ -183,6 +193,16 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
     lng: longitude,
     captured_at: updatedRecord.checkout_at
   });
+
+  // Clear live location on checkout (optional, but requested to stop tracking)
+  await supabaseAdmin
+    .from('users')
+    .update({
+      last_latitude: null,
+      last_longitude: null,
+      last_location_updated_at: updatedRecord.checkout_at
+    })
+    .eq('id', user.id);
 
   ok(res, updatedRecord, 'Checked out successfully');
 });

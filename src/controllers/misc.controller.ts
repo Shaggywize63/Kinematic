@@ -676,7 +676,7 @@ export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) =
 
 // CLIENTS
 export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { latitude, longitude, battery_percentage, activity_type } = req.body;
+  const { latitude, longitude, battery_percentage, battery, activity_type } = req.body;
   const user = req.user!;
 
   if (!latitude || !longitude) {
@@ -684,6 +684,7 @@ export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Respo
   }
 
   const now = new Date().toISOString();
+  const batteryLevel = battery !== undefined ? battery : (battery_percentage || null);
   
   // 1. Update user record with last known location and battery
   const { error: userErr } = await supabaseAdmin
@@ -691,7 +692,7 @@ export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Respo
     .update({
       last_latitude: latitude,
       last_longitude: longitude,
-      battery_percentage: battery_percentage || null,
+      battery_percentage: batteryLevel,
       last_location_updated_at: now
     })
     .eq('id', user.id);
@@ -716,7 +717,7 @@ export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Respo
     activity_type: activity_type || 'HEARTBEAT',
     lat: latitude,
     lng: longitude,
-    battery_percentage: battery_percentage || null,
+    battery_percentage: batteryLevel,
     captured_at: now
   });
 

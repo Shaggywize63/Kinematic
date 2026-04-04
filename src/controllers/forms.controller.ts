@@ -332,6 +332,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
       outlet_id: submissionData.outlet_id || (submissionData as any).outletId,
       outlet_name: submissionData.outlet_name || (submissionData as any).outletName,
       gps: submissionData.gps || (submissionData.latitude && submissionData.longitude ? `${submissionData.latitude},${submissionData.longitude}` : null),
+      client_id: user.client_id,
       org_id: user.org_id,
       user_id: user.id,
       attendance_id: attendance?.id,
