@@ -375,7 +375,7 @@ export const getMySubmissions = asyncHandler(async (req: AuthRequest, res: Respo
 
   let query = supabaseAdmin
     .from('form_submissions')
-    .select('*, form_templates(name), activities(name)', { count: 'exact' })
+    .select('*, form_templates!template_id(name), activities(name)', { count: 'exact' })
     .eq('user_id', user.id)
     .order('submitted_at', { ascending: false })
     .range(from, to);
@@ -394,7 +394,7 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
 
   const { data, error } = await supabaseAdmin
     .from('form_submissions')
-    .select('*, form_responses(*, builder_questions(title, qtype)), builder_forms(title), activities(name)')
+    .select('*, form_responses(*, builder_questions:form_fields!field_id(title, qtype)), builder_forms:form_templates!template_id(title), activities(name)')
     .eq('id', id)
     .single();
 
@@ -419,9 +419,9 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
     .select(`
       id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps, latitude, longitude, photo_url,
       users!user_id(name, employee_id, city, zone_id),
-      builder_forms(title),
+      builder_forms:form_templates!template_id(title),
       activities(name),
-      form_responses(*, builder_questions(title))
+      form_responses(*, builder_questions:form_fields!field_id(title))
     `, { count: 'exact' })
     .eq('org_id', user.org_id)
     .order('submitted_at', { ascending: false })
