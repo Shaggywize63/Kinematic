@@ -751,10 +751,17 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
   if (attError) console.log(`[MobileHome] Error: ${attError.message}`);
   console.log(`[MobileHome] Attendance Result: ${!!attRecord}, Status=${attRecord?.status}`);
   
-  // 2. Summary Stats (FE-specific) - Relaxed client filtering to count all today's submissions for the user
-  let tffHomeQuery = supabaseAdmin.from('form_submissions').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('date', today);
-  // We only filter by client_id if we want strict client isolation, 
-  // but for the FE's home screen, we should show all their work for today.
+  // 2. Summary Stats (FE-specific) - Use submitted_at range for robust counting across IST date boundaries
+  const istToday = todayDate();
+  const start = `${istToday}T00:00:00`;
+  const end = `${istToday}T23:59:59`;
+  
+  let tffHomeQuery = supabaseAdmin.from('form_submissions')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', user.id)
+    .gte('submitted_at', start)
+    .lte('submitted_at', end);
+    
   const { count: myTff } = await tffHomeQuery;
 
   if (attRecord) {
