@@ -392,20 +392,26 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
   const user = req.user!;
   const { id } = req.params;
 
-  const { data, error } = await supabaseAdmin
+  const { data: submission, error } = await supabaseAdmin
     .from('form_submissions')
-    .select('*, form_responses(id, value_text, value_number, value_bool, photo_url, builder_questions:builder_questions!fk_response_field(title, qtype)), builder_forms:builder_forms!fk_submission_template(title), activities(name)')
+    .select('*, builder_forms:builder_forms!fk_submission_template(title), activities(name)')
     .eq('id', id)
     .single();
 
-  if (error || !data) return notFound(res, 'Submission not found');
+  if (error || !submission) return notFound(res, 'Submission not found');
 
   // Execs can only see their own; supervisors+ see org
-  if (data.user_id !== user.id && !['admin','city_manager','supervisor','super_admin'].includes(user.role)) {
+  if (submission.user_id !== user.id && !['admin','city_manager','supervisor','super_admin'].includes(user.role)) {
     return forbidden(res);
   }
 
-  return ok(res, data);
+  // Decoupled fetch for responses to avoid PostgREST ambiguity
+  const { data: responses } = await supabaseAdmin
+    .from('form_responses')
+    .select('id, value_text, value_number, value_bool, photo_url, builder_questions:builder_questions!fk_response_field(title, qtype)')
+    .eq('submission_id', id);
+
+  return ok(res, { ...submission, form_responses: responses || [] });
 });
 
 // GET /api/v1/admin/submissions  (supervisor+)
@@ -420,8 +426,7 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
       id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps, latitude, longitude, photo_url,
       users!user_id(name, employee_id, city, zone_id),
       builder_forms:builder_forms!fk_submission_template(title),
-      activities(name),
-      form_responses(id, value_text, value_number, value_bool, photo_url, builder_questions:builder_questions!fk_response_field(title))
+      activities(name)
     `, { count: 'exact' })
     .eq('org_id', user.org_id)
     .order('submitted_at', { ascending: false })
@@ -445,8 +450,26 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
 
-  // Fetch checkin data from route_plan_outlets (outlet_id = route_plan_outlets.id)
-  const outletIds = [...new Set((data || []).map((s) => s.outlet_id).filter(Boolean))];
+  const submissions = data || [];
+  const submissionIds = submissions.map(s => s.id);
+
+  // Decoupled fetch for responses to avoid PostgREST ambiguity
+  const { data: allResponses } = submissionIds.length
+    ? await supabaseAdmin
+        .from('form_responses')
+        .select('id, submission_id, value_text, value_number, value_bool, photo_url, builder_questions:builder_questions!fk_response_field(title)')
+        .in('submission_id', submissionIds)
+    : { data: [] };
+
+  const responsesMap = new Map<string, any[]>();
+  (allResponses || []).forEach(r => {
+    const list = responsesMap.get(r.submission_id) || [];
+    list.push(r);
+    responsesMap.set(r.submission_id, list);
+  });
+
+  // Fetch checkin data from route_plan_outlets
+  const outletIds = [...new Set(submissions.map((s) => s.outlet_id).filter(Boolean))];
   const { data: outletCheckins } = outletIds.length
     ? await supabaseAdmin
         .from('route_plan_outlets')
@@ -457,10 +480,11 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   const outletCheckinMap = new Map<string, any>();
   for (const o of outletCheckins || []) outletCheckinMap.set(o.id, o);
 
-  const enriched = (data || []).map((s) => {
+  const enriched = submissions.map((s) => {
     const checkin = outletCheckinMap.get(s.outlet_id) || null;
     return {
       ...s,
+      form_responses: responsesMap.get(s.id) || [],
       store_name: (checkin?.stores as any)?.name || s.outlet_name || null,
       checkin_photo: checkin?.photo_url || s.photo_url || null,
       checkin_at: checkin?.checkin_at || s.submitted_at || null,
