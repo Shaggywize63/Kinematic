@@ -816,20 +816,34 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
     
     if (outErr) console.error(`[MobileHome Debug] Outlet Error: ${outErr.message}`);
     
-    // E. DEDUPLICATION: Ensure unique outlets per plan (prevents join-induced duplication)
-    const uniqueOutlets = (outlets || []).filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
-    
-    const outletsByPlan: Record<string, any[]> = {};
-    uniqueOutlets.forEach(o => {
-      const pid = o.route_plan_id;
-      if (!outletsByPlan[pid]) outletsByPlan[pid] = [];
-      outletsByPlan[pid].push(o);
+    // E. GROUPING: Consolidate all activities for each unique store
+    const storeMap: Record<string, any> = {};
+    (outlets || []).forEach(o => {
+      const sid = o.store_id;
+      if (!storeMap[sid]) {
+        // Initialize store entry with common outlet details
+        storeMap[sid] = {
+          ...o,
+          activities: []
+        };
+      }
+      // Add this activity to the outlet's list
+      if (o.activity_id) {
+        storeMap[sid].activities.push({
+          id: o.activity_id,
+          name: o.activity_name || "Assigned Task",
+          plan_id: o.route_plan_id,
+          status: o.status
+        });
+      }
     });
 
-    routePlans = plans.map(p => ({
-      ...p,
-      outlets: outletsByPlan[p.id] || []
-    }));
+    // F. Final Payload: Flatten the map into a clean list of stores
+    routePlans = [{
+      id: "consolidated_daily_plan",
+      plan_date: today,
+      outlets: Object.values(storeMap)
+    }];
   }
 
   // 4. Notifications (Unread count)
