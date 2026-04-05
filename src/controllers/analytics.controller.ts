@@ -458,12 +458,12 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
   const today = isoDate(new Date());
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
-  // Include both executives and supervisors for live tracking as requested
+  // Role-Agnostic Query: Fetch all users except strictly restricted ones
   let execQuery = supabaseAdmin
     .from('users')
     .select('id, name, employee_id, role, battery_percentage, last_latitude, last_longitude, last_location_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id)
-    .in('role', ['executive', 'field_executive', 'field-executive', 'fe', 'FE', 'FE-001', 'supervisor', 'sub-admin', 'sub_admin', 'city_manager', 'city-manager', 'program_manager', 'program-manager']);
+    .not('role', 'in', '("admin", "main-admin", "client")');
   
   if (user.client_id) {
     execQuery = execQuery.or(`client_id.eq.${user.client_id},client_id.is.null`);
@@ -496,13 +496,13 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
     const zone = fe.zones as unknown as { name: string; city: string; meeting_lat: number; meeting_lng: number } | null;
     
     // Logic: 
-    // 1. If we have a very recent HEARTBEAT/Live location (within last 30 mins), use last_latitude
-    // 2. Otherwise use attendance checkin location
+    // 1. If we have a HEARTBEAT/Live location (within last 24h), use it as primary
+    // 2. Otherwise use attendance checkin location as secondary
     // 3. Last fallback is zone meeting point
-    const recentLocation = fe.last_location_updated_at && (new Date().getTime() - new Date(fe.last_location_updated_at).getTime() < 1800000);
+    const hasLastLoc = fe.last_latitude && fe.last_longitude && fe.last_location_updated_at && (new Date().getTime() - new Date(fe.last_location_updated_at).getTime() < 86400000); // 24h
     
-    const lat = (recentLocation && fe.last_latitude) ? fe.last_latitude : (rec?.checkin_lat || zone?.meeting_lat || null);
-    const lng = (recentLocation && fe.last_longitude) ? fe.last_longitude : (rec?.checkin_lng || zone?.meeting_lng || null);
+    const lat = hasLastLoc ? fe.last_latitude : (rec?.checkin_lat || zone?.meeting_lat || null);
+    const lng = hasLastLoc ? fe.last_longitude : (rec?.checkin_lng || zone?.meeting_lng || null);
     
     return {
       id: fe.id, 
