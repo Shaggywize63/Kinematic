@@ -769,20 +769,18 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
     (attRecord as any).tff_count = myTff || 0;
   }
 
-  // 3. Today's Route Plans - Bullet-proof dual-layer lookup
+  // 3. Today's Route Plans - Bullet-proof lookup (Narrowed to Today only for deduplication)
   // A. Ensure we have the user's email definitively from the DB
   const { data: profile } = await supabaseAdmin.from('users').select('email').eq('id', user.id).single();
   const userEmail = profile?.email || user.email;
 
-  const yesterday = new Date(new Date(today).getTime() - 86400000).toISOString().split('T')[0];
-  const tomorrow  = new Date(new Date(today).getTime() + 86400000).toISOString().split('T')[0];
-  const startRange = `${yesterday}T00:00:00.000Z`;
-  const endRange   = `${tomorrow}T23:59:59.999Z`;
+  const startRange = `${today}T00:00:00.000Z`;
+  const endRange   = `${today}T23:59:59.999Z`;
 
-  console.log(`[MobileHome Debug] Searching for ${user.id} / ${userEmail} in [${startRange} - ${endRange}]`);
+  console.log(`[MobileHome Debug] Searching for ${user.id} / ${userEmail} strictly on [${today}]`);
 
   // B. Try the main view first (Aggressive Case-Insensitive)
-  let { data: plans, error: planErr } = await supabaseAdmin
+  let { data: rawPlans, error: planErr } = await supabaseAdmin
     .from('v_route_plan_daily')
     .select('*')
     .or(`user_id.eq.${user.id}${userEmail ? `,fe_email.ilike.${userEmail}` : ''}`)
@@ -792,17 +790,20 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
   if (planErr) {
     console.error(`[MobileHome Debug] Main Query Failed: ${planErr.message}`);
     // C. FINAL FAILSAFE: Query raw table if view fails
-    const { data: rawPlans } = await supabaseAdmin
+    const { data: fallbackPlans } = await supabaseAdmin
       .from('route_plans')
       .select('id, user_id, plan_date, org_id')
       .eq('user_id', user.id)
       .gte('plan_date', startRange)
       .lte('plan_date', endRange);
-    if (rawPlans && rawPlans.length > 0) plans = rawPlans;
+    if (fallbackPlans && fallbackPlans.length > 0) rawPlans = fallbackPlans;
   }
 
-  const finalCount = plans?.length || 0;
-  console.log(`[MobileHome Debug] Resolved Route Plans: ${finalCount}`);
+  // D. DEDUPLICATION: Ensure we only have UNIQUE plans by ID
+  const plans = (rawPlans || []).filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+  
+  const finalCount = plans.length;
+  console.log(`[MobileHome Debug] Resolved UNIQUE Route Plans: ${finalCount}`);
 
   let routePlans = [];
   if (plans && plans.length > 0) {
@@ -815,8 +816,11 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
     
     if (outErr) console.error(`[MobileHome Debug] Outlet Error: ${outErr.message}`);
     
+    // E. DEDUPLICATION: Ensure unique outlets per plan (prevents join-induced duplication)
+    const uniqueOutlets = (outlets || []).filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+    
     const outletsByPlan: Record<string, any[]> = {};
-    (outlets || []).forEach(o => {
+    uniqueOutlets.forEach(o => {
       const pid = o.route_plan_id;
       if (!outletsByPlan[pid]) outletsByPlan[pid] = [];
       outletsByPlan[pid].push(o);
