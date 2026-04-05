@@ -458,14 +458,18 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
   const today = isoDate(new Date());
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
-  // Role-Agnostic Query: Fetch all users except strictly restricted ones
+  // Role-Agnostic Query: Fetch all users except strictly restricted ones (Admin/Client)
+  // Fix: PostgREST .in/.not in expects a simple parenthesized list: (val1,val2,val3)
+  const restrictedRoles = ['admin', 'main-admin', 'client', 'super_admin'];
+  
   let execQuery = supabaseAdmin
     .from('users')
     .select('id, name, employee_id, role, battery_percentage, last_latitude, last_longitude, last_location_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id)
-    .not('role', 'in', '("admin", "main-admin", "client")');
+    .not('role', 'in', `(${restrictedRoles.join(',')})`);
   
-  if (user.client_id) {
+  // Super Admin can see everyone; others are restricted by their own client_id
+  if (user.client_id && user.role !== 'super_admin') {
     execQuery = execQuery.or(`client_id.eq.${user.client_id},client_id.is.null`);
   }
   
