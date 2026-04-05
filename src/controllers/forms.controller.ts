@@ -406,16 +406,33 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
     return forbidden(res);
   }
 
-  // Decoupled fetch for responses to avoid PostgREST ambiguity
-  const { data: responses } = await supabaseAdmin
+  // Decoupled fetch for responses first to ensure data visibility even if join fails
+  const { data: responses, error: respError } = await supabaseAdmin
     .from('form_responses')
-    .select(`
-      id, value_text, value_number, value_bool, photo_url, field_key,
-      builder_questions:builder_questions!form_fields(title, qtype)
-    `)
+    .select('id, value_text, value_number, value_bool, photo_url, field_key, field_id')
     .eq('submission_id', id);
 
-  return ok(res, { ...submission, form_responses: responses || [] });
+  if (respError) {
+    console.error('Error fetching responses:', respError);
+    return ok(res, { ...submission, form_responses: [] });
+  }
+
+  // Fetch questions separately to avoid PostgREST relationship ambiguity
+  const { data: questions } = await supabaseAdmin
+    .from('builder_questions')
+    .select('id, title, qtype')
+    .eq('form_id', submission.template_id);
+
+  // Map questions to responses manually
+  const mappedResponses = (responses || []).map(r => {
+    const q = (questions || []).find(q => q.id === r.field_id);
+    return {
+      ...r,
+      builder_questions: q || { title: r.field_key || 'Captured Data', qtype: 'text' }
+    };
+  });
+
+  return ok(res, { ...submission, form_responses: mappedResponses });
 });
 
 // GET /api/v1/admin/submissions  (supervisor+)
@@ -457,46 +474,42 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   const submissions = data || [];
   const submissionIds = submissions.map(s => s.id);
 
-  // Decoupled fetch for responses to avoid PostgREST ambiguity
+  // Decoupled fetch for all responses to ensure visibility even if join fails
   const { data: allResponses } = submissionIds.length
     ? await supabaseAdmin
         .from('form_responses')
-        .select(`
-          id, submission_id, value_text, value_number, value_bool, photo_url, field_key,
-          builder_questions:builder_questions!form_fields(title)
-        `)
+        .select('id, submission_id, value_text, value_number, value_bool, photo_url, field_key, field_id')
         .in('submission_id', submissionIds)
     : { data: [] };
 
-  const responsesMap = new Map<string, any[]>();
-  (allResponses || []).forEach(r => {
-    const list = responsesMap.get(r.submission_id) || [];
-    list.push(r);
-    responsesMap.set(r.submission_id, list);
-  });
-
-  // Fetch checkin data from route_plan_outlets
-  const outletIds = [...new Set(submissions.map((s) => s.outlet_id).filter(Boolean))];
-  const { data: outletCheckins } = outletIds.length
+  // Fetch all questions for these templates to map labels
+  const templateIds = Array.from(new Set(submissions.map(s => s.template_id)));
+  const { data: allQuestions } = templateIds.length
     ? await supabaseAdmin
-        .from('route_plan_outlets')
-        .select('id, photo_url, checkin_at, checkin_lat, checkin_lng, store_id, stores(name, address)')
-        .in('id', outletIds)
+        .from('builder_questions')
+        .select('id, title, qtype, form_id')
+        .in('form_id', templateIds)
     : { data: [] };
 
-  const outletCheckinMap = new Map<string, any>();
-  for (const o of outletCheckins || []) outletCheckinMap.set(o.id, o);
-
+  // Map responses back to submissions with metadata
   const enriched = submissions.map((s) => {
-    const checkin = outletCheckinMap.get(s.outlet_id) || null;
+    const sResponses = (allResponses || []).filter(r => r.submission_id === s.id);
+    const mappedSResponses = sResponses.map(r => {
+      const q = (allQuestions || []).find(q => q.id === r.field_id);
+      return {
+        ...r,
+        builder_questions: q || { title: r.field_key || 'Captured Data', qtype: 'text' }
+      };
+    });
+
     return {
       ...s,
-      form_responses: responsesMap.get(s.id) || [],
-      store_name: (checkin?.stores as any)?.name || s.outlet_name || null,
-      checkin_photo: checkin?.photo_url || s.photo_url || null,
-      checkin_at: checkin?.checkin_at || s.submitted_at || null,
-      checkin_lat: checkin?.checkin_lat || s.latitude || null,
-      checkin_lng: checkin?.checkin_lng || s.longitude || null,
+      form_responses: mappedSResponses,
+      store_name: s.outlet_name || null,
+      checkin_photo: s.photo_url || null,
+      checkin_at: s.submitted_at || null,
+      checkin_lat: s.latitude || null,
+      checkin_lng: s.longitude || null,
     };
   });
 
