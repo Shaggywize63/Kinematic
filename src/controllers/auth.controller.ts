@@ -102,7 +102,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   console.log(`[DEBUG] Fetching profile for user ID: ${session.user.id}`);
   const { data: userProfile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select('id, org_id, client_id, name, role, is_active')
+    .select('id, org_id, client_id, name, email, role, is_active')
     .eq('id', session.user.id)
     .single();
 
@@ -181,7 +181,7 @@ export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabaseAdmin
     .from('users')
     .select(`
-      id, org_id, client_id, name, mobile, role, employee_id,
+      id, org_id, client_id, name, mobile, email, role, employee_id,
       zone_id, supervisor_id, city, state, avatar_url,
       is_active, joined_date, created_at,
       zones!zone_id(id, name, city, meeting_lat, meeting_lng, geofence_radius),

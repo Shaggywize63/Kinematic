@@ -6,6 +6,7 @@ export interface AuthUser {
   org_id: string;
   name: string;
   mobile: string;
+  email: string;
   role: UserRole;
   zone_id?: string;
   supervisor_id?: string;

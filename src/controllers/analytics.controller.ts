@@ -769,12 +769,63 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
     (attRecord as any).tff_count = myTff || 0;
   }
 
-  // 3. Today's Route Plan
-  const { data: plan } = await supabaseAdmin.from('v_route_plan_daily').select('*').eq('user_id', user.id).eq('plan_date', today).maybeSingle();
-  let outlets = [];
-  if (plan) {
-    const { data: out } = await supabaseAdmin.from('v_route_outlet_detail').select('*').eq('route_plan_id', plan.id).order('visit_order', { ascending: true });
-    outlets = out || [];
+  // 3. Today's Route Plans - Bullet-proof dual-layer lookup
+  // A. Ensure we have the user's email definitively from the DB
+  const { data: profile } = await supabaseAdmin.from('users').select('email').eq('id', user.id).single();
+  const userEmail = profile?.email || user.email;
+
+  const yesterday = new Date(new Date(today).getTime() - 86400000).toISOString().split('T')[0];
+  const tomorrow  = new Date(new Date(today).getTime() + 86400000).toISOString().split('T')[0];
+  const startRange = `${yesterday}T00:00:00.000Z`;
+  const endRange   = `${tomorrow}T23:59:59.999Z`;
+
+  console.log(`[MobileHome Debug] Searching for ${user.id} / ${userEmail} in [${startRange} - ${endRange}]`);
+
+  // B. Try the main view first (Aggressive Case-Insensitive)
+  let { data: plans, error: planErr } = await supabaseAdmin
+    .from('v_route_plan_daily')
+    .select('*')
+    .or(`user_id.eq.${user.id}${userEmail ? `,fe_email.ilike.${userEmail}` : ''}`)
+    .gte('plan_date', startRange)
+    .lte('plan_date', endRange);
+  
+  if (planErr) {
+    console.error(`[MobileHome Debug] Main Query Failed: ${planErr.message}`);
+    // C. FINAL FAILSAFE: Query raw table if view fails
+    const { data: rawPlans } = await supabaseAdmin
+      .from('route_plans')
+      .select('id, user_id, plan_date, org_id')
+      .eq('user_id', user.id)
+      .gte('plan_date', startRange)
+      .lte('plan_date', endRange);
+    if (rawPlans && rawPlans.length > 0) plans = rawPlans;
+  }
+
+  const finalCount = plans?.length || 0;
+  console.log(`[MobileHome Debug] Resolved Route Plans: ${finalCount}`);
+
+  let routePlans = [];
+  if (plans && plans.length > 0) {
+    const planIds = plans.map(p => p.id);
+    const { data: outlets, error: outErr } = await supabaseAdmin
+      .from('v_route_outlet_detail')
+      .select('*')
+      .in('route_plan_id', planIds)
+      .order('visit_order', { ascending: true });
+    
+    if (outErr) console.error(`[MobileHome Debug] Outlet Error: ${outErr.message}`);
+    
+    const outletsByPlan: Record<string, any[]> = {};
+    (outlets || []).forEach(o => {
+      const pid = o.route_plan_id;
+      if (!outletsByPlan[pid]) outletsByPlan[pid] = [];
+      outletsByPlan[pid].push(o);
+    });
+
+    routePlans = plans.map(p => ({
+      ...p,
+      outlets: outletsByPlan[p.id] || []
+    }));
   }
 
   // 4. Notifications (Unread count)
@@ -802,7 +853,7 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
   return ok(res, {
     today: attRecord || null,
     summary: { tff_count: myTff || 0 },
-    routePlan: plan ? [{ ...plan, outlets }] : [],
+    routePlan: routePlans,
     unreadCount: unread || 0,
     quote: quote || null,
     broadcast: broadcast ? { 
