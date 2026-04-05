@@ -411,7 +411,7 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
     .from('form_responses')
     .select(`
       id, value_text, value_number, value_bool, photo_url, field_key,
-      builder_questions:builder_questions!fk_response_field(title, qtype)
+      builder_questions:builder_questions!form_fields(title, qtype)
     `)
     .eq('submission_id', id);
 
@@ -463,7 +463,7 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
         .from('form_responses')
         .select(`
           id, submission_id, value_text, value_number, value_bool, photo_url, field_key,
-          builder_questions:builder_questions!fk_response_field(title)
+          builder_questions:builder_questions!form_fields(title)
         `)
         .in('submission_id', submissionIds)
     : { data: [] };
