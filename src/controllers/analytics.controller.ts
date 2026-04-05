@@ -460,7 +460,7 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
 
   // Role-Agnostic Query: Fetch all users except strictly restricted ones (Admin/Client)
   // Fix: PostgREST .in/.not in expects a simple parenthesized list: (val1,val2,val3)
-  const restrictedRoles = ['admin', 'main_admin', 'client', 'super_admin'];
+  const restrictedRoles = ['admin', 'super_admin'];
   
   let execQuery = supabaseAdmin
     .from('users')
