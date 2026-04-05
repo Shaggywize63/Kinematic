@@ -409,7 +409,10 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
   // Decoupled fetch for responses to avoid PostgREST ambiguity
   const { data: responses } = await supabaseAdmin
     .from('form_responses')
-    .select('id, value_text, value_number, value_bool, photo_url, builder_questions:builder_questions!fk_response_field(title, qtype)')
+    .select(`
+      id, value_text, value_number, value_bool, photo_url, field_key,
+      builder_questions:builder_questions!fk_response_field(title, qtype)
+    `)
     .eq('submission_id', id);
 
   return ok(res, { ...submission, form_responses: responses || [] });
@@ -458,7 +461,10 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   const { data: allResponses } = submissionIds.length
     ? await supabaseAdmin
         .from('form_responses')
-        .select('id, submission_id, value_text, value_number, value_bool, photo_url, builder_questions:builder_questions!fk_response_field(title)')
+        .select(`
+          id, submission_id, value_text, value_number, value_bool, photo_url, field_key,
+          builder_questions:builder_questions!fk_response_field(title)
+        `)
         .in('submission_id', submissionIds)
     : { data: [] };
 
