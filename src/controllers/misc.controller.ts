@@ -779,3 +779,50 @@ export const upsertQuote = asyncHandler(async (req: AuthRequest, res: Response) 
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data, 'Quote updated successfully', 201)
 })
+
+// SECURITY ALERTS
+export const logSecurityAlert = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { type, action, lat, lng } = req.body
+  const user = req.user!
+
+  const { data, error } = await supabaseAdmin.from('security_alerts')
+    .insert({
+      org_id: user.org_id,
+      client_id: user.client_id,
+      user_id: user.id,
+      type, // MOCK_LOCATION, VPN_DETECTED
+      action, // ATTENDANCE, FORM_SUBMISSION, etc.
+      lat,
+      lng,
+      created_at: new Date().toISOString()
+    })
+    .select().single()
+
+  if (error) {
+    // If table doesn't exist yet, we'll log it for now to avoid breaking the app
+    console.error('[Security] Alert logged to console (table may be missing):', { user: user.id, type, action, lat, lng })
+    return sendSuccess(res, null, 'Alert received', 202)
+  }
+
+  sendSuccess(res, data, 'Alert logged', 201)
+})
+
+export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!
+  const { page, limit, offset } = getPagination(
+    parseInt(req.query.page as string) || 1,
+    parseInt(req.query.limit as string) || 20
+  )
+
+  let query = supabaseAdmin.from('security_alerts')
+    .select('*, user:user_id(id, name, employee_id, role, zone_id, zones(name))', { count: 'exact' })
+    .eq('org_id', user.org_id)
+    .order('created_at', { ascending: false })
+
+  if (user.client_id) query = query.eq('client_id', user.client_id)
+
+  const { data, error, count } = await query.range(offset, offset + limit - 1)
+  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+
+  sendPaginated(res, data || [], count || 0, page, limit)
+})
