@@ -428,7 +428,8 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
     const q = (questions || []).find(q => q.id === r.field_id);
     return {
       ...r,
-      builder_questions: q || { title: r.field_key || 'Captured Data', qtype: 'text' }
+      builder_questions: q || { title: r.field_key || 'Captured Data', qtype: 'text' },
+      form_fields: q || { label: r.field_key || 'Captured Data', field_type: 'text', qtype: 'text' }
     };
   });
 
@@ -498,7 +499,8 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
       const q = (allQuestions || []).find(q => q.id === r.field_id);
       return {
         ...r,
-        builder_questions: q || { title: r.field_key || 'Captured Data', qtype: 'text' }
+        builder_questions: q || { title: r.field_key || 'Captured Data', qtype: 'text' },
+        form_fields: q ? { ...q, label: q.title || q.label, field_type: q.qtype || 'text' } : { label: r.field_key || 'Captured Data', field_type: 'text', qtype: 'text' }
       };
     });
 
