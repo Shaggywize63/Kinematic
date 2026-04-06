@@ -676,7 +676,7 @@ export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) =
 
 // CLIENTS
 export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { latitude, longitude, battery_percentage, battery, activity_type } = req.body;
+  const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version } = req.body;
   const user = req.user!;
 
   if (!latitude || !longitude) {
@@ -686,29 +686,35 @@ export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Respo
   const now = new Date().toISOString();
   const batteryLevel = battery !== undefined ? battery : (battery_percentage || null);
   
-  // 1. Update user record with last known location and battery
-  const { error: userErr } = await supabaseAdmin
-    .from('users')
-    .update({
-      last_latitude: latitude,
-      last_longitude: longitude,
-      battery_percentage: batteryLevel,
-      last_location_updated_at: now
-    })
-    .eq('id', user.id);
-
-  if (userErr) throw new AppError(500, userErr.message, 'DB_ERROR');
-
-  // 2. Fetch today's attendance record (if any) to link with work_activity
+  // 1. Run User Update and Attendance fetch concurrently
   const today = now.split('T')[0];
-  const { data: att } = await supabaseAdmin
-    .from('attendance')
-    .select('id')
-    .eq('user_id', user.id)
-    .eq('date', today)
-    .maybeSingle();
+  
+  const [userUpdate, attResult] = await Promise.all([
+    supabaseAdmin
+      .from('users')
+      .update({
+        last_latitude: latitude,
+        last_longitude: longitude,
+        battery_percentage: batteryLevel,
+        device_model: device_model || undefined,
+        device_brand: device_brand || undefined,
+        os_version: os_version || undefined,
+        last_location_updated_at: now
+      })
+      .eq('id', user.id),
 
-  // 3. Insert into work_activity for history tracking
+    supabaseAdmin
+      .from('attendance')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('date', today)
+      .maybeSingle()
+  ]);
+
+  if (userUpdate.error) throw new AppError(500, userUpdate.error.message, 'DB_ERROR');
+  const att = attResult.data;
+
+  // 2. Insert into work_activity for history tracking
   await supabaseAdmin.from('work_activity').insert({
     org_id: user.org_id,
     client_id: user.client_id,
@@ -718,6 +724,9 @@ export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Respo
     lat: latitude,
     lng: longitude,
     battery_percentage: batteryLevel,
+    device_model: device_model || null,
+    device_brand: device_brand || null,
+    os_version: os_version || null,
     captured_at: now
   });
 
