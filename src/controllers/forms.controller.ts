@@ -445,7 +445,7 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
   let query = supabaseAdmin
     .from('form_submissions')
     .select(`
-      id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, gps, latitude, longitude, photo_url,
+      id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, template_id, gps, latitude, longitude, photo_url,
       users!user_id(name, employee_id, city, zone_id),
       builder_forms:builder_forms!fk_submission_template(title),
       activities(name)
