@@ -420,16 +420,17 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
   // Fetch questions separately to avoid PostgREST relationship ambiguity
   const { data: questions } = await supabaseAdmin
     .from('builder_questions')
-    .select('id, title, qtype')
+    .select('id, label, qtype')
     .eq('form_id', submission.template_id);
 
   // Map questions to responses manually
   const mappedResponses = (responses || []).map(r => {
     const q = (questions || []).find(q => q.id === r.field_id);
+    const fallbackTitle = r.field_key || 'Captured Data';
     return {
       ...r,
-      builder_questions: q || { title: r.field_key || 'Captured Data', qtype: 'text' },
-      form_fields: q || { label: r.field_key || 'Captured Data', field_type: 'text', qtype: 'text' }
+      builder_questions: q || { label: fallbackTitle, qtype: 'text' },
+      form_fields: q ? { ...q, field_type: q.qtype || 'text' } : { label: fallbackTitle, field_type: 'text', qtype: 'text' }
     };
   });
 
@@ -485,10 +486,10 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
 
   // Fetch all questions for these templates to map labels
   const templateIds = Array.from(new Set(submissions.map(s => s.template_id)));
-  const { data: allQuestions } = templateIds.length
+    const { data: allQuestions } = templateIds.length
     ? await supabaseAdmin
         .from('builder_questions')
-        .select('id, title, qtype, form_id')
+        .select('id, label, qtype, form_id')
         .in('form_id', templateIds)
     : { data: [] };
 
@@ -501,10 +502,10 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
       
       return {
         ...r,
-        builder_questions: q || { title: fallbackTitle, qtype: 'text' },
+        builder_questions: q || { label: fallbackTitle, qtype: 'text' },
         form_fields: q ? { 
           ...q, 
-          label: q.title || q.label || fallbackTitle, 
+          label: q.label || fallbackTitle, 
           field_type: q.qtype || 'text' 
         } : { 
           label: fallbackTitle, 
