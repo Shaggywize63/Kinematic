@@ -856,21 +856,25 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
   // 5. Quote
   const { data: quote } = await supabaseAdmin.from('motivation_quotes').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
 
-  // 6. Broadcast (Today only)
-  const startOfToday = new Date(today + 'T00:00:00+05:30').toISOString();
-  const { data: broadcast } = await supabaseAdmin
-    .from('notification_broadcasts')
-    .select('*')
+  // 6. Broadcast (New System: Active & Assigned)
+  const { data: bq } = await supabaseAdmin
+    .from('broadcast_questions')
+    .select(`
+      id, question, options, correct_option, is_urgent, deadline_at,
+      status, target_roles, target_zone_ids, target_cities, created_at,
+      broadcast_answers!left(id, selected, is_correct, answered_at)
+    `)
     .eq('org_id', user.org_id)
-    .gte('created_at', startOfToday)
+    .eq('status', 'active')
+    .contains('target_roles', [user.role])
+    .eq('broadcast_answers.user_id', user.id)
+    .order('is_urgent', { ascending: false })
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  if (broadcast) {
-    const { data: ans } = await supabaseAdmin.from('notifications').select('id').eq('broadcast_id', broadcast.id).eq('user_id', user.id).eq('is_interacted', true).maybeSingle();
-    (broadcast as any).alreadyAnswered = !!ans;
-  }
+  const b = bq as any;
+  const alreadyAnswered = Array.isArray(b?.broadcast_answers) && b.broadcast_answers.length > 0;
 
   return ok(res, {
     today: attRecord || null,
@@ -878,15 +882,13 @@ export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response
     routePlan: routePlans,
     unreadCount: unread || 0,
     quote: quote || null,
-    broadcast: broadcast ? { 
-      id: broadcast.id, 
-      question: broadcast.body, 
-      is_urgent: broadcast.priority === 'high',
-      already_answered: (broadcast as any).alreadyAnswered,
-      options: [
-        { label: "Understood", value: 1 },
-        { label: "Need Clarification", value: 0 }
-      ]
+    broadcast: b ? { 
+      id: b.id, 
+      question: b.question, 
+      is_urgent: b.is_urgent,
+      already_answered: alreadyAnswered,
+      options: b.options,
+      deadline_at: b.deadline_at
     } : null,
     timestamp: new Date().toISOString()
   });
