@@ -497,10 +497,20 @@ export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Resp
     const sResponses = (allResponses || []).filter(r => r.submission_id === s.id);
     const mappedSResponses = sResponses.map(r => {
       const q = (allQuestions || []).find(q => q.id === r.field_id);
+      const fallbackTitle = r.field_key || 'Captured Data';
+      
       return {
         ...r,
-        builder_questions: q || { title: r.field_key || 'Captured Data', qtype: 'text' },
-        form_fields: q ? { ...q, label: q.title || q.label, field_type: q.qtype || 'text' } : { label: r.field_key || 'Captured Data', field_type: 'text', qtype: 'text' }
+        builder_questions: q || { title: fallbackTitle, qtype: 'text' },
+        form_fields: q ? { 
+          ...q, 
+          label: q.title || q.label || fallbackTitle, 
+          field_type: q.qtype || 'text' 
+        } : { 
+          label: fallbackTitle, 
+          field_type: 'text', 
+          qtype: 'text' 
+        }
       };
     });
 
