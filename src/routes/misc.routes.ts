@@ -44,4 +44,8 @@ router.get('/quote/daily', requireAuth, misc.getDailyQuote);
 // POST /api/v1/misc/quote -> Upsert a motivation quote (admin/hr only)
 router.post('/quote', requireAuth, requireRole('admin', 'super_admin', 'hr'), misc.upsertQuote);
 
+// SECURITY ALERTS
+router.post('/security/alert', requireAuth, misc.logSecurityAlert);
+router.get('/security/alerts/all', requireAuth, requireRole('admin', 'super_admin', 'hr', 'supervisor'), misc.getSecurityAlerts);
+
 export default router;
