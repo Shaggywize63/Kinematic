@@ -631,8 +631,8 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   const outletMap = new Map<string, { checkins_set: Set<string>; tff: number; city: string | null }>();
   (forms || []).forEach((f) => {
     const outlet = f.outlet_name || 'Unknown Outlet';
-    const u = f.users as unknown as { zones?: { city?: string } } | null;
-    const city = u?.zones?.city || null;
+    const u = f.users as unknown as { city?: string } | null;
+    const city = u?.city || null;
     if (!outletMap.has(outlet)) outletMap.set(outlet, { checkins_set: new Set(), tff: 0, city });
     const entry = outletMap.get(outlet)!;
     entry.tff++;

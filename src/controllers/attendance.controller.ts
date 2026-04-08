@@ -359,7 +359,7 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
       checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
       total_hours, break_minutes, working_minutes, notes,
       is_regularised, created_at, updated_at,
-      users!attendance_user_id_fkey(name, employee_id, city, zone_id, zones(name))
+      users!attendance_user_id_fkey(name, employee_id, city, zone_id, zones!zone_id(name))
     `) // Forced redeploy for hint verification c2
     .eq('org_id', user.org_id)
     .eq('date', date);

@@ -10,6 +10,7 @@
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx -r dotenv/config src/scripts/run_migration.ts",
+    "seed": "tsx -r dotenv/config src/scripts/seedSampleData.ts",
     "deploy": "git add . && git commit -m \"deploy: automatic update\" && echo '🚀 Ready to push. Run: git push origin main'",
     "deploy:direct": "git add . && git commit -m \"deploy: direct automated fix\" || true; git push origin main && cd ../kinematic-dashboard && (git add . && git commit -m \"deploy: direct automated fix\" || true); git push origin main --force && cd ../Kinematic",
     "deploy:full": "cd .. && bash ./deploy.sh"
