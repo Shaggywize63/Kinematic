@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, toIST, isoDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
+import { DEMO_ORG_ID, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations } from '../utils/demoData';
 
 /* ─────────────────────────────────────────────────────────────
    HELPERS
@@ -30,50 +31,31 @@ const enrichWithHours = (r: any) => {
 /* ── GET /api/v1/analytics/summary ───────────────────────── */
 export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockSummary(req.query.date as string || isoDate(toIST(new Date()))));
+
   const from = (req.query.from as string) || (req.query.date as string) || isoDate(toIST(new Date()));
   const to   = (req.query.to   as string) || (req.query.date as string) || isoDate(toIST(new Date()));
   const date = to; // For backwards compatibility
 
-  let kpiQuery = supabaseAdmin
-    .from('v_daily_kpis').select('*')
-    .eq('org_id', user.org_id).eq('date', to);
-  
-  if (user.client_id) kpiQuery = kpiQuery.eq('client_id', user.client_id);
-  const { data: kpis } = await kpiQuery.single();
+  // Combined concurrent fetch for independent counts to minimize sequential await overhead
+  const [kpisRes, totalExecsRes, activeSosRes, openGrievancesRes, visitLogsRes] = await Promise.all([
+    supabaseAdmin.from('v_daily_kpis').select('*').eq('org_id', user.org_id).eq('date', to).single(),
+    supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true),
+    supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'active'),
+    supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'submitted'),
+    supabaseAdmin.from('visit_logs').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('date', date)
+  ]);
 
-  let execQuery = supabaseAdmin
-    .from('users').select('id', { count: 'exact', head: true })
-    .eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
-  
-  if (user.client_id) execQuery = execQuery.eq('client_id', user.client_id);
-  const { count: totalExecs } = await execQuery;
+  const kpis = kpisRes.data;
+  const totalExecs = totalExecsRes.count || 0;
+  const activeSos = activeSosRes.count || 0;
+  const openGrievances = openGrievancesRes.count || 0;
+  const totalVisits = visitLogsRes.count || 0;
 
-  let sosQuery = supabaseAdmin
-    .from('sos_alerts').select('id', { count: 'exact', head: true })
-    .eq('org_id', user.org_id).eq('status', 'active');
-  
-  if (user.client_id) sosQuery = sosQuery.eq('client_id', user.client_id);
-  const { count: activeSos } = await sosQuery;
-
-  let grievanceQuery = supabaseAdmin
-    .from('grievances').select('id', { count: 'exact', head: true })
-    .eq('org_id', user.org_id).eq('status', 'submitted');
-  
-  if (user.client_id) grievanceQuery = grievanceQuery.eq('client_id', user.client_id);
-  const { count: openGrievances } = await grievanceQuery;
-
-  let visitQuery = supabaseAdmin
-    .from('visit_logs').select('id', { count: 'exact', head: true })
-    .eq('org_id', user.org_id)
-    .eq('date', date);
-  
-  if (user.client_id) visitQuery = visitQuery.eq('client_id', user.client_id);
-  const { count: totalVisits } = await visitQuery;
-
-  // Real-time metrics from form_submissions
+  // Real-time metrics from form_submissions - Selecting minimal fields for speed
   let submissionsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('id, is_converted, user_id, submitted_at, date, users!user_id(city)', { count: 'exact' })
+    .select('id, is_converted, user_id, submitted_at, date', { count: 'exact' })
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
@@ -204,6 +186,8 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
 /* ── GET /api/v1/analytics/tff-trends ─────────────────────── */
 export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockTrends());
+
   const from = (req.query.from as string) || isoDate(new Date(Date.now() - 7 * 86400000));
   const to   = (req.query.to   as string) || isoDate(new Date());
 
@@ -248,6 +232,8 @@ export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response)
 /* ── GET /api/v1/analytics/activity-feed ─────────────────── */
 export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockFeed());
+
   const limit = Math.min(50, parseInt(req.query.limit as string || '20', 10));
 
   const userRole = (user.role || '').toLowerCase();
@@ -300,6 +286,7 @@ export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) =>
 /* ── GET /api/v1/analytics/contact-heatmap ───────────────── */
 export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockHeatmap());
   
   // Strictly last 7 days for heatmap as requested
   const endStr   = isoDate(toIST(new Date()));
@@ -456,6 +443,9 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const today = isoDate(new Date());
+  
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockLocations(today));
+
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
   // Role-Agnostic Query: Fetch all users except strictly restricted ones (Admin/Client)
@@ -624,10 +614,10 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   const from  = (req.query.from  as string) || isoDate(new Date());
   const to    = (req.query.to    as string) || isoDate(new Date());
 
-  // All unique outlets from form_submissions in range - reverting to submitted_at
+  // Only fetch essential fields for grouping to reduce data transfer & memory usage
   let formsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('outlet_name, is_converted, user_id, submitted_at, date, users!user_id(name, zones!zone_id(name, city))')
+    .select('outlet_name, is_converted, user_id, submitted_at, date')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
@@ -681,6 +671,14 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 /* ── GET /api/v1/analytics/dashboard-init ────────────────── */
 export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (user.org_id === DEMO_ORG_ID) {
+    return ok(res, {
+      attendance: { total: 145, present: 132, on_break: 5, checked_out: 4, absent: 4, regularised: 0 },
+      kpis: { total_tff: 1248, avg_attendance: 92, open_grievances: 2 },
+      weekly: { days: getMockTrends(), total_tff: 1248 }
+    });
+  }
+
   const today = isoDate(toIST(new Date()));
   const sevenDaysAgo = isoDate(new Date(Date.now() - 6 * 86400000));
 

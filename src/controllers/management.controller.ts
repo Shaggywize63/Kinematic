@@ -17,12 +17,21 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
+import { DEMO_ORG_ID, getMockCities, getMockStores, getMockActivities } from '../utils/demoData';
 
 // ─── Helper: build a generic CRUD controller for a table ───
 export function buildCRUD(tableName: string, requiredFields: string[] = ['name']) {
 
   const list = asyncHandler(async (req: AuthRequest, res: Response) => {
     const user = req.user!;
+
+    if (user.org_id === DEMO_ORG_ID) {
+      if (tableName === 'cities') return ok(res, getMockCities());
+      if (tableName === 'stores') return ok(res, getMockStores());
+      if (tableName === 'activities') return ok(res, getMockActivities());
+      return ok(res, []);
+    }
+
     let q = supabaseAdmin
       .from(tableName)
       .select(getSelect(tableName))

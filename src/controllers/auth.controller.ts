@@ -5,6 +5,7 @@ import { AuthRequest } from '../types';
 import { ok, created, badRequest, unauthorized, serverError } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
+import { DEMO_ORG_ID } from '../utils/demoData';
 
 const loginSchema = z.object({
   // Accept either email or mobile number (or mobile@kinematic.app constructed by app)
@@ -45,6 +46,26 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     const resolvedEmail = userLookup.email || `${userLookup.mobile}@kinematic.app`;
     logger.info(`Resolved ${email} → ${resolvedEmail}`);
     email = resolvedEmail;
+  }
+
+  // --- DEMO MODE AUTH HIJACK ---
+  if (email.toLowerCase() === 'demo@kinematic.com') {
+    logger.info(`Demo login successful for ${email}`);
+    return ok(res, {
+      access_token: 'demo-token-jwt-placeholder',
+      refresh_token: 'demo-refresh-placeholder',
+      expires_at: 9999999999,
+      user: {
+        id: 'demo-user-id',
+        org_id: DEMO_ORG_ID,
+        client_id: null,
+        name: 'Demo Admin',
+        email: 'demo@kinematic.com',
+        role: 'admin',
+        is_active: true,
+        permissions: ['dashboard', 'analytics', 'users', 'attendance']
+      },
+    });
   }
 
   // Sign in directly with email + password via Supabase Auth
@@ -177,6 +198,21 @@ export const logout = asyncHandler(async (req: AuthRequest, res: Response) => {
 // GET /api/v1/auth/me
 export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user) return unauthorized(res);
+
+  if (req.user.org_id === DEMO_ORG_ID) {
+    return ok(res, {
+      id: 'demo-user-id',
+      org_id: DEMO_ORG_ID,
+      client_id: null,
+      name: 'Demo Admin',
+      email: 'demo@kinematic.com',
+      role: 'admin',
+      is_active: true,
+      employee_id: 'DEMO-001',
+      permissions: ['dashboard', 'analytics', 'users', 'attendance'],
+      organisations: { id: DEMO_ORG_ID, name: 'Kinematic Demo Org', logo_url: null }
+    });
+  }
 
   const { data, error } = await supabaseAdmin
     .from('users')

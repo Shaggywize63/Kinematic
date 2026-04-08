@@ -5,6 +5,7 @@ import { AuthRequest } from '../types';
 import { ok, created, badRequest, notFound, forbidden, todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
+import { DEMO_ORG_ID, getMockSubmissions, getMockSubmissionDetails } from '../utils/demoData';
 
 const fieldSchema = z.object({
   label: z.string().min(1),
@@ -393,6 +394,8 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
   const user = req.user!;
   const { id } = req.params;
 
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockSubmissionDetails(id));
+
   const { data: submission, error } = await supabaseAdmin
     .from('form_submissions')
     .select('*, builder_forms:builder_forms!fk_submission_template(title), activities(name)')
@@ -441,7 +444,16 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
 export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
-  const { date, date_from, date_to, zone_id, activity_id, user_id, fe_id, outlet_id, city, city_id } = req.query as Record<string, string>;
+  const { date } = req.query as Record<string, string>;
+
+  if (user.org_id === DEMO_ORG_ID) {
+    const today = date || new Date().toISOString().split('T')[0];
+    const mock = getMockSubmissions(today);
+    const result = buildPaginatedResult(mock.data, mock.total, page, limit);
+    return res.status(200).json({ success: true, ...result });
+  }
+
+  const { date_from, date_to, zone_id, activity_id, user_id, fe_id, outlet_id, city, city_id } = req.query as Record<string, string>;
 
   let query = supabaseAdmin
     .from('form_submissions')

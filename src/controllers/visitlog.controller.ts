@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
+import { DEMO_ORG_ID, getMockVisitLogs } from '../utils/demoData';
 
 const visitSchema = z.object({
   visitor_role: z.string().optional(),
@@ -151,6 +152,8 @@ export const updateFEFeedback = asyncHandler(async (req: AuthRequest, res: Respo
 export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
+
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockVisitLogs(date));
 
   let query = supabaseAdmin
     .from('visit_logs')
