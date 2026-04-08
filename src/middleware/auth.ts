@@ -1,6 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest, UserRole } from '../types';
+import { DEMO_ORG_ID } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
 
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
@@ -10,6 +11,23 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   }
 
   const token = authHeader.split(' ')[1];
+
+  // --- DEMO TOKEN BYPASS ---
+  if (token === 'demo-token-jwt-placeholder') {
+    req.user = {
+      id: 'demo-user-id',
+      org_id: DEMO_ORG_ID,
+      client_id: null,
+      name: 'Demo Admin',
+      email: 'demo@kinematic.com',
+      role: 'admin',
+      is_active: true,
+      permissions: ['dashboard', 'analytics', 'users', 'attendance'],
+      assigned_cities: []
+    } as any;
+    req.accessToken = token;
+    return next();
+  }
 
   // Verify JWT with Supabase
   const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
