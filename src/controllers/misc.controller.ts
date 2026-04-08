@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../lib/supabase'
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok } from '../utils'
 import { AuthRequest } from '../types'
 import { logger } from '../lib/logger'
-import { DEMO_ORG_ID, getMockZones, getMockClients } from '../utils/demoData'
+import { DEMO_ORG_ID, getMockZones, getMockClients, getMockSecurityAlerts } from '../utils/demoData'
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -826,16 +826,20 @@ export const logSecurityAlert = asyncHandler(async (req: AuthRequest, res: Respo
     .select().single()
 
   if (error) {
-    // If table doesn't exist yet, we'll log it for now to avoid breaking the app
-    console.error('[Security] Alert logged to console (table may be missing):', { user: user.id, type, action, lat, lng })
-    return sendSuccess(res, null, 'Alert received', 202)
+    throw new AppError(500, `Failed to log alert: ${error.message}`, 'DB_ERROR')
   }
 
   sendSuccess(res, data, 'Alert logged', 201)
 })
 
+
 export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
+  
+  if (user.org_id === DEMO_ORG_ID) {
+    return sendSuccess(res, getMockSecurityAlerts(todayDate()));
+  }
+
   const { page, limit, offset } = getPagination(
     parseInt(req.query.page as string) || 1,
     parseInt(req.query.limit as string) || 20
@@ -853,3 +857,4 @@ export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Resp
 
   sendPaginated(res, data || [], count || 0, page, limit)
 })
+

@@ -199,3 +199,14 @@ export const getMockActivities = () => [
   { id: 'a3', name: 'Merchandising', type: 'form', is_active: true },
   { id: 'a4', name: 'Compliance', type: 'form', is_active: true }
 ];
+
+export const getMockSecurityAlerts = (today: string) => [
+  { id: 'sa1', type: 'MOCK_LOCATION', action: 'ATTENDANCE', lat: 12.9352, lng: 77.6245, created_at: `${today}T09:16:12Z`, user: { name: 'Arjun Sharma', employee_id: 'KIN-001' } },
+  { id: 'sa2', type: 'VPN_DETECTED', action: 'FORM_SUBMISSION', lat: 12.9279, lng: 77.6271, created_at: `${today}T11:50:45Z`, user: { name: 'Priya Patel', employee_id: 'KIN-002' } },
+];
+
+export const getMockDeviceInfo = () => [
+  { id: 'd1', user_id: 'fe1', device_model: 'Pixel 7 Pro', device_brand: 'Google', os_version: '14', battery_percentage: 85, last_updated: new Date().toISOString() },
+  { id: 'd2', user_id: 'fe2', device_model: 'Galaxy S23', device_brand: 'Samsung', os_version: '13', battery_percentage: 42, last_updated: new Date().toISOString() },
+];
+
