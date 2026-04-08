@@ -56,7 +56,7 @@ const submissionSchema = z.object({
 // ── Templates ──────────────────────────────────────────────
 
 // GET /api/v1/forms/templates
-export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const activityId = req.query.activity_id as string | undefined;
 
@@ -183,7 +183,7 @@ export const getTemplates = asyncHandler(async (req: AuthRequest, res: Response)
 });
 
 // GET /api/v1/forms/templates/:id
-export const getTemplate = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getTemplate = asyncHandler<AuthRequest>(async (req, res) => {
   const { id } = req.params;
   const user = req.user!;
 
@@ -199,7 +199,7 @@ export const getTemplate = asyncHandler(async (req: AuthRequest, res: Response) 
 });
 
 // POST /api/v1/forms/templates  (admin+)
-export const createTemplate = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const createTemplate = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const body = templateSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
@@ -232,7 +232,7 @@ export const createTemplate = asyncHandler(async (req: AuthRequest, res: Respons
 });
 
 // POST /api/v1/forms/templates/:id/fields  (admin+)
-export const addField = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const addField = asyncHandler<AuthRequest>(async (req, res) => {
   const { id } = req.params;
   const user = req.user!;
   const body = fieldSchema.safeParse(req.body);
@@ -260,7 +260,7 @@ export const addField = asyncHandler(async (req: AuthRequest, res: Response) => 
 // ── Submissions ────────────────────────────────────────────
 
 // POST /api/v1/forms/submit
-export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   console.log("Received form submission:", JSON.stringify(req.body, null, 2));
   const user = req.user!;
   const result = submissionSchema.safeParse(req.body);
@@ -370,7 +370,7 @@ export const submitForm = asyncHandler(async (req: AuthRequest, res: Response) =
 });
 
 // GET /api/v1/forms/submissions
-export const getMySubmissions = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
   const date = req.query.date as string | undefined;
@@ -390,7 +390,7 @@ export const getMySubmissions = asyncHandler(async (req: AuthRequest, res: Respo
 });
 
 // GET /api/v1/forms/submissions/:id
-export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
 
@@ -441,7 +441,7 @@ export const getSubmission = asyncHandler(async (req: AuthRequest, res: Response
 });
 
 // GET /api/v1/admin/submissions  (supervisor+)
-export const getAllSubmissions = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
   const { date } = req.query as Record<string, string>;

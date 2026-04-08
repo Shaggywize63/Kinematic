@@ -22,7 +22,7 @@ const checkoutSchema = z.object({
 });
 
 // POST /api/v1/attendance/checkin
-export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = todayDate();
   const { latitude, longitude, selfie_url, activity_id, zone_id, date: passedDate } = req.body;
@@ -128,7 +128,7 @@ export const checkin = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // POST /api/v1/attendance/checkout
-export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { latitude, longitude, selfie_url, date: passedDate } = req.body;
   
@@ -209,7 +209,7 @@ export const checkout = asyncHandler(async (req: AuthRequest, res: Response) => 
 });
 
 // POST /api/v1/attendance/break/start
-export const startBreak = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = todayDate();
 
@@ -241,7 +241,7 @@ export const startBreak = asyncHandler(async (req: AuthRequest, res: Response) =
 });
 
 // POST /api/v1/attendance/break/end
-export const endBreak = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = todayDate();
 
@@ -305,7 +305,7 @@ const enrichWithHours = (r: any) => {
 };
 
 // GET /api/v1/attendance/today
-export const getToday = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = (req.query.date as string) || todayDate();
 
@@ -323,7 +323,7 @@ export const getToday = asyncHandler(async (req: AuthRequest, res: Response) => 
 });
 
 // GET /api/v1/attendance/history
-export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(
     req.query.page as string,
@@ -343,7 +343,7 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
 });
 
 // GET /api/v1/attendance/team  (supervisor+)
-export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = todayDate();
   if (user.org_id === DEMO_ORG_ID) return ok(res, getMockAttendanceToday(today).executives);
@@ -394,7 +394,7 @@ export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response)
 });
 
 // POST /api/v1/attendance/override  (admin+)
-export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => {
   const admin = req.user!;
   const {
     user_id, date, status, override_reason,
@@ -483,7 +483,7 @@ export const overrideAttendance = asyncHandler(async (req: AuthRequest, res: Res
 });
 
 // PATCH /api/v1/attendance/:id/override  (admin+)
-export const updateAttendanceOverride = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const updateAttendanceOverride = asyncHandler<AuthRequest>(async (req, res) => {
   const admin = req.user!;
   const {
     status, override_reason,

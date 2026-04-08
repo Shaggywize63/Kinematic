@@ -29,7 +29,7 @@ const enrichWithHours = (r: any) => {
 };
 
 /* ── GET /api/v1/analytics/summary ───────────────────────── */
-export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (user.org_id === DEMO_ORG_ID) return ok(res, getMockSummary(req.query.date as string || isoDate(toIST(new Date()))));
 
@@ -184,7 +184,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response) =
 });
 
 /* ── GET /api/v1/analytics/tff-trends ─────────────────────── */
-export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (user.org_id === DEMO_ORG_ID) return ok(res, getMockTrends());
 
@@ -230,7 +230,7 @@ export const getTffTrends = asyncHandler(async (req: AuthRequest, res: Response)
 });
 
 /* ── GET /api/v1/analytics/activity-feed ─────────────────── */
-export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (user.org_id === DEMO_ORG_ID) return ok(res, getMockFeed());
 
@@ -264,7 +264,7 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
 });
 
 /* ── GET /api/v1/analytics/hourly ────────────────────────── */
-export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const date = (req.query.date as string) || isoDate(toIST(new Date()));
 
@@ -284,7 +284,7 @@ export const getHourly = asyncHandler(async (req: AuthRequest, res: Response) =>
 });
 
 /* ── GET /api/v1/analytics/contact-heatmap ───────────────── */
-export const getContactHeatmap = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (user.org_id === DEMO_ORG_ID) return ok(res, getMockHeatmap());
   
@@ -440,7 +440,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 });
 
 /* ── GET /api/v1/analytics/live-locations ────────────────── */
-export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = isoDate(new Date());
   
@@ -529,7 +529,7 @@ export const getLiveLocations = asyncHandler(async (req: AuthRequest, res: Respo
 });
 
 /* ── GET /api/v1/analytics/attendance-today ──────────────── */
-export const getAttendanceToday = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { city, city_id, zone_id, fe_id, user_id, date: passedDate } = req.query as Record<string, string>;
   const today = passedDate || isoDate(new Date());
@@ -669,7 +669,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 });
 
 /* ── GET /api/v1/analytics/dashboard-init ────────────────── */
-export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (user.org_id === DEMO_ORG_ID) {
     return ok(res, {
@@ -742,7 +742,7 @@ export const getDashboardInit = asyncHandler(async (req: AuthRequest, res: Respo
 });
 
 /* ── GET /api/v1/analytics/mobile-home ───────────────────── */
-export const getMobileHome = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = todayDate();
   console.log(`[MobileHome] User ${user.id} fetching home. Date=${today}`);

@@ -17,10 +17,10 @@ export interface AuthUser {
   assigned_cities?: string[];    // IDs of assigned cities
 }
 
-export interface AuthRequest extends Request {
+export type AuthRequest = Request & {
   user?: AuthUser;
   accessToken?: string;
-}
+};
 
 export type ApiResponse<T = unknown> = {
   success: true;
