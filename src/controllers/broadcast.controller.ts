@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest, notFound, conflict, serverError } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
+import { DEMO_ORG_ID, getMockBroadcasts } from '../utils/demoData';
 
 const questionSchema = z.object({
   question: z.string().min(5),
@@ -64,6 +65,8 @@ export const getQuestions = asyncHandler(async (req: AuthRequest, res: Response)
 // GET /api/v1/broadcast/admin — all questions for admin dashboard
 export const getAdminQuestions = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockBroadcasts());
 
   const { data: questions, error } = await supabaseAdmin
     .from('broadcast_questions')

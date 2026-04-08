@@ -2,8 +2,9 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess, todayDate } from '../utils';
+import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess, todayDate, isoDate } from '../utils';
 import { isWithinGeofence } from '../lib/haversine';
+import { DEMO_ORG_ID, getMockAttendanceToday } from '../utils/demoData';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 
 const checkinSchema = z.object({
@@ -344,7 +345,10 @@ export const getHistory = asyncHandler(async (req: AuthRequest, res: Response) =
 // GET /api/v1/attendance/team  (supervisor+)
 export const getTeamToday = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const date = (req.query.date as string) || todayDate();
+  const today = todayDate();
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockAttendanceToday(today).executives);
+
+  const date = (req.query.date as string) || today;
   const { zone_id, city, city_id, user_id, fe_id } = req.query as Record<string, string>;
 
   let query = supabaseAdmin

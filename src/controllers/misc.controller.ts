@@ -1,8 +1,9 @@
 import { Request, Response } from 'express'
 import { supabaseAdmin } from '../lib/supabase'
-import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate } from '../utils'
+import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok } from '../utils'
 import { AuthRequest } from '../types'
 import { logger } from '../lib/logger'
+import { DEMO_ORG_ID, getMockZones, getMockClients } from '../utils/demoData'
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -160,6 +161,17 @@ export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => 
 // USERS
 export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
+  
+  if (user.org_id === DEMO_ORG_ID) {
+    return sendSuccess(res, [
+      { id: 'fe1', name: 'Arjun Sharma', employee_id: 'KIN-001', role: 'executive', city: 'Bangalore', is_active: true, hours_worked: 4.5, is_checked_in: true, zones: { name: 'Koramangala 4th Block' }, permissions: ['attendance', 'forms'] },
+      { id: 'fe2', name: 'Priya Patel', employee_id: 'KIN-002', role: 'executive', city: 'Mumbai', is_active: true, hours_worked: 4.2, is_checked_in: true, zones: { name: 'Andheri East' }, permissions: ['attendance'] },
+      { id: 'fe3', name: 'Rahul Verma', employee_id: 'KIN-003', role: 'executive', city: 'Delhi', is_active: true, hours_worked: 4.8, is_checked_in: false, status: 'on_break', zones: { name: 'Cannaught Place' }, permissions: ['attendance', 'grievances'] },
+      { id: 'fe4', name: 'Sneha Rao', employee_id: 'KIN-004', role: 'supervisor', city: 'Hyderabad', is_active: true, hours_worked: 3.7, is_checked_in: true, zones: { name: 'Banjara Hills' }, permissions: ['attendance', 'users'] },
+      { id: 'fe5', name: 'Amit Singh', employee_id: 'KIN-005', role: 'executive', city: 'Pune', is_active: true, hours_worked: 4.25, is_checked_in: false, status: 'checked_out', zones: { name: 'Viman Nagar' }, permissions: ['attendance'] }
+    ]);
+  }
+
   const { role: filterRole, zone_id, is_active, client_id } = req.query;
   const { page, limit, offset } = getPagination(
     parseInt(req.query.page as string) || 1,
@@ -510,6 +522,9 @@ export const resetUserPassword = asyncHandler(async (req: AuthRequest, res: Resp
 // ZONES
 export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  
+  if (user.org_id === DEMO_ORG_ID) return sendSuccess(res, getMockZones());
+
   let query = supabaseAdmin.from('zones')
     .select('*').eq('org_id', user.org_id).eq('is_active', true);
 
@@ -736,6 +751,9 @@ export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Respo
 // CLIENTS
 export const getClients = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!
+
+  if (user.org_id === DEMO_ORG_ID) return sendSuccess(res, getMockClients());
+
   let query = supabaseAdmin.from('clients')
     .select('id, name')
     .eq('is_active', true)

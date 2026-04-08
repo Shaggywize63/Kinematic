@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest, notFound } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
+import { DEMO_ORG_ID, getMockGrievances } from '../utils/demoData';
 
 const submitSchema = z.object({
   category: z.enum(['harassment_misconduct','unfair_treatment','payment_salary','stock_supply','work_environment','supervisor_conduct','other']),
@@ -50,6 +51,9 @@ export const getMine = asyncHandler(async (req: AuthRequest, res: Response) => {
 // GET /api/v1/admin/grievances  (admin+)
 export const getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockGrievances());
+
   const status = req.query.status as string | undefined;
 
   let query = supabaseAdmin

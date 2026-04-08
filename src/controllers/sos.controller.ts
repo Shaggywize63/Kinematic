@@ -5,6 +5,7 @@ import { AuthRequest } from '../types';
 import { ok, created, badRequest, notFound } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
+import { DEMO_ORG_ID, getMockSOS } from '../utils/demoData';
 
 const triggerSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -111,6 +112,9 @@ export const resolve = asyncHandler(async (req: AuthRequest, res: Response) => {
 // GET /api/v1/sos  (supervisor+)
 export const getAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  
+  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockSOS());
+
   const status = req.query.status as string | undefined;
 
   let query = supabaseAdmin

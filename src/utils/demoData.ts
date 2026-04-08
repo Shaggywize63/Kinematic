@@ -1,0 +1,201 @@
+import { isoDate } from './index';
+
+export const DEMO_ORG_ID = 'demo-org-999';
+
+export const getMockSummary = (date: string) => ({
+  date,
+  kpis: {
+    total_tff: 1248,
+    total_engagements: 1560,
+    tff_rate: 80,
+    avg_attendance: 92,
+    total_leaves: 4,
+    total_days_worked: 26,
+    total_hours_worked: 1840.5,
+    active_sos: 0,
+    open_grievances: 2,
+  },
+  top_performers: [
+    { name: 'Arjun Sharma', zone: 'Bangalore North', tff: 142 },
+    { name: 'Priya Patel', zone: 'Mumbai West', tff: 138 },
+    { name: 'Rahul Verma', zone: 'Delhi Central', tff: 135 },
+    { name: 'Sneha Rao', zone: 'Hyderabad South', tff: 128 },
+    { name: 'Amit Singh', zone: 'Pune East', tff: 122 }
+  ],
+  zone_performance: [
+    { zone: 'Bangalore', tff: 450, target: 500 },
+    { zone: 'Mumbai', tff: 380, target: 400 },
+    { zone: 'Delhi', tff: 320, target: 350 },
+    { zone: 'Chennai', tff: 280, target: 300 }
+  ],
+  total_executives: 145,
+});
+
+export const getMockTrends = () => {
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    const dateStr = isoDate(d);
+    return {
+      date: dateStr,
+      tff: 120 + Math.floor(Math.random() * 40),
+      engagements: 150 + Math.floor(Math.random() * 50),
+      label: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+    };
+  });
+  return days;
+};
+
+export const getMockFeed = () => [
+  { id: '1', time: new Date().toISOString(), description: 'Arjun Sharma submitted TFF ✓', meta: { activity: 'Product Launch', outlet: 'Reliance Fresh' } },
+  { id: '2', time: new Date(Date.now() - 3600000).toISOString(), description: 'Priya Patel checked in', meta: { activity: 'Attendance', outlet: 'Big Bazaar' } },
+  { id: '3', time: new Date(Date.now() - 7200000).toISOString(), description: 'Rahul Verma submitted Form', meta: { activity: 'Price Audit', outlet: 'Star Market' } },
+  { id: '4', time: new Date(Date.now() - 10800000).toISOString(), description: 'Sneha Rao submitted TFF ✓', meta: { activity: 'Store Branding', outlet: 'Metro Cash' } },
+  { id: '5', time: new Date(Date.now() - 14400000).toISOString(), description: 'Amit Singh checked out', meta: { activity: 'Attendance', outlet: 'Spencer\'s' } }
+];
+
+export const getMockHeatmap = () => {
+  const daysArr = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const rows = daysArr.map(day => ({
+    day,
+    hours: Array.from({ length: 24 }, (_, h) => ({
+      hour: h,
+      count: (h >= 10 && h <= 18) ? Math.floor(Math.random() * 20) + 5 : Math.floor(Math.random() * 5)
+    })),
+    total: 150 + Math.floor(Math.random() * 100)
+  }));
+  return {
+    rows,
+    summary: {
+      peak_hour: '11:00',
+      peak_hour_count: 45,
+      peak_day: 'Wed',
+      peak_day_count: 240,
+      total_contacts: 1560
+    }
+  };
+};
+
+export const getMockLocations = (today: string) => ({
+  date: today,
+  summary: { total: 15, active: 12, checked_out: 2, absent: 1 },
+  locations: [
+    { id: 'fe1', name: 'Arjun Sharma', role: 'executive', battery_percentage: 85, status: 'active', lat: 12.9352, lng: 77.6245, address: 'Koramangala 4th Block' },
+    { id: 'fe2', name: 'Priya Patel', role: 'executive', battery_percentage: 42, status: 'active', lat: 12.9279, lng: 77.6271, address: 'Koramangala 5th Block' },
+    { id: 'fe3', name: 'Rahul Verma', role: 'executive', battery_percentage: 91, status: 'on_break', lat: 12.9314, lng: 77.6189, address: 'Indiranagar Main Rd' },
+    { id: 'fe4', name: 'Sneha Rao', role: 'executive', battery_percentage: 12, status: 'active', lat: 12.9401, lng: 77.6201, address: 'Sony World Signal' },
+    { id: 'fe5', name: 'Amit Singh', role: 'senior_executive', battery_percentage: 77, status: 'checked_out', lat: 12.9378, lng: 77.6305, address: 'HSR Layout Sector 2' }
+  ]
+});
+
+export const getMockAttendanceToday = (today: string) => ({
+  date: today,
+  summary: { total: 145, present: 132, on_break: 5, checked_out: 4, absent: 4, regularised: 0 },
+  executives: [
+    { id: 'fe1', name: 'Arjun Sharma', display_status: 'present', checkin_at: `${today}T09:15:00Z`, total_hours: 4.5 },
+    { id: 'fe2', name: 'Priya Patel', display_status: 'present', checkin_at: `${today}T09:30:00Z`, total_hours: 4.2 },
+    { id: 'fe3', name: 'Rahul Verma', display_status: 'on_break', checkin_at: `${today}T09:00:00Z`, total_hours: 4.8 },
+    { id: 'fe4', name: 'Sneha Rao', display_status: 'present', checkin_at: `${today}T10:00:00Z`, total_hours: 3.7 },
+    { id: 'fe5', name: 'Amit Singh', display_status: 'checked_out', checkin_at: `${today}T08:45:00Z`, checkout_at: `${today}T13:00:00Z`, total_hours: 4.25 }
+  ]
+});
+
+export const getMockVisitLogs = (today: string) => [
+  { id: 'v1', visitor_name: 'Manish Kumar', visitor_role: 'Operations Manager', executive: { name: 'Arjun Sharma' }, rating: 'Excellent', remarks: 'Good shelf discipline. Product display is perfect.', visited_at: `${today}T11:20:00Z`, visit_response: 'Thanks, working on the inventory update now.' },
+  { id: 'v2', visitor_name: 'Anita Desai', visitor_role: 'Supervisor', executive: { name: 'Priya Patel' }, rating: 'Good', remarks: 'Store compliance met. Need focus on SKU expansion.', visited_at: `${today}T10:45:00Z`, visit_response: null },
+  { id: 'v3', visitor_name: 'Manish Kumar', visitor_role: 'Operations Manager', executive: { name: 'Rahul Verma' }, rating: 'Average', remarks: 'Uniform missing. Grooming standards need improvement.', visited_at: `${today}T09:30:00Z`, visit_response: 'Noted. Will ensure from tomorrow.' }
+];
+
+export const getMockSubmissions = (today: string) => ({
+  total: 1560,
+  data: [
+    { id: 's1', submitted_at: `${today}T12:05:00Z`, is_converted: true, outlet_name: 'Reliance Fresh - Koramangala', users: { name: 'Arjun Sharma' }, form_templates: { name: 'Product Audit' }, activities: { name: 'Store Visit' } },
+    { id: 's2', submitted_at: `${today}T11:50:00Z`, is_converted: false, outlet_name: 'Big Bazaar - Indiranagar', users: { name: 'Priya Patel' }, form_templates: { name: 'Merchandising' }, activities: { name: 'Merchandising' } },
+    { id: 's3', submitted_at: `${today}T11:30:00Z`, is_converted: true, outlet_name: 'Star Market - HSR', users: { name: 'Rahul Verma' }, form_templates: { name: 'Product Audit' }, activities: { name: 'Store Visit' } },
+    { id: 's4', submitted_at: `${today}T11:15:00Z`, is_converted: true, outlet_name: 'Metro Cash & Carry', users: { name: 'Sneha Rao' }, form_templates: { name: 'Compliance Checklist' }, activities: { name: 'Compliance' } },
+    { id: 's5', submitted_at: `${today}T10:55:00Z`, is_converted: false, outlet_name: 'Reliance Smart - Jayanagar', users: { name: 'Amit Singh' }, form_templates: { name: 'Stock Reporting' }, activities: { name: 'Inventory' } }
+  ]
+});
+
+export const getMockSubmissionDetails = (id: string) => ({
+  id,
+  submitted_at: new Date().toISOString(),
+  is_converted: true,
+  outlet_name: 'Reliance Fresh - Koramangala',
+  users: { name: 'Arjun Sharma', employee_id: 'KIN-001' },
+  form_templates: { name: 'Product Audit' },
+  activities: { name: 'Store Visit' },
+  form_responses: [
+    { field_key: 'shelf_status', form_fields: { label: 'Shelf Condition', field_type: 'text' }, value_text: 'Clean and Organized' },
+    { field_key: 'stock_available', form_fields: { label: 'Stock Available', field_type: 'yes_no' }, value_bool: true },
+    { field_key: 'store_photo', form_fields: { label: 'Store Front Photo', field_type: 'camera' }, photo_url: 'https://images.unsplash.com/photo-1534723452862-4c874018d66d?auto=format&fit=crop&w=800&q=80' },
+    { field_key: 'manager_sign', form_fields: { label: 'Manager Signature', field_type: 'signature' }, value_text: 'https://upload.wikimedia.org/wikipedia/commons/3/3a/Jon_Snow_Signature.png' }
+  ]
+});
+
+export const getMockSOS = () => [
+  { id: 'sos1', created_at: new Date().toISOString(), status: 'active', remarks: 'Accident reported near Indiranagar signal.', users: { name: 'Arjun Sharma' }, latitude: 12.9716, longitude: 77.5946 },
+  { id: 'sos2', created_at: new Date(Date.now() - 86400000).toISOString(), status: 'resolved', remarks: 'Medical emergency - resolved in 15 mins.', users: { name: 'Priya Patel' }, resolution: 'Ambulance called, family informed.' }
+];
+
+export const getMockGrievances = () => [
+  { id: 'g1', reference_no: 'GRV-102', category: 'Harassment', status: 'submitted', description: 'Rude behavior from store manager.', created_at: new Date().toISOString() },
+  { id: 'g2', reference_no: 'GRV-098', category: 'Payment', status: 'resolved', description: 'Travel allowance not credited for March.', resolution: 'Credited in April cycle.' }
+];
+
+export const getMockBroadcasts = () => [
+  { 
+    id: 'b1', 
+    question: 'How do you like the new Kinematic 2.0 interface?', 
+    options: [{ label: 'Love it!', value: 'love' }, { label: 'It is OK', value: 'ok' }, { label: 'Needs work', value: 'work' }],
+    status: 'active',
+    is_urgent: true,
+    response_count: 156,
+    created_at: new Date().toISOString(),
+    tally: [
+      { label: 'Love it!', count: 120 },
+      { label: 'It is OK', count: 30 },
+      { label: 'Needs work', count: 6 }
+    ],
+    responses: [
+      { user_name: 'Arjun Sharma', employee_id: 'KIN-001', selected_label: 'Love it!', is_correct: null, answered_at: new Date().toISOString() },
+      { user_name: 'Priya Patel', employee_id: 'KIN-002', selected_label: 'Love it!', is_correct: null, answered_at: new Date().toISOString() }
+    ]
+  }
+];
+
+// --- Metadata Mocks ---
+
+export const getMockCities = () => [
+  { id: 'c1', name: 'Bangalore', state: 'Karnataka', is_active: true, created_at: new Date().toISOString() },
+  { id: 'c2', name: 'Mumbai', state: 'Maharashtra', is_active: true, created_at: new Date().toISOString() },
+  { id: 'c3', name: 'Delhi', state: 'Delhi', is_active: true, created_at: new Date().toISOString() },
+  { id: 'c4', name: 'Hyderabad', state: 'Telangana', is_active: true, created_at: new Date().toISOString() },
+  { id: 'c5', name: 'Pune', state: 'Maharashtra', is_active: true, created_at: new Date().toISOString() }
+];
+
+export const getMockZones = () => [
+  { id: 'z1', name: 'Koramangala 4th Block', city: 'Bangalore', is_active: true, created_at: new Date().toISOString() },
+  { id: 'z2', name: 'Andheri East', city: 'Mumbai', is_active: true, created_at: new Date().toISOString() },
+  { id: 'z3', name: 'Cannaught Place', city: 'Delhi', is_active: true, created_at: new Date().toISOString() },
+  { id: 'z4', name: 'Banjara Hills', city: 'Hyderabad', is_active: true, created_at: new Date().toISOString() },
+  { id: 'z5', name: 'Viman Nagar', city: 'Pune', is_active: true, created_at: new Date().toISOString() }
+];
+
+export const getMockClients = () => [
+  { id: 'cl1', name: 'Hindustan Unilever', is_active: true },
+  { id: 'cl2', name: 'ITC Limited', is_active: true },
+  { id: 'cl3', name: 'Nestle India', is_active: true }
+];
+
+export const getMockStores = () => [
+  { id: 'st1', name: 'Reliance Fresh - Koramangala', city_id: 'c1', zone_id: 'z1', address: '123 Main Rd', is_active: true, cities: { name: 'Bangalore' }, zones: { name: 'Koramangala 4th Block' } },
+  { id: 'st2', name: 'Big Bazaar - Indiranagar', city_id: 'c1', zone_id: 'z1', address: '456 Side Rd', is_active: true, cities: { name: 'Bangalore' }, zones: { name: 'Indiranagar Main Rd' } }
+];
+
+export const getMockActivities = () => [
+  { id: 'a1', name: 'Store Visit', type: 'visit', is_active: true },
+  { id: 'a2', name: 'Product Audit', type: 'form', is_active: true },
+  { id: 'a3', name: 'Merchandising', type: 'form', is_active: true },
+  { id: 'a4', name: 'Compliance', type: 'form', is_active: true }
+];
