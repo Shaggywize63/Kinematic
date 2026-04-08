@@ -186,7 +186,6 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/tff-trends ─────────────────────── */
 export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockTrends());
 
   const from = (req.query.from as string) || isoDate(new Date(Date.now() - 7 * 86400000));
   const to   = (req.query.to   as string) || isoDate(new Date());
@@ -232,7 +231,6 @@ export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/activity-feed ─────────────────── */
 export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockFeed());
 
   const limit = Math.min(50, parseInt(req.query.limit as string || '20', 10));
 
@@ -286,7 +284,7 @@ export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/contact-heatmap ───────────────── */
 export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockHeatmap());
+  
   
   // Strictly last 7 days for heatmap as requested
   const endStr   = isoDate(toIST(new Date()));
@@ -751,13 +749,13 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   let orgTffQuery = supabaseAdmin.from('form_submissions')
     .select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id)
-    .eq('is_converted', true)
     .gte('submitted_at', `${istToday}T00:00:00+05:30`)
     .lte('submitted_at', `${istToday}T23:59:59+05:30`);
     
   if (user.client_id) orgTffQuery = orgTffQuery.eq('client_id', user.client_id);
     
   const { count: orgTffCount } = await orgTffQuery;
+  console.log(`[MobileHome] Org=${user.org_id} Date=${istToday} OrgTFF=${orgTffCount} AttRecord=${!!attRecord}`);
 
   if (attRecord) {
     enrichWithHours(attRecord);
@@ -877,7 +875,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
 
   return ok(res, {
     today: attRecord || null,
-    summary: { tff_count: myTff || 0 },
+    summary: { tff_count: orgTffCount || 0 },
     routePlan: routePlans,
     unreadCount: unread || 0,
     quote: quote || null,
