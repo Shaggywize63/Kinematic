@@ -31,7 +31,7 @@ const enrichWithHours = (r: any) => {
 /* ── GET /api/v1/analytics/summary ───────────────────────── */
 export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockSummary(req.query.date as string || isoDate(toIST(new Date()))));
+  // DEMO MODE REMOVED: Always show real data to ensure testing progress is visible.
 
   const from = (req.query.from as string) || (req.query.date as string) || isoDate(toIST(new Date()));
   const to   = (req.query.to   as string) || (req.query.date as string) || isoDate(toIST(new Date()));
@@ -57,8 +57,8 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
     .from('form_submissions')
     .select('id, is_converted, user_id, submitted_at, date', { count: 'exact' })
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${from}T00:00:00`)
-    .lte('submitted_at', `${to}T23:59:59`);
+    .gte('submitted_at', `${from}T00:00:00+05:30`)
+    .lte('submitted_at', `${to}T23:59:59+05:30`);
 
   if (user.client_id) submissionsQuery = submissionsQuery.eq('client_id', user.client_id);
 
@@ -121,8 +121,8 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
     .from('form_submissions')
     .select('user_id, is_converted, submitted_at, users!user_id(name, zone_id, zones!zone_id(id, name))')
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${from}T00:00:00`)
-    .lte('submitted_at', `${to}T23:59:59`);
+    .gte('submitted_at', `${from}T00:00:00+05:30`)
+    .lte('submitted_at', `${to}T23:59:59+05:30`);
   
   if (user.client_id) topPerfQuery = topPerfQuery.eq('client_id', user.client_id);
   const { data: topPerf } = await topPerfQuery;
@@ -442,9 +442,8 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 /* ── GET /api/v1/analytics/live-locations ────────────────── */
 export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = isoDate(new Date());
-  
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockLocations(today));
+  const today = todayDate();
+  // DEMO MODE REMOVED: Always show real data to ensure testing progress is visible.
 
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
@@ -671,13 +670,6 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 /* ── GET /api/v1/analytics/dashboard-init ────────────────── */
 export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (user.org_id === DEMO_ORG_ID) {
-    return ok(res, {
-      attendance: { total: 145, present: 132, on_break: 5, checked_out: 4, absent: 4, regularised: 0 },
-      kpis: { total_tff: 1248, avg_attendance: 92, open_grievances: 2 },
-      weekly: { days: getMockTrends(), total_tff: 1248 }
-    });
-  }
 
   const today = isoDate(toIST(new Date()));
   const sevenDaysAgo = isoDate(new Date(Date.now() - 6 * 86400000));
@@ -753,22 +745,23 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   if (attError) console.log(`[MobileHome] Error: ${attError.message}`);
   console.log(`[MobileHome] Attendance Result: ${!!attRecord}, Status=${attRecord?.status}`);
   
-  // 2. Summary Stats (FE-specific) - Use submitted_at range for robust counting across IST date boundaries
+  // 2. Summary Stats (ORAL-LEVEL Alignment) - Scaling to Org-level to match Dashboard "Total Forms Filled"
   const istToday = todayDate();
-  const start = `${istToday}T00:00:00`;
-  const end = `${istToday}T23:59:59`;
   
-  let tffHomeQuery = supabaseAdmin.from('form_submissions')
+  let orgTffQuery = supabaseAdmin.from('form_submissions')
     .select('id', { count: 'exact', head: true })
-    .eq('user_id', user.id)
-    .gte('submitted_at', start)
-    .lte('submitted_at', end);
+    .eq('org_id', user.org_id)
+    .eq('is_converted', true)
+    .gte('submitted_at', `${istToday}T00:00:00+05:30`)
+    .lte('submitted_at', `${istToday}T23:59:59+05:30`);
     
-  const { count: myTff } = await tffHomeQuery;
+  if (user.client_id) orgTffQuery = orgTffQuery.eq('client_id', user.client_id);
+    
+  const { count: orgTffCount } = await orgTffQuery;
 
   if (attRecord) {
     enrichWithHours(attRecord);
-    (attRecord as any).tff_count = myTff || 0;
+    (attRecord as any).tff_count = orgTffCount || 0;
   }
 
   // 3. Today's Route Plans - Bullet-proof lookup (Narrowed to Today only for deduplication)
@@ -823,20 +816,28 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     (outlets || []).forEach(o => {
       const sid = o.store_id;
       if (!storeMap[sid]) {
-        // Initialize store entry with common outlet details
         storeMap[sid] = {
           ...o,
-          activities: []
+          activities: [],
+          status: o.status // initial status
         };
       }
+      
       // Add this activity to the outlet's list
       if (o.activity_id) {
+        const activityStatus = o.status || 'pending';
         storeMap[sid].activities.push({
           id: o.activity_id,
           name: o.activity_name || "Assigned Task",
           plan_id: o.route_plan_id,
-          status: o.status
+          status: activityStatus
         });
+        
+        // STATUS AGGREGATION: If any activity is visited/completed, mark the store as visited
+        // This ensures the dashboard 'Visited' count is accurate even if some tasks are pending
+        if (activityStatus === 'visited' || activityStatus === 'completed') {
+          storeMap[sid].status = 'visited';
+        }
       }
     });
 

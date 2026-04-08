@@ -346,8 +346,6 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = todayDate();
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockAttendanceToday(today).executives);
-
   const date = (req.query.date as string) || today;
   const { zone_id, city, city_id, user_id, fe_id } = req.query as Record<string, string>;
 

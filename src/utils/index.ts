@@ -68,7 +68,12 @@ export function sendPaginated(
 
 // ── Today's date as YYYY-MM-DD in IST ──
 export function todayDate(): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+  // Use a manual approach to guarantee YYYY-MM-DD across different Node versions/environments
+  const d = toIST(new Date());
+  const year = d.getFullYear();
+  const month = (d.getMonth() + 1).toString().padStart(2, '0');
+  const day = d.getDate().toString().padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 export function toIST(date: Date = new Date()): Date {

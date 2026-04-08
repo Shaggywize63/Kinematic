@@ -66,8 +66,6 @@ export const getQuestions = asyncHandler<AuthRequest>(async (req, res) => {
 export const getAdminQuestions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
 
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockBroadcasts());
-
   const { data: questions, error } = await supabaseAdmin
     .from('broadcast_questions')
     .select(`
