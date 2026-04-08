@@ -21,7 +21,7 @@ const updateStatusSchema = z.object({
 });
 
 // POST /api/v1/grievances
-export const submit = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const submit = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const body = submitSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
@@ -37,7 +37,7 @@ export const submit = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/v1/grievances/mine
-export const getMine = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getMine = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { data, error } = await supabaseAdmin
     .from('grievances')
@@ -49,7 +49,7 @@ export const getMine = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/v1/admin/grievances  (admin+)
-export const getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getAll = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   
   if (user.org_id === DEMO_ORG_ID) return ok(res, getMockGrievances());
@@ -78,7 +78,7 @@ export const getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // PATCH /api/v1/admin/grievances/:id  (admin+)
-export const updateStatus = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const updateStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
   const body = updateStatusSchema.safeParse(req.body);

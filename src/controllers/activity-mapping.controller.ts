@@ -1,10 +1,11 @@
-import { Request, Response } from 'express';
+import { Response } from 'express';
+import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
 import { asyncHandler, sendSuccess, AppError } from '../utils';
 
 /* ── GET /api/v1/activity-mappings ── */
-export const listAllMappings = asyncHandler(async (req: Request, res: Response) => {
-  const user = (req as any).user;
+export const listAllMappings = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
   const { data, error } = await supabaseAdmin
     .from('activity_users')
     .select('activity_id, user_id')
@@ -15,9 +16,9 @@ export const listAllMappings = asyncHandler(async (req: Request, res: Response) 
 });
 
 /* ── GET /api/v1/activity-mappings/activity/:activityId ── */
-export const getFEsByActivity = asyncHandler(async (req: Request, res: Response) => {
+export const getFEsByActivity = asyncHandler<AuthRequest>(async (req, res) => {
   const { activityId } = req.params;
-  const user = (req as any).user;
+  const user = req.user!;
 
   const { data, error } = await supabaseAdmin
     .from('activity_users')
@@ -30,9 +31,9 @@ export const getFEsByActivity = asyncHandler(async (req: Request, res: Response)
 });
 
 /* ── GET /api/v1/activity-mappings/user/:userId ── */
-export const getActivitiesByUser = asyncHandler(async (req: Request, res: Response) => {
+export const getActivitiesByUser = asyncHandler<AuthRequest>(async (req, res) => {
   const { userId } = req.params;
-  const user = (req as any).user;
+  const user = req.user!;
 
   const { data, error } = await supabaseAdmin
     .from('activity_users')
@@ -45,9 +46,9 @@ export const getActivitiesByUser = asyncHandler(async (req: Request, res: Respon
 });
 
 /* ── POST /api/v1/activity-mappings ── */
-export const mapActivityUser = asyncHandler(async (req: Request, res: Response) => {
+export const mapActivityUser = asyncHandler<AuthRequest>(async (req, res) => {
   const { activity_id, user_ids } = req.body;
-  const admin = (req as any).user;
+  const admin = req.user!;
 
   if (!activity_id || !Array.isArray(user_ids)) {
     throw new AppError(400, 'activity_id and user_ids[] are required', 'VALIDATION_ERROR');

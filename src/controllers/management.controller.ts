@@ -22,7 +22,7 @@ import { DEMO_ORG_ID, getMockCities, getMockStores, getMockActivities } from '..
 // ─── Helper: build a generic CRUD controller for a table ───
 export function buildCRUD(tableName: string, requiredFields: string[] = ['name']) {
 
-  const list = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const list = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
 
     if (user.org_id === DEMO_ORG_ID) {
@@ -44,7 +44,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     ok(res, data || []);
   });
 
-  const getOne = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const getOne = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
     const { id } = req.params;
     let q = supabaseAdmin
@@ -57,7 +57,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     ok(res, data);
   });
 
-  const create = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const create = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
     const body = req.body;
     for (const f of requiredFields) {
@@ -73,7 +73,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     created(res, data);
   });
 
-  const update = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const update = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
     const { id } = req.params;
     const { org_id, client_id: _, ...rest } = req.body; // strip sensitive IDs
@@ -89,7 +89,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     ok(res, data);
   });
 
-  const remove = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const remove = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
     
     // Restriction: Ensure the record belongs to the user's org/client

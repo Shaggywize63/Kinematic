@@ -6,7 +6,7 @@ import { logger } from '../lib/logger'
 import { DEMO_ORG_ID, getMockZones, getMockClients } from '../utils/demoData'
 
 // VISIT LOGS
-export const getVisitLogs = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   const date = (req.query.date as string) || todayDate()
   let query = supabaseAdmin
@@ -22,7 +22,7 @@ export const getVisitLogs = asyncHandler(async (req: AuthRequest, res: Response)
   sendSuccess(res, data)
 })
 
-export const createVisitLog = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const createVisitLog = asyncHandler<AuthRequest>(async (req, res) => {
   const { executive_id, rating, remarks, photo_url, latitude, longitude } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('visit_logs')
@@ -46,7 +46,7 @@ export const createVisitLog = asyncHandler(async (req: AuthRequest, res: Respons
 })
 
 // GRIEVANCES
-export const submitGrievance = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const submitGrievance = asyncHandler<AuthRequest>(async (req, res) => {
   const { category, against_role, incident_date, description, is_anonymous } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('grievances')
@@ -66,7 +66,7 @@ export const submitGrievance = asyncHandler(async (req: AuthRequest, res: Respon
   sendSuccess(res, data, 'Grievance submitted. HR will review within 48 hours.', 201)
 })
 
-export const getMyGrievances = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getMyGrievances = asyncHandler<AuthRequest>(async (req, res) => {
   const { data, error } = await supabaseAdmin.from('grievances')
     .select('id, reference_no, category, status, created_at, resolution')
     .eq('submitted_by', req.user!.id).eq('is_anonymous', false)
@@ -75,7 +75,7 @@ export const getMyGrievances = asyncHandler(async (req: AuthRequest, res: Respon
   sendSuccess(res, data)
 })
 
-export const getAllGrievances = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getAllGrievances = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   const { status } = req.query
   const { page, limit, offset } = getPagination(
@@ -93,7 +93,7 @@ export const getAllGrievances = asyncHandler(async (req: AuthRequest, res: Respo
   sendPaginated(res, data || [], count || 0, page, limit)
 })
 
-export const updateGrievance = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const updateGrievance = asyncHandler<AuthRequest>(async (req, res) => {
   const { status, resolution } = req.body
   const { data, error } = await supabaseAdmin.from('grievances')
     .update({ status, resolution: resolution || null, reviewed_by: req.user!.id, reviewed_at: new Date().toISOString() })
@@ -103,7 +103,7 @@ export const updateGrievance = asyncHandler(async (req: AuthRequest, res: Respon
 })
 
 // LEARNING CENTER
-export const getMaterials = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getMaterials = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('learning_materials')
     .select('*, learning_progress(is_completed, progress_pct, completed_at, last_accessed)')
@@ -114,7 +114,7 @@ export const getMaterials = asyncHandler(async (req: AuthRequest, res: Response)
   sendSuccess(res, enriched)
 })
 
-export const updateProgress = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const updateProgress = asyncHandler<AuthRequest>(async (req, res) => {
   const { progress_pct, is_completed } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('learning_progress')
@@ -124,7 +124,7 @@ export const updateProgress = asyncHandler(async (req: AuthRequest, res: Respons
   sendSuccess(res, data, 'Progress updated')
 })
 
-export const createMaterial = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const createMaterial = asyncHandler<AuthRequest>(async (req, res) => {
   const { title, description, category, type, file_url, thumbnail_url, duration_min, page_count, target_roles, is_mandatory } = req.body
   const user = req.user!
   const { data, error } = await supabaseAdmin.from('learning_materials')
@@ -135,7 +135,7 @@ export const createMaterial = asyncHandler(async (req: AuthRequest, res: Respons
 })
 
 // NOTIFICATIONS
-export const getNotifications = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getNotifications = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   const { page, limit, offset } = getPagination(
     parseInt(req.query.page as string) || 1,
@@ -148,7 +148,7 @@ export const getNotifications = asyncHandler(async (req: AuthRequest, res: Respo
   sendPaginated(res, data || [], count || 0, page, limit)
 })
 
-export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const markRead = asyncHandler<AuthRequest>(async (req, res) => {
   const { ids } = req.body
   let query = supabaseAdmin.from('notifications')
     .update({ is_read: true, read_at: new Date().toISOString() }).eq('user_id', req.user!.id)
@@ -159,7 +159,7 @@ export const markRead = asyncHandler(async (req: AuthRequest, res: Response) => 
 })
 
 // USERS
-export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getUsers = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   
   if (user.org_id === DEMO_ORG_ID) {
@@ -259,7 +259,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response) => 
 
 
 
-export const getUserById = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getUserById = asyncHandler<AuthRequest>(async (req, res) => {
   const { data, error } = await supabaseAdmin.from('users')
     .select('*, zones!zone_id(name)')
     .eq('id', req.params.id).eq('org_id', req.user!.org_id).single()
@@ -268,7 +268,7 @@ export const getUserById = asyncHandler(async (req: AuthRequest, res: Response) 
   sendSuccess(res, data)
 })
 
-export const createUser = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   const { name, mobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email } = req.body
   const admin = req.user!
 
@@ -396,7 +396,7 @@ export const createUser = asyncHandler(async (req: AuthRequest, res: Response) =
   sendSuccess(res, { ...data, permissions: permissions || [], assigned_cities: assigned_cities || [] }, 'User created', 201)
 })
 
-export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
   const allowed = ['name', 'mobile', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id']
   const updates: any = {}
   for (const key of allowed) { 
@@ -508,7 +508,7 @@ export const updateUser = asyncHandler(async (req: AuthRequest, res: Response) =
   }
 })
 
-export const resetUserPassword = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const resetUserPassword = asyncHandler<AuthRequest>(async (req, res) => {
   const { password } = req.body
   if (!password || password.length < 6) {
     throw new AppError(400, 'Password must be at least 6 characters', 'VALIDATION_ERROR')
@@ -520,7 +520,7 @@ export const resetUserPassword = asyncHandler(async (req: AuthRequest, res: Resp
 })
 
 // ZONES
-export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getZones = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   
   if (user.org_id === DEMO_ORG_ID) return sendSuccess(res, getMockZones());
@@ -541,7 +541,7 @@ export const getZones = asyncHandler(async (req: AuthRequest, res: Response) => 
   sendSuccess(res, data)
 })
 
-export const createZone = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const createZone = asyncHandler<AuthRequest>(async (req, res) => {
   const { name, city, city_id, state, meeting_lat, meeting_lng, meeting_address, geofence_radius } = req.body
   const user = req.user!
   const targetClientId = user.client_id || req.body.client_id || null
@@ -573,7 +573,7 @@ export const createZone = asyncHandler(async (req: AuthRequest, res: Response) =
   sendSuccess(res, data, 'Zone created', 201)
 })
 
-export const updateZone = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const updateZone = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
   const { name, city, city_id, state, meeting_lat, meeting_lng, meeting_address, geofence_radius, is_active } = req.body;
@@ -597,7 +597,7 @@ export const updateZone = asyncHandler(async (req: AuthRequest, res: Response) =
   sendSuccess(res, data, 'Zone updated');
 });
 
-export const deleteZone = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const deleteZone = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
   
@@ -613,7 +613,7 @@ export const deleteZone = asyncHandler(async (req: AuthRequest, res: Response) =
 });
 
 // ANALYTICS
-export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getDashboardSummary = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   const date = (req.query.date as string) || todayDate()
   const [attRes, subRes, sosRes] = await Promise.all([
@@ -634,7 +634,7 @@ export const getDashboardSummary = asyncHandler(async (req: AuthRequest, res: Re
   })
 })
 
-export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   const [attRes, subRes, sosRes] = await Promise.all([
     supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!attendance_user_id_fkey(name, zones(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
@@ -649,7 +649,7 @@ export const getActivityFeed = asyncHandler(async (req: AuthRequest, res: Respon
   sendSuccess(res, feed)
 })
 
-export const createSOS = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const createSOS = asyncHandler<AuthRequest>(async (req, res) => {
   const { latitude, longitude, remarks } = req.body
   const user = req.user!
   
@@ -672,7 +672,7 @@ export const createSOS = asyncHandler(async (req: AuthRequest, res: Response) =>
   sendSuccess(res, data, 'SOS Alert sent to supervisors', 201)
 })
 
-export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const resolveSOS = asyncHandler<AuthRequest>(async (req, res) => {
   const { resolution } = req.body
   const { data, error } = await supabaseAdmin.from('sos_alerts')
     .update({ 
@@ -690,7 +690,7 @@ export const resolveSOS = asyncHandler(async (req: AuthRequest, res: Response) =
 })
 
 // CLIENTS
-export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version } = req.body;
   const user = req.user!;
 
@@ -749,7 +749,7 @@ export const updateUserStatus = asyncHandler(async (req: AuthRequest, res: Respo
 });
 
 // CLIENTS
-export const getClients = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getClients = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
 
   if (user.org_id === DEMO_ORG_ID) return sendSuccess(res, getMockClients());
@@ -771,7 +771,7 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
 })
 
 // MOTIVATION QUOTES
-export const getDailyQuote = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getDailyQuote = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   // Fetch the most recent quote for the organization
   let data = null
@@ -793,7 +793,7 @@ export const getDailyQuote = asyncHandler(async (req: AuthRequest, res: Response
   sendSuccess(res, data || fallback)
 })
 
-export const upsertQuote = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const upsertQuote = asyncHandler<AuthRequest>(async (req, res) => {
   const { quote, author } = req.body
   const user = req.user!
   

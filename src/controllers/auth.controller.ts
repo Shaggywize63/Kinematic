@@ -20,7 +20,7 @@ const refreshSchema = z.object({
 });
 
 // POST /api/v1/auth/login
-export const login = asyncHandler(async (req: Request, res: Response) => {
+export const login = asyncHandler<Request>(async (req, res) => {
   const body = loginSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
@@ -165,7 +165,8 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
 });
 
 // POST /api/v1/auth/refresh
-export const refresh = asyncHandler(async (req: Request, res: Response) => {
+// POST /api/v1/auth/refresh
+export const refresh = asyncHandler<Request>(async (req, res) => {
   const body = refreshSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'refresh_token is required');
 
@@ -183,7 +184,8 @@ export const refresh = asyncHandler(async (req: Request, res: Response) => {
 });
 
 // POST /api/v1/auth/logout
-export const logout = asyncHandler(async (req: AuthRequest, res: Response) => {
+// POST /api/v1/auth/logout
+export const logout = asyncHandler<AuthRequest>(async (req, res) => {
   if (req.accessToken) {
     const client = getUserClient(req.accessToken);
     await client.auth.signOut();
@@ -196,7 +198,8 @@ export const logout = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/v1/auth/me
-export const me = asyncHandler(async (req: AuthRequest, res: Response) => {
+// GET /api/v1/auth/me
+export const me = asyncHandler<AuthRequest>(async (req, res) => {
   if (!req.user) return unauthorized(res);
 
   if (req.user.org_id === DEMO_ORG_ID) {

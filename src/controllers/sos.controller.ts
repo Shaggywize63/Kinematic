@@ -15,7 +15,7 @@ const triggerSchema = z.object({
 });
 
 // POST /api/v1/sos/trigger
-export const trigger = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const trigger = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const body = triggerSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
@@ -70,7 +70,7 @@ export const trigger = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // PATCH /api/v1/sos/:id/acknowledge  (supervisor+)
-export const acknowledge = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const acknowledge = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
 
@@ -87,7 +87,7 @@ export const acknowledge = asyncHandler(async (req: AuthRequest, res: Response) 
 });
 
 // PATCH /api/v1/sos/:id/resolve  (supervisor+)
-export const resolve = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const resolve = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
   const { resolution_notes } = req.body;
@@ -110,7 +110,7 @@ export const resolve = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/v1/sos  (supervisor+)
-export const getAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getAlerts = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   
   if (user.org_id === DEMO_ORG_ID) return ok(res, getMockSOS());

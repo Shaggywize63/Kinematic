@@ -61,7 +61,7 @@ async function enrichVisitLogs(logs: any[]) {
 const ALL_COLUMNS = 'id, visitor_id, executive_id, zone_id, client_id, visit_outlet_id, org_id, rating, remarks, visit_response, visit_response_at, photo_url, latitude, longitude, date, visited_at';
 
 // POST /api/v1/visits
-export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const logVisit = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const body = visitSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
@@ -95,7 +95,7 @@ export const logVisit = asyncHandler(async (req: AuthRequest, res: Response) => 
 });
 
 // GET /api/v1/visits/mine
-export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getMyVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const date = req.query.date as string | undefined;
 
@@ -114,7 +114,7 @@ export const getMyVisits = asyncHandler(async (req: AuthRequest, res: Response) 
 });
 
 // GET /api/v1/visits/received
-export const getReceivedVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getReceivedVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
@@ -127,7 +127,7 @@ export const getReceivedVisits = asyncHandler(async (req: AuthRequest, res: Resp
 });
 
 // PATCH /api/v1/visits/:id/feedback
-export const updateFEFeedback = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const updateFEFeedback = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
   const body = feedbackSchema.safeParse(req.body);
@@ -149,7 +149,7 @@ export const updateFEFeedback = asyncHandler(async (req: AuthRequest, res: Respo
 });
 
 // GET /api/v1/visits/team
-export const getTeamVisits = asyncHandler(async (req: AuthRequest, res: Response) => {
+export const getTeamVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
