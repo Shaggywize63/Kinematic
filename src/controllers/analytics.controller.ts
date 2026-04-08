@@ -485,8 +485,8 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
 
   const attMap = new Map((att || []).map((a) => [a.user_id, a]));
 
-  const locations = (execs || []).map((fe) => {
-    const rec  = attMap.get(fe.id);
+  const locations = (execs || []).map((fe: any) => {
+    const rec  = attMap.get(fe.id) as any;
     const zone = fe.zones as unknown as { name: string; city: string; meeting_lat: number; meeting_lng: number } | null;
     
     // Logic: 
@@ -929,7 +929,7 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
     lat: number | null; lng: number | null;
   }>();
 
-  const zoneToCity = new Map((zones || []).map((z) => [z.id, { city: z.city, lat: z.meeting_lat, lng: z.meeting_lng }]));
+  const zoneToCity = new Map<string, { city: string; lat: number | null; lng: number | null }>((zones || []).map((z: any) => [z.id, { city: z.city, lat: z.meeting_lat, lng: z.meeting_lng }]));
 
   // Aggregate attendance
   (att || []).forEach((a) => {
@@ -943,8 +943,8 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   });
 
   // Aggregate forms
-  (forms || []).forEach((f) => {
-    const zoneId = execZoneMap.get(f.user_id) || '';
+  (forms || []).forEach((f: any) => {
+    const zoneId = execZoneMap.get(f.user_id || '') || '';
     const zInfo  = zoneToCity.get(zoneId);
     const city   = zInfo?.city || 'Unknown';
     if (!cityAgg.has(city)) cityAgg.set(city, { zones: new Set(), fes: new Set(), checkins: 0, total_hours: 0, engagements: 0, tff: 0, outlets: new Set(), lat: zInfo?.lat || null, lng: zInfo?.lng || null });
