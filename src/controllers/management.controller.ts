@@ -25,13 +25,6 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const list = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
 
-    if (user.org_id === DEMO_ORG_ID) {
-      if (tableName === 'cities') return ok(res, getMockCities());
-      if (tableName === 'stores') return ok(res, getMockStores());
-      if (tableName === 'activities') return ok(res, getMockActivities());
-      return ok(res, []);
-    }
-
     let q = supabaseAdmin
       .from(tableName)
       .select(getSelect(tableName))

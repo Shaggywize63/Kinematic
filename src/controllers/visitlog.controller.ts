@@ -153,8 +153,6 @@ export const getTeamVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockVisitLogs(date));
-
   let query = supabaseAdmin
     .from('visit_logs')
     .select(ALL_COLUMNS)

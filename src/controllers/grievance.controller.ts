@@ -52,8 +52,6 @@ export const getMine = asyncHandler<AuthRequest>(async (req, res) => {
 export const getAll = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   
-  if (user.org_id === DEMO_ORG_ID) return ok(res, getMockGrievances());
-
   const status = req.query.status as string | undefined;
 
   let query = supabaseAdmin

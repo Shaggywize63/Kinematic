@@ -48,31 +48,6 @@ export const login = asyncHandler<Request>(async (req, res) => {
     email = resolvedEmail;
   }
 
-  // --- DEMO MODE AUTH HIJACK ---
-  if (email.toLowerCase() === 'demo@kinematic.com') {
-    logger.info(`Demo login successful for ${email}`);
-    return ok(res, {
-      access_token: 'demo-token-jwt-placeholder',
-      refresh_token: 'demo-refresh-placeholder',
-      expires_at: 9999999999,
-      user: {
-        id: 'demo-user-id',
-        org_id: DEMO_ORG_ID,
-        client_id: null,
-        name: 'Demo Admin',
-        email: 'demo@kinematic.com',
-        role: 'admin',
-        is_active: true,
-        permissions: [
-          'dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory', 
-          'broadcast', 'orders', 'work_activities', 'hr', 'visit_logs', 'clients', 
-          'grievances', 'form_builder', 'settings', 'cities', 'stores', 'skus', 
-          'activities', 'assets', 'live_tracking'
-        ]
-      },
-    });
-  }
-
   // Sign in directly with email + password via Supabase Auth
   console.log(`[DEBUG] Attempting login for ${email}...`);
   let { data: session, error: signInError } = await supabase.auth.signInWithPassword({
@@ -206,21 +181,6 @@ export const logout = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/auth/me
 export const me = asyncHandler<AuthRequest>(async (req, res) => {
   if (!req.user) return unauthorized(res);
-
-  if (req.user.org_id === DEMO_ORG_ID) {
-    return ok(res, {
-      id: 'demo-user-id',
-      org_id: DEMO_ORG_ID,
-      client_id: null,
-      name: 'Demo Admin',
-      email: 'demo@kinematic.com',
-      role: 'admin',
-      is_active: true,
-      employee_id: 'DEMO-001',
-      permissions: ['dashboard', 'analytics', 'users', 'attendance'],
-      organisations: { id: DEMO_ORG_ID, name: 'Kinematic Demo Org', logo_url: null }
-    });
-  }
 
   const { data, error } = await supabaseAdmin
     .from('users')
