@@ -1,13 +1,5 @@
-import { Request, Response, NextFunction, RequestHandler } from 'express'
-
-// ── Wraps async route handlers to forward errors to Express error middleware ──
-export function asyncHandler(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<void | any>
-): RequestHandler {
-  return (req, res, next) => {
-    Promise.resolve(fn(req, res, next)).catch(next)
-  }
-}
+import { Response, NextFunction, RequestHandler } from 'express'
+export * from './asyncHandler';
 
 // ── Standard application error ──
 export class AppError extends Error {

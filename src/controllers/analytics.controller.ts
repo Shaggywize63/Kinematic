@@ -617,7 +617,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   // Only fetch essential fields for grouping to reduce data transfer & memory usage
   let formsQuery = supabaseAdmin
     .from('form_submissions')
-    .select('outlet_name, is_converted, user_id, submitted_at, date')
+    .select('outlet_name, is_converted, user_id, submitted_at, date, users!user_id(city)')
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
