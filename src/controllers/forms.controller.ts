@@ -50,6 +50,10 @@ const submissionSchema = z.object({
   consumer_gender: z.string().nullable().optional(),
   photo_url: z.string().optional(),
   submitted_at: z.string().optional(),
+  check_in_at: z.string().optional(),
+  check_out_at: z.string().optional(),
+  check_in_gps: z.string().optional(),
+  check_out_gps: z.string().optional(),
   responses: z.array(responseSchema).min(1),
 });
 
@@ -338,6 +342,10 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
       user_id: user.id,
       attendance_id: attendance?.id,
       submitted_at: submissionData.submitted_at || new Date().toISOString(),
+      check_in_at: submissionData.check_in_at,
+      check_out_at: submissionData.check_out_at,
+      check_in_gps: submissionData.check_in_gps,
+      check_out_gps: submissionData.check_out_gps,
       date: (submissionData as any).date || today,
       is_converted: submissionData.is_converted !== undefined ? submissionData.is_converted : (submissionData as any).isConverted ?? true,
     })
