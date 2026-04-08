@@ -119,4 +119,70 @@ Return an object with:
   }
 }));
 
+// --- AI FORM METADATA RECOMMENDATIONS ---
+router.post('/recommend-form-details', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const { prompt, activities } = req.body;
+
+  if (!prompt) {
+    throw new AppError(400, 'prompt is required', 'VALIDATION_ERROR');
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new AppError(500, 'AI service not configured.', 'CONFIG_ERROR');
+  }
+
+  const systemPrompt = `
+You are an expert operations consultant. Your task is to suggest form metadata based on a user's "Description Prompt".
+You must also pick the most appropriate "Linked Activity" from a provided list of activities.
+
+### OUTPUT FORMAT
+You MUST return ONLY a valid JSON object. No preamble.
+{
+  "title": string (professional, concise form name),
+  "description": string (clear summary of purpose),
+  "activity_id": string (the EXACT ID of the most relevant activity from the provided list, or null if no close match),
+  "icon": string (emoji),
+  "cover_color": string (hex code of a professional color)
+}
+
+### AVILABLE ACTIVITIES
+${JSON.stringify(activities || [])}
+`;
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type':      'application/json',
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model:      'claude-3-5-sonnet-20240620',
+      max_tokens: 500,
+      system:     systemPrompt,
+      messages:   [{ role: 'user', content: `Description Prompt: ${prompt}` }],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    const msg = (err as any)?.error?.message || `AI error: ${response.status}`;
+    throw new AppError(response.status, msg, 'AI_ERROR');
+  }
+
+  const data: any = await response.json();
+  const text = data?.content?.[0]?.text || '';
+  
+  try {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    const jsonStr = text.substring(start, end + 1);
+    const parsed = JSON.parse(jsonStr);
+    res.json({ success: true, data: parsed });
+  } catch (e) {
+    throw new AppError(500, 'AI failed to recommend form details.', 'AI_ERROR');
+  }
+}));
+
 export default router;
