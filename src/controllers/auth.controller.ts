@@ -63,7 +63,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
         email: 'demo@kinematic.com',
         role: 'admin',
         is_active: true,
-        permissions: ['dashboard', 'analytics', 'users', 'attendance']
+        permissions: ['dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory']
       },
     });
   }
