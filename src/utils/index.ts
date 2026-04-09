@@ -92,9 +92,7 @@ export function isoDate(d: Date): string {
 export function formatAppDate(dateStr: string | Date | null): string {
   if (!dateStr) return '';
   if (typeof dateStr === 'string') {
-    // If it's already in DD--MM-YYYY format, return it
     if (dateStr.includes('--')) return dateStr;
-    // If it's in ISO format or YYYY-MM-DD format
     const matches = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (matches) {
        const [_, y, m, d] = matches;
@@ -102,7 +100,6 @@ export function formatAppDate(dateStr: string | Date | null): string {
     }
   }
   
-  // Fallback for Date objects or other strings
   const d = typeof dateStr === 'string' ? new Date(dateStr) : dateStr;
   if (isNaN(d.getTime())) return typeof dateStr === 'string' ? dateStr : '';
   const year = d.getFullYear();
@@ -111,18 +108,49 @@ export function formatAppDate(dateStr: string | Date | null): string {
   return `${day}--${month}--${year}`;
 }
 
-// Convert App format (DD--MM--YYYY) -> DB format (YYYY-MM-DD)
+// FIXED: Robust date parsing for all formats (DD--MM--YYYY, DD-MM-YYYY, DD/MM/YYYY, YYYY-MM-DD)
 export function parseAppDate(appDate: string | null): string {
   if (!appDate) return dbToday();
-  if (appDate.includes('--')) {
-    const parts = appDate.split('--');
-    if (parts.length === 3) {
-      const [d, m, y] = parts;
-      return `${y}-${m}-${d}`;
+  
+  // 1. Handle YYYY-MM-DD or ISO
+  if (appDate.match(/^\d{4}-\d{2}-\d{2}/)) return appDate.substring(0, 10);
+  
+  // 2. Handle DD/MM/YYYY or MM/DD/YYYY? 
+  // In our app context, Dashboard sends MM/DD/YYYY or DD/MM/YYYY based on locale.
+  // We will attempt to parse it manually.
+  const separators = ['--', '-', '/'];
+  for (const sep of separators) {
+    if (appDate.includes(sep)) {
+      const parts = appDate.split(sep);
+      if (parts.length === 3) {
+        // We assume DD-MM-YYYY or MM-DD-YYYY. 
+        // If the first part > 12, it must be DD.
+        let d = parseInt(parts[0]);
+        let m = parseInt(parts[1]);
+        let y = parseInt(parts[2]);
+        
+        // Handle years like '26' -> 2026
+        if (y < 100) y += 2000;
+        
+        // Heuristic: If dashboard is using US format (MM/DD/YYYY)
+        if (sep === '/' && m > 12) {
+           // Swap d and m
+           [d, m] = [m, d];
+        }
+
+        const dd = d.toString().padStart(2, '0');
+        const mm = m.toString().padStart(2, '0');
+        return `${y}-${mm}-${dd}`;
+      }
     }
   }
-  // Fallback if it's already YYYY-MM-DD
-  if (appDate.match(/^\d{4}-\d{2}-\d{2}/)) return appDate;
+
+  // 3. Last resort Date object
+  try {
+    const d = new Date(appDate);
+    if (!isNaN(d.getTime())) return isoDate(d);
+  } catch (e) {}
+
   return dbToday();
 }
 

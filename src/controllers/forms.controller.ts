@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
+import { asyncHandler, ok, created, badRequest, notFound, parseAppDate } from '../utils';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 import { logger } from '../lib/logger';
 
@@ -159,9 +159,9 @@ export const getSubmission = getSubmissionById;
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { date, user_id, template_id, activity_id, outlet_id, client_id, date_from, date_to } = req.query;
+  const { date, user_id, template_id, activity_id, outlet_id, client_id, date_from, date_to, search } = req.query;
 
-  logger.info(`[Forms] getAllSubmissions: page=${page}, limit=${limit}, client_id=${client_id}, role=${user.role}`);
+  logger.info(`[Forms] getAllSubmissions: page=${page}, limit=${limit}, client_id=${client_id}, role=${user.role}, date_from=${date_from}, date_to=${date_to}`);
 
   // Target 'form_submissions' first.
   let query = supabaseAdmin
@@ -176,10 +176,19 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     query = query.eq('org_id', user.org_id);
   }
 
+  // Handle Dates using parseAppDate to ensure YYYY-MM-DD
   if (date) {
-    query = query.filter('submitted_at', 'gte', `${date}T00:00:00`).filter('submitted_at', 'lte', `${date}T23:59:59`);
-  } else if (date_from && date_to) {
-    query = query.filter('submitted_at', 'gte', `${date_from}T00:00:00`).filter('submitted_at', 'lte', `${date_to}T23:59:59`);
+    const d = parseAppDate(date as string);
+    query = query.filter('submitted_at', 'gte', `${d}T00:00:00`).filter('submitted_at', 'lte', `${d}T23:59:59`);
+  } else if (date_from || date_to) {
+    if (date_from) {
+      const df = parseAppDate(date_from as string);
+      query = query.filter('submitted_at', 'gte', `${df}T00:00:00`);
+    }
+    if (date_to) {
+      const dt = parseAppDate(date_to as string);
+      query = query.filter('submitted_at', 'lte', `${dt}T23:59:59`);
+    }
   }
 
   if (user_id) query = query.eq('user_id', user_id);
@@ -190,6 +199,10 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   
   if (outlet_id) query = query.eq('outlet_id', outlet_id);
 
+  if (search) {
+     query = query.or(`outlet_name.ilike.%${search}%,store_name.ilike.%${search}%`);
+  }
+
   query = query.order('submitted_at', { ascending: false }).range(from, to);
 
   const { data, error, count } = await query;
@@ -198,21 +211,19 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     return badRequest(res, error.message);
   }
 
-  // FALLBACK: If 0 results, check 'builder_submissions' table which might be where newer data lives
-  if ((count || 0) === 0 && !date && !user_id) {
+  // FALLBACK: If 0 results, check 'builder_submissions' table 
+  if ((count || 0) === 0 && !date && !user_id && !search) {
     logger.info('[Forms] 0 results in form_submissions, attempting builder_submissions fallback');
     let bQuery = supabaseAdmin
       .from('builder_submissions')
       .select('*, users(name, employee_id)', { count: 'exact' });
     
-    // Use the same org/client filtering
     if (client_id && client_id !== 'undefined') bQuery = bQuery.eq('org_id', client_id);
     else if (!isAdmin) bQuery = bQuery.eq('org_id', user.org_id);
 
     const { data: bData, count: bCount } = await bQuery.order('submitted_at', { ascending: false }).range(from, to);
     
     if (bCount && bCount > 0) {
-      // Map builder structure to the expected frontend structure
       const mappedData = (bData || []).map(b => ({
         ...b,
         users: b.users,
@@ -224,5 +235,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
+  logger.info(`[Forms] Found ${count} records`);
   return ok(res, buildPaginatedResult(data || [], count || 0, (page as any), (limit as any)));
 });
