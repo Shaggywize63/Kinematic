@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
+import { logger } from '../lib/logger';
 
 const submissionSchema = z.object({
   template_id: z.string().uuid(),
@@ -158,27 +159,34 @@ export const getSubmission = getSubmissionById;
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { date, user_id, template_id, outlet_id, client_id } = req.query;
+  const { date, user_id, template_id, outlet_id, client_id, date_from, date_to } = req.query;
+
+  logger.info(`[Forms] getAllSubmissions: page=${page}, limit=${limit}, client_id=${client_id}, role=${user.role}`);
 
   let query = supabaseAdmin
     .from('form_submissions')
-    .select('*, form_templates:builder_forms!left(title), activities!left(name), profile:users!left!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
+    .select('*, builder_forms!left(title), activities!left(name), profile:users!left(name, role)', { count: 'exact' });
 
   const isAdmin = user.role === 'admin' || user.role === 'super_admin' || (user.role as string) === 'main_admin';
 
-  // Use client_id if provided, otherwise default to user's org
-  if (client_id && client_id !== 'undefined') {
+  // Support both client_id (context override) and org_id (user restrict)
+  if (client_id && client_id !== 'undefined' && client_id !== 'null' && client_id !== '') {
     query = query.eq('org_id', client_id);
   } else if (!isAdmin) {
-     query = query.eq('org_id', user.org_id);
+    query = query.eq('org_id', user.org_id);
   }
 
-  // Debug: If Admin and still 0, we can try removing ALL org filtering to find where the data is
-  // But for now, we've loosened it to the max safe level.
-
+  // Support all date variation from Frontend
   if (date) {
     query = query.filter('submitted_at', 'gte', `${date}T00:00:00`).filter('submitted_at', 'lte', `${date}T23:59:59`);
+  } else if (date_from && date_to) {
+    query = query.filter('submitted_at', 'gte', `${date_from}T00:00:00`).filter('submitted_at', 'lte', `${date_to}T23:59:59`);
+  } else if (date_from) {
+    query = query.gte('submitted_at', `${date_from}T00:00:00`);
+  } else if (date_to) {
+    query = query.lte('submitted_at', `${date_to}T23:59:59`);
   }
+
   if (user_id) query = query.eq('user_id', user_id);
   if (template_id) query = query.eq('template_id', template_id);
   if (outlet_id) query = query.eq('outlet_id', outlet_id);
@@ -186,7 +194,11 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   query = query.order('submitted_at', { ascending: false }).range(from, to);
 
   const { data, error, count } = await query;
-  if (error) return badRequest(res, error.message);
+  if (error) {
+    logger.error(`[Forms] Query Error: ${error.message}`);
+    return badRequest(res, error.message);
+  }
 
+  logger.info(`[Forms] Found ${count} records`);
   return ok(res, buildPaginatedResult(data || [], count || 0, (page as any), (limit as any)));
 });
