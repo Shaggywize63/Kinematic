@@ -886,7 +886,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
       }
       
       if (o.activity_id) {
-        storeMap[sid].activities.push({
+        storeMap[dedupeKey].activities.push({
           id: o.activity_id,
           name: o.activity_name || "Assigned Task",
           status: isActuallyVisited ? 'completed' : (o.status || 'pending')
