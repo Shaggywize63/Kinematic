@@ -207,7 +207,7 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
     })
     .eq('id', user.id);
 
-  ok(res, updatedRecord, 'Checked out successfully');
+  ok(res, enrichWithHours(updatedRecord), 'Checked out successfully');
 });
 
 // POST /api/v1/attendance/break/start
