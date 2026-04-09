@@ -747,13 +747,38 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
     grievanceInitQuery = grievanceInitQuery.eq('client_id', cid);
     weekSubsInitQuery = weekSubsInitQuery.eq('client_id', cid);
   }
-  const { data: weekSubs } = await weekSubsInitQuery;
+
+  // 3. Parallel Execution
+  const [attRes, execRes, kpiRes, griRes, weekRes] = await Promise.all([
+    attInitQuery,
+    execInitQuery,
+    kpisInitQuery.maybeSingle(),
+    grievanceInitQuery,
+    weekSubsInitQuery
+  ]);
+
+  const att = attRes.data || [];
+  const totalExecs = execRes.count || 0;
+  const kpisView = kpiRes.data;
+  const openGrievances = griRes.count || 0;
+  const weekSubs = weekRes.data || [];
+
+  // 4. Calculations
+  const attSummary = {
+    total: totalExecs,
+    present: att.filter(a => (a.status === 'checked_in' || a.status === 'present') && !a.checkout_at).length,
+    on_break: att.filter(a => a.status === 'on_break').length,
+    checked_out: att.filter(a => a.checkout_at).length,
+    absent: totalExecs - att.length,
+    regularised: att.filter(a => a.is_regularised).length,
+  };
+
   const dayMap: Record<string, number> = {};
   for(let i=0; i<7; i++) {
     const d = isoDate(new Date(Date.now() - i * 86400000));
     dayMap[d] = 0;
   }
-  (weekSubs || []).forEach(s => {
+  weekSubs.forEach(s => {
     const d = isoDate(toIST(new Date(s.submitted_at)));
     if (dayMap[d] !== undefined) dayMap[d]++;
   });
@@ -768,11 +793,11 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, {
     attendance: attSummary,
     kpis: {
-      total_tff: (weekSubs || []).filter(s => isoDate(toIST(new Date(s.submitted_at))) === today).length,
-      avg_attendance: kpisView?.avg_attendance || Math.round(((att?.length || 0) / (totalExecs || 1)) * 100),
-      open_grievances: openGrievances || 0
+      total_tff: weekSubs.filter(s => isoDate(toIST(new Date(s.submitted_at))) === today).length,
+      avg_attendance: kpisView?.avg_attendance || Math.round((att.length / (totalExecs || 1)) * 100),
+      open_grievances: openGrievances
     },
-    weekly: { days: weeklyDays, total_tff: weekSubs?.length || 0 }
+    weekly: { days: weeklyDays, total_tff: weekSubs.length }
   });
 });
 
