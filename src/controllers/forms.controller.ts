@@ -163,28 +163,23 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   logger.info(`[Forms] getAllSubmissions: page=${page}, limit=${limit}, client_id=${client_id}, role=${user.role}`);
 
+  // Target 'form_submissions' first.
   let query = supabaseAdmin
     .from('form_submissions')
-    .select('*, builder_forms!left(title), activities!left(name), profile:users!left(name, role)', { count: 'exact' });
+    .select('*, form_templates:builder_forms!left(title), activities!left(name), profile:users!left(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
 
   const isAdmin = user.role === 'admin' || user.role === 'super_admin' || (user.role as string) === 'main_admin';
 
-  // Support both client_id (context override) and org_id (user restrict)
   if (client_id && client_id !== 'undefined' && client_id !== 'null' && client_id !== '') {
     query = query.eq('org_id', client_id);
   } else if (!isAdmin) {
     query = query.eq('org_id', user.org_id);
   }
 
-  // Support all date variation from Frontend
   if (date) {
     query = query.filter('submitted_at', 'gte', `${date}T00:00:00`).filter('submitted_at', 'lte', `${date}T23:59:59`);
   } else if (date_from && date_to) {
     query = query.filter('submitted_at', 'gte', `${date_from}T00:00:00`).filter('submitted_at', 'lte', `${date_to}T23:59:59`);
-  } else if (date_from) {
-    query = query.gte('submitted_at', `${date_from}T00:00:00`);
-  } else if (date_to) {
-    query = query.lte('submitted_at', `${date_to}T23:59:59`);
   }
 
   if (user_id) query = query.eq('user_id', user_id);
@@ -199,6 +194,31 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     return badRequest(res, error.message);
   }
 
-  logger.info(`[Forms] Found ${count} records`);
+  // FALLBACK: If 0 results, check 'builder_submissions' table which might be where newer data lives
+  if ((count || 0) === 0 && !date && !user_id) {
+    logger.info('[Forms] 0 results in form_submissions, attempting builder_submissions fallback');
+    let bQuery = supabaseAdmin
+      .from('builder_submissions')
+      .select('*, users(name, employee_id)', { count: 'exact' });
+    
+    // Use the same org/client filtering
+    if (client_id && client_id !== 'undefined') bQuery = bQuery.eq('org_id', client_id);
+    else if (!isAdmin) bQuery = bQuery.eq('org_id', user.org_id);
+
+    const { data: bData, count: bCount } = await bQuery.order('submitted_at', { ascending: false }).range(from, to);
+    
+    if (bCount && bCount > 0) {
+      // Map builder structure to the expected frontend structure
+      const mappedData = (bData || []).map(b => ({
+        ...b,
+        users: b.users,
+        submitted_at: b.submitted_at,
+        outlet_name: b.outlet_name || 'Dynamic Outlet',
+        activities: { name: 'Form Builder Activity' }
+      }));
+      return ok(res, buildPaginatedResult(mappedData, bCount, (page as any), (limit as any)));
+    }
+  }
+
   return ok(res, buildPaginatedResult(data || [], count || 0, (page as any), (limit as any)));
 });
