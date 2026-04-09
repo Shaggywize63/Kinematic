@@ -1,9 +1,9 @@
-import { Request, Response } from 'express'
-import { supabaseAdmin } from '../lib/supabase'
-import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID } from '../utils'
-import { AuthRequest } from '../types'
-import { logger } from '../lib/logger'
-import { DEMO_ORG_ID, getMockZones, getMockClients, getMockSecurityAlerts } from '../utils/demoData'
+import { Request, Response, NextFunction } from 'express';
+import { supabaseAdmin } from '../lib/supabase';
+import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID } from '../utils';
+import { AuthRequest } from '../types';
+import { logger } from '../lib/logger';
+import { DEMO_ORG_ID, getMockZones, getMockClients, getMockSecurityAlerts } from '../utils/demoData';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -159,7 +159,7 @@ export const markRead = asyncHandler<AuthRequest>(async (req, res) => {
 })
 
 // USERS
-export const getUsers = asyncHandler<AuthRequest>(async (req, res) => {
+export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
   const user = req.user!
   
   const { role: filterRole, zone_id, is_active, client_id } = req.query;
@@ -179,7 +179,11 @@ export const getUsers = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
-    }
+  if (isUUID(user.client_id)) {
+    const cid = user.client_id;
+    query = isPrivileged 
+      ? query.or(`client_id.eq.${cid},client_id.is.null`)
+      : query.eq('client_id', cid);
   } else if (isUUID(client_id as string)) {
     query = query.eq('client_id', client_id as string);
   }
