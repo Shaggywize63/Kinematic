@@ -91,7 +91,20 @@ export function isoDate(d: Date): string {
 // Convert DB format (YYYY-MM-DD) -> App format (DD--MM--YYYY)
 export function formatAppDate(dateStr: string | Date | null): string {
   if (!dateStr) return '';
+  if (typeof dateStr === 'string') {
+    // If it's already in DD--MM-YYYY format, return it
+    if (dateStr.includes('--')) return dateStr;
+    // If it's in ISO format or YYYY-MM-DD format
+    const matches = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (matches) {
+       const [_, y, m, d] = matches;
+       return `${d}--${m}--${y}`;
+    }
+  }
+  
+  // Fallback for Date objects or other strings
   const d = typeof dateStr === 'string' ? new Date(dateStr) : dateStr;
+  if (isNaN(d.getTime())) return typeof dateStr === 'string' ? dateStr : '';
   const year = d.getFullYear();
   const month = (d.getMonth() + 1).toString().padStart(2, '0');
   const day = d.getDate().toString().padStart(2, '0');
@@ -100,9 +113,17 @@ export function formatAppDate(dateStr: string | Date | null): string {
 
 // Convert App format (DD--MM--YYYY) -> DB format (YYYY-MM-DD)
 export function parseAppDate(appDate: string | null): string {
-  if (!appDate || !appDate.includes('--')) return appDate || dbToday();
-  const [day, month, year] = appDate.split('--');
-  return `${year}-${month}-${day}`;
+  if (!appDate) return dbToday();
+  if (appDate.includes('--')) {
+    const parts = appDate.split('--');
+    if (parts.length === 3) {
+      const [d, m, y] = parts;
+      return `${y}-${m}-${d}`;
+    }
+  }
+  // Fallback if it's already YYYY-MM-DD
+  if (appDate.match(/^\d{4}-\d{2}-\d{2}/)) return appDate;
+  return dbToday();
 }
 
 export const ok = <T>(res: Response, data: T, message?: string) =>

@@ -124,7 +124,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     })
     .eq('id', user.id);
 
-  created(res, data, 'Checked in successfully');
+  created(res, enrichWithHours(data), 'Checked in successfully');
 });
 
 // POST /api/v1/attendance/checkout
@@ -218,7 +218,9 @@ export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
     .select('id, status')
     .eq('user_id', user.id)
     .eq('date', today)
-    .single();
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   if (!record) { badRequest(res, 'Not checked in today'); return; }
   if (record.status !== 'checked_in') { conflict(res, 'Cannot start break in current status'); return; }
@@ -250,7 +252,9 @@ export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
     .select('id, status, break_minutes')
     .eq('user_id', user.id)
     .eq('date', today)
-    .single();
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   if (!record) { badRequest(res, 'Not checked in today'); return; }
   if (record.status !== 'on_break') { conflict(res, 'Not currently on break'); return; }
