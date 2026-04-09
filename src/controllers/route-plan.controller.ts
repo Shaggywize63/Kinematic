@@ -194,7 +194,20 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
   });
 
   for (const aid of acts) {
-    // Insert plan (no more duplicate check)
+    // 1. DELETE existing plans for this FE, Date, and Activity to prevent duplication
+    const { error: delErr } = await supabase
+      .from('route_plans')
+      .delete()
+      .eq('user_id', user_id)
+      .eq('plan_date', plan_date)
+      .eq('activity_id', aid)
+      .eq('org_id', org);
+
+    if (delErr) {
+      console.error(`[RoutePlan] Failed to clean up existing plans: ${delErr.message}`);
+    }
+
+    // 2. Insert fresh plan
 
     // Insert plan
     const { data: plan, error: planErr } = await supabase
@@ -415,9 +428,16 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
         continue;
       }
 
-      // FE-Activity mapping check removed as per user request
+      // 1. DELETE existing plans for this specific FE, Date, and Activity
+      await supabase
+        .from('route_plans')
+        .delete()
+        .eq('user_id', fe_user_id)
+        .eq('plan_date', plan_date)
+        .eq('activity_id', aid)
+        .eq('org_id', org);
 
-      // Insert plan (changed from upsert to allow multiple)
+      // 2. Insert fresh plan
       const { data: plan, error: upsertErr } = await supabase
         .from('route_plans')
         .insert({ 
