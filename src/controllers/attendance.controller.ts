@@ -317,31 +317,41 @@ const enrichWithHours = (r: any) => {
 // GET /api/v1/attendance/today
 export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = parseAppDate((req.query.date as string) || todayDate());
+  const todayStr = parseAppDate((req.query.date as string) || todayDate());
 
+  // Self-Healing: Get ALL records for today to detect duplicates
   let { data, error } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)')
     .eq('user_id', user.id)
-    .eq('date', today)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .eq('date', todayStr)
+    .order('created_at', { ascending: false });
 
-  if (!data && !error) {
+  // Fallback: If no record for today, check for any open shift
+  if ((!data || data.length === 0) && !error) {
     const { data: active } = await supabaseAdmin
       .from('attendance')
       .select('*, breaks(*)')
       .eq('user_id', user.id)
-      .in('status', ['checked_in', 'on_break'])
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (active) data = active;
+      .in('status', ['checked_in', 'on_break', 'on-break'])
+      .order('created_at', { ascending: false });
+    if (active && active.length > 0) data = active;
   }
 
-  if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }
-  ok(res, enrichWithHours(data));
+  if (error) { badRequest(res, error.message); return; }
+
+  let record = (data && data.length > 0) ? data[0] : null;
+
+  // Cleanup duplicates in background
+  if (data && data.length > 1) {
+    console.log(`[Attendance] Self-Healing: Removing ${data.length - 1} duplicates for user ${user.id}`);
+    const toDelete = data.slice(1).map(r => r.id);
+    supabaseAdmin.from('attendance').delete().in('id', toDelete).then(() => {
+      console.log(`[Attendance] Self-Healing Complete.`);
+    });
+  }
+
+  ok(res, enrichWithHours(record));
 });
 
 // GET /api/v1/attendance/history
