@@ -6,6 +6,21 @@ import { asyncHandler, ok, created, badRequest, notFound, parseAppDate } from '.
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 import { logger } from '../lib/logger';
 
+const submissionSchema = z.object({
+  template_id: z.string().uuid(),
+  activity_id: z.string().uuid().optional(),
+  outlet_id: z.string().uuid().optional(),
+  outlet_name: z.string().optional(),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
+  responses: z.array(z.object({
+    question_id: z.string().uuid(),
+    value: z.any()
+  }))
+});
+
+// --- Template Management ---
+
 export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { is_active } = req.query;
@@ -16,20 +31,120 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, data);
 });
 
+export const getTemplate = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const { data, error } = await supabaseAdmin.from('builder_forms').select('*, builder_questions(*)').eq('id', req.params.id).single();
+  if (error) return badRequest(res, error.message);
+  return ok(res, data);
+});
+
+export const createTemplate = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const { title, description } = req.body;
+  const { data, error } = await supabaseAdmin
+    .from('builder_forms')
+    .insert({ title, description, org_id: user.org_id, created_by: user.id })
+    .select()
+    .single();
+
+  if (error) return badRequest(res, error.message);
+  return created(res, data, 'Template created');
+});
+
+export const addField = asyncHandler<AuthRequest>(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('builder_questions')
+    .insert({ ...req.body, form_id: req.params.id })
+    .select()
+    .single();
+
+  if (error) return badRequest(res, error.message);
+  return created(res, data, 'Field added');
+});
+
+// --- Submission Flow ---
+
+export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const validated = submissionSchema.parse(req.body);
+
+  const { data: sub, error: subErr } = await supabaseAdmin
+    .from('form_submissions')
+    .insert({
+      user_id: user.id,
+      org_id: user.org_id,
+      template_id: validated.template_id,
+      activity_id: validated.activity_id,
+      outlet_id: validated.outlet_id,
+      outlet_name: validated.outlet_name,
+      latitude: validated.latitude,
+      longitude: validated.longitude,
+      submitted_at: new Date().toISOString()
+    })
+    .select()
+    .single();
+
+  if (subErr) return badRequest(res, subErr.message);
+
+  const responses = validated.responses.map(r => ({
+    submission_id: sub.id,
+    question_id: r.question_id,
+    value_text: typeof r.value === 'string' ? r.value : JSON.stringify(r.value),
+    value_number: typeof r.value === 'number' ? r.value : null,
+    value_bool: typeof r.value === 'boolean' ? r.value : null
+  }));
+
+  const { error: respErr } = await supabaseAdmin.from('form_responses').insert(responses);
+  if (respErr) return badRequest(res, respErr.message);
+
+  return created(res, sub, 'Submission successful');
+});
+
+export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
+  
+  const { data, error, count } = await supabaseAdmin
+    .from('form_submissions')
+    .select('*, builder_forms!left(title), activities!left(name)', { count: 'exact' })
+    .eq('user_id', user.id)
+    .order('submitted_at', { ascending: false })
+    .range(from, to);
+
+  if (error) return badRequest(res, error.message);
+  return ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
+});
+
+export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
+  const { id } = req.params;
+  const { data: sub } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title), activities(name)').eq('id', id).single();
+  if (sub) {
+    const { data: resp } = await supabaseAdmin.from('form_responses').select('*, builder_questions(*)').eq('submission_id', id);
+    return ok(res, { ...sub, form_responses: resp || [] });
+  }
+  const { data: bSub } = await supabaseAdmin.from('builder_submissions').select('*, builder_forms(title), users(name)').eq('id', id).single();
+  if (bSub) {
+    return ok(res, { ...bSub, activities: { name: bSub.builder_forms?.title }, form_responses: bSub.responses || [] });
+  }
+  return notFound(res);
+});
+
+// --- Main Unified Admin Query ---
+
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { date, user_id, template_id, activity_id, outlet_id, client_id, date_from, date_to, search } = req.query;
+  const { client_id, date_from, date_to, search, user_id, activity_id, template_id } = req.query;
 
   const isAdmin = user.role === 'admin' || user.role === 'super_admin' || (user.role as string) === 'main_admin';
-  const effectiveOrgId = (client_id && client_id !== 'undefined' && client_id !== 'null' && client_id !== '') ? client_id : user.org_id;
+  const effectiveOrgId = (client_id && client_id !== 'undefined') ? (client_id as string) : user.org_id;
 
   const df = date_from ? parseAppDate(date_from as string) : null;
   const dt = date_to ? parseAppDate(date_to as string) : null;
 
-  logger.info(`[Forms] SEARCH: user=${user.id}, org=${effectiveOrgId}, from=${df}, to=${dt}`);
+  logger.info(`[Forms] SEARCH: org=${effectiveOrgId}, from=${df}, to=${dt}`);
 
-  // --- 1. Traditional Table ---
+  // --- QUERY 1: TRADITIONAL ---
   let q1 = supabaseAdmin
     .from('form_submissions')
     .select('*, form_templates:builder_forms!left(title), activities!left(name), profile:users!left(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
@@ -40,12 +155,11 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (user_id) q1 = q1.eq('user_id', user_id);
   const tid = template_id || activity_id;
   if (tid) q1 = q1.eq('template_id', tid);
-  if (outlet_id) q1 = q1.eq('outlet_id', outlet_id);
   if (search) q1 = q1.or(`outlet_name.ilike.%${search}%,store_name.ilike.%${search}%`);
 
   const { data: fData, count: fCount } = await q1.order('submitted_at', { ascending: false }).range(from, to);
 
-  // --- 2. New Builder Table ---
+  // --- QUERY 2: BUILDER ---
   let q2 = supabaseAdmin
     .from('builder_submissions')
     .select('*, users!inner(name, employee_id), builder_forms!inner(title)', { count: 'exact' });
@@ -60,8 +174,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const { data: bData, count: bCount } = await q2.order('submitted_at', { ascending: false }).range(from, to);
 
   const totalPossible = (fCount || 0) + (bCount || 0);
-  
-  // Merge response
   let finalRows = [];
   if (bCount && bCount > 0) {
     finalRows = (bData || []).map(b => ({
@@ -77,30 +189,8 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   }
 
   const result = buildPaginatedResult(finalRows, totalPossible, page, limit);
-  // Add debug message so user can see what's happening
   return res.status(200).json({ 
     ...result, 
     debug: { parsed_from: df, parsed_to: dt, fCount, bCount, org: effectiveOrgId } 
   });
-});
-
-export const getTemplates_Legacy = getTemplates;
-export const getTemplate = asyncHandler<AuthRequest>(async (req, res) => {
-  const user = req.user!;
-  const { data, error } = await supabaseAdmin.from('builder_forms').select('*, builder_questions(*)').eq('id', req.params.id).single();
-  if (error) return badRequest(res, error.message);
-  return ok(res, data);
-});
-export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
-  const { id } = req.params;
-  const { data: sub } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title), activities(name)').eq('id', id).single();
-  if (sub) {
-    const { data: resp } = await supabaseAdmin.from('form_responses').select('*, builder_questions(*)').eq('submission_id', id);
-    return ok(res, { ...sub, form_responses: resp || [] });
-  }
-  const { data: bSub } = await supabaseAdmin.from('builder_submissions').select('*, builder_forms(title), users(name)').eq('id', id).single();
-  if (bSub) {
-    return ok(res, { ...bSub, activities: { name: bSub.builder_forms?.title }, form_responses: bSub.responses || [] });
-  }
-  return notFound(res);
 });
