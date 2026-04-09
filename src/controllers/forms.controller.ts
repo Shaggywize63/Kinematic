@@ -470,13 +470,13 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (date_from) query = query.gte('submitted_at', `${date_from}T00:00:00`);
   if (date_to) query = query.lte('submitted_at', `${date_to}T23:59:59`);
   
-  if (activity_id) query = query.eq('activity_id', activity_id);
-  if (user_id || fe_id) query = query.eq('user_id', user_id || fe_id);
-  if (outlet_id) query = query.eq('outlet_id', outlet_id);
-  if (zone_id) query = query.eq('users.zone_id', zone_id);
+  if (isUUID(activity_id)) query = query.eq('activity_id', activity_id);
+  if (isUUID(user_id) || isUUID(fe_id)) query = query.eq('user_id', user_id || fe_id);
+  if (isUUID(outlet_id)) query = query.eq('outlet_id', outlet_id);
+  if (isUUID(zone_id)) query = query.eq('users.zone_id', zone_id);
 
   if (city) query = query.eq('users.city', city);
-  if (city_id) {
+  if (isUUID(city_id)) {
     const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
     if (cityData?.name) query = query.eq('users.city', cityData.name);
   }
