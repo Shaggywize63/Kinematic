@@ -246,17 +246,19 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const { data: submissions } = await submissionQuery.order('submitted_at', { ascending: false }).limit(limit);
 
   const feed = (submissions || []).map((s) => {
-    const u = s.users as unknown as { name: string } | null;
+    const u = s.users as unknown as { name: string; city: string | null } | null;
     const f = s.builder_forms as unknown as { title: string } | null;
     return { 
       id: s.id, 
-      type: 'form_submission' as const, 
-      time: s.submitted_at,
-      description: `${u?.name || 'Unknown'} submitted form${s.is_converted ? ' ✓ TFF' : ''}`,
+      outlet_name: s.outlet_name || 'Unknown Store',
+      submitted_at: s.submitted_at,
+      is_converted: s.is_converted,
+      user: { name: u?.name || 'Unknown', city: u?.city || '' },
+      // Keep description/meta for potential web compatibility, but Android needs the above
+      description: `${u?.name || 'Unknown'} submitted ${f?.title || 'Form'}`,
       form_name: f?.title || 'General Form',
-      meta: { activity: f?.title, outlet: s.outlet_name } 
     };
-  }).sort((a, b) => new Date(b.time!).getTime() - new Date(a.time!).getTime());
+  }).sort((a, b) => new Date(b.submitted_at!).getTime() - new Date(a.submitted_at!).getTime());
 
   return ok(res, feed);
 });
@@ -762,90 +764,85 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     (attRecord as any).tff_count = orgTffCount || 0;
   }
 
-  // 3. Today's Route Plans - Bullet-proof lookup (Narrowed to Today only for deduplication)
-  // A. Ensure we have the user's email definitively from the DB
+  // 3. Today's Route Plans & ACTUAL VISITS (Merged)
   const { data: profile } = await supabaseAdmin.from('users').select('email').eq('id', user.id).single();
   const userEmail = profile?.email || user.email;
 
   const startRange = `${today}T00:00:00.000Z`;
   const endRange   = `${today}T23:59:59.999Z`;
 
-  console.log(`[MobileHome Debug] Searching for ${user.id} / ${userEmail} strictly on [${today}]`);
-
-  // B. Try the main view first (Aggressive Case-Insensitive)
-  let { data: rawPlans, error: planErr } = await supabaseAdmin
+  // Fetch planned activities
+  let { data: rawPlans } = await supabaseAdmin
     .from('v_route_plan_daily')
     .select('*')
     .or(`user_id.eq.${user.id}${userEmail ? `,fe_email.ilike.${userEmail}` : ''}`)
     .gte('plan_date', startRange)
     .lte('plan_date', endRange);
-  
-  if (planErr) {
-    console.error(`[MobileHome Debug] Main Query Failed: ${planErr.message}`);
-    // C. FINAL FAILSAFE: Query raw table if view fails
-    const { data: fallbackPlans } = await supabaseAdmin
-      .from('route_plans')
-      .select('id, user_id, plan_date, org_id')
-      .eq('user_id', user.id)
-      .gte('plan_date', startRange)
-      .lte('plan_date', endRange);
-    if (fallbackPlans && fallbackPlans.length > 0) rawPlans = fallbackPlans;
-  }
 
-  // D. DEDUPLICATION: Ensure we only have UNIQUE plans by ID
+  // Fetch actual work performed today (to catch ad-hoc visits)
+  const { data: actualSubmissions } = await supabaseAdmin
+    .from('form_submissions')
+    .select('id, outlet_name, outlet_id, submitted_at')
+    .eq('user_id', user.id)
+    .gte('submitted_at', `${today}T00:00:00+05:30`)
+    .lte('submitted_at', `${today}T23:59:59+05:30`);
+
+  const visitedOutletNames = new Set((actualSubmissions || []).map(s => s.outlet_name?.toLowerCase()));
+  const visitedOutletIds   = new Set((actualSubmissions || []).map(s => s.outlet_id).filter(Boolean));
+
   const plans = (rawPlans || []).filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
-  
-  const finalCount = plans.length;
-  console.log(`[MobileHome Debug] Resolved UNIQUE Route Plans: ${finalCount}`);
-
   let routePlans = [];
+  
+  const storeMap: Record<string, any> = {};
+
+  // 1. Process Planned Outlets
   if (plans && plans.length > 0) {
     const planIds = plans.map(p => p.id);
-    const { data: outlets, error: outErr } = await supabaseAdmin
+    const { data: outlets } = await supabaseAdmin
       .from('v_route_outlet_detail')
       .select('*')
       .in('route_plan_id', planIds)
       .order('visit_order', { ascending: true });
     
-    if (outErr) console.error(`[MobileHome Debug] Outlet Error: ${outErr.message}`);
-    
-    // E. GROUPING: Consolidate all activities for each unique store
-    const storeMap: Record<string, any> = {};
     (outlets || []).forEach(o => {
-      const sid = o.store_id;
+      const sid = o.store_id || o.outlet_id;
       if (!storeMap[sid]) {
-        storeMap[sid] = {
-          ...o,
-          activities: [],
-          status: o.status // initial status
-        };
+        storeMap[sid] = { ...o, activities: [], status: o.status };
       }
       
-      // Add this activity to the outlet's list
+      const isActuallyVisited = visitedOutletIds.has(sid) || visitedOutletNames.has(o.store_name?.toLowerCase());
+      if (isActuallyVisited) storeMap[sid].status = 'visited';
+
       if (o.activity_id) {
-        const activityStatus = o.status || 'pending';
         storeMap[sid].activities.push({
           id: o.activity_id,
           name: o.activity_name || "Assigned Task",
-          plan_id: o.route_plan_id,
-          status: activityStatus
+          status: isActuallyVisited ? 'completed' : (o.status || 'pending')
         });
-        
-        // STATUS AGGREGATION: If any activity is visited/completed, mark the store as visited
-        // This ensures the dashboard 'Visited' count is accurate even if some tasks are pending
-        if (activityStatus === 'visited' || activityStatus === 'completed') {
-          storeMap[sid].status = 'visited';
-        }
       }
     });
-
-    // F. Final Payload: Flatten the map into a clean list of stores
-    routePlans = [{
-      id: "consolidated_daily_plan",
-      plan_date: today,
-      outlets: Object.values(storeMap)
-    }];
   }
+
+  // 2. Inject Ad-hoc VISITS
+  (actualSubmissions || []).forEach(s => {
+    const sid = s.outlet_id || s.outlet_name;
+    if (!sid) return;
+    if (!storeMap[sid]) {
+      // Create ad-hoc entry
+      storeMap[sid] = {
+        store_id: s.outlet_id,
+        store_name: s.outlet_name,
+        status: 'visited',
+        activities: [{ id: 'adhoc', name: 'Form Submission', status: 'completed' }]
+      };
+    }
+  });
+
+  routePlans = [{
+    id: "consolidated_daily_plan",
+    plan_date: today,
+    outlets: Object.values(storeMap)
+  }];
 
   // 4. Notifications (Unread count)
   const { count: unread } = await supabaseAdmin.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('is_read', false);
