@@ -862,8 +862,8 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   let routePlans = [];
   
   const storeMap: Record<string, any> = {};
-
-  // 1. Process Planned Outlets
+  
+  // 1. Process Planned Outlets with mapping by BOTH ID and NAME for robust deduplication
   if (plans && plans.length > 0) {
     const planIds = plans.map(p => p.id);
     const { data: outlets } = await supabaseAdmin
@@ -874,13 +874,16 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     
     (outlets || []).forEach(o => {
       const sid = o.store_id || o.outlet_id;
+      const sname = (o.store_name || '').toLowerCase().trim();
+      
+      const isActuallyVisitedByID = sid && visitedOutletIds.has(sid);
+      const isActuallyVisitedByName = sname && visitedOutletNames.has(sname);
+      const isActuallyVisited = isActuallyVisitedByID || isActuallyVisitedByName;
+
       if (!storeMap[sid]) {
-        storeMap[sid] = { ...o, activities: [], status: o.status };
+        storeMap[sid] = { ...o, activities: [], status: isActuallyVisited ? 'visited' : (o.status || 'pending') };
       }
       
-      const isActuallyVisited = visitedOutletIds.has(sid) || visitedOutletNames.has(o.store_name?.toLowerCase());
-      if (isActuallyVisited) storeMap[sid].status = 'visited';
-
       if (o.activity_id) {
         storeMap[sid].activities.push({
           id: o.activity_id,
@@ -891,14 +894,31 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     });
   }
 
-  // 2. Inject Ad-hoc VISITS
+  // 2. Inject Ad-hoc VISITS with cross-referencing to Planned stores
   (actualSubmissions || []).forEach(s => {
-    const sid = s.outlet_id || s.outlet_name;
-    if (!sid) return;
-    if (!storeMap[sid]) {
-      // Create ad-hoc entry
-      storeMap[sid] = {
-        store_id: s.outlet_id,
+    const sid = s.outlet_id;
+    const sname = (s.outlet_name || '').toLowerCase().trim();
+    
+    // Attempt to find an existing planned store by ID first, then by Name
+    let existingKey = sid && storeMap[sid] ? sid : null;
+    if (!existingKey && sname) {
+      existingKey = Object.keys(storeMap).find(k => (storeMap[k].store_name || '').toLowerCase().trim() === sname) || null;
+    }
+
+    if (existingKey) {
+      // Merge with existing planned store
+      storeMap[existingKey].status = 'visited';
+      // Ensure it has at least one activity marking it as completed
+      if (storeMap[existingKey].activities.length === 0) {
+        storeMap[existingKey].activities.push({ id: 'adhoc', name: 'Form Submission', status: 'completed' });
+      } else {
+        storeMap[existingKey].activities.forEach((a: any) => a.status = 'completed');
+      }
+    } else if (sid || sname) {
+      // Create ad-hoc entry if definitely not planned
+      const key = sid || sname;
+      storeMap[key] = {
+        store_id: sid,
         store_name: s.outlet_name,
         status: 'visited',
         activities: [{ id: 'adhoc', name: 'Form Submission', status: 'completed' }]
