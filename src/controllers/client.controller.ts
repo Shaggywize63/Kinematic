@@ -142,9 +142,7 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
  */
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, modules, password } = req.body;
-
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
   const { data: client, error } = await supabaseAdmin
     .from('clients')
@@ -244,6 +242,7 @@ export const deleteClient = asyncHandler(async (req: AuthRequest, res: Response)
   const user = req.user!;
   const { id } = req.params;
 
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   const { error } = await supabaseAdmin
     .from('clients')
     .delete()

@@ -16,7 +16,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
+import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { DEMO_ORG_ID, getMockCities, getMockStores, getMockActivities } from '../utils/demoData';
 
 // ─── Helper: build a generic CRUD controller for a table ───
@@ -30,7 +30,11 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       .select(getSelect(tableName))
       .eq('org_id', user.org_id);
 
-    if (user.client_id) q = q.eq('client_id', user.client_id);
+    if (isUUID(user.client_id)) {
+      q = q.eq('client_id', user.client_id);
+    } else if (isUUID(req.query.client_id)) {
+      q = q.eq('client_id', req.query.client_id as string);
+    }
 
     const { data, error } = await q.order('created_at', { ascending: false });
     if (error) { badRequest(res, error.message); return; }
@@ -43,7 +47,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     let q = supabaseAdmin
       .from(tableName).select('*').eq('id', id).eq('org_id', user.org_id);
     
-    if (user.client_id) q = q.eq('client_id', user.client_id);
+    if (isUUID(user.client_id)) q = q.eq('client_id', user.client_id);
     
     const { data, error } = await q.single();
     if (error || !data) { notFound(res, `${tableName} record not found`); return; }
@@ -74,7 +78,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       .from(tableName).update({ ...rest, updated_at: new Date().toISOString() })
       .eq('id', id).eq('org_id', user.org_id);
     
-    if (user.client_id) q = q.eq('client_id', user.client_id);
+    if (isUUID(user.client_id)) q = q.eq('client_id', user.client_id);
     
     const { data, error } = await q.select().single();
     if (error) { badRequest(res, error.message); return; }
@@ -90,7 +94,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     let q = supabaseAdmin
       .from(tableName).delete().eq('id', id).eq('org_id', user.org_id);
     
-    if (user.client_id) q = q.eq('client_id', user.client_id);
+    if (isUUID(user.client_id)) q = q.eq('client_id', user.client_id);
     
     const { error } = await q;
     if (error) { badRequest(res, error.message); return; }

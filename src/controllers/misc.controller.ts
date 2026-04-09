@@ -1,6 +1,6 @@
 import { Request, Response } from 'express'
 import { supabaseAdmin } from '../lib/supabase'
-import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok } from '../utils'
+import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID } from '../utils'
 import { AuthRequest } from '../types'
 import { logger } from '../lib/logger'
 import { DEMO_ORG_ID, getMockZones, getMockClients, getMockSecurityAlerts } from '../utils/demoData'
@@ -14,7 +14,7 @@ export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*, visitor:visitor_id(id, name, role), executive:executive_id(id, name, zone_id, zones!zone_id(name))')
     .eq('org_id', user.org_id).eq('date', date);
 
-  if (user.client_id) query = query.eq('client_id', user.client_id);
+  if (isUUID(user.client_id)) query = query.eq('client_id', user.client_id);
   if (user.role === 'executive') query = query.eq('executive_id', user.id);
   if (user.role === 'supervisor') query = query.eq('visitor_id', user.id);
   const { data, error } = await query
@@ -86,7 +86,7 @@ export const getAllGrievances = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*, submitted_by_user:submitted_by(id, name, zone_id)', { count: 'exact' })
     .eq('org_id', user.org_id);
 
-  if (user.client_id) query = query.eq('client_id', user.client_id);
+  if (isUUID(user.client_id)) query = query.eq('client_id', user.client_id);
   if (status) query = query.eq('status', status as string);
   const { data, error, count } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
@@ -179,13 +179,13 @@ export const getUsers = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
-  if (user.client_id) {
+  if (isUUID(user.client_id)) {
     if (isPrivileged) {
       query = query.or(`client_id.eq.${user.client_id},client_id.is.null`);
     } else {
       query = query.eq('client_id', user.client_id);
     }
-  } else if (client_id) {
+  } else if (isUUID(client_id)) {
     query = query.eq('client_id', client_id as string);
   }
 
@@ -452,7 +452,7 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
       const query = supabaseAdmin.from('users').update(updates).eq('id', req.params.id)
       if (req.user?.role !== 'super_admin' && req.user?.role !== 'admin') {
         query.eq('org_id', req.user!.org_id)
-        if (req.user?.client_id) query.eq('client_id', req.user!.client_id)
+        if (isUUID(req.user?.client_id)) query.eq('client_id', req.user!.client_id)
       }
       const { data: dbData, error } = await query.select()
       if (error) throw new AppError(500, `DB update failed: ${error.message}`, 'DB_ERROR')
@@ -516,8 +516,10 @@ export const getZones = asyncHandler<AuthRequest>(async (req, res) => {
   let query = supabaseAdmin.from('zones')
     .select('*').eq('org_id', user.org_id).eq('is_active', true);
 
-  if (user.client_id) {
+  if (isUUID(user.client_id)) {
     query = query.eq('client_id', user.client_id);
+  } else if (isUUID(req.query.client_id)) {
+    query = query.eq('client_id', req.query.client_id as string);
   }
 
   if (user.role === 'city_manager' && user.assigned_cities?.length) {
@@ -577,7 +579,7 @@ export const updateZone = asyncHandler<AuthRequest>(async (req, res) => {
   };
   
   let query = supabaseAdmin.from('zones').update(updates).eq('id', id).eq('org_id', user.org_id);
-  if (user.client_id) query = query.eq('client_id', user.client_id);
+  if (isUUID(user.client_id)) query = query.eq('client_id', user.client_id);
   
   const { data, error } = await query.select().single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -590,7 +592,7 @@ export const deleteZone = asyncHandler<AuthRequest>(async (req, res) => {
   const { id } = req.params;
   
   let query = supabaseAdmin.from('zones').delete().eq('id', id).eq('org_id', user.org_id);
-  if (user.client_id) query = query.eq('client_id', user.client_id);
+  if (isUUID(user.client_id)) query = query.eq('client_id', user.client_id);
   
   const { error } = await query;
   if (error) {
@@ -604,11 +606,18 @@ export const deleteZone = asyncHandler<AuthRequest>(async (req, res) => {
 export const getDashboardSummary = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   const date = (req.query.date as string) || todayDate()
-  const [attRes, subRes, sosRes] = await Promise.all([
-    supabaseAdmin.from('attendance').select('user_id, status', { count: 'exact' }).eq('org_id', user.org_id).eq('date', date).filter('client_id', 'eq', user.client_id || undefined),
-    supabaseAdmin.from('form_submissions').select('id, is_converted', { count: 'exact' }).eq('org_id', user.org_id).gte('submitted_at', date + 'T00:00:00+05:30').lte('submitted_at', date + 'T23:59:59+05:30').filter('client_id', 'eq', user.client_id || undefined),
-    supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'active').filter('client_id', 'eq', user.client_id || undefined),
-  ])
+  let attQ = supabaseAdmin.from('attendance').select('user_id, status', { count: 'exact' }).eq('org_id', user.org_id).eq('date', date)
+  let subQ = supabaseAdmin.from('form_submissions').select('id, is_converted', { count: 'exact' }).eq('org_id', user.org_id).gte('submitted_at', date + 'T00:00:00+05:30').lte('submitted_at', date + 'T23:59:59+05:30')
+  let sosQ = supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'active')
+
+  if (isUUID(user.client_id)) {
+    attQ = attQ.eq('client_id', user.client_id)
+    subQ = subQ.eq('client_id', user.client_id)
+    sosQ = sosQ.eq('client_id', user.client_id)
+  }
+
+  const [attRes, subRes, sosRes] = await Promise.all([attQ, subQ, sosQ])
+
   const totalEngagements = subRes.count || 0
   const totalTff = (subRes.data || []).filter((s: any) => s.is_converted).length
   sendSuccess(res, {
@@ -624,11 +633,21 @@ export const getDashboardSummary = asyncHandler<AuthRequest>(async (req, res) =>
 
 export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
+  let aQ = supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!attendance_user_id_fkey(name, zones(name))').eq('org_id', user.org_id);
+  let fQ = supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users!user_id(name)').eq('org_id', user.org_id);
+  let sQ = supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users!user_id(name)').eq('org_id', user.org_id);
+
+  if (isUUID(user.client_id)) {
+    aQ = aQ.eq('client_id', user.client_id);
+    fQ = fQ.eq('client_id', user.client_id);
+    sQ = sQ.eq('client_id', user.client_id);
+  }
+
   const [attRes, subRes, sosRes] = await Promise.all([
-    supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!attendance_user_id_fkey(name, zones(name))').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('checkin_at', { ascending: false }).limit(10),
-    supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users!user_id(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('submitted_at', { ascending: false }).limit(10),
-    supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users!user_id(name)').eq('org_id', user.org_id).filter('client_id', 'eq', user.client_id || undefined).order('created_at', { ascending: false }).limit(5),
-  ])
+    aQ.order('checkin_at', { ascending: false }).limit(10),
+    fQ.order('submitted_at', { ascending: false }).limit(10),
+    sQ.order('created_at', { ascending: false }).limit(5),
+  ]);
   const feed = [
     ...(attRes.data || []).map((a: any) => ({ type: 'attendance', event: a.status === 'checked_in' ? 'Check-in' : 'Check-out', user: a.users?.name, zone: a.users?.zones?.name, time: a.checkin_at, id: a.id })),
     ...(subRes.data || []).map((s: any) => ({ type: 'form', event: 'Form submitted' + (s.is_converted ? ' ✓ TFF' : ''), user: s.users?.name, outlet: s.outlet_name, time: s.submitted_at, id: s.id })),
@@ -832,7 +851,7 @@ export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Resp
     .eq('org_id', user.org_id)
     .order('created_at', { ascending: false })
 
-  if (user.client_id) query = query.eq('client_id', user.client_id)
+  if (isUUID(user.client_id)) query = query.eq('client_id', user.client_id)
 
   const { data, error, count } = await query.range(offset, offset + limit - 1)
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
