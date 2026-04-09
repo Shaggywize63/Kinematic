@@ -20,7 +20,7 @@ const today  = () => todayDate();
 ───────────────────────────────────────────────────────────── */
 export const getRoutePlans = asyncHandler(async (req: Request, res: Response) => {
   const org   = orgId(req);
-  const date  = (req.query.date as string) || today();
+  const date  = parseAppDate((req.query.date as string) || today());
   const uid   = req.query.user_id as string | undefined;
   const stat  = req.query.status  as string | undefined;
   const zone  = req.query.zone_id as string | undefined;
@@ -71,7 +71,7 @@ export const getRoutePlans = asyncHandler(async (req: Request, res: Response) =>
 ───────────────────────────────────────────────────────────── */
 export const getRoutePlanSummary = asyncHandler(async (req: Request, res: Response) => {
   const org  = orgId(req);
-  const date = (req.query.date as string) || today();
+  const date = parseAppDate((req.query.date as string) || today());
 
   let q = supabase
     .from('route_plans')
@@ -110,7 +110,7 @@ export const getRoutePlanSummary = asyncHandler(async (req: Request, res: Respon
 ───────────────────────────────────────────────────────────── */
 export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) => {
   const uid  = userId(req);
-  const date = (req.query.date as string) || today();
+  const date = parseAppDate((req.query.date as string) || today());
 
   console.log(`[Diagnostic] Authenticated UID: ${uid}`);
   console.log(`[Diagnostic] Requested Date: ${date}`);
@@ -530,7 +530,7 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
 ───────────────────────────────────────────────────────────── */
 export const getImports = asyncHandler(async (req: Request, res: Response) => {
   const org  = orgId(req);
-  const date = (req.query.date as string) || today();
+  const date = parseAppDate((req.query.query_date as string) || (req.query.date as string) || today());
 
   let q = supabase
     .from('route_plan_imports')
