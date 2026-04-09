@@ -725,8 +725,14 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
   const today = isoDate(toIST(new Date()));
   const sevenDaysAgo = isoDate(new Date(Date.now() - 6 * 86400000));
 
-  // 1. Attendance Today (Minimal summary)
+  // 1. Definition of all queries
   let attInitQuery = supabaseAdmin.from('attendance').select('status, is_regularised, checkout_at').eq('org_id', user.org_id).eq('date', today);
+  let execInitQuery = supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
+  let kpisInitQuery = supabaseAdmin.from('v_daily_kpis').select('*').eq('org_id', user.org_id).eq('date', today);
+  let grievanceInitQuery = supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'submitted');
+  let weekSubsInitQuery = supabaseAdmin.from('form_submissions').select('submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${sevenDaysAgo}T00:00:00`);
+
+  // 2. Application of client_id filter
   if (isUUID(user.client_id)) {
     attInitQuery = attInitQuery.eq('client_id', user.client_id);
     execInitQuery = execInitQuery.eq('client_id', user.client_id);
