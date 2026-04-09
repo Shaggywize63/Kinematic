@@ -143,38 +143,39 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
     console.log('[Diagnostic] Outlet Names:', outlets.map((o: any) => o.store_name).join(', '));
   }
   
-  // Distribute outlets back to their respective plans with deep deduplication
-  const outletsByPlan: Record<string, any[]> = {};
+  // Distribute and Deduplicate outlets across ALL plans for the day
+  const unifiedOutlets: any[] = [];
+  const storeMap = new Map();
+
   (outlets || []).forEach((o: any) => {
-    if (!outletsByPlan[o.route_plan_id]) outletsByPlan[o.route_plan_id] = [];
-    
-    // Check if we already have this store in this plan
-    const existingIdx = outletsByPlan[o.route_plan_id].findIndex(e => e.store_id === o.store_id);
-    if (existingIdx === -1) {
-      outletsByPlan[o.route_plan_id].push(o);
+    const statusRank: Record<string, number> = { 'completed': 3, 'checked_in': 2, 'pending': 1 };
+    const currentRank = statusRank[o.status] || 0;
+
+    if (!storeMap.has(o.store_id)) {
+      storeMap.set(o.store_id, o);
+      unifiedOutlets.push(o);
     } else {
-      // Prioritization logic: keep the 'completed' or 'checked_in' version over 'pending'
-      const existing = outletsByPlan[o.route_plan_id][existingIdx];
-      const statusRank: Record<string, number> = { 'completed': 3, 'checked_in': 2, 'pending': 1 };
-      
-      const newRank = statusRank[o.status] || 0;
-      const oldRank = statusRank[existing.status] || 0;
-      
-      if (newRank > oldRank) {
-        outletsByPlan[o.route_plan_id][existingIdx] = o;
+      const existing = storeMap.get(o.store_id);
+      const existingRank = statusRank[existing.status] || 0;
+
+      // Keep the outlet with the most localized progress
+      if (currentRank > existingRank) {
+        const idx = unifiedOutlets.indexOf(existing);
+        unifiedOutlets[idx] = o;
+        storeMap.set(o.store_id, o);
       }
     }
   });
 
-  const result = plan.map((p: any) => ({
-    ...p,
-    outlets: (outletsByPlan[p.id] || []).sort((a, b) => (a.visit_order || 0) - (b.visit_order || 0))
-  }));
+  // Return a single unified plan object or a simplified list
+  const consolidatedPlan = {
+    ...plan[0], // Use the first plan's metadata as a base
+    id: 'unified-' + date,
+    outlets: unifiedOutlets.sort((a, b) => (a.visit_order || 0) - (b.visit_order || 0)),
+    multi_plan_ids: planIds // Keep track of the actual DB IDs just in case
+  };
 
-  // Final Safeguard: Deduplicate plans by ID
-  const uniqueResult = Array.from(new Map(result.map(p => [p.id, p])).values());
-
-  return ok(res, uniqueResult);
+  return ok(res, [consolidatedPlan]); // Still returning an array to maintain app compatibility
 });
 
 /* ─────────────────────────────────────────────────────────────
