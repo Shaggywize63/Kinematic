@@ -807,8 +807,8 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const today = todayDate();
   console.log(`[MobileHome] User ${user.id} fetching home. Date=${today}`);
 
-  // 1. Today Attendance Status (Crucial for shift active state)
-  const { data: attRecord, error: attError } = await supabaseAdmin
+  // 1. Today Attendance Status (Unified date lookup with active shift fallback)
+  let { data: attRecord, error: attError } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)')
     .eq('user_id', user.id)
@@ -816,9 +816,27 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  // FALLBACK: If no record for exact date, look for ANY active shift (to handle timezone/midnight drift)
+  if (!attRecord && !attError) {
+    console.log(`[MobileHome] No record for ${today}. Checking for active shifts...`);
+    const { data: activeShift } = await supabaseAdmin
+      .from('attendance')
+      .select('*, breaks(*)')
+      .eq('user_id', user.id)
+      .in('status', ['checked_in', 'on_break'])
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    
+    if (activeShift) {
+      console.log(`[MobileHome] Recovered active shift from ${activeShift.date}`);
+      attRecord = activeShift;
+    }
+  }
   
   if (attError) console.log(`[MobileHome] Attendance Error: ${attError.message}`);
-  console.log(`[MobileHome] Attendance Record Found: ${!!attRecord}, Status=${attRecord?.status}, CheckinAt=${attRecord?.checkin_at}`);
+  console.log(`[MobileHome] Result: Found=${!!attRecord}, Id=${attRecord?.id}, Status=${attRecord?.status}`);
   
   // 2. Summary Stats
   const istToday = today; // Sync today date
