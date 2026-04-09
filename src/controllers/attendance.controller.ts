@@ -309,7 +309,7 @@ export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = (req.query.date as string) || todayDate();
 
-  const { data, error } = await supabaseAdmin
+  let { data, error } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)')
     .eq('user_id', user.id)
@@ -317,6 +317,18 @@ export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  if (!data && !error) {
+    const { data: active } = await supabaseAdmin
+      .from('attendance')
+      .select('*, breaks(*)')
+      .eq('user_id', user.id)
+      .in('status', ['checked_in', 'on_break'])
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (active) data = active;
+  }
 
   if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }
   ok(res, enrichWithHours(data));
