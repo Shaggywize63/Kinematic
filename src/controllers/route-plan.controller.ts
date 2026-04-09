@@ -155,7 +155,10 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
     outlets: outletsByPlan[p.id] || []
   }));
 
-  return ok(res, result);
+  // Final Safeguard: Deduplicate by ID to prevent ghost plans from affecting the UI
+  const uniqueResult = Array.from(new Map(result.map(p => [p.id, p])).values());
+
+  return ok(res, uniqueResult);
 });
 
 /* ─────────────────────────────────────────────────────────────
@@ -171,7 +174,9 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
     frequency = 'daily', territory_label,
   } = req.body;
 
-  const acts = activity_ids && activity_ids.length > 0 ? activity_ids : (activity_id ? [activity_id] : []);
+  // Ensure activity_ids are unique and clean
+  const rawActs = activity_ids && activity_ids.length > 0 ? activity_ids : (activity_id ? [activity_id] : []);
+  const acts = [...new Set(rawActs.filter(Boolean))];
 
   if (!user_id || !plan_date || acts.length === 0) return badRequest(res, 'user_id, activity_ids and plan_date are required');
   if (!Array.isArray(outlets) || outlets.length === 0) return badRequest(res, 'outlets[] must be a non-empty array');
