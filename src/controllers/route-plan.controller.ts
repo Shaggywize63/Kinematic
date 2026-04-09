@@ -153,9 +153,9 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
     if (existingIdx === -1) {
       outletsByPlan[o.route_plan_id].push(o);
     } else {
-      // Prioritization logic: keep the 'completed' or 'in_progress' version over 'pending'
+      // Prioritization logic: keep the 'completed' or 'checked_in' version over 'pending'
       const existing = outletsByPlan[o.route_plan_id][existingIdx];
-      const statusRank: Record<string, number> = { 'completed': 3, 'in_progress': 2, 'pending': 1 };
+      const statusRank: Record<string, number> = { 'completed': 3, 'checked_in': 2, 'pending': 1 };
       
       const newRank = statusRank[o.status] || 0;
       const oldRank = statusRank[existing.status] || 0;
