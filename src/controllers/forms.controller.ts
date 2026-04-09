@@ -260,10 +260,6 @@ export const addField = asyncHandler<AuthRequest>(async (req, res) => {
   if (error) return badRequest(res, error.message);
   return created(res, data, 'Field added');
 });
-
-// ── Submissions ────────────────────────────────────────────
-
-// POST /api/v1/forms/submit
 export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const result = submissionSchema.safeParse(req.body);
