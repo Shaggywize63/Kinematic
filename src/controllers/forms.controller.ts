@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
-import { AuthRequest, UserRole } from '../types';
+import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 
@@ -164,13 +164,17 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     .from('form_submissions')
     .select('*, form_templates:builder_forms!left(title), activities!left(name), profile:users!left!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
 
-  // Use client_id if provided (for multi-client selection override)
+  const isAdmin = user.role === 'admin' || user.role === 'super_admin' || (user.role as string) === 'main_admin';
+
+  // Use client_id if provided, otherwise default to user's org
   if (client_id && client_id !== 'undefined') {
     query = query.eq('org_id', client_id);
-  } else if (user.role !== 'admin' && user.role !== 'super_admin' && (user.role as string) !== 'main_admin') {
-     // Enforce org_id for field-level roles to maintain security boundaries
+  } else if (!isAdmin) {
      query = query.eq('org_id', user.org_id);
   }
+
+  // Debug: If Admin and still 0, we can try removing ALL org filtering to find where the data is
+  // But for now, we've loosened it to the max safe level.
 
   if (date) {
     query = query.filter('submitted_at', 'gte', `${date}T00:00:00`).filter('submitted_at', 'lte', `${date}T23:59:59`);
