@@ -2,8 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest } from '../utils/response';
-import { asyncHandler } from '../utils/asyncHandler';
+import { ok, created, badRequest, isUUID } from '../utils';
 import { DEMO_ORG_ID, getMockVisitLogs } from '../utils/demoData';
 
 const visitSchema = z.object({
@@ -159,7 +158,7 @@ export const getTeamVisits = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('org_id', user.org_id)
     .eq('date', date);
 
-  if (user.client_id) {
+  if (isUUID(user.client_id)) {
     query = query.eq('client_id', user.client_id);
   }
 

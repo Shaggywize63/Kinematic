@@ -1,13 +1,16 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin as supabase } from '../lib/supabase';
-import { ok, created, badRequest, notFound, todayDate } from '../utils';
+import { ok, created, badRequest, notFound, todayDate, isUUID } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 
 /* ─────────────────────────────────────────────────────────────
    HELPERS
 ───────────────────────────────────────────────────────────── */
 const orgId  = (req: Request) => (req as any).user.org_id as string;
-const clientId = (req: Request) => (req as any).user.client_id as string | undefined;
+const clientId = (req: Request) => {
+  const cid = (req as any).user.client_id as string | undefined;
+  return isUUID(cid) ? cid : undefined;
+};
 const userId = (req: Request) => (req as any).user.id as string;
 const today  = () => todayDate();
 
@@ -243,12 +246,14 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
 export const updateRoutePlan = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { notes, status, territory_label, frequency } = req.body;
+  const org = orgId(req);
+  if (!isUUID(id)) return notFound(res, 'Invalid record ID');
 
   let q = supabase
     .from('route_plans')
     .update({ notes, status, territory_label, frequency })
     .eq('id', id)
-    .eq('org_id', orgId(req));
+    .eq('org_id', org);
 
   const cid = clientId(req);
   if (cid) q = q.eq('client_id', cid);
@@ -265,6 +270,7 @@ export const updateRoutePlan = asyncHandler(async (req: Request, res: Response) 
 ───────────────────────────────────────────────────────────── */
 export const deleteRoutePlan = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+  if (!isUUID(id)) return notFound(res, 'Invalid record ID');
   const { error } = await supabase
     .from('route_plans')
     .delete()
@@ -281,6 +287,7 @@ export const deleteRoutePlan = asyncHandler(async (req: Request, res: Response) 
 ───────────────────────────────────────────────────────────── */
 export const updateOutletVisit = asyncHandler(async (req: Request, res: Response) => {
   const { outletId } = req.params;
+  if (!isUUID(outletId)) return notFound(res, 'Invalid record ID');
   const {
     status,
     checkin_lat, checkin_lng, checkin_distance_m,
