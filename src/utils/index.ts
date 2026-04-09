@@ -108,48 +108,52 @@ export function formatAppDate(dateStr: string | Date | null): string {
   return `${day}--${month}--${year}`;
 }
 
-// FIXED: Robust date parsing for all formats (DD--MM--YYYY, DD-MM-YYYY, DD/MM/YYYY, YYYY-MM-DD)
+// IMPROVED: Flexible date parsing with MM/DD/YYYY detection
 export function parseAppDate(appDate: string | null): string {
   if (!appDate) return dbToday();
+  const raw = appDate.trim();
   
-  // 1. Handle YYYY-MM-DD or ISO
-  if (appDate.match(/^\d{4}-\d{2}-\d{2}/)) return appDate.substring(0, 10);
+  // 1. Handle YYYY-MM-DD
+  if (raw.match(/^\d{4}-\d{2}-\d{2}/)) return raw.substring(0, 10);
   
-  // 2. Handle DD/MM/YYYY or MM/DD/YYYY? 
-  // In our app context, Dashboard sends MM/DD/YYYY or DD/MM/YYYY based on locale.
-  // We will attempt to parse it manually.
-  const separators = ['--', '-', '/'];
-  for (const sep of separators) {
-    if (appDate.includes(sep)) {
-      const parts = appDate.split(sep);
-      if (parts.length === 3) {
-        // We assume DD-MM-YYYY or MM-DD-YYYY. 
-        // If the first part > 12, it must be DD.
-        let d = parseInt(parts[0]);
-        let m = parseInt(parts[1]);
-        let y = parseInt(parts[2]);
-        
-        // Handle years like '26' -> 2026
-        if (y < 100) y += 2000;
-        
-        // Heuristic: If dashboard is using US format (MM/DD/YYYY)
-        if (sep === '/' && m > 12) {
-           // Swap d and m
-           [d, m] = [m, d];
-        }
-
-        const dd = d.toString().padStart(2, '0');
-        const mm = m.toString().padStart(2, '0');
-        return `${y}-${mm}-${dd}`;
-      }
-    }
+  // 2. Handle DD--MM--YYYY (Double dash)
+  if (raw.includes('--')) {
+    const p = raw.split('--');
+    if (p.length === 3) return `${p[2]}-${p[1]}-${p[0]}`;
   }
 
-  // 3. Last resort Date object
-  try {
-    const d = new Date(appDate);
-    if (!isNaN(d.getTime())) return isoDate(d);
-  } catch (e) {}
+  // 3. Handle slashed or single-dashed dates (MM/DD/YYYY or DD/MM/YYYY)
+  const sep = raw.includes('/') ? '/' : (raw.includes('-') ? '-' : null);
+  if (sep) {
+    const p = raw.split(sep);
+    if (p.length === 3) {
+      let p1 = parseInt(p[0]);
+      let p2 = parseInt(p[1]);
+      let y = parseInt(p[2]);
+      if (y < 100) y += 2000;
+
+      // Heuristic: If today is April (Month 4), and the first part is 4 and second is 9, 
+      // then 4/9/2026 is April 9 (MM/DD/YYYY).
+      // Most Dashboards use MM/DD/YYYY.
+      // If p1 > 12, it must be DD/MM/YYYY.
+      // If p2 > 12, it must be MM/DD/YYYY.
+      
+      let finalM, finalD;
+      if (p1 > 12) { // Clearly DD/MM/YYYY
+        finalD = p1; finalM = p2;
+      } else if (p2 > 12) { // Clearly MM/DD/YYYY
+        finalM = p1; finalD = p2;
+      } else {
+        // AMBIGUOUS: Default to MM/DD/YYYY (Standard for most web inputs unless specified)
+        // But for Indian context, we might prefer DD/MM.
+        // However, the user's screenshot shows 04/09 (April 9). 
+        // In April, if a user filters for "yesterday", they expect April 9.
+        finalM = p1; finalD = p2; 
+      }
+
+      return `${y}-${finalM.toString().padStart(2, '0')}-${finalD.toString().padStart(2, '0')}`;
+    }
+  }
 
   return dbToday();
 }
