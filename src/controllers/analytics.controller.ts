@@ -807,14 +807,19 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const today = todayDate();
   console.log(`[MobileHome] User ${user.id} fetching home. Date=${today}`);
 
-  // 1. Today Attendance Status (Crucial for flicker fix)
-  const { data: attRecord, error: attError } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('user_id', user.id).eq('date', today).maybeSingle();
+  // 1. Today Attendance Status (Crucial for shift active state)
+  const { data: attRecord, error: attError } = await supabaseAdmin
+    .from('attendance')
+    .select('*, breaks(*)')
+    .eq('user_id', user.id)
+    .eq('date', today)
+    .maybeSingle();
   
-  if (attError) console.log(`[MobileHome] Error: ${attError.message}`);
-  console.log(`[MobileHome] Attendance Result: ${!!attRecord}, Status=${attRecord?.status}`);
+  if (attError) console.log(`[MobileHome] Attendance Error: ${attError.message}`);
+  console.log(`[MobileHome] Attendance Record Found: ${!!attRecord}, Status=${attRecord?.status}, CheckinAt=${attRecord?.checkin_at}`);
   
-  // 2. Summary Stats (ORAL-LEVEL Alignment) - Scaling to Org-level to match Dashboard "Total Forms Filled"
-  const istToday = todayDate();
+  // 2. Summary Stats
+  const istToday = today; // Sync today date
   
   let orgTffQuery = supabaseAdmin.from('form_submissions')
     .select('id', { count: 'exact', head: true })
@@ -825,7 +830,6 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   if (isUUID(user.client_id)) orgTffQuery = orgTffQuery.eq('client_id', user.client_id);
     
   const { count: orgTffCount } = await orgTffQuery;
-  console.log(`[MobileHome] Org=${user.org_id} Date=${istToday} OrgTFF=${orgTffCount} AttRecord=${!!attRecord}`);
 
   if (attRecord) {
     enrichWithHours(attRecord);
@@ -847,23 +851,24 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     .gte('plan_date', startRange)
     .lte('plan_date', endRange);
 
-  // Fetch actual work performed today (to catch ad-hoc visits)
+  // Fetch actual work performed today
   const { data: actualSubmissions } = await supabaseAdmin
     .from('form_submissions')
-    .select('id, outlet_name, outlet_id, submitted_at')
+    .select('id, outlet_name, outlet_id, submitted_at, activity_id')
     .eq('user_id', user.id)
     .gte('submitted_at', `${today}T00:00:00+05:30`)
     .lte('submitted_at', `${today}T23:59:59+05:30`);
 
-  const visitedOutletNames = new Set((actualSubmissions || []).map(s => s.outlet_name?.toLowerCase()));
+  const visitedOutletNames = new Set((actualSubmissions || []).map(s => (s.outlet_name || '').toLowerCase().trim()));
   const visitedOutletIds   = new Set((actualSubmissions || []).map(s => s.outlet_id).filter(Boolean));
 
   const plans = (rawPlans || []).filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
   let routePlans = [];
   
   const storeMap: Record<string, any> = {};
-  
-  // 1. Process Planned Outlets with mapping by BOTH ID and NAME for robust deduplication
+  const nameToIdMap: Record<string, string> = {}; // Helper for name-based merging
+
+  // 1. Process Planned Outlets (UUID primary)
   if (plans && plans.length > 0) {
     const planIds = plans.map(p => p.id);
     const { data: outlets } = await supabaseAdmin
@@ -875,54 +880,53 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     (outlets || []).forEach(o => {
       const sid = o.store_id || o.outlet_id;
       const sname = (o.store_name || '').toLowerCase().trim();
-      const dedupeKey = sname || sid; // Key by name consistently
       
       const isActuallyVisitedByID = sid && visitedOutletIds.has(sid);
       const isActuallyVisitedByName = sname && visitedOutletNames.has(sname);
       const isActuallyVisited = isActuallyVisitedByID || isActuallyVisitedByName;
 
-      if (!storeMap[dedupeKey]) {
-        storeMap[dedupeKey] = { ...o, activities: [], status: isActuallyVisited ? 'visited' : (o.status || 'pending') };
+      if (!storeMap[sid]) {
+        storeMap[sid] = { ...o, activities: [], status: isActuallyVisited ? 'visited' : (o.status || 'pending') };
+        if (sname) nameToIdMap[sname] = sid; // Link name to UUID for merging
       }
       
       if (o.activity_id) {
-        storeMap[dedupeKey].activities.push({
+        storeMap[sid].activities.push({
           id: o.activity_id,
           name: o.activity_name || "Assigned Task",
+          plan_id: o.route_plan_id, // Important for App logic
           status: isActuallyVisited ? 'completed' : (o.status || 'pending')
         });
       }
     });
   }
 
-  // 2. Inject Ad-hoc VISITS with cross-referencing to Planned stores
+  // 2. Inject Ad-hoc VISITS with cross-referencing
   (actualSubmissions || []).forEach(s => {
     const sid = s.outlet_id;
     const sname = (s.outlet_name || '').toLowerCase().trim();
     
-    // Attempt to find an existing planned store by ID first, then by Name
-    let existingKey = sid && storeMap[sid] ? sid : null;
-    if (!existingKey && sname) {
-      existingKey = Object.keys(storeMap).find(k => (storeMap[k].store_name || '').toLowerCase().trim() === sname) || null;
-    }
+    // Find the master key (UUID preferred)
+    const existingKey = (sid && storeMap[sid]) ? sid : (sname ? nameToIdMap[sname] : null);
 
     if (existingKey) {
-      // Merge with existing planned store
       storeMap[existingKey].status = 'visited';
-      // Ensure it has at least one activity marking it as completed
       if (storeMap[existingKey].activities.length === 0) {
-        storeMap[existingKey].activities.push({ id: 'adhoc', name: 'Form Submission', status: 'completed' });
+        storeMap[existingKey].activities.push({ 
+          id: s.activity_id || 'adhoc', 
+          name: 'Form Submission', 
+          status: 'completed' 
+        });
       } else {
         storeMap[existingKey].activities.forEach((a: any) => a.status = 'completed');
       }
     } else if (sid || sname) {
-      // Create ad-hoc entry if definitely not planned
       const key = sid || sname;
       storeMap[key] = {
         store_id: sid,
         store_name: s.outlet_name,
         status: 'visited',
-        activities: [{ id: 'adhoc', name: 'Form Submission', status: 'completed' }]
+        activities: [{ id: s.activity_id || 'adhoc', name: 'Form Submission', status: 'completed' }]
       };
     }
   });
