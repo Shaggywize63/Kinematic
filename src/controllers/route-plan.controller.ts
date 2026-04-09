@@ -147,25 +147,34 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
   const unifiedOutlets: any[] = [];
   const storeMap = new Map();
 
+  const nameToIdMap: Record<string, string> = {};
+
   (outlets || []).forEach((o: any) => {
     const statusRank: Record<string, number> = { 'completed': 3, 'checked_in': 2, 'pending': 1 };
     const currentRank = statusRank[o.status] || 0;
     
-    // Key by normalized name to catch stores that look the same but have different IDs
-    const normalizedName = (o.store_name || '').toLowerCase().trim();
-    const dedupeKey = normalizedName || o.store_id;
+    const sid = o.store_id || o.outlet_id;
+    const sname = (o.store_name || '').toLowerCase().trim();
+    
+    // Primary key: UUID; Secondary: Merge by name if UUID is new
+    let masterKey = sid;
+    if (sname && nameToIdMap[sname]) {
+       masterKey = nameToIdMap[sname];
+    } else if (sname) {
+       nameToIdMap[sname] = sid;
+    }
 
-    if (!storeMap.has(dedupeKey)) {
-      storeMap.set(dedupeKey, o);
+    if (!storeMap.has(masterKey)) {
+      storeMap.set(masterKey, o);
       unifiedOutlets.push(o);
     } else {
-      const existing = storeMap.get(dedupeKey);
+      const existing = storeMap.get(masterKey);
       const existingRank = statusRank[existing.status] || 0;
 
       if (currentRank > existingRank) {
         const idx = unifiedOutlets.indexOf(existing);
         unifiedOutlets[idx] = o;
-        storeMap.set(dedupeKey, o);
+        storeMap.set(masterKey, o);
       }
     }
   });
