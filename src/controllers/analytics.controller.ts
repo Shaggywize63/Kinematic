@@ -1,4 +1,4 @@
-import { Response } from 'express';
+import { Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, toIST, isoDate, isUUID } from '../utils';
@@ -29,7 +29,7 @@ const enrichWithHours = (r: any) => {
 };
 
 /* ── GET /api/v1/analytics/summary ───────────────────────── */
-export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
+export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
   const user = req.user!;
   // DEMO MODE REMOVED: Always show real data to ensure testing progress is visible.
 
@@ -52,12 +52,15 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   const openGrievances = openGrievancesRes.count || 0;
   const totalVisits = visitLogsRes.count || 0;
 
-  // Real-time metrics from form_submissions - Selecting minimal fields for speed
-    .lte('submitted_at', `${to}T23:59:59+05:30`);
+  // Real-time metrics from form_submissions - Flattened for build stability
+  let submissionsQuery = supabaseAdmin.from('form_submissions').select('id, is_converted, user_id, submitted_at, date', { count: 'exact' });
+  submissionsQuery = submissionsQuery.eq('org_id', user.org_id);
+  submissionsQuery = submissionsQuery.gte('submitted_at', `${from}T00:00:00+05:30`);
+  submissionsQuery = submissionsQuery.lte('submitted_at', `${to}T23:59:59+05:30`);
 
   if (isUUID(user.client_id)) {
     submissionsQuery = submissionsQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     submissionsQuery = submissionsQuery.eq('client_id', req.query.client_id as string);
   }
 
@@ -91,7 +94,7 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (isUUID(user.client_id)) {
     attendanceQuery = attendanceQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     attendanceQuery = attendanceQuery.eq('client_id', req.query.client_id as string);
   }
 
@@ -129,7 +132,7 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   
   if (isUUID(user.client_id)) {
     topPerfQuery = topPerfQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     topPerfQuery = topPerfQuery.eq('client_id', req.query.client_id as string);
   }
   const { data: topPerf } = await topPerfQuery;
@@ -150,7 +153,7 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   
   if (isUUID(user.client_id)) {
     zonesQuery = zonesQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     zonesQuery = zonesQuery.eq('client_id', req.query.client_id as string);
   }
   const { data: zones } = await zonesQuery;
@@ -175,19 +178,21 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   const totalExecsCount = totalExecs || 1;
   const attendancePct = Math.round((attArr.length / totalExecsCount) * 100);
 
+  const kpisData = {
+    total_tff: totalEngagements,
+    total_engagements: totalEngagements,
+    tff_rate: 100,
+    avg_attendance: kpis?.avg_attendance || (attendancePct > 100 ? 100 : attendancePct),
+    total_leaves: totalLeaves || 0,
+    total_days_worked: totalDaysWorked || 0,
+    total_hours_worked: +totalHoursWorked.toFixed(1),
+    active_sos: activeSos || 0,
+    open_grievances: openGrievances || 0,
+  };
+
   return ok(res, {
     date,
-    kpis: {
-      total_tff: totalEngagements, // User: TFF is the total count (32)
-      total_engagements: totalEngagements,
-      tff_rate: 100, // Default to 100% if TFF is the total
-      avg_attendance: kpis?.avg_attendance || (attendancePct > 100 ? 100 : attendancePct),
-      total_leaves: totalLeaves || 0,
-      total_days_worked: totalDaysWorked || 0,
-      total_hours_worked: +totalHoursWorked.toFixed(1),
-      active_sos: activeSos || 0,
-      open_grievances: openGrievances || 0,
-    },
+    kpis: kpisData,
     top_performers: topPerformers,
     zone_performance: zonePerformance,
     total_executives: totalExecs || 0,
@@ -210,7 +215,7 @@ export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
   
   if (isUUID(user.client_id)) {
     trendQuery = trendQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     trendQuery = trendQuery.eq('client_id', req.query.client_id as string);
   }
   const { data, error } = await trendQuery;
@@ -328,7 +333,7 @@ export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
   
   if (isUUID(user.client_id)) {
     heatmapQuery = heatmapQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     heatmapQuery = heatmapQuery.eq('client_id', req.query.client_id as string);
   }
   const { data, error } = await heatmapQuery;
@@ -438,7 +443,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
   
   if (isUUID(user.client_id)) {
     weeklyQuery = weeklyQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     weeklyQuery = weeklyQuery.eq('client_id', req.query.client_id as string);
   }
   const { data, error } = await weeklyQuery;
@@ -592,7 +597,7 @@ export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => 
   let attQuery = supabaseAdmin.from('attendance').select('*').eq('org_id', user.org_id).eq('date', today);
   if (isUUID(user.client_id)) {
     attQuery = attQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     attQuery = attQuery.eq('client_id', req.query.client_id as string);
   }
   const { data: att } = await attQuery;
@@ -665,7 +670,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   
   if (isUUID(user.client_id)) {
     formsQuery = formsQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     formsQuery = formsQuery.eq('client_id', req.query.client_id as string);
   }
   const { data: forms, error } = await formsQuery;
@@ -734,7 +739,7 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
     kpisInitQuery = kpisInitQuery.eq('client_id', user.client_id);
     grievanceInitQuery = grievanceInitQuery.eq('client_id', user.client_id);
     weekSubsInitQuery = weekSubsInitQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     const cid = req.query.client_id as string;
     attInitQuery = attInitQuery.eq('client_id', cid);
     execInitQuery = execInitQuery.eq('client_id', cid);
