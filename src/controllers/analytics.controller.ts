@@ -983,8 +983,24 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const b = bq as any;
   const alreadyAnswered = Array.isArray(b?.broadcast_answers) && b.broadcast_answers.length > 0;
 
+  // 7. Explicit mapping for Android stability
+  const todayMapped = attRecord ? {
+    id: attRecord.id,
+    date: attRecord.date,
+    status: attRecord.status,
+    checkin_at: attRecord.checkin_at,
+    checkout_at: attRecord.checkout_at,
+    total_hours: attRecord.total_hours,
+    working_minutes: attRecord.working_minutes,
+    checkin_lat: attRecord.checkin_lat,
+    checkin_lng: attRecord.checkin_lng,
+    checkin_selfie_url: attRecord.checkin_selfie_url,
+    checkout_selfie_url: attRecord.checkout_selfie_url,
+    breaks: attRecord.breaks || []
+  } : null;
+
   return ok(res, {
-    today: attRecord || null,
+    today: todayMapped,
     summary: { tff_count: orgTffCount || 0 },
     routePlan: routePlans,
     unreadCount: unread || 0,
