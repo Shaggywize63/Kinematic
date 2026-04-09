@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest, todayDate, toIST, isoDate, isUUID } from '../utils';
+import { ok, badRequest, todayDate, toIST, isoDate, isUUID, formatAppDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { DEMO_ORG_ID, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations } from '../utils/demoData';
 
@@ -882,7 +882,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   // Fetch actual work performed today
   const { data: actualSubmissions } = await supabaseAdmin
     .from('form_submissions')
-    .select('id, outlet_name, outlet_id, submitted_at, activity_id')
+    .select('id, outlet_name, outlet_id, submitted_at, activity_id, check_in_at, check_out_at')
     .eq('user_id', user.id)
     .gte('submitted_at', `${today}T00:00:00+05:30`)
     .lte('submitted_at', `${today}T23:59:59+05:30`);
@@ -929,7 +929,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     });
   }
 
-  // 2. Inject Ad-hoc VISITS with cross-referencing
+  // 2. Inject Ad-hoc VISITS with cross-referencing & TIMING
   (actualSubmissions || []).forEach(s => {
     const sid = s.outlet_id;
     const sname = (s.outlet_name || '').toLowerCase().trim();
@@ -938,15 +938,25 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     const existingKey = (sid && storeMap[sid]) ? sid : (sname ? nameToIdMap[sname] : null);
 
     if (existingKey) {
-      storeMap[existingKey].status = 'visited';
-      if (storeMap[existingKey].activities.length === 0) {
-        storeMap[existingKey].activities.push({ 
+      const target = storeMap[existingKey];
+      target.status = 'visited';
+      
+      // Pivot Timing: Use earliest check-in and latest check-out
+      if (s.check_in_at && (!target.checkin_at || new Date(s.check_in_at) < new Date(target.checkin_at))) {
+        target.checkin_at = s.check_in_at;
+      }
+      if (s.check_out_at && (!target.checkout_at || new Date(s.check_out_at) > new Date(target.checkout_at))) {
+        target.checkout_at = s.check_out_at;
+      }
+
+      if (target.activities.length === 0) {
+        target.activities.push({ 
           id: s.activity_id || 'adhoc', 
           name: 'Form Submission', 
           status: 'completed' 
         });
       } else {
-        storeMap[existingKey].activities.forEach((a: any) => a.status = 'completed');
+        target.activities.forEach((a: any) => a.status = 'completed');
       }
     } else if (sid || sname) {
       const key = sid || sname;
@@ -954,8 +964,11 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
         store_id: sid,
         store_name: s.outlet_name,
         status: 'visited',
+        checkin_at: s.check_in_at,
+        checkout_at: s.check_out_at,
         activities: [{ id: s.activity_id || 'adhoc', name: 'Form Submission', status: 'completed' }]
       };
+      if (sname && !sid) nameToIdMap[sname] = sname;
     }
   });
 
