@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
-import { AuthRequest } from '../types';
+import { AuthRequest, UserRole } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 
@@ -121,7 +121,7 @@ export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   
   const { data, error, count } = await supabaseAdmin
     .from('form_submissions')
-    .select('*, builder_forms(title), activities(name)', { count: 'exact' })
+    .select('*, builder_forms!left(title), activities!left(name)', { count: 'exact' })
     .eq('user_id', user.id)
     .order('submitted_at', { ascending: false })
     .range(from, to);
@@ -162,13 +162,13 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   let query = supabaseAdmin
     .from('form_submissions')
-    .select('*, builder_forms!left(title), activities!left(name), profile:users!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
+    .select('*, form_templates:builder_forms!left(title), activities!left(name), profile:users!left!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
 
-  // If a specific client is selected, use that, otherwise default to user's org
-  if (client_id) {
+  // Use client_id if provided (for multi-client selection override)
+  if (client_id && client_id !== 'undefined') {
     query = query.eq('org_id', client_id);
-  } else if (user.role !== 'super_admin' && user.role !== 'admin' && user.role !== 'main_admin') {
-     // Only enforce org_id for non-admins to allow wider visibility during debugging
+  } else if (user.role !== 'admin' && user.role !== 'super_admin' && (user.role as string) !== 'main_admin') {
+     // Enforce org_id for field-level roles to maintain security boundaries
      query = query.eq('org_id', user.org_id);
   }
 
