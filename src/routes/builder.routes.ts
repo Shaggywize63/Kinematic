@@ -372,3 +372,14 @@ router.post(
 );
 
 export default router;
+
+// Missing Admin Submissions Route (Added to satisfy Dashboard Submissions Page)
+router.get(
+  "/admin/submissions",
+  requireAuth,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    // Delegate to the consolidated forms controller logic
+    const { getAllSubmissions } = require("../controllers/forms.controller");
+    return getAllSubmissions(req, res);
+  })
+);
