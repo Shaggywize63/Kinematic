@@ -942,11 +942,11 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
       target.status = 'visited';
       
       // Pivot Timing: Use earliest check-in and latest check-out
-      if (s.check_in_at && (!target.checkin_at || new Date(s.check_in_at) < new Date(target.checkin_at))) {
-        target.checkin_at = s.check_in_at;
+      if (s.check_in_at && (!target.check_in_at || new Date(s.check_in_at) < new Date(target.check_in_at))) {
+        target.check_in_at = s.check_in_at;
       }
-      if (s.check_out_at && (!target.checkout_at || new Date(s.check_out_at) > new Date(target.checkout_at))) {
-        target.checkout_at = s.check_out_at;
+      if (s.check_out_at && (!target.check_out_at || new Date(s.check_out_at) > new Date(target.check_out_at))) {
+        target.check_out_at = s.check_out_at;
       }
 
       if (target.activities.length === 0) {
@@ -964,8 +964,8 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
         store_id: sid,
         store_name: s.outlet_name,
         status: 'visited',
-        checkin_at: s.check_in_at,
-        checkout_at: s.check_out_at,
+        check_in_at: s.check_in_at,
+        check_out_at: s.check_out_at,
         activities: [{ id: s.activity_id || 'adhoc', name: 'Form Submission', status: 'completed' }]
       };
       if (sname && !sid) nameToIdMap[sname] = sname;
