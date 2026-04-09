@@ -808,28 +808,35 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const appToday = todayDate();
   console.log(`[MobileHome] User ${user.id} fetching home. Date=${today} (App Date: ${appToday})`);
 
-  // 1. Today Attendance Status (Prioritize ANY active session for absolute robustness)
-  let { data: attRecord, error: attError } = await supabaseAdmin
+  // 1. Today Attendance Status (Self-Healing Lookup)
+  let { data: attRecords, error: attError } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)')
     .eq('user_id', user.id)
-    .in('status', ['checked_in', 'on_break'])
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .in('status', ['checked_in', 'on_break', 'on-break'])
+    .order('created_at', { ascending: false });
 
-  // FALLBACK: If no active session, look for the most recent record for today specifically
-  if (!attRecord && !attError) {
-    console.log(`[MobileHome] No active session for ${user.id}. Checking for record on date ${today}...`);
-    const { data: todayRecord } = await supabaseAdmin
-      .from('attendance')
-      .select('*, breaks(*)')
-      .eq('user_id', user.id)
-      .eq('date', today)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    attRecord = todayRecord;
+  // Fallback to today specifically if no active session
+  if (!attRecords || attRecords.length === 0) {
+     const { data: todayRecords } = await supabaseAdmin
+       .from('attendance')
+       .select('*, breaks(*)')
+       .eq('user_id', user.id)
+       .eq('date', today)
+       .order('created_at', { ascending: false });
+     attRecords = todayRecords;
+  }
+
+  let attRecord = (attRecords && attRecords.length > 0) ? attRecords[0] : null;
+
+  // SELF-HEALING: If duplicates exist, clean them up in background
+  if (attRecords && attRecords.length > 1) {
+     console.log(`[MobileHome] Self-Healing: Cleaning ${attRecords.length - 1} duplicates for user ${user.id}`);
+     const toKeep = attRecords[0].id;
+     const toDelete = attRecords.slice(1).map(r => r.id);
+     supabaseAdmin.from('attendance').delete().in('id', toDelete).then(() => {
+        console.log(`[MobileHome] Self-Healing Complete: Removed ${toDelete.length} records.`);
+     });
   }
 
   if (attRecord) {
