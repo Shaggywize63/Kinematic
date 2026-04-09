@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, badRequest } from '../utils/response';
 import { asyncHandler } from '../utils/asyncHandler';
+import { isUUID } from '../utils';
 
 // GET /api/v1/leaderboard?period=weekly&limit=20
 export const getLeaderboard = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -33,7 +34,7 @@ export const getLeaderboard = asyncHandler(async (req: AuthRequest, res: Respons
     .order('overall_score', { ascending: false })
     .limit(limit);
 
-  if (zoneId) query = query.eq('zone_id', zoneId);
+  if (isUUID(zoneId)) query = query.eq('zone_id', zoneId);
 
   const { data, error } = await query;
   if (error) return badRequest(res, error.message);
