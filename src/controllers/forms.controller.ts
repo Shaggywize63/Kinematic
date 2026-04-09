@@ -158,13 +158,18 @@ export const getSubmission = getSubmissionById;
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { date, user_id, template_id, outlet_id } = req.query;
+  const { date, user_id, template_id, outlet_id, client_id } = req.query;
 
   let query = supabaseAdmin
     .from('form_submissions')
     .select('*, builder_forms!left(title), activities!left(name), profile:users!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
 
-  query = query.eq('org_id', user.org_id);
+  // Use client_id if provided (for multi-client selection override)
+  if (client_id) {
+    query = query.eq('org_id', client_id);
+  } else {
+    query = query.eq('org_id', user.org_id);
+  }
 
   if (date) {
     query = query.filter('submitted_at', 'gte', `${date}T00:00:00`).filter('submitted_at', 'lte', `${date}T23:59:59`);
