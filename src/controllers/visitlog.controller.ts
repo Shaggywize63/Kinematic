@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, isUUID } from '../utils';
+import { asyncHandler, ok, created, badRequest, isUUID } from '../utils';
 import { DEMO_ORG_ID, getMockVisitLogs } from '../utils/demoData';
 
 const visitSchema = z.object({

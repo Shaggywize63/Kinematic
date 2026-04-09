@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, notFound, forbidden, todayDate } from '../utils';
+import { ok, created, badRequest, notFound, forbidden, todayDate, isUUID } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 import { DEMO_ORG_ID, getMockSubmissions, getMockSubmissionDetails } from '../utils/demoData';
