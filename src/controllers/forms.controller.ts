@@ -432,6 +432,7 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
 });
 
 // GET /api/v1/forms/all-submissions (admin+)
+
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
@@ -439,14 +440,18 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   let query = supabaseAdmin
     .from('form_submissions')
-    .eq('org_id', user.org_id)
-    .order('submitted_at', { ascending: false })
-    .range(from, to);
+    .select('*, form_templates:builder_forms!fk_submission_template(title), activities(name), profile:profiles!user_id(full_name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
 
-  if (date) query = query.eq('submitted_at::date', date);
+  query = query.eq('org_id', user.org_id);
+
+  if (date) {
+    query = query.filter('submitted_at', 'gte', `${date}T00:00:00`).filter('submitted_at', 'lte', `${date}T23:59:59`);
+  }
   if (user_id) query = query.eq('user_id', user_id);
   if (template_id) query = query.eq('template_id', template_id);
   if (outlet_id) query = query.eq('outlet_id', outlet_id);
+
+  query = query.order('submitted_at', { ascending: false }).range(from, to);
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
