@@ -13,7 +13,24 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
   const token = authHeader.split(' ')[1].replace(/['"]+/g, '').trim();
 
-  // Verify JWT with Supabase (Primary: Admin client, Fallback: Public client)
+  // --- DEMO TOKEN BYPASS ---
+  if (token === 'demo-token-jwt-placeholder') {
+    req.user = {
+      id: 'demo-user-id',
+      org_id: DEMO_ORG_ID,
+      client_id: null,
+      name: 'Demo Admin',
+      email: 'demo@kinematic.com',
+      role: 'admin',
+      is_active: true,
+      permissions: ['dashboard', 'analytics', 'users', 'attendance'],
+      assigned_cities: []
+    } as any;
+    req.accessToken = token;
+    return next();
+  }
+
+  // Verify JWT with Supabase
   let user = null;
   let error = null;
 
