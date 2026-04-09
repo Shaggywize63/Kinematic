@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
+import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 
 /**
  * GET /api/v1/clients
@@ -142,6 +142,9 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
  */
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  const { id } = req.params;
+  const { name, contact_person, email, phone, is_active, password, modules, user_id } = req.body;
+
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
   const { data: client, error } = await supabaseAdmin

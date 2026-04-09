@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, notFound } from '../utils/response';
+import { ok, created, badRequest, notFound, isUUID } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, getMockSOS } from '../utils/demoData';
