@@ -143,19 +143,35 @@ export const getMyRoutePlan = asyncHandler(async (req: Request, res: Response) =
     console.log('[Diagnostic] Outlet Names:', outlets.map((o: any) => o.store_name).join(', '));
   }
   
-  // Distribute outlets back to their respective plans
+  // Distribute outlets back to their respective plans with deep deduplication
   const outletsByPlan: Record<string, any[]> = {};
   (outlets || []).forEach((o: any) => {
     if (!outletsByPlan[o.route_plan_id]) outletsByPlan[o.route_plan_id] = [];
-    outletsByPlan[o.route_plan_id].push(o);
+    
+    // Check if we already have this store in this plan
+    const existingIdx = outletsByPlan[o.route_plan_id].findIndex(e => e.store_id === o.store_id);
+    if (existingIdx === -1) {
+      outletsByPlan[o.route_plan_id].push(o);
+    } else {
+      // Prioritization logic: keep the 'completed' or 'in_progress' version over 'pending'
+      const existing = outletsByPlan[o.route_plan_id][existingIdx];
+      const statusRank: Record<string, number> = { 'completed': 3, 'in_progress': 2, 'pending': 1 };
+      
+      const newRank = statusRank[o.status] || 0;
+      const oldRank = statusRank[existing.status] || 0;
+      
+      if (newRank > oldRank) {
+        outletsByPlan[o.route_plan_id][existingIdx] = o;
+      }
+    }
   });
 
   const result = plan.map((p: any) => ({
     ...p,
-    outlets: outletsByPlan[p.id] || []
+    outlets: (outletsByPlan[p.id] || []).sort((a, b) => (a.visit_order || 0) - (b.visit_order || 0))
   }));
 
-  // Final Safeguard: Deduplicate by ID to prevent ghost plans from affecting the UI
+  // Final Safeguard: Deduplicate plans by ID
   const uniqueResult = Array.from(new Map(result.map(p => [p.id, p])).values());
 
   return ok(res, uniqueResult);
@@ -213,8 +229,6 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
     }
 
     // 2. Insert fresh plan
-
-    // Insert plan
     const { data: plan, error: planErr } = await supabase
       .from('route_plans')
       .insert({ 
@@ -228,7 +242,10 @@ export const createRoutePlan = asyncHandler(async (req: Request, res: Response) 
 
     if (planErr) return badRequest(res, planErr.message);
 
-    const outletRows = outlets.map((o: any, idx: number) => ({
+    // Ensure unique store_ids in the outlets array for this specific plan
+    const uniqueOutlets = Array.from(new Map(outlets.map((o: any) => [o.store_id, o])).values());
+
+    const outletRows = uniqueOutlets.map((o: any, idx: number) => ({
       route_plan_id:       plan.id,
       store_id:            o.store_id,
       org_id:              org,
@@ -465,8 +482,11 @@ export const bulkImportRoutePlans = asyncHandler(async (req: Request, res: Respo
       // Delete existing outlets for this specific plan
       await supabase.from('route_plan_outlets').delete().eq('route_plan_id', plan.id);
 
+      // Deduplicate outlets for this specific plan in the bulk import
+      const uniqueActRows = Array.from(new Map(actRows.map((r: any) => [r.resolved_store_id, r])).values());
+
       // Insert new outlets
-      const outletRows = actRows.map((r: any, i: number) => ({
+      const outletRows = uniqueActRows.map((r: any, i: number) => ({
         route_plan_id:       plan.id,
         store_id:            r.resolved_store_id,
         org_id:              org,
