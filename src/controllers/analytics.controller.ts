@@ -813,6 +813,8 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*, breaks(*)')
     .eq('user_id', user.id)
     .eq('date', today)
+    .order('created_at', { ascending: false })
+    .limit(1)
     .maybeSingle();
   
   if (attError) console.log(`[MobileHome] Attendance Error: ${attError.message}`);
