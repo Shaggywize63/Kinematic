@@ -129,7 +129,7 @@ export const addField = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
+  const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
   
   const { data, error, count } = await supabaseAdmin
     .from('form_submissions')
@@ -170,7 +170,7 @@ export const getSubmission = getSubmissionById; // Alias for routes
 // GET /api/v1/forms/all-submissions (admin+)
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
+  const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
   const { date, user_id, template_id, outlet_id } = req.query;
 
   let query = supabaseAdmin
