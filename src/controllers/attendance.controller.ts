@@ -29,6 +29,8 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   
   console.log(`[Attendance] Check-in: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
   if (selfie_url) console.log(`[Attendance] Selfie URL: ${selfie_url}`);
+  
+  // Enforce DD--MM--YYYY parsing
   const attendanceDate = parseAppDate(passedDate || today);
 
   if (latitude == null || longitude == null) return badRequest(res, 'Latitude and longitude are required');
@@ -176,7 +178,7 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
       total_hours: Number((Math.max(0, workingMinutes) / 60).toFixed(2))
     })
     .eq('id', record.id)
-    .select()
+    .select('*, breaks(*)')
     .single();
 
   if (updatedRecord) {

@@ -265,7 +265,7 @@ export const addField = asyncHandler<AuthRequest>(async (req, res) => {
 
 // POST /api/v1/forms/submit
 export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
-  console.log("Received form submission:", JSON.stringify(req.body, null, 2));
+  console.log(\"Received form submission:\", JSON.stringify(req.body, null, 2));
   const user = req.user!;
   const result = submissionSchema.safeParse(req.body);
   if (!result.success) {
@@ -357,20 +357,28 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   // 5. Insert responses
   const { error: respError } = await supabaseAdmin
     .from('form_responses')
-    .insert(submittedResponses.map((r) => ({ ...r, submission_id: submission.id })));
+    .insert(submittedResponses.map((r: any) => ({ ...r, submission_id: submission.id })));
 
   if (respError) return badRequest(res, respError.message);
   
-  // 6. Update route plan outlet status to 'visited' if outlet_id is provided
+  // 6. Update route plan outlet status if checkout is performed
   const oid = submissionData.outlet_id || (submissionData as any).outletId;
-  if (oid) {
+  const isCheckout = !!submissionData.check_out_at;
+  if (oid && isCheckout) {
     await supabaseAdmin
       .from('route_plan_outlets')
       .update({ 
-        status: 'visited',
-        checkout_at: new Date().toISOString() 
+        status: 'completed',
+        checkout_at: submissionData.check_out_at 
       })
       .eq('id', oid);
+  } else if (oid) {
+    // Just ensure it's marked as visited/in-progress if not already
+    await supabaseAdmin
+      .from('route_plan_outlets')
+      .update({ status: 'visited' })
+      .eq('id', oid)
+      .eq('status', 'pending');
   }
 
   return created(res, { submission_id: submission.id, is_converted: submission.is_converted },
@@ -422,121 +430,33 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('submission_id', id);
 
   if (respError) {
-    console.error('Error fetching responses:', respError);
-    return ok(res, { ...submission, form_responses: [] });
+    console.warn(`Could not fetch responses for submission ${id}:`, respError.message);
   }
 
-  // Fetch questions separately to avoid PostgREST relationship ambiguity
-  const { data: questions } = await supabaseAdmin
-    .from('builder_questions')
-    .select('id, label, qtype')
-    .eq('form_id', submission.template_id);
-
-  // Map questions to responses manually
-  const mappedResponses = (responses || []).map(r => {
-    const q = (questions || []).find(q => q.id === r.field_id);
-    const fallbackTitle = r.field_key || 'Captured Data';
-    return {
-      ...r,
-      builder_questions: q || { label: fallbackTitle, qtype: 'text' },
-      form_fields: q ? { ...q, field_type: q.qtype || 'text' } : { label: fallbackTitle, field_type: 'text', qtype: 'text' }
-    };
-  });
-
-  return ok(res, { ...submission, form_responses: mappedResponses });
+  return ok(res, { ...submission, responses: responses || [] });
 });
 
-// GET /api/v1/admin/submissions  (supervisor+)
+// GET /api/v1/forms/all-submissions (admin+)
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
-  const { date } = req.query as Record<string, string>;
-
-  const { date_from, date_to, zone_id, activity_id, user_id, fe_id, outlet_id, city, city_id } = req.query as Record<string, string>;
+  const { date, user_id, template_id, outlet_id } = req.query;
 
   let query = supabaseAdmin
     .from('form_submissions')
-    .select(`
-      id, submitted_at, is_converted, outlet_id, outlet_name, user_id, activity_id, template_id, gps, latitude, longitude, photo_url,
-      users!user_id(name, employee_id, city, zone_id),
-      builder_forms:builder_forms!fk_submission_template(title),
-      activities(name)
-    `, { count: 'exact' })
+    .select('*, form_templates:builder_forms!fk_submission_template(title), activities(name), profile:profiles!form_submissions_user_id_fkey(full_name, role)', { count: 'exact' })
     .eq('org_id', user.org_id)
     .order('submitted_at', { ascending: false })
     .range(from, to);
 
-  if (date) query = query.gte('submitted_at', `${date}T00:00:00`).lte('submitted_at', `${date}T23:59:59`);
-  if (date_from) query = query.gte('submitted_at', `${date_from}T00:00:00`);
-  if (date_to) query = query.lte('submitted_at', `${date_to}T23:59:59`);
-  
-  if (isUUID(activity_id)) query = query.eq('activity_id', activity_id);
-  if (isUUID(user_id) || isUUID(fe_id)) query = query.eq('user_id', user_id || fe_id);
-  if (isUUID(outlet_id)) query = query.eq('outlet_id', outlet_id);
-  if (isUUID(zone_id)) query = query.eq('users.zone_id', zone_id);
-
-  if (city) query = query.eq('users.city', city);
-  if (isUUID(city_id)) {
-    const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
-    if (cityData?.name) query = query.eq('users.city', cityData.name);
-  }
+  if (date) query = query.eq('submitted_at::date', date);
+  if (user_id) query = query.eq('user_id', user_id);
+  if (template_id) query = query.eq('template_id', template_id);
+  if (outlet_id) query = query.eq('outlet_id', outlet_id);
 
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
 
-  const submissions = data || [];
-  const submissionIds = submissions.map(s => s.id);
-
-  // Decoupled fetch for all responses to ensure visibility even if join fails
-  const { data: allResponses } = submissionIds.length
-    ? await supabaseAdmin
-        .from('form_responses')
-        .select('id, submission_id, value_text, value_number, value_bool, photo_url, field_key, field_id')
-        .in('submission_id', submissionIds)
-    : { data: [] };
-
-  // Fetch all questions for these templates to map labels
-  const templateIds = Array.from(new Set(submissions.map(s => s.template_id)));
-    const { data: allQuestions } = templateIds.length
-    ? await supabaseAdmin
-        .from('builder_questions')
-        .select('id, label, qtype, form_id')
-        .in('form_id', templateIds)
-    : { data: [] };
-
-  // Map responses back to submissions with metadata
-  const enriched = submissions.map((s) => {
-    const sResponses = (allResponses || []).filter(r => r.submission_id === s.id);
-    const mappedSResponses = sResponses.map(r => {
-      const q = (allQuestions || []).find(q => q.id === r.field_id);
-      const fallbackTitle = r.field_key || 'Captured Data';
-      
-      return {
-        ...r,
-        builder_questions: q || { label: fallbackTitle, qtype: 'text' },
-        form_fields: q ? { 
-          ...q, 
-          label: q.label || fallbackTitle, 
-          field_type: q.qtype || 'text' 
-        } : { 
-          label: fallbackTitle, 
-          field_type: 'text', 
-          qtype: 'text' 
-        }
-      };
-    });
-
-    return {
-      ...s,
-      form_responses: mappedSResponses,
-      store_name: s.outlet_name || null,
-      checkin_photo: s.photo_url || null,
-      checkin_at: s.submitted_at || null,
-      checkin_lat: s.latitude || null,
-      checkin_lng: s.longitude || null,
-    };
-  });
-
-  const result = buildPaginatedResult(enriched, count || 0, page, limit);
-  return res.status(200).json({ success: true, ...result });
+  const result = buildPaginatedResult(data || [], count || 0, page, limit);
+  return ok(res, result);
 });
