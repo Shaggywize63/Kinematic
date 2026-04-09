@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest } from '../utils';
+import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 
 const submissionSchema = z.object({
@@ -16,59 +16,6 @@ const submissionSchema = z.object({
     question_id: z.string().uuid(),
     value: z.any()
   }))
-});
-
-export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
-  const user = req.user!;
-  const result = submissionSchema.safeParse(req.body);
-  if (!result.success) {
-    const errorMsg = JSON.stringify(result.error.format(), null, 2);
-    return badRequest(res, 'Validation failed: ' + errorMsg, result.error.errors);
-  }
-  const { responses, ...submissionData } = result.data;
-
-  // 1. Verify template exists
-  const { data: template } = await supabaseAdmin
-    .from('builder_forms')
-    .select('id, org_id')
-    .eq('id', submissionData.template_id)
-    .single();
-
-  if (!template) return badRequest(res, 'Form template not found');
-
-  // 2. Create the submission record
-  const { data: submission, error: subError } = await supabaseAdmin
-    .from('form_submissions')
-    .insert({
-      ...submissionData,
-      user_id: user.id,
-      org_id: user.org_id,
-      submitted_at: new Date().toISOString()
-    })
-    .select()
-    .single();
-
-  if (subError) return badRequest(res, subError.message);
-
-  // 3. Create the responses
-  if (responses && responses.length > 0) {
-    const responseData = responses.map(r => ({
-      submission_id: submission.id,
-      question_id: r.question_id,
-      value: r.value
-    }));
-
-    const { error: respError } = await supabaseAdmin
-      .from('form_responses')
-      .insert(responseData);
-
-    if (respError) {
-      await supabaseAdmin.from('form_submissions').delete().eq('id', submission.id);
-      return badRequest(res, respError.message);
-    }
-  }
-
-  return created(res, submission, 'Form submitted');
 });
 
 export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
@@ -127,6 +74,47 @@ export const addField = asyncHandler<AuthRequest>(async (req, res) => {
   return created(res, data, 'Field added');
 });
 
+export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const validated = submissionSchema.parse(req.body);
+
+  // 1. Create Submission record
+  const { data: sub, error: subErr } = await supabaseAdmin
+    .from('form_submissions')
+    .insert({
+      user_id: user.id,
+      org_id: user.org_id,
+      template_id: validated.template_id,
+      activity_id: validated.activity_id,
+      outlet_id: validated.outlet_id,
+      outlet_name: validated.outlet_name,
+      latitude: validated.latitude,
+      longitude: validated.longitude,
+      submitted_at: new Date().toISOString()
+    })
+    .select()
+    .single();
+
+  if (subErr) return badRequest(res, subErr.message);
+
+  // 2. Create Responses
+  const responses = validated.responses.map(r => ({
+    submission_id: sub.id,
+    question_id: r.question_id,
+    value_text: typeof r.value === 'string' ? r.value : JSON.stringify(r.value),
+    value_number: typeof r.value === 'number' ? r.value : null,
+    value_bool: typeof r.value === 'boolean' ? r.value : null
+  }));
+
+  const { error: respErr } = await supabaseAdmin
+    .from('form_responses')
+    .insert(responses);
+
+  if (respErr) return badRequest(res, respErr.message);
+
+  return created(res, sub, 'Submission successful');
+});
+
 export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
@@ -139,7 +127,7 @@ export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     .range(from, to);
 
   if (error) return badRequest(res, error.message);
-  return ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
+  return ok(res, buildPaginatedResult(data || [], count || 0, (page as any), (limit as any)));
 });
 
 export const getSubmissionById = asyncHandler<AuthRequest>(async (req, res) => {
@@ -165,9 +153,8 @@ export const getSubmissionById = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, { ...submission, responses: responses || [] });
 });
 
-export const getSubmission = getSubmissionById; // Alias for routes
+export const getSubmission = getSubmissionById;
 
-// GET /api/v1/forms/all-submissions (admin+)
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
@@ -191,6 +178,5 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const { data, error, count } = await query;
   if (error) return badRequest(res, error.message);
 
-  const result = buildPaginatedResult(data || [], count || 0, page, limit);
-  return ok(res, result);
+  return ok(res, buildPaginatedResult(data || [], count || 0, (page as any), (limit as any)));
 });
