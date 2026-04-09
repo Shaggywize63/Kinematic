@@ -66,25 +66,43 @@ export function sendPaginated(
   })
 }
 
-// ── Today's date as YYYY-MM-DD in IST ──
+// ── Today's date as DD--MM--YYYY in IST (App format) ──
 export function todayDate(): string {
-  // Use a manual approach to guarantee YYYY-MM-DD across different Node versions/environments
-  const d = toIST(new Date());
+  return formatAppDate(toIST());
+}
+
+// ── Today's date as YYYY-MM-DD (Database format) ──
+export function dbToday(): string {
+  return isoDate(toIST());
+}
+
+export function toIST(date: Date = new Date()): Date {
+  const utc = date.getTime() + (date.getTimezoneOffset() * 60000);
+  return new Date(utc + (3600000 * 5.5));
+}
+
+export function isoDate(d: Date): string {
   const year = d.getFullYear();
   const month = (d.getMonth() + 1).toString().padStart(2, '0');
   const day = d.getDate().toString().padStart(2, '0');
   return `${year}-${month}-${day}`;
 }
 
-export function toIST(date: Date = new Date()): Date {
-  return new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+// Convert DB format (YYYY-MM-DD) -> App format (DD--MM--YYYY)
+export function formatAppDate(dateStr: string | Date | null): string {
+  if (!dateStr) return '';
+  const d = typeof dateStr === 'string' ? new Date(dateStr) : dateStr;
+  const year = d.getFullYear();
+  const month = (d.getMonth() + 1).toString().padStart(2, '0');
+  const day = d.getDate().toString().padStart(2, '0');
+  return `${day}--${month}--${year}`;
 }
 
-export function isoDate(d: Date): string {
-  const Y = d.getFullYear();
-  const M = (d.getMonth() + 1).toString().padStart(2, '0');
-  const D = d.getDate().toString().padStart(2, '0');
-  return `${Y}-${M}-${D}`;
+// Convert App format (DD--MM--YYYY) -> DB format (YYYY-MM-DD)
+export function parseAppDate(appDate: string | null): string {
+  if (!appDate || !appDate.includes('--')) return appDate || dbToday();
+  const [day, month, year] = appDate.split('--');
+  return `${year}-${month}-${day}`;
 }
 
 export const ok = <T>(res: Response, data: T, message?: string) =>

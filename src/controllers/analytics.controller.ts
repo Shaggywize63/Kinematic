@@ -804,8 +804,9 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/mobile-home ───────────────────── */
 export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = todayDate();
-  console.log(`[MobileHome] User ${user.id} fetching home. Date=${today}`);
+  const today = dbToday();
+  const appToday = todayDate();
+  console.log(`[MobileHome] User ${user.id} fetching home. Date=${today} (App Date: ${appToday})`);
 
   // 1. Today Attendance Status (Unified date lookup with active shift fallback)
   let { data: attRecord, error: attError } = await supabaseAdmin
@@ -986,7 +987,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   // 7. Explicit mapping for Android stability
   const todayMapped = attRecord ? {
     id: attRecord.id,
-    date: attRecord.date,
+    date: formatAppDate(attRecord.date),
     status: attRecord.status,
     checkin_at: attRecord.checkin_at,
     checkout_at: attRecord.checkout_at,

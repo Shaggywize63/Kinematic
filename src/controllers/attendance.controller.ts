@@ -29,7 +29,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   
   console.log(`[Attendance] Check-in: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
   if (selfie_url) console.log(`[Attendance] Selfie URL: ${selfie_url}`);
-  const attendanceDate = passedDate || today;
+  const attendanceDate = parseAppDate(passedDate || today);
 
   if (latitude == null || longitude == null) return badRequest(res, 'Latitude and longitude are required');
 
@@ -135,7 +135,7 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   console.log(`[Attendance] Check-out: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
   if (selfie_url) console.log(`[Attendance] Selfie URL: ${selfie_url}`);
   const today = todayDate();
-  const attendanceDate = passedDate || today;
+  const attendanceDate = parseAppDate(passedDate || today);
 
   const { data: record, error: findError } = await supabaseAdmin
     .from('attendance')
@@ -211,7 +211,7 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
 // POST /api/v1/attendance/break/start
 export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = todayDate();
+  const today = dbToday();
 
   const { data: record } = await supabaseAdmin
     .from('attendance')
@@ -243,7 +243,7 @@ export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
 // POST /api/v1/attendance/break/end
 export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = todayDate();
+  const today = dbToday();
 
   const { data: record } = await supabaseAdmin
     .from('attendance')
@@ -301,13 +301,17 @@ const enrichWithHours = (r: any) => {
     const hours = (durationMs / 3600000) - ((r.break_minutes || 0) / 60);
     r.total_hours = parseFloat(Math.max(0, hours).toFixed(2));
   }
+  // Transform date for app display
+  if (r && r.date) {
+    r.date = formatAppDate(r.date);
+  }
   return r;
 };
 
 // GET /api/v1/attendance/today
 export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = (req.query.date as string) || todayDate();
+  const today = parseAppDate((req.query.date as string) || todayDate());
 
   let { data, error } = await supabaseAdmin
     .from('attendance')
@@ -357,8 +361,8 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/attendance/team  (supervisor+)
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = todayDate();
-  const date = (req.query.date as string) || today;
+  const today = dbToday();
+  const date = parseAppDate((req.query.date as string) || today);
   const { zone_id, city, city_id, user_id, fe_id } = req.query as Record<string, string>;
 
   let query = supabaseAdmin
