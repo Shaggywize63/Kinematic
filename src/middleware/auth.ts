@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest, UserRole } from '../types';
 import { DEMO_ORG_ID } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
+import { logger } from '../lib/logger';
 
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
