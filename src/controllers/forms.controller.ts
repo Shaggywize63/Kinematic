@@ -162,7 +162,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   let query = supabaseAdmin
     .from('form_submissions')
-    .select('*, form_templates:builder_forms(title), activities(name), profile:users!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
+    .select('*, builder_forms!left(title), activities!left(name), profile:users!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
 
   query = query.eq('org_id', user.org_id);
 
