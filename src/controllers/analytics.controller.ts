@@ -808,32 +808,32 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const appToday = todayDate();
   console.log(`[MobileHome] User ${user.id} fetching home. Date=${today} (App Date: ${appToday})`);
 
-  // 1. Today Attendance Status (Unified date lookup with active shift fallback)
+  // 1. Today Attendance Status (Prioritize ANY active session for absolute robustness)
   let { data: attRecord, error: attError } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)')
     .eq('user_id', user.id)
-    .eq('date', today)
+    .in('status', ['checked_in', 'on_break'])
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  // FALLBACK: If no record for exact date, look for ANY active shift (to handle timezone/midnight drift)
+  // FALLBACK: If no active session, look for the most recent record for today specifically
   if (!attRecord && !attError) {
-    console.log(`[MobileHome] No record for ${today}. Checking for active shifts...`);
-    const { data: activeShift } = await supabaseAdmin
+    console.log(`[MobileHome] No active session for ${user.id}. Checking for record on date ${today}...`);
+    const { data: todayRecord } = await supabaseAdmin
       .from('attendance')
       .select('*, breaks(*)')
       .eq('user_id', user.id)
-      .in('status', ['checked_in', 'on_break'])
+      .eq('date', today)
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
-    
-    if (activeShift) {
-      console.log(`[MobileHome] Recovered active shift from ${activeShift.date}`);
-      attRecord = activeShift;
-    }
+    attRecord = todayRecord;
+  }
+
+  if (attRecord) {
+    console.log(`[MobileHome] Found record for user ${user.id}: status=${attRecord.status}, date=${attRecord.date}`);
   }
   
   if (attError) console.log(`[MobileHome] Attendance Error: ${attError.message}`);

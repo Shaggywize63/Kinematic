@@ -124,7 +124,9 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     })
     .eq('id', user.id);
 
-  created(res, enrichWithHours(data), 'Checked in successfully');
+  const enriched = enrichWithHours(data);
+  console.log(`[Attendance] Check-in SUCCESS for user ${user.id}. Record: ${JSON.stringify(enriched)}`);
+  created(res, enriched, 'Checked in successfully');
 });
 
 // POST /api/v1/attendance/checkout
