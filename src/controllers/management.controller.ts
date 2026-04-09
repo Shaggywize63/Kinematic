@@ -42,6 +42,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   });
 
   const getOne = asyncHandler<AuthRequest>(async (req, res) => {
+    const { id } = req.params;
     const user = req.user!;
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     let q = supabaseAdmin
@@ -63,7 +64,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     const payload = { 
       ...body, 
       org_id: user.org_id, 
-      client_id: body.client_id || user.client_id || null 
+      client_id: (isUUID(body.client_id) ? body.client_id : (isUUID(user.client_id) ? user.client_id : null))
     };
     const { data, error } = await supabaseAdmin.from(tableName).insert(payload).select().single();
     if (error) { badRequest(res, error.message); return; }
@@ -71,6 +72,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   });
 
   const update = asyncHandler<AuthRequest>(async (req, res) => {
+    const { id } = req.params;
     const user = req.user!;
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     const { org_id, client_id: _, ...rest } = req.body; // strip sensitive IDs
@@ -87,10 +89,9 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   });
 
   const remove = asyncHandler<AuthRequest>(async (req, res) => {
+    const { id } = req.params;
     const user = req.user!;
     
-    // Restriction: Ensure the record belongs to the user's org/client
-    const { id } = req.params;
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     let q = supabaseAdmin
       .from(tableName).delete().eq('id', id).eq('org_id', user.org_id);

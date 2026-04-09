@@ -53,17 +53,12 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   const totalVisits = visitLogsRes.count || 0;
 
   // Real-time metrics from form_submissions - Selecting minimal fields for speed
-  let submissionsQuery = supabaseAdmin
-    .from('form_submissions')
-    .select('id, is_converted, user_id, submitted_at, date', { count: 'exact' })
-    .eq('org_id', user.org_id)
-    .gte('submitted_at', `${from}T00:00:00+05:30`)
     .lte('submitted_at', `${to}T23:59:59+05:30`);
 
   if (isUUID(user.client_id)) {
     submissionsQuery = submissionsQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    submissionsQuery = submissionsQuery.eq('client_id', req.query.client_id);
+    submissionsQuery = submissionsQuery.eq('client_id', req.query.client_id as string);
   }
 
   const userRole = (user.role || '').toLowerCase();
@@ -97,7 +92,7 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   if (isUUID(user.client_id)) {
     attendanceQuery = attendanceQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    attendanceQuery = attendanceQuery.eq('client_id', req.query.client_id);
+    attendanceQuery = attendanceQuery.eq('client_id', req.query.client_id as string);
   }
 
   if (isFE) {
@@ -135,7 +130,7 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   if (isUUID(user.client_id)) {
     topPerfQuery = topPerfQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    topPerfQuery = topPerfQuery.eq('client_id', req.query.client_id);
+    topPerfQuery = topPerfQuery.eq('client_id', req.query.client_id as string);
   }
   const { data: topPerf } = await topPerfQuery;
 
@@ -156,7 +151,7 @@ export const getSummary = asyncHandler<AuthRequest>(async (req, res) => {
   if (isUUID(user.client_id)) {
     zonesQuery = zonesQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    zonesQuery = zonesQuery.eq('client_id', req.query.client_id);
+    zonesQuery = zonesQuery.eq('client_id', req.query.client_id as string);
   }
   const { data: zones } = await zonesQuery;
 
@@ -216,7 +211,7 @@ export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
   if (isUUID(user.client_id)) {
     trendQuery = trendQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    trendQuery = trendQuery.eq('client_id', req.query.client_id);
+    trendQuery = trendQuery.eq('client_id', req.query.client_id as string);
   }
   const { data, error } = await trendQuery;
 
@@ -264,7 +259,7 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   if (isUUID(user.client_id)) {
     submissionQuery = submissionQuery.or(`client_id.eq.${user.client_id},user_id.eq.${user.id}`);
   } else if (isUUID(req.query.client_id)) {
-    submissionQuery = submissionQuery.eq('client_id', req.query.client_id);
+    submissionQuery = submissionQuery.eq('client_id', req.query.client_id as string);
   } else {
     // Show user's own submissions by default
     submissionQuery = submissionQuery.eq('user_id', user.id);
@@ -303,7 +298,7 @@ export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {
   if (isUUID(user.client_id)) {
     hourlyQuery = hourlyQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    hourlyQuery = hourlyQuery.eq('client_id', req.query.client_id);
+    hourlyQuery = hourlyQuery.eq('client_id', req.query.client_id as string);
   }
   const { data, error } = await hourlyQuery;
 
@@ -334,7 +329,7 @@ export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
   if (isUUID(user.client_id)) {
     heatmapQuery = heatmapQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    heatmapQuery = heatmapQuery.eq('client_id', req.query.client_id);
+    heatmapQuery = heatmapQuery.eq('client_id', req.query.client_id as string);
   }
   const { data, error } = await heatmapQuery;
 
@@ -444,7 +439,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
   if (isUUID(user.client_id)) {
     weeklyQuery = weeklyQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    weeklyQuery = weeklyQuery.eq('client_id', req.query.client_id);
+    weeklyQuery = weeklyQuery.eq('client_id', req.query.client_id as string);
   }
   const { data, error } = await weeklyQuery;
 
@@ -501,7 +496,7 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
     execQuery = execQuery.or(`client_id.eq.${user.client_id},client_id.is.null`);
   }
   
-  if (city) execQuery = execQuery.eq('city', city);
+  if (isUUID(city)) execQuery = execQuery.eq('city', city);
   if (isUUID(city_id)) {
     const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
     if (cityData?.name) execQuery = execQuery.eq('city', cityData.name);
@@ -578,11 +573,11 @@ export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => 
   
   if (isUUID(user.client_id)) {
     execQuery = execQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
-    execQuery = execQuery.eq('client_id', req.query.client_id);
+  } else if (isUUID(req.query.client_id as string)) {
+    execQuery = execQuery.eq('client_id', req.query.client_id as string);
   }
   
-  if (city) execQuery = execQuery.eq('city', city);
+  if (isUUID(city)) execQuery = execQuery.eq('city', city);
   if (isUUID(city_id)) {
     const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
     if (cityData?.name) execQuery = execQuery.eq('city', cityData.name);
@@ -598,7 +593,7 @@ export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => 
   if (isUUID(user.client_id)) {
     attQuery = attQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    attQuery = attQuery.eq('client_id', req.query.client_id);
+    attQuery = attQuery.eq('client_id', req.query.client_id as string);
   }
   const { data: att } = await attQuery;
 
@@ -671,7 +666,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
   if (isUUID(user.client_id)) {
     formsQuery = formsQuery.eq('client_id', user.client_id);
   } else if (isUUID(req.query.client_id)) {
-    formsQuery = formsQuery.eq('client_id', req.query.client_id);
+    formsQuery = formsQuery.eq('client_id', req.query.client_id as string);
   }
   const { data: forms, error } = await formsQuery;
 

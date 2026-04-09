@@ -179,13 +179,8 @@ export const getUsers = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
-  if (isUUID(user.client_id)) {
-    if (isPrivileged) {
-      query = query.or(`client_id.eq.${user.client_id},client_id.is.null`);
-    } else {
-      query = query.eq('client_id', user.client_id);
     }
-  } else if (isUUID(client_id)) {
+  } else if (isUUID(client_id as string)) {
     query = query.eq('client_id', client_id as string);
   }
 
@@ -518,7 +513,7 @@ export const getZones = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (isUUID(user.client_id)) {
     query = query.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     query = query.eq('client_id', req.query.client_id as string);
   }
 
@@ -614,7 +609,7 @@ export const getDashboardSummary = asyncHandler<AuthRequest>(async (req, res) =>
     attQ = attQ.eq('client_id', user.client_id)
     subQ = subQ.eq('client_id', user.client_id)
     sosQ = sosQ.eq('client_id', user.client_id)
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     const cid = req.query.client_id as string
     attQ = attQ.eq('client_id', cid)
     subQ = subQ.eq('client_id', cid)
@@ -646,7 +641,7 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
     aQ = aQ.eq('client_id', user.client_id);
     fQ = fQ.eq('client_id', user.client_id);
     sQ = sQ.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (isUUID(req.query.client_id as string)) {
     const cid = req.query.client_id as string;
     aQ = aQ.eq('client_id', cid);
     fQ = fQ.eq('client_id', cid);
@@ -864,7 +859,9 @@ export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Resp
   if (isUUID(user.client_id)) query = query.eq('client_id', user.client_id)
 
   const { data, error, count } = await query.range(offset, offset + limit - 1)
-  if (error) throw new AppError(500, error.message, 'DB_ERROR')
+  sendPaginated(res, data || [], count || 0, page, limit)
+})
+
 
 export const nukeTestData = asyncHandler<AuthRequest>(async (req, res) => {
   const { user_name = 'Test FE' } = req.body;
