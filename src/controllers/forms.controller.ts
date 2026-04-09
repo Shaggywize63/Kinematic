@@ -265,7 +265,6 @@ export const addField = asyncHandler<AuthRequest>(async (req, res) => {
 
 // POST /api/v1/forms/submit
 export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
-  console.log(\"Received form submission:\", JSON.stringify(req.body, null, 2));
   const user = req.user!;
   const result = submissionSchema.safeParse(req.body);
   if (!result.success) {
