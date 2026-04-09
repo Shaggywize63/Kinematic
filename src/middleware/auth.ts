@@ -11,29 +11,23 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     return unauthorized(res, 'Missing or invalid Authorization header');
   }
 
-  const token = authHeader.split(' ')[1];
+  const token = authHeader.split(' ')[1].replace(/['"]+/g, '').trim();
 
-  // --- DEMO TOKEN BYPASS ---
-  if (token === 'demo-token-jwt-placeholder') {
-    req.user = {
-      id: 'demo-user-id',
-      org_id: DEMO_ORG_ID,
-      client_id: null,
-      name: 'Demo Admin',
-      email: 'demo@kinematic.com',
-      role: 'admin',
-      is_active: true,
-      permissions: ['dashboard', 'analytics', 'users', 'attendance'],
-      assigned_cities: []
-    } as any;
-    req.accessToken = token;
-    return next();
+  // Verify JWT with Supabase (Primary: Admin client, Fallback: Public client)
+  let user = null;
+  let error = null;
+
+  try {
+    const { data, error: authError } = await supabaseAdmin.auth.getUser(token);
+    user = data?.user;
+    error = authError;
+  } catch (e: any) {
+    logger.error(`[Auth] Exception in admin.getUser: ${e.message}`);
+    error = e;
   }
 
-  // Verify JWT with Supabase
-  const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
   if (error || !user) {
-    logger.error(`[Auth] Verification failed for token: ${error?.message || 'No user found'}`);
+    logger.error(`[Auth] Verification failed. Error: ${JSON.stringify(error)}. Token start: ${token.substring(0, 10)}...`);
     return unauthorized(res, 'Invalid or expired token');
   }
 
