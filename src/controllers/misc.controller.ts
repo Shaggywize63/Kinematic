@@ -614,6 +614,11 @@ export const getDashboardSummary = asyncHandler<AuthRequest>(async (req, res) =>
     attQ = attQ.eq('client_id', user.client_id)
     subQ = subQ.eq('client_id', user.client_id)
     sosQ = sosQ.eq('client_id', user.client_id)
+  } else if (isUUID(req.query.client_id)) {
+    const cid = req.query.client_id as string
+    attQ = attQ.eq('client_id', cid)
+    subQ = subQ.eq('client_id', cid)
+    sosQ = sosQ.eq('client_id', cid)
   }
 
   const [attRes, subRes, sosRes] = await Promise.all([attQ, subQ, sosQ])
@@ -641,6 +646,11 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
     aQ = aQ.eq('client_id', user.client_id);
     fQ = fQ.eq('client_id', user.client_id);
     sQ = sQ.eq('client_id', user.client_id);
+  } else if (isUUID(req.query.client_id)) {
+    const cid = req.query.client_id as string;
+    aQ = aQ.eq('client_id', cid);
+    fQ = fQ.eq('client_id', cid);
+    sQ = sQ.eq('client_id', cid);
   }
 
   const [attRes, subRes, sosRes] = await Promise.all([

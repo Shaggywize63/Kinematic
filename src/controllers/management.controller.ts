@@ -43,7 +43,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
   const getOne = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
-    const { id } = req.params;
+    if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     let q = supabaseAdmin
       .from(tableName).select('*').eq('id', id).eq('org_id', user.org_id);
     
@@ -72,7 +72,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
   const update = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
-    const { id } = req.params;
+    if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     const { org_id, client_id: _, ...rest } = req.body; // strip sensitive IDs
     let q = supabaseAdmin
       .from(tableName).update({ ...rest, updated_at: new Date().toISOString() })
@@ -91,6 +91,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     
     // Restriction: Ensure the record belongs to the user's org/client
     const { id } = req.params;
+    if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     let q = supabaseAdmin
       .from(tableName).delete().eq('id', id).eq('org_id', user.org_id);
     

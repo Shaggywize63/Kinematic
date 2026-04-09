@@ -366,11 +366,11 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
     query = query.eq('client_id', user.client_id);
   }
 
-  if (zone_id) query = query.eq('users.zone_id', zone_id);
-  if (user_id || fe_id) query = query.eq('user_id', user_id || fe_id);
+  if (isUUID(zone_id)) query = query.eq('users.zone_id', zone_id);
+  if (isUUID(user_id) || isUUID(fe_id)) query = query.eq('user_id', user_id || fe_id);
 
   if (city) query = query.eq('users.city', city);
-  if (city_id) {
+  if (isUUID(city_id)) {
     const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
     if (cityData?.name) query = query.eq('users.city', cityData.name);
   }
