@@ -40,6 +40,7 @@ export const trigger = asyncHandler<AuthRequest>(async (req, res) => {
     .from('sos_alerts')
     .insert({
       org_id: user.org_id,
+      client_id: user.client_id,
       user_id: user.id,
       zone_id: user.zone_id,
       ...body.data,
@@ -120,6 +121,12 @@ export const getAlerts = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*, users!user_id(name, mobile, employee_id), zones!zone_id(name)')
     .eq('org_id', user.org_id)
     .order('created_at', { ascending: false });
+
+  if (isUUID(user.client_id)) {
+    query = query.eq('client_id', user.client_id);
+  } else if (isUUID(req.query.client_id as string)) {
+    query = query.eq('client_id', req.query.client_id as string);
+  }
 
   if (status) query = query.eq('status', status);
 

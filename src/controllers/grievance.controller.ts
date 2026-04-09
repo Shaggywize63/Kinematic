@@ -60,6 +60,12 @@ export const getAll = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('org_id', user.org_id)
     .order('created_at', { ascending: false });
 
+  if (isUUID(user.client_id)) {
+    query = query.eq('client_id', user.client_id);
+  } else if (isUUID(req.query.client_id as string)) {
+    query = query.eq('client_id', req.query.client_id as string);
+  }
+
   if (status) query = query.eq('status', status);
 
   const { data, error } = await query;
