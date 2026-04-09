@@ -241,7 +241,12 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
     .select('id, submitted_at, is_converted, outlet_name, users!user_id(name, city), builder_forms:builder_forms!fk_submission_template(title)')
     .eq('org_id', user.org_id);
 
-  if (user.client_id) submissionQuery = submissionQuery.eq('client_id', user.client_id);
+  if (user.client_id) {
+    submissionQuery = submissionQuery.or(`client_id.eq.${user.client_id},user_id.eq.${user.id}`);
+  } else {
+    // Show user's own submissions by default
+    submissionQuery = submissionQuery.eq('user_id', user.id);
+  }
 
   const { data: submissions } = await submissionQuery.order('submitted_at', { ascending: false }).limit(limit);
 
@@ -253,7 +258,7 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
       outlet_name: s.outlet_name || 'Unknown Store',
       submitted_at: s.submitted_at,
       is_converted: s.is_converted,
-      user: { name: u?.name || 'Unknown', city: u?.city || '' },
+      user: { name: u?.name || 'Unknown', zones: { city: u?.city || '', name: '' } },
       // Keep description/meta for potential web compatibility, but Android needs the above
       description: `${u?.name || 'Unknown'} submitted ${f?.title || 'Form'}`,
       form_name: f?.title || 'General Form',
