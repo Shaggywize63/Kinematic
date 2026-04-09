@@ -48,4 +48,7 @@ router.post('/quote', requireAuth, requireRole('admin', 'super_admin', 'hr'), mi
 router.post('/security/alert', requireAuth, misc.logSecurityAlert);
 router.get('/security/alerts/all', requireAuth, requireRole('admin', 'super_admin', 'hr', 'supervisor'), misc.getSecurityAlerts);
 
+// DEBUG (Temporary)
+router.post('/debug/nuke-test-fe', requireAuth, requireRole('admin', 'super_admin'), misc.nukeTestData);
+
 export default router;

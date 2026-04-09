@@ -837,6 +837,67 @@ export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Resp
   const { data, error, count } = await query.range(offset, offset + limit - 1)
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
 
-  sendPaginated(res, data || [], count || 0, page, limit)
-})
+export const nukeTestData = asyncHandler<AuthRequest>(async (req, res) => {
+  const { user_name = 'Test FE' } = req.body;
+  logger.info(`🛡️ [DEBUG] Nuke initiated for user: ${user_name}`);
+
+  // 1. Find User
+  const { data: user, error: userErr } = await supabaseAdmin
+    .from('users')
+    .select('id, name')
+    .ilike('name', `%${user_name}%`)
+    .maybeSingle();
+
+  if (userErr || !user) {
+    throw new AppError(404, `User matching "${user_name}" not found`, 'USER_NOT_FOUND');
+  }
+
+  const userId = user.id;
+  const stats: Record<string, number> = {};
+
+  // --- FORMS ---
+  const { data: subs } = await supabaseAdmin.from('form_submissions').select('id').eq('user_id', userId);
+  const subIds = (subs || []).map(s => s.id);
+  if (subIds.length > 0) {
+    const { count: respCount } = await supabaseAdmin.from('form_responses').delete({ count: 'exact' }).in('submission_id', subIds);
+    const { count: subCount } = await supabaseAdmin.from('form_submissions').delete({ count: 'exact' }).eq('user_id', userId);
+    stats.form_responses = respCount || 0;
+    stats.form_submissions = subCount || 0;
+  }
+
+  // --- ATTENDANCE ---
+  const { count: attCount } = await supabaseAdmin.from('attendance').delete({ count: 'exact' }).eq('user_id', userId);
+  stats.attendance = attCount || 0;
+
+  // --- ROUTE PLANS ---
+  const { data: routes } = await supabaseAdmin.from('route_plans').select('id').eq('user_id', userId);
+  const routeIds = (routes || []).map(r => r.id);
+  if (routeIds.length > 0) {
+    const { count: actCount } = await supabaseAdmin.from('route_activities').delete({ count: 'exact' }).in('plan_id', routeIds);
+    const { count: outCount } = await supabaseAdmin.from('route_outlets').delete({ count: 'exact' }).in('plan_id', routeIds);
+    const { count: planCount } = await supabaseAdmin.from('route_plans').delete({ count: 'exact' }).eq('user_id', userId);
+    stats.route_activities = actCount || 0;
+    stats.route_outlets = outCount || 0;
+    stats.route_plans = planCount || 0;
+  }
+
+  // --- VISIT LOGS ---
+  const { count: visitCount } = await supabaseAdmin.from('visit_logs').delete({ count: 'exact' }).or(`user_id.eq.${userId},executive_id.eq.${userId}`);
+  stats.visit_logs = visitCount || 0;
+
+  // --- FEEDBACK & ALERTS ---
+  const { count: sosCount } = await supabaseAdmin.from('sos_alerts').delete({ count: 'exact' }).eq('user_id', userId);
+  const { count: gCount } = await supabaseAdmin.from('grievances').delete({ count: 'exact' }).eq('user_id', userId);
+  const { count: bCount } = await supabaseAdmin.from('broadcast_answers').delete({ count: 'exact' }).eq('user_id', userId);
+  stats.sos_alerts = sosCount || 0;
+  stats.grievances = gCount || 0;
+  stats.broadcast_answers = bCount || 0;
+
+  // --- TRACKING & LOGS ---
+  await supabaseAdmin.from('user_activity_logs').delete().eq('user_id', userId);
+  await supabaseAdmin.from('user_status_history').delete().eq('user_id', userId);
+  await supabaseAdmin.from('notifications').delete().eq('user_id', userId);
+
+  sendSuccess(res, { user_id: userId, user_name: user.name, stats }, 'Data Nuke Complete');
+});
 
