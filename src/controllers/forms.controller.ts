@@ -439,7 +439,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   let query = supabaseAdmin
     .from('form_submissions')
-    .select('*, form_templates:builder_forms!fk_submission_template(title), activities(name), profile:profiles!form_submissions_user_id_fkey(full_name, role), form_responses(*, builder_questions(*))', { count: 'exact' })
     .eq('org_id', user.org_id)
     .order('submitted_at', { ascending: false })
     .range(from, to);
