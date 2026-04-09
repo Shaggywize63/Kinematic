@@ -875,13 +875,14 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     (outlets || []).forEach(o => {
       const sid = o.store_id || o.outlet_id;
       const sname = (o.store_name || '').toLowerCase().trim();
+      const dedupeKey = sname || sid; // Key by name consistently
       
       const isActuallyVisitedByID = sid && visitedOutletIds.has(sid);
       const isActuallyVisitedByName = sname && visitedOutletNames.has(sname);
       const isActuallyVisited = isActuallyVisitedByID || isActuallyVisitedByName;
 
-      if (!storeMap[sid]) {
-        storeMap[sid] = { ...o, activities: [], status: isActuallyVisited ? 'visited' : (o.status || 'pending') };
+      if (!storeMap[dedupeKey]) {
+        storeMap[dedupeKey] = { ...o, activities: [], status: isActuallyVisited ? 'visited' : (o.status || 'pending') };
       }
       
       if (o.activity_id) {
