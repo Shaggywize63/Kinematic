@@ -32,6 +32,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // Verify JWT with Supabase
   const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
   if (error || !user) {
+    logger.error(`[Auth] Verification failed for token: ${error?.message || 'No user found'}`);
     return unauthorized(res, 'Invalid or expired token');
   }
 
@@ -43,6 +44,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     .single();
 
   if (profileError || !profile) {
+    logger.error(`[Auth] Profile lookup failed for user ${user.id}: ${profileError?.message || 'Profile not found'}`);
     return unauthorized(res, 'User profile not found');
   }
 
