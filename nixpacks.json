@@ -1,0 +1,6 @@
+{
+  "providers": ["node"],
+  "node": {
+    "version": "20"
+  }
+}
