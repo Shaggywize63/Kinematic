@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest, todayDate, toIST, isoDate, isUUID, formatAppDate } from '../utils';
+import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, formatAppDate, parseAppDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { DEMO_ORG_ID, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations } from '../utils/demoData';
 
@@ -27,8 +27,6 @@ const enrichWithHours = (r: any) => {
   }
   return r;
 };
-
-/* ── GET /api/v1/analytics/summary ───────────────────────── */
 export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
   const user = req.user!;
   // DEMO MODE REMOVED: Always show real data to ensure testing progress is visible.
