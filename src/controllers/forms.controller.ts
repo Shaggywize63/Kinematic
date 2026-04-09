@@ -2,264 +2,22 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, notFound, forbidden, todayDate, isUUID } from '../utils';
-import { asyncHandler } from '../utils/asyncHandler';
-import { getPagination, buildPaginatedResult } from '../utils/pagination';
-import { DEMO_ORG_ID, getMockSubmissions, getMockSubmissionDetails } from '../utils/demoData';
-
-const fieldSchema = z.object({
-  label: z.string().min(1),
-  field_key: z.string().min(1).regex(/^[a-z_]+$/),
-  field_type: z.enum(['text','textarea','number','select','multi_select','radio','checkbox','photo','date','rating']),
-  placeholder: z.string().optional(),
-  help_text: z.string().optional(),
-  is_required: z.boolean().default(false),
-  sort_order: z.number().int().default(0),
-  options: z.array(z.object({ label: z.string(), value: z.string(), is_correct: z.boolean().optional() })).default([]),
-  validation: z.record(z.unknown()).default({}),
-});
-
-const templateSchema = z.object({
-  activity_id: z.string().uuid(),
-  name: z.string().min(1),
-  description: z.string().optional(),
-  requires_photo: z.boolean().default(false),
-  requires_gps: z.boolean().default(true),
-  fields: z.array(fieldSchema).optional(),
-});
-
-const responseSchema = z.object({
-  field_id: z.string().uuid(),
-  field_key: z.string().optional().nullable(),
-  value: z.any().optional().nullable(),
-  photo: z.string().optional().nullable(),
-  gps: z.string().optional().nullable(),
-});
+import { asyncHandler, ok, created, badRequest, isUUID, getPagination } from '../utils';
+import { buildPaginatedResult } from '../utils/pagination';
 
 const submissionSchema = z.object({
   template_id: z.string().uuid(),
   activity_id: z.string().uuid().optional(),
-  latitude: z.number().optional(),
-  longitude: z.number().optional(),
-  address: z.string().optional(),
-  is_converted: z.boolean().default(false),
   outlet_id: z.string().uuid().optional(),
   outlet_name: z.string().optional(),
-  gps: z.string().optional(),
-  consumer_age: z.string().nullable().optional(),
-  consumer_gender: z.string().nullable().optional(),
-  photo_url: z.string().optional(),
-  submitted_at: z.string().optional(),
-  check_in_at: z.string().optional(),
-  check_out_at: z.string().optional(),
-  check_in_gps: z.string().optional(),
-  check_out_gps: z.string().optional(),
-  responses: z.array(responseSchema).min(1),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
+  responses: z.array(z.object({
+    question_id: z.string().uuid(),
+    value: z.any()
+  }))
 });
 
-// ── Templates ──────────────────────────────────────────────
-
-// GET /api/v1/forms/templates
-export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
-  const user = req.user!;
-  const activityId = req.query.activity_id as string | undefined;
-
-  // 1. Fetch from builder_forms (Dynamic Form Builder)
-  let query = supabaseAdmin
-    .from('builder_forms')
-    .select('*')
-    .eq('org_id', user.org_id)
-    .eq('status', 'published')
-    .order('created_at', { ascending: false });
-
-  if (activityId) query = query.eq('activity_id', activityId);
-
-  const { data: forms, error: formsError } = await query;
-  if (formsError) return badRequest(res, formsError.message);
-  if (!forms || forms.length === 0) return ok(res, []);
-
-  // 2. Fetch all questions for these forms separately to avoid nested join issues
-  const formIds = forms.map(f => f.id);
-  const { data: allQuestions, error: qError } = await supabaseAdmin
-    .from('builder_questions')
-    .select('*')
-    .in('form_id', formIds)
-    .order('q_order', { ascending: true });
-
-  if (qError) return badRequest(res, qError.message);
-
-  // 3. Map builder_forms to FormTemplate format for the mobile app
-  const mappedTemplates = forms.map((f: any) => {
-    const formQuestions = (allQuestions || []).filter(q => q.form_id === f.id);
-    
-    return {
-      id: f.id,
-      activity_id: f.activity_id,
-      name: f.title,
-      description: f.description,
-      requires_photo: f.requires_photo || false, 
-      requires_gps: f.requires_gps !== false,    
-      form_fields: formQuestions.map((q: any) => {
-        // Map qtype to field_type for mobile app compatibility
-        let fieldType = 'text';
-        const qt = (q.type || q.qtype || '').toLowerCase();
-        if (['short_text', 'text', 'email', 'phone', 'url'].includes(qt)) fieldType = 'text';
-        else if (['long_text', 'textarea'].includes(qt)) fieldType = 'textarea';
-        else if (['number', 'integer', 'decimal'].includes(qt)) fieldType = 'number';
-        else if (['single_select', 'choice', 'select', 'dropdown', 'dropdown_search', 'radio'].includes(qt)) fieldType = 'select';
-        else if (['multi_select', 'checkbox_group', 'tags', 'checkbox'].includes(qt)) fieldType = 'multi_select';
-        else if (['yes_no', 'boolean', 'toggle'].includes(qt)) fieldType = 'yes_no';
-        else if (['rating', 'star_rating'].includes(qt)) fieldType = 'rating';
-        else if (['image_upload', 'photo', 'image', 'camera'].includes(qt)) fieldType = 'photo';
-        else if (['date'].includes(qt)) fieldType = 'date';
-        else if (['time'].includes(qt)) fieldType = 'time';
-        else if (['date_time', 'datetime'].includes(qt)) fieldType = 'datetime';
-        else if (['location', 'gps', 'map'].includes(qt)) fieldType = 'gps';
-        else if (['signature'].includes(qt)) fieldType = 'signature';
-        else if (['file_upload', 'file'].includes(qt)) fieldType = 'file';
-        else if (['consent'].includes(qt)) fieldType = 'consent';
-        else if (['section', 'section_header'].includes(qt)) fieldType = 'section';
-        else fieldType = 'text';
-
-        console.log(`Mapping question ${q.id}: qtype="${q.qtype}", type="${q.type}", resolved qt="${qt}", mapped to fieldType="${fieldType}"`);
-        
-        // Map options
-        let options: any[] = [];
-        if (q.options) {
-          try {
-            const opts = typeof q.options === 'string' ? JSON.parse(q.options) : q.options;
-            if (Array.isArray(opts)) {
-              options = opts.map((opt: any, i: number) => {
-                if (typeof opt === 'string') return { id: `opt_${i}`, label: opt, value: opt };
-                return {
-                  id: opt.id || `opt_${i}`,
-                  label: opt.label || opt.text || opt.value || `Option ${i+1}`,
-                  value: opt.value || opt.id || opt.label || ''
-                };
-              });
-            } else if (typeof opts === 'object' && opts !== null) {
-              // Handle object-based options { "key": "label" }
-              options = Object.entries(opts).map(([val, label], i) => ({
-                id: `opt_${i}`,
-                label: String(label),
-                value: String(val)
-              }));
-            }
-          } catch (e) {
-            console.error(`Error parsing options for question ${q.id}:`, e);
-          }
-        }
-
-        console.log(`Mapped question ${q.id}: type=${fieldType}, optionsCount=${options.length}`);
-        if (options.length > 0) {
-          console.log(`Options for ${q.id}:`, JSON.stringify(options));
-        }
-
-        // Fallback for yes_no
-        if (options.length === 0 && qt === 'yes_no') {
-          options = [
-            { id: 'opt_yes', label: 'Yes', value: 'Yes' },
-            { id: 'opt_no', label: 'No', value: 'No' },
-          ];
-        }
-        
-        return {
-          id: q.id,
-          field_key: q.field_key || `field_${q.id}`,
-          label: q.title || q.label || "",
-          field_type: fieldType,
-          is_required: q.required || q.is_required || false,
-          options: options,
-          placeholder: q.placeholder || "",
-          help_text: q.helper_text || q.help_text || "",
-          keyboard_type: q.keyboard_type || null,
-          image_count: q.image_count || 1,
-          camera_only: q.camera_only || false,
-          depends_on_id: q.depends_on_id || null,
-          depends_on_value: q.depends_on_value || null,
-          is_consent: q.is_consent || false
-        };
-      })
-    };
-  });
-
-  return ok(res, mappedTemplates);
-});
-
-// GET /api/v1/forms/templates/:id
-export const getTemplate = asyncHandler<AuthRequest>(async (req, res) => {
-  const { id } = req.params;
-  const user = req.user!;
-
-  const { data, error } = await supabaseAdmin
-    .from('form_templates')
-    .select('*, form_fields(*), activities(id, name, type)')
-    .eq('id', id)
-    .eq('org_id', user.org_id)
-    .single();
-
-  if (error || !data) return notFound(res, 'Template not found');
-  return ok(res, data);
-});
-
-// POST /api/v1/forms/templates  (admin+)
-export const createTemplate = asyncHandler<AuthRequest>(async (req, res) => {
-  const user = req.user!;
-  const body = templateSchema.safeParse(req.body);
-  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
-
-  const { fields, ...templateData } = body.data;
-
-  const { data: template, error } = await supabaseAdmin
-    .from('form_templates')
-    .insert({ ...templateData, org_id: user.org_id, created_by: user.id })
-    .select()
-    .single();
-
-  if (error) return badRequest(res, error.message);
-
-  // Insert fields if provided
-  if (fields?.length) {
-    const { error: fieldsError } = await supabaseAdmin
-      .from('form_fields')
-      .insert(fields.map((f) => ({ ...f, template_id: template.id })));
-    if (fieldsError) return badRequest(res, fieldsError.message);
-  }
-
-  const { data: full } = await supabaseAdmin
-    .from('form_templates')
-    .select('*, form_fields(*)')
-    .eq('id', template.id)
-    .single();
-
-  return created(res, full, 'Template created');
-});
-
-// POST /api/v1/forms/templates/:id/fields  (admin+)
-export const addField = asyncHandler<AuthRequest>(async (req, res) => {
-  const { id } = req.params;
-  const user = req.user!;
-  const body = fieldSchema.safeParse(req.body);
-  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
-
-  // Verify template belongs to org
-  const { data: tmpl } = await supabaseAdmin
-    .from('form_templates')
-    .select('id')
-    .eq('id', id)
-    .eq('org_id', user.org_id)
-    .single();
-  if (!tmpl) return notFound(res, 'Template not found');
-
-  const { data, error } = await supabaseAdmin
-    .from('form_fields')
-    .insert({ ...body.data, template_id: id })
-    .select()
-    .single();
-
-  if (error) return badRequest(res, error.message);
-  return created(res, data, 'Field added');
-});
 export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const result = submissionSchema.safeParse(req.body);
@@ -273,173 +31,100 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   // 1. Verify template exists in builder_forms
   const { data: template } = await supabaseAdmin
     .from('builder_forms')
-    .select('id')
+    .select('id, org_id')
     .eq('id', submissionData.template_id)
-    .eq('org_id', user.org_id)
     .single();
-  if (!template) return notFound(res, 'Form template not found');
 
-  // 2. Fetch questions for validation
-  const { data: questions } = await supabaseAdmin
-    .from('builder_questions')
-    .select('id, field_key, required')
-    .eq('form_id', template.id);
+  if (!template) return badRequest(res, 'Form template not found');
 
-  // 3. Map responses to DB format
-  const submittedResponses = responses.map(r => {
-    const q = (questions || []).find(q => q.id === r.field_id);
-    
-    // Determine which value column to use based on the value type
-    let value_text: string | null = null;
-    let value_number: number | null = null;
-    let value_bool: boolean | null = null;
-    let value_json: any | null = null;
-
-    if (typeof r.value === 'number') value_number = r.value;
-    else if (typeof r.value === 'boolean') value_bool = r.value;
-    else if (typeof r.value === 'object' && r.value !== null) value_json = r.value;
-    else value_text = r.value ? String(r.value) : null;
-
-    return {
-      submission_id: '', // Will be set after insert
-      field_id: r.field_id,
-      field_key: r.field_key || q?.field_key || '',
-      value_text,
-      value_number,
-      value_bool,
-      value_json,
-      photo_url: r.photo,
-      gps: r.gps
-    };
-  });
-
-  // 4. Get today's attendance
-  const today = todayDate();
-  const { data: attendance } = await supabaseAdmin
-    .from('attendance')
-    .select('id')
-    .eq('user_id', user.id)
-    .eq('date', today)
-    .maybeSingle();
-
-  // Insert submission
+  // 2. Create the submission record
   const { data: submission, error: subError } = await supabaseAdmin
     .from('form_submissions')
     .insert({
       ...submissionData,
-      template_id: submissionData.template_id || (submissionData as any).templateId,
-      activity_id: submissionData.activity_id || (submissionData as any).activityId,
-      outlet_id: submissionData.outlet_id || (submissionData as any).outletId,
-      outlet_name: submissionData.outlet_name || (submissionData as any).outletName,
-      gps: submissionData.gps || (submissionData.latitude && submissionData.longitude ? `${submissionData.latitude},${submissionData.longitude}` : null),
-      client_id: user.client_id,
-      org_id: user.org_id,
       user_id: user.id,
-      attendance_id: attendance?.id,
-      submitted_at: submissionData.submitted_at || new Date().toISOString(),
-      check_in_at: submissionData.check_in_at,
-      check_out_at: submissionData.check_out_at,
-      check_in_gps: submissionData.check_in_gps,
-      check_out_gps: submissionData.check_out_gps,
-      date: (submissionData as any).date || today,
-      is_converted: submissionData.is_converted !== undefined ? submissionData.is_converted : (submissionData as any).isConverted ?? true,
+      org_id: user.org_id,
+      submitted_at: new Date().toISOString()
     })
     .select()
     .single();
 
   if (subError) return badRequest(res, subError.message);
 
-  // 5. Insert responses
-  const { error: respError } = await supabaseAdmin
-    .from('form_responses')
-    .insert(submittedResponses.map((r: any) => ({ ...r, submission_id: submission.id })));
+  // 3. Create the responses
+  if (responses && responses.length > 0) {
+    const responseData = responses.map(r => ({
+      submission_id: submission.id,
+      question_id: r.question_id,
+      value: r.value
+    }));
 
-  if (respError) return badRequest(res, respError.message);
-  
-  // 6. Update route plan outlet status if checkout is performed
-  const oid = submissionData.outlet_id || (submissionData as any).outletId;
-  const isCheckout = !!submissionData.check_out_at;
-  if (oid && isCheckout) {
-    await supabaseAdmin
-      .from('route_plan_outlets')
-      .update({ 
-        status: 'completed',
-        checkout_at: submissionData.check_out_at 
-      })
-      .eq('id', oid);
-  } else if (oid) {
-    // Just ensure it's marked as visited/in-progress if not already
-    await supabaseAdmin
-      .from('route_plan_outlets')
-      .update({ status: 'visited' })
-      .eq('id', oid)
-      .eq('status', 'pending');
+    const { error: respError } = await supabaseAdmin
+      .from('form_responses')
+      .insert(responseData);
+
+    if (respError) {
+      // rollback submission?
+      await supabaseAdmin.from('form_submissions').delete().eq('id', submission.id);
+      return badRequest(res, respError.message);
+    }
   }
 
-  return created(res, { submission_id: submission.id, is_converted: submission.is_converted },
-    'Form submitted successfully');
+  return created(res, submission, 'Form submitted');
 });
 
-// GET /api/v1/forms/submissions
-export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
+export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
-  const date = req.query.date as string | undefined;
+  const { is_active } = req.query;
 
   let query = supabaseAdmin
-    .from('form_submissions')
-    .select('*, form_templates:builder_forms!fk_submission_template(title), activities(name)', { count: 'exact' })
-    .eq('user_id', user.id)
-    .order('submitted_at', { ascending: false })
-    .range(from, to);
+    .from('builder_forms')
+    .select('*, builder_questions(*)')
+    .eq('org_id', user.org_id);
 
-  if (date) query = query.eq('submitted_at::date', date);
+  if (is_active !== undefined) {
+    query = query.eq('is_active', is_active === 'true');
+  }
 
-  const { data, error, count } = await query;
+  const { data, error } = await query.order('created_at', { ascending: false });
   if (error) return badRequest(res, error.message);
-  const result = buildPaginatedResult(data || [], count || 0, page, limit); return res.status(200).json({ success: true, ...result });
+
+  return ok(res, data);
 });
 
-// GET /api/v1/forms/submissions/:id
-export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
+export const getSubmissionById = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
 
-  const { data: submission, error } = await supabaseAdmin
+  const { data: submission, error: subError } = await supabaseAdmin
     .from('form_submissions')
-    .select('*, builder_forms:builder_forms!fk_submission_template(title), activities(name)')
+    .select('*, builder_forms(title), activities(name)')
     .eq('id', id)
+    .eq('org_id', user.org_id)
     .single();
 
-  if (error || !submission) return notFound(res, 'Submission not found');
+  if (subError) return badRequest(res, subError.message);
 
-  // Execs can only see their own; supervisors+ see org
-  if (submission.user_id !== user.id && !['admin','city_manager','supervisor','super_admin'].includes(user.role)) {
-    return forbidden(res);
-  }
-
-  // Decoupled fetch for responses first to ensure data visibility even if join fails
   const { data: responses, error: respError } = await supabaseAdmin
     .from('form_responses')
-    .select('id, value_text, value_number, value_bool, photo_url, field_key, field_id')
+    .select('*, builder_questions(*)')
     .eq('submission_id', id);
 
-  if (respError) {
-    console.warn(`Could not fetch responses for submission ${id}:`, respError.message);
-  }
+  if (respError) return badRequest(res, respError.message);
 
   return ok(res, { ...submission, responses: responses || [] });
 });
 
 // GET /api/v1/forms/all-submissions (admin+)
-
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
   const { date, user_id, template_id, outlet_id } = req.query;
 
+  // CRITICAL FIX: .select() MUST be first in the chain for postgrest-js to return a query object
   let query = supabaseAdmin
     .from('form_submissions')
+    .select('*, form_templates:builder_forms!fk_submission_template(title), activities(name), profile:users!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
 
   query = query.eq('org_id', user.org_id);
 
