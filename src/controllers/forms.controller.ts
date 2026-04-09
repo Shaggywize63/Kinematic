@@ -160,15 +160,17 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
   const { date, user_id, template_id, outlet_id, client_id } = req.query;
 
+  // REMOVE org_id filtering temporarily to debug if data exists but org_id is mismatched
   let query = supabaseAdmin
     .from('form_submissions')
     .select('*, builder_forms!left(title), activities!left(name), profile:users!user_id(name, role), form_responses(*, builder_questions(*))', { count: 'exact' });
 
-  // Use client_id if provided (for multi-client selection override)
+  // If a specific client is selected, use that, otherwise default to user's org
   if (client_id) {
     query = query.eq('org_id', client_id);
-  } else {
-    query = query.eq('org_id', user.org_id);
+  } else if (user.role !== 'developer' && user.role !== 'admin') {
+     // Only enforce org_id for non-admins to allow wider visibility during debugging
+     query = query.eq('org_id', user.org_id);
   }
 
   if (date) {
