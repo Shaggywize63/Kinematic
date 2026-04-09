@@ -6,6 +6,7 @@ import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, fo
 import { isWithinGeofence } from '../lib/haversine';
 import { DEMO_ORG_ID, getMockAttendanceToday } from '../utils/demoData';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
+import { logger } from '../lib/logger';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -27,8 +28,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   const today = todayDate();
   const { latitude, longitude, selfie_url, activity_id, zone_id, date: passedDate } = req.body;
   
-  console.log(`[Attendance] Check-in: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
-  if (selfie_url) console.log(`[Attendance] Selfie URL: ${selfie_url}`);
+  logger.info(`[Attendance] Check-in: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
   
   // Enforce DD--MM--YYYY parsing
   const attendanceDate = parseAppDate(passedDate || today);
@@ -44,7 +44,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     .maybeSingle();
 
   if (existing) {
-    console.log(`[Attendance] user=${user.id} already checked in. Returning existing record.`);
+    logger.info(`[Attendance] user=${user.id} already checked in. Returning existing record.`);
     ok(res, enrichWithHours(existing));
     return;
   }
@@ -72,12 +72,9 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
         zone.geofence_radius
       );
       distanceMetres = dist;
-      // Note: We no longer block check-in based on distance for primary attendance.
-      // We only record the distance for reporting purposes.
     }
   }
 
-  console.log(`[Attendance] Inserting check-in record for ${user.id}`);
   const { data, error } = await supabaseAdmin
     .from('attendance')
     .insert({
@@ -97,14 +94,9 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     .select()
     .single();
 
-  if (data) {
-    console.log(`[Attendance] Stored Check-in Selfie: ${data.checkin_selfie_url || 'NULL'}`);
-  }
-  console.log(`[Attendance] Check-in record inserted: ${!!data}`);
-
   if (error) { badRequest(res, error.message); return; }
 
-  // Phase 2: Create a work_activity record on check-in to track first location
+  // Phase 2: Create a work_activity record
   await supabaseAdmin.from('work_activity').insert({
     org_id: user.org_id,
     client_id: user.client_id,
@@ -116,7 +108,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     captured_at: data.checkin_at
   });
 
-  // Update user's last known location immediately for live tracking
+  // Update user's last known location
   await supabaseAdmin
     .from('users')
     .update({
@@ -126,9 +118,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     })
     .eq('id', user.id);
 
-  const enriched = enrichWithHours(data);
-  console.log(`[Attendance] Check-in SUCCESS for user ${user.id}. Record: ${JSON.stringify(enriched)}`);
-  created(res, enriched, 'Checked in successfully');
+  created(res, enrichWithHours(data), 'Checked in successfully');
 });
 
 // POST /api/v1/attendance/checkout
@@ -136,12 +126,13 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { latitude, longitude, selfie_url, date: passedDate } = req.body;
   
-  console.log(`[Attendance] Check-out: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
-  if (selfie_url) console.log(`[Attendance] Selfie URL: ${selfie_url}`);
   const today = todayDate();
   const attendanceDate = parseAppDate(passedDate || today);
 
-  const { data: record, error: findError } = await supabaseAdmin
+  logger.info(`[Attendance] Check-out: user=${user.id}, explicitDate=${passedDate || 'NONE'}`);
+
+  // 1. Try to find record for the specific date
+  let { data: record, error: findError } = await supabaseAdmin
     .from('attendance')
     .select('*')
     .eq('user_id', user.id)
@@ -150,10 +141,26 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
     .limit(1)
     .maybeSingle();
 
-  if (findError && findError.code !== 'PGRST116') { badRequest(res, findError.message); return; }
+  // 2. FALLBACK: If no record for today, search for the most recent OPEN shift (Overnight Support)
+  if (!record && !passedDate) {
+    logger.info(`[Attendance] No record for today, checking for open shifts for user ${user.id}`);
+    const { data: openShifts } = await supabaseAdmin
+      .from('attendance')
+      .select('*')
+      .eq('user_id', user.id)
+      .in('status', ['checked_in', 'on_break'])
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-  if (!record) { badRequest(res, 'No check-in found for today'); return; }
-  if (record.status === 'checked_out') { conflict(res, 'Already checked out today'); return; }
+    if (openShifts && openShifts.length > 0) {
+      record = openShifts[0];
+      logger.info(`[Attendance] Found overnight shift from ${record.date}`);
+    }
+  }
+
+  if (findError) { badRequest(res, findError.message); return; }
+  if (!record) { badRequest(res, 'No check-in found. Please check in first.'); return; }
+  if (record.status === 'checked_out') { conflict(res, 'Already checked out for this shift'); return; }
 
   // Enforce selfie for field executives
   if (user.role === 'executive' && !selfie_url) {
@@ -181,10 +188,6 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*, breaks(*)')
     .single();
 
-  if (updatedRecord) {
-    console.log(`[Attendance] Stored Check-out Selfie: ${updatedRecord.checkout_selfie_url || 'NULL'}`);
-  }
-
   if (error) { badRequest(res, error.message); return; }
 
   // Record activity
@@ -199,15 +202,12 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
     captured_at: updatedRecord.checkout_at
   });
 
-  // Clear live location on checkout (optional, but requested to stop tracking)
-  await supabaseAdmin
-    .from('users')
-    .update({
-      last_latitude: null,
-      last_longitude: null,
-      last_location_updated_at: updatedRecord.checkout_at
-    })
-    .eq('id', user.id);
+  // Clear live location
+  await supabaseAdmin.from('users').update({
+    last_latitude: null,
+    last_longitude: null,
+    last_location_updated_at: updatedRecord.checkout_at
+  }).eq('id', user.id);
 
   ok(res, enrichWithHours(updatedRecord), 'Checked out successfully');
 });
@@ -217,33 +217,38 @@ export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = dbToday();
 
-  const { data: record } = await supabaseAdmin
+  // Unified lookup: today or most recent open shift
+  let { data: record } = await supabaseAdmin
     .from('attendance')
     .select('id, status')
     .eq('user_id', user.id)
     .eq('date', today)
-    .order('created_at', { ascending: false })
-    .limit(1)
     .maybeSingle();
 
-  if (!record) { badRequest(res, 'Not checked in today'); return; }
+  if (!record) {
+    const { data: open } = await supabaseAdmin
+      .from('attendance')
+      .select('id, status')
+      .eq('user_id', user.id)
+      .eq('status', 'checked_in')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (open?.length) record = open[0];
+  }
+
+  if (!record) { badRequest(res, 'No active shift found to start break'); return; }
   if (record.status !== 'checked_in') { conflict(res, 'Cannot start break in current status'); return; }
 
   await supabaseAdmin.from('attendance').update({ status: 'on_break' }).eq('id', record.id);
-
-  const { error } = await supabaseAdmin
-    .from('breaks')
-    .insert({ attendance_id: record.id, user_id: user.id, started_at: new Date().toISOString() });
+  const { error } = await supabaseAdmin.from('breaks').insert({
+    attendance_id: record.id,
+    user_id: user.id,
+    started_at: new Date().toISOString()
+  });
 
   if (error) { badRequest(res, error.message); return; }
-
-  const { data: updatedRecord } = await supabaseAdmin
-    .from('attendance')
-    .select('*, breaks(*)')
-    .eq('id', record.id)
-    .single();
-
-  created(res, enrichWithHours(updatedRecord), 'Break started');
+  const { data: updated } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('id', record.id).single();
+  created(res, enrichWithHours(updated), 'Break started');
 });
 
 // POST /api/v1/attendance/break/end
@@ -251,16 +256,25 @@ export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = dbToday();
 
-  const { data: record } = await supabaseAdmin
+  let { data: record } = await supabaseAdmin
     .from('attendance')
     .select('id, status, break_minutes')
     .eq('user_id', user.id)
     .eq('date', today)
-    .order('created_at', { ascending: false })
-    .limit(1)
     .maybeSingle();
 
-  if (!record) { badRequest(res, 'Not checked in today'); return; }
+  if (!record) {
+    const { data: open } = await supabaseAdmin
+      .from('attendance')
+      .select('id, status, break_minutes')
+      .eq('user_id', user.id)
+      .eq('status', 'on_break')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (open?.length) record = open[0];
+  }
+
+  if (!record) { badRequest(res, 'No active break shift found'); return; }
   if (record.status !== 'on_break') { conflict(res, 'Not currently on break'); return; }
 
   const { data: openBreak } = await supabaseAdmin
@@ -281,16 +295,10 @@ export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
     break_minutes: (record.break_minutes || 0) + breakMins,
   }).eq('id', record.id);
 
-  const { data: updatedRecord } = await supabaseAdmin
-    .from('attendance')
-    .select('*, breaks(*)')
-    .eq('id', record.id)
-    .single();
-
-  ok(res, enrichWithHours(updatedRecord), 'Break ended');
+  const { data: updated } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('id', record.id).single();
+  ok(res, enrichWithHours(updated), 'Break ended');
 });
 
-// Helper to calculate total_hours if missing from DB (handles active shifts and historical missing data)
 const enrichWithHours = (r: any) => {
   if (r && r.total_hours == null && r.checkin_at) {
     const start = new Date(r.checkin_at).getTime();
@@ -305,23 +313,18 @@ const enrichWithHours = (r: any) => {
     }
 
     let durationMs = end - start;
-    if (durationMs < 0) durationMs += 24 * 60 * 60 * 1000; // crossover
+    if (durationMs < 0) durationMs += 24 * 60 * 60 * 1000;
     const hours = (durationMs / 3600000) - ((r.break_minutes || 0) / 60);
     r.total_hours = parseFloat(Math.max(0, hours).toFixed(2));
   }
-  // Transform date for app display
-  if (r && r.date) {
-    r.date = formatAppDate(r.date);
-  }
+  if (r && r.date) r.date = formatAppDate(r.date);
   return r;
 };
 
-// GET /api/v1/attendance/today
 export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const todayStr = parseAppDate((req.query.date as string) || todayDate());
 
-  // Self-Healing: Get ALL records for today to detect duplicates
   let { data, error } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)')
@@ -329,41 +332,31 @@ export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('date', todayStr)
     .order('created_at', { ascending: false });
 
-  // Fallback: If no record for today, check for any open shift
   if ((!data || data.length === 0) && !error) {
     const { data: active } = await supabaseAdmin
       .from('attendance')
       .select('*, breaks(*)')
       .eq('user_id', user.id)
-      .in('status', ['checked_in', 'on_break', 'on-break'])
-      .order('created_at', { ascending: false });
-    if (active && active.length > 0) data = active;
+      .in('status', ['checked_in', 'on_break'])
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (active?.length) data = active;
   }
 
   if (error) { badRequest(res, error.message); return; }
-
   let record = (data && data.length > 0) ? data[0] : null;
 
-  // Cleanup duplicates in background
   if (data && data.length > 1) {
-    console.log(`[Attendance] Self-Healing: Removing ${data.length - 1} duplicates for user ${user.id}`);
     const toDelete = data.slice(1).map(r => r.id);
-    supabaseAdmin.from('attendance').delete().in('id', toDelete).then(() => {
-      console.log(`[Attendance] Self-Healing Complete.`);
-    });
+    supabaseAdmin.from('attendance').delete().in('id', toDelete);
   }
 
   ok(res, enrichWithHours(record));
 });
 
-// GET /api/v1/attendance/history
 export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { page, limit, from, to } = getPagination(
-    req.query.page as string,
-    req.query.limit as string
-  );
-
+  const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
   const { data, error, count } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)', { count: 'exact' })
@@ -376,7 +369,6 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
   ok(res, buildPaginatedResult(results, count || 0, page, limit));
 });
 
-// GET /api/v1/attendance/team  (supervisor+)
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = dbToday();
@@ -392,206 +384,60 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
       total_hours, break_minutes, working_minutes, notes,
       is_regularised, created_at, updated_at,
       users!attendance_user_id_fkey(name, employee_id, city, zone_id, zones!zone_id(name))
-    `) // Forced redeploy for hint verification c2
+    `)
     .eq('org_id', user.org_id)
     .eq('date', date);
 
-  if (isUUID(user.client_id)) {
-    query = query.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id as string)) {
-    query = query.eq('client_id', req.query.client_id as string);
-  }
-
+  if (isUUID(user.client_id)) query = query.eq('client_id', user.client_id);
   if (isUUID(zone_id)) query = query.eq('users.zone_id', zone_id);
   if (isUUID(user_id) || isUUID(fe_id)) query = query.eq('user_id', user_id || fe_id);
 
-  if (city) query = query.eq('users.city', city);
-  if (isUUID(city_id)) {
-    const { data: cityData } = await supabaseAdmin.from('cities').select('name').eq('id', city_id).single();
-    if (cityData?.name) query = query.eq('users.city', cityData.name);
-  }
-
-  if (user.role === 'supervisor') {
-    const { data: teamIds } = await supabaseAdmin
-      .from('users')
-      .select('id')
-      .eq('supervisor_id', user.id);
-    const ids = (teamIds || []).map((u: { id: string }) => u.id);
-    if (ids.length) query = query.in('user_id', ids);
-    else { ok(res, []); return; }
-  }
-
   const { data, error } = await query.order('checkin_at', { ascending: true, nullsFirst: false });
   if (error) { badRequest(res, error.message); return; }
-  const results = (data || []).map(enrichWithHours);
-  ok(res, results);
+  ok(res, (data || []).map(enrichWithHours));
 });
 
-// POST /api/v1/attendance/override  (admin+)
 export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => {
   const admin = req.user!;
-  const {
-    user_id, date, status, override_reason,
-    checkin_at, checkin_lat, checkin_lng, checkin_selfie_url,
-    checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
-    notes,
-  } = req.body;
-
-  if (!user_id || !date || !status) {
-    badRequest(res, 'user_id, date and status are required');
-    return;
-  }
+  const { user_id, date, status, override_reason, checkin_at, checkout_at, notes } = req.body;
 
   let total_hours: number | null = null;
   if (checkin_at && checkout_at) {
     let ciMs = new Date(checkin_at).getTime();
     let coMs = new Date(checkout_at).getTime();
-    if (coMs < ciMs) coMs += 24 * 60 * 60 * 1000; // midnight crossover
+    if (coMs < ciMs) coMs += 24 * 60 * 60 * 1000;
     total_hours = parseFloat(Math.min(Math.max((coMs - ciMs) / 3_600_000, 0), 24).toFixed(2));
   }
 
-  // Build payload — fields to write regardless of insert or update
   const payload: any = {
     status,
-    checkin_at:  checkin_at  || null,
+    checkin_at: checkin_at || null,
     checkout_at: checkout_at || null,
-    ...(total_hours         !== null && { total_hours }),
-    ...(checkin_lat         != null  && { checkin_lat:         parseFloat(String(checkin_lat)) }),
-    ...(checkin_lng         != null  && { checkin_lng:         parseFloat(String(checkin_lng)) }),
-    ...(checkin_selfie_url  != null  && { checkin_selfie_url }),
-    ...(checkout_lat        != null  && { checkout_lat:        parseFloat(String(checkout_lat)) }),
-    ...(checkout_lng        != null  && { checkout_lng:        parseFloat(String(checkout_lng)) }),
-    ...(checkout_selfie_url != null  && { checkout_selfie_url }),
-    ...(notes               != null  && { notes }),
-    override_reason: override_reason?.trim() || 'Manual override by admin',
-    override_by:     admin.id,
-    is_regularised:  true,
+    ...(total_hours !== null && { total_hours }),
+    notes,
+    override_reason: override_reason || 'Admin override',
+    override_by: admin.id,
+    is_regularised: true,
   };
 
-  // Check if a record already exists for this user+date
-  const { data: existing } = await supabaseAdmin
-    .from('attendance')
-    .select('id')
-    .eq('user_id', user_id)
-    .eq('date', date)
-    .eq('org_id', admin.org_id)
-    .maybeSingle();
+  const { data, error } = await supabaseAdmin.from('attendance').upsert({
+    user_id, date, org_id: admin.org_id, ...payload
+  }, { onConflict: 'user_id,date' }).select().single();
 
-  let result: any;
-  if (existing?.id) {
-    // UPDATE — always overwrites every field including status
-    result = await supabaseAdmin
-      .from('attendance')
-      .update(payload)
-      .eq('id', existing.id)
-      .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
-      .single();
-  } else {
-    // INSERT — brand new record
-    result = await supabaseAdmin
-      .from('attendance')
-      .insert({ org_id: admin.org_id, user_id, date, ...payload })
-      .select('*, users!attendance_user_id_fkey(name, employee_id, zones(name))')
-      .single();
-  }
-
-  // Fallback: override_reason/override_by/is_regularised columns may not exist yet
-  if (result.error && (
-    result.error.message.includes('override_reason') ||
-    result.error.message.includes('override_by') ||
-    result.error.message.includes('is_regularised')
-  )) {
-    const { override_reason: _or, override_by: _ob, is_regularised: _ir, ...basePayload } = payload;
-    if (existing?.id) {
-      result = await supabaseAdmin.from('attendance').update(basePayload)
-        .eq('id', existing.id)
-        .select('*, users!user_id(name, employee_id, zones!zone_id(name))').single();
-    } else {
-      result = await supabaseAdmin.from('attendance').insert({ org_id: admin.org_id, user_id, date, ...basePayload })
-        .select('*, users!user_id(name, employee_id, zones!zone_id(name))').single();
-    }
-  }
-
-  if (result.error) { badRequest(res, result.error.message); return; }
-  created(res, result.data, 'Attendance record saved');
+  if (error) { badRequest(res, error.message); return; }
+  created(res, data, 'Attendance saved');
 });
 
-// PATCH /api/v1/attendance/:id/override  (admin+)
 export const updateAttendanceOverride = asyncHandler<AuthRequest>(async (req, res) => {
   const admin = req.user!;
-  const {
-    status, override_reason,
-    checkin_at, checkin_lat, checkin_lng, checkin_selfie_url,
-    checkout_at, checkout_lat, checkout_lng, checkout_selfie_url,
-    notes,
-  } = req.body;
+  const { status, override_reason, checkin_at, checkout_at, notes } = req.body;
 
-  const { data: existing, error: fetchErr } = await supabaseAdmin
+  const { data: updated, error } = await supabaseAdmin
     .from('attendance')
-    .select('date, status, checkin_at, checkout_at')
+    .update({ status, checkin_at, checkout_at, notes, override_reason, override_by: admin.id, is_regularised: true })
     .eq('id', req.params.id)
-    .eq('org_id', admin.org_id)
-    .single();
+    .select().single();
 
-  if (fetchErr || !existing) { notFound(res, 'Attendance record not found'); return; }
-
-  const newCheckin  = checkin_at  || existing.checkin_at;
-  const newCheckout = checkout_at || existing.checkout_at;
-
-  let total_hours: number | null = null;
-  if (newCheckin && newCheckout) {
-    let ciMs = new Date(newCheckin).getTime();
-    let coMs = new Date(newCheckout).getTime();
-    if (coMs < ciMs) coMs += 24 * 60 * 60 * 1000; // midnight crossover
-    total_hours = parseFloat(Math.min(Math.max((coMs - ciMs) / 3_600_000, 0), 24).toFixed(2));
-  }
-
-  // status is ALWAYS written — it is the primary purpose of an override
-  // Use incoming status if provided, else keep existing
-  const newStatus = status ?? existing.status;
-  const updates: any = { status: newStatus };
-
-  // Times
-  if (checkin_at)           updates.checkin_at          = checkin_at;
-  if (checkout_at)          updates.checkout_at         = checkout_at;
-  if (total_hours !== null) updates.total_hours         = total_hours;
-
-  // Optional location + selfie
-  if (checkin_lat  != null)  updates.checkin_lat         = checkin_lat;
-  if (checkin_lng  != null)  updates.checkin_lng         = checkin_lng;
-  if (checkin_selfie_url)    updates.checkin_selfie_url  = checkin_selfie_url;
-  if (checkout_lat != null)  updates.checkout_lat        = checkout_lat;
-  if (checkout_lng != null)  updates.checkout_lng        = checkout_lng;
-  if (checkout_selfie_url)   updates.checkout_selfie_url = checkout_selfie_url;
-  if (notes != null)         updates.notes               = notes;
-
-  // Columns added by migration — try with them first, fall back without
-  const updatesWithMeta = {
-    ...updates,
-    override_reason: override_reason?.trim() || 'Manual override by admin',
-    override_by:     admin.id,
-    is_regularised:  true,
-  };
-
-  let result = await supabaseAdmin
-    .from('attendance')
-    .update(updatesWithMeta)
-    .eq('id', req.params.id)
-    .eq('org_id', admin.org_id)
-    .select('*, users!user_id(name, employee_id, zones!zone_id(name))')
-    .single();
-
-  // If failed due to missing columns, retry with base fields only
-  if (result.error && (result.error.message.includes('override_reason') || result.error.message.includes('override_by') || result.error.message.includes('is_regularised'))) {
-    result = await supabaseAdmin
-      .from('attendance')
-      .update(updates)
-      .eq('id', req.params.id)
-      .eq('org_id', admin.org_id)
-      .select('*, users!user_id(name, employee_id, zones!zone_id(name))')
-      .single();
-  }
-
-  if (result.error) { badRequest(res, result.error.message); return; }
-  ok(res, result.data, 'Attendance updated');
+  if (error) { badRequest(res, error.message); return; }
+  ok(res, updated, 'Attendance updated');
 });
