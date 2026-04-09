@@ -159,7 +159,7 @@ export const getSubmission = getSubmissionById;
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { date, user_id, template_id, outlet_id, client_id, date_from, date_to } = req.query;
+  const { date, user_id, template_id, activity_id, outlet_id, client_id, date_from, date_to } = req.query;
 
   logger.info(`[Forms] getAllSubmissions: page=${page}, limit=${limit}, client_id=${client_id}, role=${user.role}`);
 
@@ -183,7 +183,11 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   }
 
   if (user_id) query = query.eq('user_id', user_id);
-  if (template_id) query = query.eq('template_id', template_id);
+  
+  // Align with both frontend naming variations
+  const tid = template_id || activity_id;
+  if (tid) query = query.eq('template_id', tid);
+  
   if (outlet_id) query = query.eq('outlet_id', outlet_id);
 
   query = query.order('submitted_at', { ascending: false }).range(from, to);
