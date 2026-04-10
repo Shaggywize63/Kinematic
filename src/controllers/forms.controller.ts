@@ -148,6 +148,9 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime()
   );
 
+  const { count: rawTotalF } = await supabaseAdmin.from('form_submissions').select('*', { count: 'exact', head: true });
+  const { count: rawTotalB } = await supabaseAdmin.from('builder_submissions').select('*', { count: 'exact', head: true });
+
   // EMERGENCY RECOVERY: If search/date filters are too strict for a SuperAdmin, 
   // and we have zero results, but RAW rows exist, return the last 50 raw rows 
   // so the user actually SEES data.
@@ -160,10 +163,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   }
   
   const finalResult = merged.slice(0, limit);
-
-  // Diagnostic: Total rows in DB ignoring filters
-  const { count: rawTotalF } = await supabaseAdmin.from('form_submissions').select('*', { count: 'exact', head: true });
-  const { count: rawTotalB } = await supabaseAdmin.from('builder_submissions').select('*', { count: 'exact', head: true });
 
   return sendSuccess(res, {
     ...buildPaginatedResult(finalResult, (fCount || 0) + (bCount || 0), page, limit),
