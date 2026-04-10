@@ -137,7 +137,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (search) q2 = q2.or(`outlet_name.ilike.%${search}%,users.name.ilike.%${search}%`);
   const { data: bData, count: bCount, error: bErr } = await q2.order('submitted_at', { ascending: false }).range(from, to);
 
-  const normalizedF = (fData || []).map(f => ({
+  const normalizedF = ((fData as any[]) || []).map(f => ({
       ...f, 
       type: 'traditional',
       outlet_name: f.outlet_name || f.store_name || 'Individual Submission',
@@ -145,7 +145,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       activities: f.activities || { name: f.builder_forms?.title || 'Form' }
   }));
 
-  const normalizedB = (bData || []).map(b => ({
+  const normalizedB = ((bData as any[]) || []).map(b => ({
       ...b, 
       type: 'builder',
       outlet_name: b.outlet_name || 'Individual Submission',
