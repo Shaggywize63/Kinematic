@@ -7,15 +7,18 @@ const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
 
 export const getRoutePlans = asyncHandler(async (req, res) => {
-  const org = orgId(req);
-  const istDate = parseAppDate((req.query.date as string) || dbToday());
+  const user = (req as any).user;
+  const { client_id, date } = req.query;
+  
+  const effectiveOrgId = (client_id && client_id !== 'undefined') ? (client_id as string) : user.org_id;
+  const isGlobal = effectiveOrgId === 'Kinematic' || effectiveOrgId === '00000000-0000-0000-0000-000000000000';
+  
+  const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
   
-  // Use range to be timezone-independent
-  let q = supabase.from('v_route_plan_daily').select('*')
-    .eq('org_id', org)
-    .gte('plan_date', start)
-    .lte('plan_date', end);
+  let q = supabase.from('v_route_plan_daily').select('*');
+  if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
+  q = q.gte('plan_date', start).lte('plan_date', end);
     
   const { data: plans, error } = await q.order('fe_name', { ascending: true });
   if (error) return badRequest(res, error.message);
@@ -73,7 +76,7 @@ export const createRoutePlan = asyncHandler(async (req, res) => {
   const acts = activity_ids || (activity_id ? [activity_id] : []);
   if (!user_id || !plan_date || !acts.length || !outlets?.length) return badRequest(res, 'Missing required fields');
   
-  const pDate = parseAppDate(plan_date); // IST YYYY-MM-DD
+  const pDate = parseAppDate(plan_date);
   const createdPlans = [];
   for (const aid of acts) {
     await supabase.from('route_plans').delete().eq('user_id', user_id).eq('plan_date', pDate).eq('activity_id', aid);
@@ -111,10 +114,19 @@ export const deleteRoutePlan = asyncHandler(async (req, res) => {
 });
 
 export const getRoutePlanSummary = asyncHandler(async (req, res) => {
-  const org = orgId(req);
-  const istDate = parseAppDate((req.query.date as string) || dbToday());
+  const user = (req as any).user;
+  const { client_id, date } = req.query;
+  const effectiveOrgId = (client_id && client_id !== 'undefined') ? (client_id as string) : user.org_id;
+  const isGlobal = effectiveOrgId === 'Kinematic' || effectiveOrgId === '00000000-0000-0000-0000-000000000000';
+
+  const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
-  const { data, error } = await supabase.from('route_plans').select('*').eq('org_id', org).gte('plan_date', start).lte('plan_date', end);
+  
+  let q = supabase.from('route_plans').select('*');
+  if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
+  q = q.gte('plan_date', start).lte('plan_date', end);
+
+  const { data, error } = await q;
   if (error) return badRequest(res, error.message);
   const rows = data || [];
   return ok(res, {
