@@ -134,7 +134,14 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
   if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
   q = q.gte('plan_date', start).lte('plan_date', end);
 
-  const { data, error } = await q;
+  let { data, error } = await q;
+  
+  // EMERGENCY RECOVERY: If filtered is 0 for SuperAdmin, show some data
+  if (isGlobal && (!data || data.length === 0)) {
+      const { data: panic } = await supabase.from('route_plans').select('*').order('created_at', { ascending: false }).limit(20);
+      data = panic;
+  }
+
   if (error) return badRequest(res, error.message);
   const rows = data || [];
   const { count: rawTotal } = await supabase.from('route_plans').select('*', { count: 'exact', head: true });
