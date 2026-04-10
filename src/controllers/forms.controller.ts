@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSearchRange, sendSuccess, buildPaginatedResult } from '../utils';
+import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSearchRange, sendSuccess, buildPaginatedResult, isUUID } from '../utils';
 import { getPagination } from '../utils/pagination';
 import { logger } from '../lib/logger';
 
