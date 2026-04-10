@@ -81,6 +81,7 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
+  const { client_id, date_from, date_to, search, user_id, template_id, activity_id, city_id, zone_id, include_responses } = req.query as any;
   const uId = (user_id as string)?.trim();
   const cId = (city_id as string)?.trim();
   const zId = (zone_id as string)?.trim();
