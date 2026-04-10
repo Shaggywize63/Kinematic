@@ -1,5 +1,4 @@
 import { Response } from 'express';
-import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSearchRange } from '../utils';
@@ -84,7 +83,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const effectiveOrgId = (client_id && client_id !== 'undefined') ? (client_id as string) : user.org_id;
   const isGlobal = effectiveOrgId === 'Kinematic' || effectiveOrgId === '00000000-0000-0000-0000-000000000000';
 
-  // --- Date Range for IST ---
   const df = date_from ? parseAppDate(date_from as string) : null;
   const dt = date_to ? parseAppDate(date_to as string) : (df || null);
   
@@ -92,11 +90,10 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (df) {
     const range = getISTSearchRange(df);
     utcStart = range.start;
-    if (dt) utcEnd = getISTSearchRange(dt).end;
-    else utcEnd = range.end;
+    utcEnd = dt ? getISTSearchRange(dt).end : range.end;
   }
 
-  logger.info(`[Forms] Search: org=${effectiveOrgId}, IST=(${df} to ${dt}), UTC=(${utcStart} to ${utcEnd})`);
+  logger.info(`[Forms] Search: org=${effectiveOrgId}, Global=${isGlobal}, IST=(${df} to ${dt}), UTC=(${utcStart} to ${utcEnd})`);
 
   // --- QUERY 1: Traditional ---
   let q1 = supabaseAdmin.from('form_submissions').select('*, form_templates:builder_forms!left(title), activities!left(name), profile:users!left(name, role)', { count: 'exact' });
@@ -107,7 +104,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const tid = template_id || activity_id;
   if (tid) q1 = q1.eq('template_id', tid);
   if (search) q1 = q1.or(`outlet_name.ilike.%${search}%,store_name.ilike.%${search}%`);
-  const { data: fData, count: fCount } = await q1.order('submitted_at', { ascending: false }).range(from, to);
+  const { data: fData, count: fCount, error: fErr } = await q1.order('submitted_at', { ascending: false }).range(from, to);
 
   // --- QUERY 2: Builder ---
   let q2 = supabaseAdmin.from('builder_submissions').select('*, users!inner(name, employee_id), builder_forms!inner(title)', { count: 'exact' });
@@ -117,23 +114,33 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (user_id) q2 = q2.eq('user_id', user_id);
   if (tid) q2 = q2.eq('form_id', tid);
   if (search) q2 = q2.or(`outlet_name.ilike.%${search}%,users.name.ilike.%${search}%`);
-  const { data: bData, count: bCount } = await q2.order('submitted_at', { ascending: false }).range(from, to);
+  const { data: bData, count: bCount, error: bErr } = await q2.order('submitted_at', { ascending: false }).range(from, to);
 
-  const totalPossible = (fCount || 0) + (bCount || 0);
-  let finalRows = [];
-  if (bCount && (bCount || 0) > 0) {
-    finalRows = (bData || []).map(b => ({
-      ...b, users: b.users, 
-      submitted_at: b.submitted_at, 
+  if (fErr || bErr) logger.error(`Traditional Err: ${fErr?.message}, Builder Err: ${bErr?.message}`);
+
+  // --- MERGE LOGIC ---
+  const normalizedF = (fData || []).map(f => ({
+      ...f, 
+      type: 'traditional',
+      users: f.profile || { name: 'Unknown' },
+      activities: f.activities || { name: f.form_templates?.title || 'Form' }
+  }));
+
+  const normalizedB = (bData || []).map(b => ({
+      ...b, 
+      type: 'builder',
+      users: b.users, 
       outlet_name: b.outlet_name || 'Outlet',
       activities: { name: b.builder_forms?.title || 'Form' }
-    }));
-  } else {
-    finalRows = fData || [];
-  }
+  }));
+
+  // Combine and sort by date descending
+  const merged = [...normalizedF, ...normalizedB].sort((a, b) => 
+      new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime()
+  ).slice(0, limit);
 
   return res.status(200).json({ 
-    ...buildPaginatedResult(finalRows, totalPossible, page, limit), 
-    debug: { df, dt, utcStart, utcEnd, fCount, bCount, isGlobal } 
+    ...buildPaginatedResult(merged, (fCount || 0) + (bCount || 0), page, limit), 
+    debug: { df, dt, utcStart, utcEnd, fCount, bCount, isGlobal, fErr: fErr?.message, bErr: bErr?.message } 
   });
 });
