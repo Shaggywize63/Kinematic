@@ -137,12 +137,14 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
   const { data, error } = await q;
   if (error) return badRequest(res, error.message);
   const rows = data || [];
+  const { count: rawTotal } = await supabase.from('route_plans').select('*', { count: 'exact', head: true });
   return ok(res, {
     total_fes: rows.length,
     total_outlets: rows.reduce((s, r: any) => s + (r.total_outlets || 0), 0),
     visited_outlets: rows.reduce((s, r: any) => s + (r.visited_outlets || 0), 0),
     pending_plans: rows.filter((r: any) => r.status === 'pending').length,
-    completed_plans: rows.filter((r: any) => r.status === 'completed').length
+    completed_plans: rows.filter((r: any) => r.status === 'completed').length,
+    debug: { raw_total: rawTotal, isGlobal, effectiveOrgId, start, end }
   });
 });
 

@@ -98,7 +98,12 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   logger.info(`[Forms] IST=${istDateFrom}-${istDateTo}, UTC Range=${utcStart} to ${utcEnd}`);
 
   // --- QUERY 1: Traditional ---
-  let q1 = supabaseAdmin.from('form_submissions').select('*, form_templates:builder_forms!left(title), activities!left(name), profile:users!left(name, employee_id, role)', { count: 'exact' });
+  let q1 = supabaseAdmin.from('form_submissions').select(`
+    *,
+    activities:activity_id(name),
+    profile:users!user_id(name, employee_id, role),
+    builder_forms!template_id(title)
+  `, { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (user_id) q1 = q1.eq('user_id', user_id);
@@ -111,7 +116,11 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const { data: fData, count: fCount, error: fErr } = await q1.order('submitted_at', { ascending: false }).range(from, to);
 
   // --- QUERY 2: Builder ---
-  let q2 = supabaseAdmin.from('builder_submissions').select('*, users!inner(name, employee_id), builder_forms!inner(title)', { count: 'exact' });
+  let q2 = supabaseAdmin.from('builder_submissions').select(`
+    *,
+    users:user_id(name, employee_id),
+    builder_forms:form_id(title)
+  `, { count: 'exact' });
   if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
   q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (user_id) q2 = q2.eq('user_id', user_id);
