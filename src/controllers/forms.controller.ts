@@ -186,17 +186,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime()
   );
 
-  // EMERGENCY RECOVERY: If search/date filters are too strict for a SuperAdmin, 
-  // and we have zero results, but RAW rows exist, return the last 50 raw rows 
-  // so the user actually SEES data.
-  if (isGlobal && merged.length === 0 && !search && (rawTotalF || 0) + (rawTotalB || 0) > 0) {
-      const { data: panicF } = await supabaseAdmin.from('form_submissions').select('*, users:user_id(name), activities:activity_id(name)').order('submitted_at', { ascending: false }).limit(20);
-      const { data: panicB } = await supabaseAdmin.from('builder_submissions').select('*, users:user_id(name), builder_forms:form_id(title)').order('submitted_at', { ascending: false }).limit(20);
-      const pF = (panicF || []).map(f => ({ ...f, type: 'traditional', activities: f.activities || { name: 'Log' } }));
-      const pB = (panicB || []).map(b => ({ ...b, type: 'builder', activities: { name: b.builder_forms?.title || 'Builder' } }));
-      merged = [...pF, ...pB].sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime());
-  }
-  
   const finalResult = merged.slice(0, limit);
 
   return sendSuccess(res, {
