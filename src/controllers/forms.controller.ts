@@ -132,6 +132,7 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     return {
       submission_id: sub.id,
       field_id: fieldId, // DB column is 'field_id'
+      field_key: fieldId, // Satisfy NOT NULL constraint
       value_text: typeof val === 'string' ? val : JSON.stringify(val),
       value_number: typeof val === 'number' ? val : null,
       value_bool: typeof val === 'boolean' ? val : null,
