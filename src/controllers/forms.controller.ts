@@ -104,12 +104,14 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   logger.info(`[Forms] IST=${istDateFrom}-${istDateTo}, UTC Range=${utcStart} to ${utcEnd}`);
 
-  // --- QUERY 1: Traditional ---
+  const isFilteringUserContext = isUUID(user_id as string) || isUUID(city_id as string) || isUUID(zone_id as string);
+  const userJoin = isFilteringUserContext ? '!inner' : '!left';
+
   let select1 = `
     *,
     builder_forms:template_id(title),
     activities:activity_id(name),
-    users:user_id!left(name, employee_id, role, city_id, zone_id)
+    users:user_id${userJoin}(name, employee_id, role, city_id, zone_id)
   `;
   if (include_responses === 'true') {
      select1 += `, form_responses(*, builder_questions(*))`;
@@ -133,7 +135,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- QUERY 2: Builder ---
   let select2 = `
     *,
-    users:user_id!left(name, employee_id, city_id, zone_id),
+    users:user_id${userJoin}(name, employee_id, city_id, zone_id),
     builder_forms:form_id(title)
   `;
   // Builder forms usually store responses in JSON, skip extra join unless needed
