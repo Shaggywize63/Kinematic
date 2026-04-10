@@ -81,7 +81,7 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { client_id, date_from, date_to, search, user_id, template_id, activity_id, city_id, zone_id } = req.query;
+  const { client_id, date_from, date_to, search, user_id, template_id, activity_id, city_id, zone_id, include_responses } = req.query;
 
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
@@ -103,12 +103,16 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   logger.info(`[Forms] IST=${istDateFrom}-${istDateTo}, UTC Range=${utcStart} to ${utcEnd}`);
 
   // --- QUERY 1: Traditional ---
-  let q1 = supabaseAdmin.from('form_submissions').select(`
+  let select1 = `
     *,
     builder_forms:template_id(title),
     activities:activity_id(name),
     users!inner(name, employee_id, role, city_id, zone_id)
-  `, { count: 'exact' });
+  `;
+  if (include_responses === 'true') {
+     select1 += `, form_responses(*, builder_questions(*))`;
+  }
+  let q1 = supabaseAdmin.from('form_submissions').select(select1, { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (isUUID(user_id)) q1 = q1.eq('user_id', user_id);
@@ -123,11 +127,13 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const { data: fData, count: fCount, error: fErr } = await q1.order('submitted_at', { ascending: false }).range(from, to);
 
   // --- QUERY 2: Builder ---
-  let q2 = supabaseAdmin.from('builder_submissions').select(`
+  let select2 = `
     *,
     users!inner(name, employee_id, city_id, zone_id),
     builder_forms:form_id(title)
-  `, { count: 'exact' });
+  `;
+  // Builder forms usually store responses in JSON, skip extra join unless needed
+  let q2 = supabaseAdmin.from('builder_submissions').select(select2, { count: 'exact' });
   if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
   q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (isUUID(user_id)) q2 = q2.eq('user_id', user_id);
