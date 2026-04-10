@@ -5,8 +5,6 @@ import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSe
 import { getPagination } from '../utils/pagination';
 import { logger } from '../lib/logger';
 
-// --- Controllers ---
-
 export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { is_active } = req.query;
@@ -83,32 +81,34 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const effectiveOrgId = (client_id && client_id !== 'undefined') ? (client_id as string) : user.org_id;
   const isGlobal = effectiveOrgId === 'Kinematic' || effectiveOrgId === '00000000-0000-0000-0000-000000000000';
 
-  const df = date_from ? parseAppDate(date_from as string) : null;
-  const dt = date_to ? parseAppDate(date_to as string) : (df || null);
+  // Always use the IST Range helper for the "definitve" fix
+  const istDateFrom = parseAppDate(date_from as string);
+  const istDateTo = date_to ? parseAppDate(date_to as string) : istDateFrom;
   
-  let utcStart = null, utcEnd = null;
-  if (df) {
-    const range = getISTSearchRange(df);
-    utcStart = range.start;
-    utcEnd = dt ? getISTSearchRange(dt).end : range.end;
-  }
+  const rangeFrom = getISTSearchRange(istDateFrom);
+  const rangeTo = getISTSearchRange(istDateTo);
+  const utcStart = rangeFrom.start;
+  const utcEnd = rangeTo.end;
+
+  logger.info(`[Forms] IST=${istDateFrom}-${istDateTo}, UTC Range=${utcStart} to ${utcEnd}`);
 
   // --- QUERY 1: Traditional ---
   let q1 = supabaseAdmin.from('form_submissions').select('*, form_templates:builder_forms!left(title), activities!left(name), profile:users!left(name, employee_id, role)', { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
-  if (utcStart) q1 = q1.gte('submitted_at', utcStart);
-  if (utcEnd) q1 = q1.lte('submitted_at', utcEnd);
+  q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (user_id) q1 = q1.eq('user_id', user_id);
+  
+  // Flexibly handle ID column mismatch
   const tid = (template_id || activity_id) as string;
-  if (tid) q1 = q1.eq('template_id', tid);
+  if (tid) q1 = q1.or(`template_id.eq.${tid},activity_id.eq.${tid}`);
+  
   if (search) q1 = q1.or(`outlet_name.ilike.%${search}%,store_name.ilike.%${search}%`);
   const { data: fData, count: fCount, error: fErr } = await q1.order('submitted_at', { ascending: false }).range(from, to);
 
   // --- QUERY 2: Builder ---
   let q2 = supabaseAdmin.from('builder_submissions').select('*, users!inner(name, employee_id), builder_forms!inner(title)', { count: 'exact' });
   if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
-  if (utcStart) q2 = q2.gte('submitted_at', utcStart);
-  if (utcEnd) q2 = q2.lte('submitted_at', utcEnd);
+  q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (user_id) q2 = q2.eq('user_id', user_id);
   if (tid) q2 = q2.eq('form_id', tid);
   if (search) q2 = q2.or(`outlet_name.ilike.%${search}%,users.name.ilike.%${search}%`);
@@ -118,15 +118,15 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       ...f, 
       type: 'traditional',
       outlet_name: f.outlet_name || f.store_name || 'Individual Submission',
-      users: f.profile || { name: 'Unknown FE' },
-      activities: f.activities || { name: f.form_templates?.title || 'Activity' }
+      users: f.profile || { name: 'FE' },
+      activities: f.activities || { name: f.form_templates?.title || 'Form' }
   }));
 
   const normalizedB = (bData || []).map(b => ({
       ...b, 
       type: 'builder',
       outlet_name: b.outlet_name || 'Individual Submission',
-      users: b.users || { name: 'Unknown FE' },
+      users: b.users || { name: 'FE' },
       activities: { name: b.builder_forms?.title || 'Form' }
   }));
 
@@ -136,6 +136,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   return sendSuccess(res, {
     ...buildPaginatedResult(merged, (fCount || 0) + (bCount || 0), page, limit),
-    debug: { df, dt, fCount, bCount, fErr: fErr?.message, bErr: bErr?.message }
+    debug: { istDateFrom, utcStart, utcEnd, fCount, bCount }
   });
 });
