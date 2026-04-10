@@ -78,8 +78,13 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
   const { client_id, date_from, date_to, search, user_id, template_id, activity_id } = req.query;
 
-  const effectiveOrgId = (client_id && client_id !== 'undefined') ? (client_id as string) : user.org_id;
-  const isGlobal = effectiveOrgId === 'Kinematic' || effectiveOrgId === '00000000-0000-0000-0000-000000000000';
+  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
+  const isSagar = (user.name || '').toLowerCase().includes('sagar');
+  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
+  
+  // Rule: If Sagar/SuperAdmin and NO specific UUID client is provided, default to Global (isGlobal=true)
+  const isGlobal = isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) );
+  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
 
   // Always use the IST Range helper for the "definitve" fix
   const istDateFrom = parseAppDate(date_from as string);

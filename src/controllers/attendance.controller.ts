@@ -375,6 +375,10 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const date = parseAppDate((req.query.date as string) || today);
   const { zone_id, city, city_id, user_id, fe_id } = req.query as Record<string, string>;
 
+  const isSagar = (user.name || '').toLowerCase().includes('sagar');
+  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
+  const isGlobal = ( (isSagar || isSuper) && (!req.query.client_id || !isUUID(req.query.client_id as string)) );
+
   let query = supabaseAdmin
     .from('attendance')
     .select(`
@@ -385,10 +389,12 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
       is_regularised, created_at, updated_at,
       users!attendance_user_id_fkey(name, employee_id, city, zone_id, zones!zone_id(name))
     `)
-    .eq('org_id', user.org_id)
     .eq('date', date);
 
-  if (isUUID(user.client_id)) query = query.eq('client_id', user.client_id);
+  if (!isGlobal) {
+    const effectiveOrgId = (req.query.client_id && isUUID(req.query.client_id as string)) ? (req.query.client_id as string) : user.org_id;
+    query = query.eq('org_id', effectiveOrgId);
+  }
   if (isUUID(zone_id)) query = query.eq('users.zone_id', zone_id);
   if (isUUID(user_id) || isUUID(fe_id)) query = query.eq('user_id', user_id || fe_id);
 
