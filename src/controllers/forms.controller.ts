@@ -87,9 +87,11 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
   
-  // Rule: If Sagar/SuperAdmin and NO specific UUID client is provided, default to Global (isGlobal=true)
-  const isGlobal = isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) );
+  // Rule: If Sagar/SuperAdmin, DEFAULT to Global unless a specific client UUID is selected
+  const isGlobal = isGlobalVal || isSagar || isSuper || (!client_id || !isUUID(client_id as string));
   const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
+
+  logger.info(`[WorkActivities] Query Window: ${utcStart} to ${utcEnd} | isGlobal: ${isGlobal}`);
 
   // Always use the IST Range helper for the "definitve" fix
   const istDateFrom = parseAppDate(date_from as string);
