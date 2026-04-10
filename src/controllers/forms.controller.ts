@@ -107,7 +107,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     *,
     builder_forms:template_id(title),
     activities:activity_id(name),
-    users!inner:user_id(name, employee_id, role, city_id, zone_id)
+    users!inner(name, employee_id, role, city_id, zone_id)
   `, { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
@@ -125,7 +125,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- QUERY 2: Builder ---
   let q2 = supabaseAdmin.from('builder_submissions').select(`
     *,
-    users!inner:user_id(name, employee_id, city_id, zone_id),
+    users!inner(name, employee_id, city_id, zone_id),
     builder_forms:form_id(title)
   `, { count: 'exact' });
   if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
