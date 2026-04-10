@@ -91,8 +91,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const isGlobal = isGlobalVal || isSagar || isSuper || (!client_id || !isUUID(client_id as string));
   const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
 
-  logger.info(`[WorkActivities] Query Window: ${utcStart} to ${utcEnd} | isGlobal: ${isGlobal}`);
-
   // Always use the IST Range helper for the "definitve" fix
   const istDateFrom = parseAppDate(date_from as string);
   const istDateTo = date_to ? parseAppDate(date_to as string) : istDateFrom;
@@ -101,6 +99,8 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const rangeTo = getISTSearchRange(istDateTo);
   const utcStart = rangeFrom.start;
   const utcEnd = rangeTo.end;
+
+  logger.info(`[WorkActivities] Query Window: ${utcStart} to ${utcEnd} | isGlobal: ${isGlobal}`);
 
   logger.info(`[Forms] IST=${istDateFrom}-${istDateTo}, UTC Range=${utcStart} to ${utcEnd}`);
 
