@@ -117,7 +117,8 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   let q1 = supabaseAdmin.from('form_submissions').select(select1, { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
-  if (isUUID(user_id)) q1 = q1.eq('user_id', user_id);
+  // Standardize filter to use joined table alias for better reliability in Global View
+  if (isUUID(user_id as string)) q1 = q1.eq('users.id', user_id);
   // Filter on joined column only if relevant
   if (isUUID(city_id)) q1 = q1.eq('users.city_id', city_id);
   if (isUUID(zone_id)) q1 = q1.eq('users.zone_id', zone_id);
@@ -139,7 +140,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   let q2 = supabaseAdmin.from('builder_submissions').select(select2, { count: 'exact' });
   if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
   q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
-  if (isUUID(user_id)) q2 = q2.eq('user_id', user_id);
+  if (isUUID(user_id as string)) q2 = q2.eq('users.id', user_id as string);
   if (isUUID(city_id)) q2 = q2.eq('users.city_id', city_id);
   if (isUUID(zone_id)) q2 = q2.eq('users.zone_id', zone_id);
   if (isUUID(tid)) q2 = q2.eq('form_id', tid);
