@@ -35,33 +35,64 @@ export function getPagination(
 }
 
 // ── Success responses ──
-export const ok = <T>(res: Response, data: T, message?: string) =>
+
+/**
+ * Standard success response.
+ * code 4 is used to bypass build breaks where controllers call with 4 arguments.
+ */
+export function sendSuccess(
+  res: Response,
+  data: any,
+  message = 'Success',
+  statusCode = 200
+) {
+  res.status(statusCode).json({ success: true, message, data });
+}
+
+export function ok<T>(res: Response, data: T, message?: string) {
   res.status(200).json({ success: true, data, ...(message && { message }) });
+}
 
-export const created = <T>(res: Response, data: T, message?: string) =>
+export function created<T>(res: Response, data: T, message?: string) {
   res.status(201).json({ success: true, data, ...(message && { message }) });
+}
 
-export const badRequest = (res: Response, error: string, details?: unknown) =>
+export function badRequest(res: Response, error: string, details?: unknown) {
   res.status(400).json({ success: false, error, ...(details && { details }) });
+}
 
-export const notFound = (res: Response, error = 'Not found') =>
+export function notFound(res: Response, error = 'Not found') {
   res.status(404).json({ success: false, error });
+}
 
-export const forbidden = (res: Response, error = 'Forbidden') =>
+export function forbidden(res: Response, error = 'Forbidden') {
   res.status(403).json({ success: false, error });
+}
 
-export const conflict = (res: Response, error: string) =>
+export function conflict(res: Response, error: string) {
   res.status(409).json({ success: false, error });
+}
 
-export const sendSuccess = (res: Response, data: any, message?: string) =>
-  res.status(200).json({ success: true, data, message });
-
-export const sendPaginated = (res: Response, data: any[], total: number, page: number, limit: number) =>
+export function sendPaginated(
+  res: Response,
+  data: any[],
+  total: number,
+  page: number,
+  limit: number
+) {
   res.status(200).json({
     success: true,
     data,
-    pagination: { total, page, limit, totalPages: Math.ceil(total / limit) }
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
   });
+}
 
 export const isUUID = (id: any): boolean =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id));
@@ -126,4 +157,8 @@ export function formatAppDate(date: any): string {
   const mm = (d.getMonth() + 1).toString().padStart(2, '0');
   const yyyy = d.getFullYear();
   return `${dd}--${mm}--${yyyy}`;
+}
+// Add clientId helper used in some controllers
+export function clientId(req: Request): string | null {
+  return (req as any).user?.client_id || null;
 }
