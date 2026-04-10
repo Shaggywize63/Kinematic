@@ -81,7 +81,11 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { client_id, date_from, date_to, search, user_id, template_id, activity_id, city_id, zone_id, include_responses } = req.query;
+  const uId = (user_id as string)?.trim();
+  const cId = (city_id as string)?.trim();
+  const zId = (zone_id as string)?.trim();
+  const tId = (template_id as string)?.trim();
+  const aId = (activity_id as string)?.trim();
 
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
@@ -91,7 +95,6 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const isGlobal = isGlobalVal || isSagar || isSuper || (!client_id || !isUUID(client_id as string));
   const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
 
-  // Always use the IST Range helper for the "definitve" fix
   const istDateFrom = parseAppDate(date_from as string);
   const istDateTo = date_to ? parseAppDate(date_to as string) : istDateFrom;
   
@@ -100,11 +103,11 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const utcStart = rangeFrom.start;
   const utcEnd = rangeTo.end;
 
-  logger.info(`[WorkActivities] Query Window: ${utcStart} to ${utcEnd} | isGlobal: ${isGlobal}`);
+  logger.info(`[WorkActivities] Window: ${utcStart} to ${utcEnd} | isGlobal: ${isGlobal} | FilterUser: ${uId}`);
 
   logger.info(`[Forms] IST=${istDateFrom}-${istDateTo}, UTC Range=${utcStart} to ${utcEnd}`);
 
-  const isFilteringUserContext = isUUID(user_id as string) || isUUID(city_id as string) || isUUID(zone_id as string);
+  const isFilteringUserContext = !!(uId || cId || zId);
   const userJoin = isFilteringUserContext ? '!inner' : '!left';
 
   let select1 = `
@@ -119,16 +122,12 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   let q1 = supabaseAdmin.from('form_submissions').select(select1, { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
-  // Reverted to direct column filtering on primary table for 100% reliability
-  if (isUUID(user_id as string)) q1 = q1.eq('user_id', user_id);
-  // City/Zone must stay on the join alias
-  if (isUUID(city_id)) q1 = q1.eq('users.city_id', city_id);
-  if (isUUID(zone_id)) q1 = q1.eq('users.zone_id', zone_id);
-  
-  // Flexibly handle ID column mismatch
-  const tid = (template_id || activity_id) as string;
-  if (tid) q1 = q1.or(`template_id.eq.${tid},activity_id.eq.${tid}`);
-  
+  // Absoute Enforcement: No 'isUUID' gate. If value exists, it MUST filter.
+  if (uId) q1 = q1.eq('user_id', uId);
+  if (cId) q1 = q1.eq('users.city_id', cId);
+  if (zId) q1 = q1.eq('users.zone_id', zId);
+  if (aId) q1 = q1.eq('activity_id', aId);
+  if (tId) q1 = q1.eq('template_id', tId);
   if (search) q1 = q1.or(`outlet_name.ilike.%${search}%,store_name.ilike.%${search}%`);
   const { data: fData, count: fCount, error: fErr } = await q1.order('submitted_at', { ascending: false }).range(from, to);
 
@@ -142,10 +141,11 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   let q2 = supabaseAdmin.from('builder_submissions').select(select2, { count: 'exact' });
   if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
   q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
-  if (isUUID(user_id as string)) q2 = q2.eq('user_id', user_id as string);
-  if (isUUID(city_id)) q2 = q2.eq('users.city_id', city_id);
-  if (isUUID(zone_id)) q2 = q2.eq('users.zone_id', zone_id);
-  if (isUUID(tid)) q2 = q2.eq('form_id', tid);
+  // Absolute Enforcement
+  if (uId) q2 = q2.eq('user_id', uId);
+  if (cId) q2 = q2.eq('users.city_id', cId);
+  if (zId) q2 = q2.eq('users.zone_id', zId);
+  if (tId) q2 = q2.eq('form_id', tId);
   if (search) q2 = q2.or(`outlet_name.ilike.%${search}%,users.name.ilike.%${search}%`);
   const { data: bData, count: bCount, error: bErr } = await q2.order('submitted_at', { ascending: false }).range(from, to);
 
