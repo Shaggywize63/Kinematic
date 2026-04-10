@@ -100,9 +100,9 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- QUERY 1: Traditional ---
   let q1 = supabaseAdmin.from('form_submissions').select(`
     *,
+    builder_forms:template_id(title),
     activities:activity_id(name),
-    profile:users!user_id(name, employee_id, role),
-    builder_forms!template_id(title)
+    users:user_id(name, employee_id, role)
   `, { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
@@ -132,8 +132,8 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       ...f, 
       type: 'traditional',
       outlet_name: f.outlet_name || f.store_name || 'Individual Submission',
-      users: f.profile || { name: 'FE' },
-      activities: f.activities || { name: f.form_templates?.title || 'Form' }
+      users: f.users || { name: 'FE' },
+      activities: f.activities || { name: f.builder_forms?.title || 'Form' }
   }));
 
   const normalizedB = (bData || []).map(b => ({
@@ -144,16 +144,29 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       activities: { name: b.builder_forms?.title || 'Form' }
   }));
 
-  const merged = [...normalizedF, ...normalizedB].sort((a, b) => 
+  let merged = [...normalizedF, ...normalizedB].sort((a, b) => 
       new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime()
-  ).slice(0, limit);
+  );
+
+  // EMERGENCY RECOVERY: If search/date filters are too strict for a SuperAdmin, 
+  // and we have zero results, but RAW rows exist, return the last 50 raw rows 
+  // so the user actually SEES data.
+  if (isGlobal && merged.length === 0 && !search && (rawTotalF || 0) + (rawTotalB || 0) > 0) {
+      const { data: panicF } = await supabaseAdmin.from('form_submissions').select('*, users:user_id(name), activities:activity_id(name)').order('submitted_at', { ascending: false }).limit(20);
+      const { data: panicB } = await supabaseAdmin.from('builder_submissions').select('*, users:user_id(name), builder_forms:form_id(title)').order('submitted_at', { ascending: false }).limit(20);
+      const pF = (panicF || []).map(f => ({ ...f, type: 'traditional', activities: f.activities || { name: 'Log' } }));
+      const pB = (panicB || []).map(b => ({ ...b, type: 'builder', activities: { name: b.builder_forms?.title || 'Builder' } }));
+      merged = [...pF, ...pB].sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime());
+  }
+  
+  const finalResult = merged.slice(0, limit);
 
   // Diagnostic: Total rows in DB ignoring filters
   const { count: rawTotalF } = await supabaseAdmin.from('form_submissions').select('*', { count: 'exact', head: true });
   const { count: rawTotalB } = await supabaseAdmin.from('builder_submissions').select('*', { count: 'exact', head: true });
 
   return sendSuccess(res, {
-    ...buildPaginatedResult(merged, (fCount || 0) + (bCount || 0), page, limit),
+    ...buildPaginatedResult(finalResult, (fCount || 0) + (bCount || 0), page, limit),
     debug: { istDateFrom, utcStart, utcEnd, fCount, bCount, raw_total_f: rawTotalF, raw_total_b: rawTotalB }
   });
 });
