@@ -7,18 +7,95 @@ import { logger } from '../lib/logger';
 
 export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { is_active } = req.query;
+  const { is_active, activity_id } = req.query;
+  
+  logger.info(`[Forms] Fetching templates: org_id=${user.org_id}, activity_id=${activity_id}, is_active=${is_active}`);
+
   let q = supabaseAdmin.from('builder_forms').select('*, builder_questions(*)').eq('org_id', user.org_id);
-  if (is_active !== undefined) q = q.eq('is_active', is_active === 'true');
-  const { data, error } = await q.order('created_at', { ascending: false });
-  if (error) return badRequest(res, error.message);
-  return ok(res, data);
+
+  // If activity_id is provided, filter for forms matching it OR global forms (activity_id is null)
+  if (activity_id && isUUID(activity_id as string)) {
+    q = q.or(`activity_id.eq.${activity_id},activity_id.is.null`);
+  }
+
+  // Filter for active forms for mobile app/FE visibility
+  if (is_active !== undefined) {
+    q = q.eq('is_active', is_active === 'true');
+  }
+
+  // Prioritize activity-specific forms over global ones, then by creation date
+  const { data, error } = await q
+    .order('activity_id', { ascending: false, nullsFirst: false })
+    .order('created_at', { ascending: false });
+  
+  if (error) {
+    logger.error(`[Forms] Error fetching templates: ${error.message}`);
+    return badRequest(res, error.message);
+  }
+
+  // Map to the format expected by the Android App (Models.kt)
+  const mappedData = (data || []).map(form => ({
+    id: form.id,
+    activity_id: form.activity_id || "",
+    name: form.title, // App expects 'name', DB has 'title'
+    description: form.description,
+    requires_photo: form.requires_photo || false,
+    requires_gps: form.requires_gps || true,
+    form_fields: (form.builder_questions || []).map((q: any) => ({
+      id: q.id,
+      label: q.label,
+      field_key: q.id, // Using ID as key
+      field_type: q.qtype, // App expects 'field_type', DB has 'qtype'
+      placeholder: q.placeholder,
+      help_text: q.helper_text || q.help_text, // Handle both variants
+      is_required: q.is_required,
+      sort_order: q.q_order, // App expects 'sort_order', DB has 'q_order'
+      keyboard_type: q.keyboard_type,
+      image_count: q.image_count,
+      camera_only: q.camera_only,
+      is_consent: q.is_consent,
+      depends_on_id: q.depends_on_id,
+      depends_on_value: q.depends_on_value,
+      options: q.options || []
+    })).sort((a: any, b: any) => a.sort_order - b.sort_order)
+  }));
+
+  logger.info(`[Forms] Found ${mappedData.length} templates (mapped)`);
+  return ok(res, mappedData);
 });
 
 export const getTemplate = asyncHandler<AuthRequest>(async (req, res) => {
   const { data, error } = await supabaseAdmin.from('builder_forms').select('*, builder_questions(*)').eq('id', req.params.id).single();
   if (error) return badRequest(res, error.message);
-  return ok(res, data);
+  
+  // Apply same mapping logic for consistency
+  const mapped = {
+    id: data.id,
+    activity_id: data.activity_id || "",
+    name: data.title,
+    description: data.description,
+    requires_photo: data.requires_photo || false,
+    requires_gps: data.requires_gps || true,
+    form_fields: (data.builder_questions || []).map((q: any) => ({
+      id: q.id,
+      label: q.label,
+      field_key: q.id,
+      field_type: q.qtype,
+      placeholder: q.placeholder,
+      help_text: q.helper_text,
+      is_required: q.is_required,
+      sort_order: q.q_order,
+      keyboard_type: q.keyboard_type,
+      image_count: q.image_count,
+      camera_only: q.camera_only,
+      is_consent: q.is_consent,
+      depends_on_id: q.depends_on_id,
+      depends_on_value: q.depends_on_value,
+      options: q.options || []
+    })).sort((a: any, b: any) => a.sort_order - b.sort_order)
+  };
+
+  return ok(res, mapped);
 });
 
 export const createTemplate = asyncHandler<AuthRequest>(async (req, res) => {
