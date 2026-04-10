@@ -109,7 +109,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     *,
     builder_forms:template_id(title),
     activities:activity_id(name),
-    users!left(name, employee_id, role, city_id, zone_id)
+    users:user_id!left(name, employee_id, role, city_id, zone_id)
   `;
   if (include_responses === 'true') {
      select1 += `, form_responses(*, builder_questions(*))`;
@@ -132,7 +132,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- QUERY 2: Builder ---
   let select2 = `
     *,
-    users!left(name, employee_id, city_id, zone_id),
+    users:user_id!left(name, employee_id, city_id, zone_id),
     builder_forms:form_id(title)
   `;
   // Builder forms usually store responses in JSON, skip extra join unless needed
