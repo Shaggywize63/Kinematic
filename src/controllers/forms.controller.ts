@@ -123,13 +123,20 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   let q1 = supabaseAdmin.from('form_submissions').select(select1, { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
-  // Absoute Enforcement: No 'isUUID' gate. If value exists, it MUST filter.
+
+  // --- ABSOLUTE FILTER ENFORCEMENT LAYER ---
   if (uId) q1 = q1.eq('user_id', uId);
+  // Filter by City/Zone through the joined 'users' alias
   if (cId) q1 = q1.eq('users.city_id', cId);
   if (zId) q1 = q1.eq('users.zone_id', zId);
-  if (aId) q1 = q1.eq('activity_id', aId);
   if (tId) q1 = q1.eq('template_id', tId);
-  if (search) q1 = q1.or(`outlet_name.ilike.%${search}%,store_name.ilike.%${search}%`);
+  if (aId) q1 = q1.eq('activity_id', aId);
+  
+  if (search) {
+      const s = search.toString().trim();
+      q1 = q1.or(`outlet_name.ilike.%${s}%,store_name.ilike.%${s}%`);
+  }
+
   const { data: fData, count: fCount, error: fErr } = await q1.order('submitted_at', { ascending: false }).range(from, to);
 
   // --- QUERY 2: Builder ---
@@ -142,12 +149,18 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   let q2 = supabaseAdmin.from('builder_submissions').select(select2, { count: 'exact' });
   if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
   q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
-  // Absolute Enforcement
+
+  // --- ABSOLUTE FILTER ENFORCEMENT LAYER (BUILDER) ---
   if (uId) q2 = q2.eq('user_id', uId);
   if (cId) q2 = q2.eq('users.city_id', cId);
   if (zId) q2 = q2.eq('users.zone_id', zId);
   if (tId) q2 = q2.eq('form_id', tId);
-  if (search) q2 = q2.or(`outlet_name.ilike.%${search}%,users.name.ilike.%${search}%`);
+  
+  if (search) {
+      const s = search.toString().trim();
+      q2 = q2.or(`outlet_name.ilike.%${s}%,users.name.ilike.%${s}%`);
+  }
+
   const { data: bData, count: bCount, error: bErr } = await q2.order('submitted_at', { ascending: false }).range(from, to);
 
   const normalizedF = ((fData as any[]) || []).map(f => ({
