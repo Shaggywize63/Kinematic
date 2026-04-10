@@ -124,12 +124,21 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address
   }).select().single();
   if (subErr) return badRequest(res, subErr.message);
-  const respRows = (responses || []).map((r: any) => ({
-    submission_id: sub.id, question_id: r.question_id, 
-    value_text: typeof r.value === 'string' ? r.value : JSON.stringify(r.value),
-    value_number: typeof r.value === 'number' ? r.value : null,
-    value_bool: typeof r.value === 'boolean' ? r.value : null
-  }));
+  const respRows = (responses || []).map((r: any) => {
+    // Mobile app sends 'field_id' and 'value' or 'photo'
+    const fieldId = r.field_id || r.question_id;
+    const val = r.value || r.response || r.photo || "";
+    
+    return {
+      submission_id: sub.id,
+      field_id: fieldId, // DB column is 'field_id'
+      value_text: typeof val === 'string' ? val : JSON.stringify(val),
+      value_number: typeof val === 'number' ? val : null,
+      value_bool: typeof val === 'boolean' ? val : null,
+      gps: r.gps || null
+    };
+  });
+
   const { error: respErr } = await supabaseAdmin.from('form_responses').insert(respRows);
   if (respErr) return badRequest(res, respErr.message);
   return created(res, sub, 'Submission successful');
