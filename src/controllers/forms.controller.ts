@@ -37,9 +37,14 @@ export const addField = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { template_id, activity_id, outlet_id, outlet_name, latitude, longitude, responses } = req.body;
+  const { 
+    template_id, activity_id, outlet_id, outlet_name, latitude, longitude, 
+    check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address, responses 
+  } = req.body;
   const { data: sub, error: subErr } = await supabaseAdmin.from('form_submissions').insert({
-    user_id: user.id, org_id: user.org_id, template_id, activity_id, outlet_id, outlet_name, latitude, longitude, submitted_at: new Date().toISOString()
+    user_id: user.id, org_id: user.org_id, template_id, activity_id, outlet_id, outlet_name, 
+    latitude, longitude, submitted_at: new Date().toISOString(),
+    check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address
   }).select().single();
   if (subErr) return badRequest(res, subErr.message);
   const respRows = (responses || []).map((r: any) => ({
@@ -76,7 +81,7 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { client_id, date_from, date_to, search, user_id, template_id, activity_id } = req.query;
+  const { client_id, date_from, date_to, search, user_id, template_id, activity_id, city_id, zone_id } = req.query;
 
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
@@ -102,11 +107,13 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     *,
     builder_forms:template_id(title),
     activities:activity_id(name),
-    users:user_id(name, employee_id, role)
+    users!inner:user_id(name, employee_id, role, city_id, zone_id)
   `, { count: 'exact' });
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (user_id) q1 = q1.eq('user_id', user_id);
+  if (city_id) q1 = q1.eq('users.city_id', city_id);
+  if (zone_id) q1 = q1.eq('users.zone_id', zone_id);
   
   // Flexibly handle ID column mismatch
   const tid = (template_id || activity_id) as string;
@@ -118,12 +125,14 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- QUERY 2: Builder ---
   let q2 = supabaseAdmin.from('builder_submissions').select(`
     *,
-    users:user_id(name, employee_id),
+    users!inner:user_id(name, employee_id, city_id, zone_id),
     builder_forms:form_id(title)
   `, { count: 'exact' });
   if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
   q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (user_id) q2 = q2.eq('user_id', user_id);
+  if (city_id) q2 = q2.eq('users.city_id', city_id);
+  if (zone_id) q2 = q2.eq('users.zone_id', zone_id);
   if (tid) q2 = q2.eq('form_id', tid);
   if (search) q2 = q2.or(`outlet_name.ilike.%${search}%,users.name.ilike.%${search}%`);
   const { data: bData, count: bCount, error: bErr } = await q2.order('submitted_at', { ascending: false }).range(from, to);
@@ -144,12 +153,12 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       activities: { name: b.builder_forms?.title || 'Form' }
   }));
 
+  const { count: rawTotalF } = await supabaseAdmin.from('form_submissions').select('*', { count: 'exact', head: true });
+  const { count: rawTotalB } = await supabaseAdmin.from('builder_submissions').select('*', { count: 'exact', head: true });
+
   let merged = [...normalizedF, ...normalizedB].sort((a, b) => 
       new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime()
   );
-
-  const { count: rawTotalF } = await supabaseAdmin.from('form_submissions').select('*', { count: 'exact', head: true });
-  const { count: rawTotalB } = await supabaseAdmin.from('builder_submissions').select('*', { count: 'exact', head: true });
 
   // EMERGENCY RECOVERY: If search/date filters are too strict for a SuperAdmin, 
   // and we have zero results, but RAW rows exist, return the last 50 raw rows 
