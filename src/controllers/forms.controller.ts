@@ -107,7 +107,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
     *,
     builder_forms:template_id(title),
     activities:activity_id(name),
-    users!inner(name, employee_id, role, city_id, zone_id)
+    users!left(name, employee_id, role, city_id, zone_id)
   `;
   if (include_responses === 'true') {
      select1 += `, form_responses(*, builder_questions(*))`;
@@ -116,6 +116,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
   if (isUUID(user_id)) q1 = q1.eq('user_id', user_id);
+  // Filter on joined column only if relevant
   if (isUUID(city_id)) q1 = q1.eq('users.city_id', city_id);
   if (isUUID(zone_id)) q1 = q1.eq('users.zone_id', zone_id);
   
@@ -129,7 +130,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- QUERY 2: Builder ---
   let select2 = `
     *,
-    users!inner(name, employee_id, city_id, zone_id),
+    users!left(name, employee_id, city_id, zone_id),
     builder_forms:form_id(title)
   `;
   // Builder forms usually store responses in JSON, skip extra join unless needed
