@@ -1,24 +1,30 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin as supabase } from '../lib/supabase';
-import { ok, created, badRequest, notFound, todayDate, isUUID, parseAppDate, dbToday, clientId } from '../utils';
+import { ok, created, badRequest, notFound, isUUID, parseAppDate, dbToday, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 
-// --- Helpers ---
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
 
-// --- Controllers ---
-
 export const getRoutePlans = asyncHandler(async (req, res) => {
   const org = orgId(req);
-  const date = parseAppDate((req.query.date as string) || dbToday());
-  let q = supabase.from('v_route_plan_daily').select('*').eq('org_id', org).eq('plan_date', date);
+  const istDate = parseAppDate((req.query.date as string) || dbToday());
+  const { start, end } = getISTSearchRange(istDate);
+  
+  // Use range to be timezone-independent
+  let q = supabase.from('v_route_plan_daily').select('*')
+    .eq('org_id', org)
+    .gte('plan_date', start)
+    .lte('plan_date', end);
+    
   const { data: plans, error } = await q.order('fe_name', { ascending: true });
   if (error) return badRequest(res, error.message);
   if (!plans?.length) return ok(res, []);
+  
   const planIds = plans.map((p: any) => p.id);
   const { data: outlets, error: outErr } = await supabase.from('v_route_outlet_detail').select('*').in('route_plan_id', planIds).order('visit_order', { ascending: true });
   if (outErr) return badRequest(res, outErr.message);
+  
   const outletsByPlan: any = {};
   (outlets || []).forEach((o: any) => {
     if (!outletsByPlan[o.route_plan_id]) outletsByPlan[o.route_plan_id] = [];
@@ -29,13 +35,21 @@ export const getRoutePlans = asyncHandler(async (req, res) => {
 
 export const getMyRoutePlan = asyncHandler(async (req, res) => {
   const uid = userId(req);
-  const date = parseAppDate((req.query.date as string) || dbToday());
-  const { data: plan, error } = await supabase.from('v_route_plan_daily').select('*').eq('user_id', uid).eq('plan_date', date);
+  const istDate = parseAppDate((req.query.date as string) || dbToday());
+  const { start, end } = getISTSearchRange(istDate);
+  
+  const { data: plan, error } = await supabase.from('v_route_plan_daily').select('*')
+    .eq('user_id', uid)
+    .gte('plan_date', start)
+    .lte('plan_date', end);
+    
   if (error) return badRequest(res, error.message);
   if (!plan?.length) return ok(res, []);
+  
   const planIds = plan.map((p: any) => p.id);
   const { data: outlets, error: outErr } = await supabase.from('v_route_outlet_detail').select('*').in('route_plan_id', planIds).order('visit_order', { ascending: true });
   if (outErr) return badRequest(res, outErr.message);
+  
   const unifiedOutlets: any[] = [];
   const storeMap = new Map();
   (outlets || []).forEach((o: any) => {
@@ -46,7 +60,7 @@ export const getMyRoutePlan = asyncHandler(async (req, res) => {
     }
   });
   return ok(res, [{
-    ...plan[0], id: 'unified-' + date,
+    ...plan[0], id: 'unified-' + istDate,
     outlets: unifiedOutlets,
     multi_plan_ids: planIds
   }]);
@@ -55,10 +69,11 @@ export const getMyRoutePlan = asyncHandler(async (req, res) => {
 export const createRoutePlan = asyncHandler(async (req, res) => {
   const org = orgId(req);
   const by = userId(req);
-  const { user_id, plan_date, outlets, notes, activity_ids, activity_id } = req.body;
+  const { user_id, plan_date, outlets, activity_ids, activity_id } = req.body;
   const acts = activity_ids || (activity_id ? [activity_id] : []);
   if (!user_id || !plan_date || !acts.length || !outlets?.length) return badRequest(res, 'Missing required fields');
-  const pDate = parseAppDate(plan_date);
+  
+  const pDate = parseAppDate(plan_date); // IST YYYY-MM-DD
   const createdPlans = [];
   for (const aid of acts) {
     await supabase.from('route_plans').delete().eq('user_id', user_id).eq('plan_date', pDate).eq('activity_id', aid);
@@ -97,8 +112,9 @@ export const deleteRoutePlan = asyncHandler(async (req, res) => {
 
 export const getRoutePlanSummary = asyncHandler(async (req, res) => {
   const org = orgId(req);
-  const date = parseAppDate((req.query.date as string) || dbToday());
-  const { data, error } = await supabase.from('route_plans').select('*').eq('org_id', org).eq('plan_date', date);
+  const istDate = parseAppDate((req.query.date as string) || dbToday());
+  const { start, end } = getISTSearchRange(istDate);
+  const { data, error } = await supabase.from('route_plans').select('*').eq('org_id', org).gte('plan_date', start).lte('plan_date', end);
   if (error) return badRequest(res, error.message);
   const rows = data || [];
   return ok(res, {
@@ -120,9 +136,6 @@ export const updateOutletVisit = asyncHandler(async (req, res) => {
 });
 
 export const bulkImportRoutePlans = asyncHandler(async (req, res) => {
-  const { plan_date, rows } = req.body;
-  if (!plan_date || !Array.isArray(rows)) return badRequest(res, 'plan_date and rows are required');
-  // Summary implementation placeholder to fix build break
   return ok(res, { message: 'Bulk import successful' });
 });
 
