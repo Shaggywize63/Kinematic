@@ -129,11 +129,23 @@ export function parseAppDate(appDate: string | null): string {
  * Covers from 18:30 UTC of previous day to 18:29 UTC of target day.
  */
 export function getISTSearchRange(istDate: string) {
-  const [y, m, day] = istDate.split('-').map(Number);
-  // Start of IST Day: 12:00 AM IST = 6:30 PM UTC Day-1
-  const start = new Date(Date.UTC(y, m - 1, day - 1, 18, 30, 0, 0)).toISOString();
-  // End of IST Day: 11:59:59 PM IST = 6:29:59 PM UTC Day
-  const end = new Date(Date.UTC(y, m - 1, day, 18, 29, 59, 999)).toISOString();
+  // istDate is YYYY-MM-DD
+  const parts = istDate.split('-').map(Number);
+  if (parts.length !== 3) {
+    const today = new Date();
+    parts[0] = today.getFullYear();
+    parts[1] = today.getMonth() + 1;
+    parts[2] = today.getDate();
+  }
+  const [y, m, d] = parts;
+  
+  // Start of Day: 00:00:00 IST = 18:30:00 UTC of PREVIOUS day
+  // We use 18, 30, 0, 0 to be precise about the 5.5h offset
+  const start = new Date(Date.UTC(y, m - 1, d - 1, 18, 30, 0, 0)).toISOString();
+  
+  // End of Day: 23:59:59.999 IST = 18:29:59.999 UTC of TARGET day
+  const end = new Date(Date.UTC(y, m - 1, d, 18, 29, 59, 999)).toISOString();
+  
   return { start, end };
 }
 
