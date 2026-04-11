@@ -347,20 +347,37 @@ router.post(
   "/forms/:id/submissions",
   requireAuth,
   asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { answers, location_lat, location_lng, is_offline } = req.body;
+    const { 
+      answers, location_lat, location_lng, is_offline,
+      outlet_id, outlet_name, check_in_at, check_out_at, 
+      check_in_gps, check_out_gps, gps, address
+    } = req.body;
 
     const user = req.user;
+
+    const durationMinutes = (check_in_at && check_out_at) 
+      ? Math.round((new Date(check_out_at).getTime() - new Date(check_in_at).getTime()) / 60000)
+      : null;
 
     const { data, error } = await supabaseAdmin
       .from("builder_submissions")
       .insert({
         form_id: req.params.id,
-        submitted_by: user?.id,
+        user_id: user?.id, // Fix: Changed from submitted_by to user_id to match schema
         answers: answers || {},
         location_lat,
         location_lng,
         is_offline: is_offline || false,
         status: "submitted",
+        outlet_id,
+        outlet_name,
+        check_in_at,
+        check_out_at,
+        check_in_gps,
+        check_out_gps,
+        gps,
+        address,
+        duration_minutes: durationMinutes
       })
       .select()
       .single();
