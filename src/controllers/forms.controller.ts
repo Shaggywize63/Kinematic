@@ -118,10 +118,15 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     template_id, activity_id, outlet_id, outlet_name, latitude, longitude, 
     check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address, responses 
   } = req.body;
+  const durationMinutes = (check_in_at && check_out_at) 
+    ? Math.round((new Date(check_out_at).getTime() - new Date(check_in_at).getTime()) / 60000)
+    : null;
+
   const { data: sub, error: subErr } = await supabaseAdmin.from('form_submissions').insert({
     user_id: user.id, org_id: user.org_id, template_id, activity_id, outlet_id, outlet_name, 
     latitude, longitude, submitted_at: new Date().toISOString(),
-    check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address
+    check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address,
+    duration_minutes: durationMinutes
   }).select().single();
   if (subErr) return badRequest(res, subErr.message);
   const respRows = (responses || []).map((r: any) => {

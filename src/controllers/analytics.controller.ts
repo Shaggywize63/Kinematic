@@ -529,10 +529,10 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
     // 1. If we have a HEARTBEAT/Live location (within last 24h), use it as primary
     // 2. Otherwise use attendance checkin location as secondary
     // 3. Last fallback is zone meeting point
-    const hasLastLoc = fe.last_latitude && fe.last_longitude && fe.last_location_updated_at && (new Date().getTime() - new Date(fe.last_location_updated_at).getTime() < 86400000); // 24h
+    const hasLastLoc = fe.last_latitude !== null && fe.last_longitude !== null && fe.last_location_updated_at && (new Date().getTime() - new Date(fe.last_location_updated_at).getTime() < 86400000); // 24h
     
-    const lat = hasLastLoc ? fe.last_latitude : (rec?.checkin_lat || zone?.meeting_lat || null);
-    const lng = hasLastLoc ? fe.last_longitude : (rec?.checkin_lng || zone?.meeting_lng || null);
+    const lat = hasLastLoc ? fe.last_latitude : (rec?.checkin_lat ?? zone?.meeting_lat ?? null);
+    const lng = hasLastLoc ? fe.last_longitude : (rec?.checkin_lng ?? zone?.meeting_lng ?? null);
     
     return {
       id: fe.id, 

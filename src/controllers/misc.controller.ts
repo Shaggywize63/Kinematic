@@ -710,12 +710,14 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version } = req.body;
   const user = req.user!;
 
-  if (!latitude || !longitude) {
+  // Bug Fix: 0.0 is a valid coordinate but falsy in JS.
+  if (latitude === undefined || longitude === undefined) {
     throw new AppError(400, 'Latitude and longitude are required', 'VALIDATION_ERROR');
   }
 
   const now = new Date().toISOString();
-  const batteryLevel = battery !== undefined ? battery : (battery_percentage || null);
+  // Bug Fix: 0% battery is valid.
+  const batteryLevel = battery !== undefined ? battery : (battery_percentage !== undefined ? battery_percentage : null);
   
   // 1. Run User Update and Attendance fetch concurrently
   const today = now.split('T')[0];
