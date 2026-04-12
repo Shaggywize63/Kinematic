@@ -14,6 +14,7 @@ const checkinSchema = z.object({
   selfie_url: z.string().url().optional(),
   activity_id: z.string().uuid().optional(),
   zone_id: z.string().uuid().optional(),
+  battery_percentage: z.number().optional(),
 });
 
 const checkoutSchema = z.object({
@@ -26,7 +27,7 @@ const checkoutSchema = z.object({
 export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const today = todayDate();
-  const { latitude, longitude, selfie_url, activity_id, zone_id, date: passedDate } = req.body;
+  const { latitude, longitude, selfie_url, activity_id, zone_id, battery_percentage, date: passedDate } = req.body;
   
   logger.info(`[Attendance] Check-in: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
   
@@ -108,12 +109,13 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     captured_at: data.checkin_at
   });
 
-  // Update user's last known location
+  // Update user's last known location and battery
   await supabaseAdmin
     .from('users')
     .update({
       last_latitude: latitude,
       last_longitude: longitude,
+      battery_percentage: battery_percentage !== undefined ? battery_percentage : undefined,
       last_location_updated_at: data.checkin_at
     })
     .eq('id', user.id);
