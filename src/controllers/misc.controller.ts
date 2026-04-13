@@ -104,7 +104,7 @@ export const getAllGrievances = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const updateGrievance = asyncHandler<AuthRequest>(async (req, res) => {
   const { status, resolution } = req.body
-  const { data, error } = await supabaseAdmin.from('grievances')
+  let query = supabaseAdmin.from('grievances')
     .update({ status, resolution: resolution || null, reviewed_by: req.user!.id, reviewed_at: new Date().toISOString() })
     .eq('id', req.params.id);
 
@@ -708,7 +708,7 @@ export const createSOS = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const resolveSOS = asyncHandler<AuthRequest>(async (req, res) => {
   const { resolution } = req.body
-  const { data, error } = await supabaseAdmin.from('sos_alerts')
+  let query = supabaseAdmin.from('sos_alerts')
     .update({ 
       status: 'resolved', 
       resolution: resolution || 'Resolved by admin',
