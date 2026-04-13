@@ -372,9 +372,14 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = dbToday();
-  const { date, from_date, to_date, zone_id, city, city_id, user_id, fe_id, client_id } = req.query as Record<string, string>;
+  const { from, to, date, from_date, to_date, zone_id, user_id, fe_id, client_id } = req.query as Record<string, string>;
   
+  // Universal standards: from and to are primary, fallback to date or today
+  const f = (from || from_date || date || dbToday()).trim();
+  const t = (to   || to_date   || date || f).trim();
+
+  logger.info(`[Attendance] getTeamToday: user=${user.id}, from=${f}, to=${t}, role=${user.role}`);
+
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
   const isGlobal = ( (isSagar || isSuper) && (!req.query.client_id || !isUUID(req.query.client_id as string)) );
@@ -386,23 +391,21 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
       users:user_id(name, employee_id, city, role, zone_id, zones!zone_id(name))
     `);
 
-  // Date Filtering: Support range or single date
-  if (from_date && to_date) {
-    query = query.gte('date', parseAppDate(from_date)).lte('date', parseAppDate(to_date));
-  } else {
-    query = query.eq('date', parseAppDate(date || today));
-  }
+  // Date Filtering: Strict range
+  query = query.gte('date', parseAppDate(f)).lte('date', parseAppDate(t));
 
-  // Auth / Org / Client Filtering
+  // Auth / Org Filtering
   if (!isGlobal) {
-    const effectiveOrgId = (client_id && isUUID(client_id)) ? client_id : user.org_id;
-    query = query.eq('org_id', effectiveOrgId);
+    if (client_id && isUUID(client_id)) {
+      // If a client is selected, show records matching that client_id OR records where the org_id is the client
+      query = query.or(`client_id.eq.${client_id},org_id.eq.${client_id}`);
+    } else {
+      query = query.eq('org_id', user.org_id);
+    }
   }
 
   // Additional Property Filters
   if (isUUID(zone_id)) query = query.eq('zone_id', zone_id);
-  
-  // fe_id/user_id filter (common for filtering by specific executive)
   if (isUUID(user_id) || isUUID(fe_id)) {
     query = query.eq('user_id', user_id || fe_id);
   }
