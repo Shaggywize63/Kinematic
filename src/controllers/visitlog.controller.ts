@@ -155,13 +155,13 @@ export const getTeamVisits = asyncHandler<AuthRequest>(async (req, res) => {
   let query = supabaseAdmin
     .from('visit_logs')
     .select(ALL_COLUMNS)
-    .eq('org_id', user.org_id)
     .eq('date', date);
 
-  if (isUUID(user.client_id)) {
-    query = query.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id as string)) {
-    query = query.eq('client_id', req.query.client_id as string);
+  const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
+  if (targetCid && isUUID(targetCid)) {
+    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
+  } else {
+    query = query.eq('org_id', user.org_id);
   }
 
   const { data, error } = await query.order('visited_at', { ascending: false });

@@ -36,12 +36,20 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, n
   const date = to; // For backwards compatibility
 
   // Combined concurrent fetch for independent counts to minimize sequential await overhead
+  const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
+  const isGlobalMetric = (!targetCid || !isUUID(targetCid));
+
+  const applyTenantFilter = (q: any) => {
+    if (isGlobalMetric) return q.eq('org_id', user.org_id);
+    return q.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
+  };
+
   const [kpisRes, totalExecsRes, activeSosRes, openGrievancesRes, visitLogsRes] = await Promise.all([
-    supabaseAdmin.from('v_daily_kpis').select('*').eq('org_id', user.org_id).eq('date', to).single(),
-    supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true),
-    supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'active'),
-    supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'submitted'),
-    supabaseAdmin.from('visit_logs').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('date', date)
+    applyTenantFilter(supabaseAdmin.from('v_daily_kpis').select('*')).eq('date', to).single(),
+    applyTenantFilter(supabaseAdmin.from('users').select('id', { count: 'exact', head: true })).eq('role', 'executive').eq('is_active', true),
+    applyTenantFilter(supabaseAdmin.from('sos_alerts').select('id', { count: 'exact', head: true })).eq('status', 'active'),
+    applyTenantFilter(supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true })).eq('status', 'submitted'),
+    applyTenantFilter(supabaseAdmin.from('visit_logs').select('id', { count: 'exact', head: true })).eq('date', date)
   ]);
 
   const kpis = kpisRes.data;
@@ -52,15 +60,9 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, n
 
   // Real-time metrics from form_submissions - Flattened for build stability
   let submissionsQuery = supabaseAdmin.from('form_submissions').select('id, is_converted, user_id, submitted_at, date', { count: 'exact' });
-  submissionsQuery = submissionsQuery.eq('org_id', user.org_id);
+  submissionsQuery = applyTenantFilter(submissionsQuery);
   submissionsQuery = submissionsQuery.gte('submitted_at', `${from}T00:00:00+05:30`);
   submissionsQuery = submissionsQuery.lte('submitted_at', `${to}T23:59:59+05:30`);
-
-  if (isUUID(user.client_id)) {
-    submissionsQuery = submissionsQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id as string)) {
-    submissionsQuery = submissionsQuery.eq('client_id', req.query.client_id as string);
-  }
 
   const userRole = (user.role || '').toLowerCase();
   const isFE = userRole.includes('executive');
@@ -86,15 +88,10 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, n
   let attendanceQuery = supabaseAdmin
     .from('attendance')
     .select('status, user_id, date, total_hours, checkin_at')
-    .eq('org_id', user.org_id)
     .gte('date', from)
     .lte('date', to);
 
-  if (isUUID(user.client_id)) {
-    attendanceQuery = attendanceQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id as string)) {
-    attendanceQuery = attendanceQuery.eq('client_id', req.query.client_id as string);
-  }
+  attendanceQuery = applyTenantFilter(attendanceQuery);
 
   if (isFE) {
     attendanceQuery = attendanceQuery.eq('user_id', user.id);
@@ -124,15 +121,10 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, n
   let topPerfQuery = supabaseAdmin
     .from('form_submissions')
     .select('user_id, is_converted, submitted_at, users!user_id(name, zone_id, zones!zone_id(id, name))')
-    .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00+05:30`)
     .lte('submitted_at', `${to}T23:59:59+05:30`);
   
-  if (isUUID(user.client_id)) {
-    topPerfQuery = topPerfQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id as string)) {
-    topPerfQuery = topPerfQuery.eq('client_id', req.query.client_id as string);
-  }
+  topPerfQuery = applyTenantFilter(topPerfQuery);
   const { data: topPerf } = await topPerfQuery;
 
   const tpMap = new Map<string, { name: string; zone: string; tff: number }>();
@@ -146,14 +138,9 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, n
   // Fetch zone performance (TFF vs Target)
   let zonesQuery = supabaseAdmin
     .from('zones')
-    .select('id, name, tff_target')
-    .eq('org_id', user.org_id);
+    .select('id, name, tff_target');
   
-  if (isUUID(user.client_id)) {
-    zonesQuery = zonesQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id as string)) {
-    zonesQuery = zonesQuery.eq('client_id', req.query.client_id as string);
-  }
+  zonesQuery = applyTenantFilter(zonesQuery);
   const { data: zones } = await zonesQuery;
 
   const zpMap = new Map<string, { zone: string; tff: number; target: number }>();
@@ -204,17 +191,18 @@ export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
   const from = (req.query.from as string) || isoDate(new Date(Date.now() - 7 * 86400000));
   const to   = (req.query.to   as string) || isoDate(new Date());
 
+  const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
+
   let trendQuery = supabaseAdmin
     .from('form_submissions')
     .select('submitted_at, is_converted')
-    .eq('org_id', user.org_id)
     .gte('submitted_at', `${from}T00:00:00`)
     .lte('submitted_at', `${to}T23:59:59`);
   
-  if (isUUID(user.client_id)) {
-    trendQuery = trendQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id as string)) {
-    trendQuery = trendQuery.eq('client_id', req.query.client_id as string);
+  if (targetCid && isUUID(targetCid)) {
+    trendQuery = trendQuery.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
+  } else {
+    trendQuery = trendQuery.eq('org_id', user.org_id);
   }
   const { data, error } = await trendQuery;
 
@@ -293,15 +281,16 @@ export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const date = (req.query.date as string) || isoDate(toIST(new Date()));
 
+  const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
+
   let hourlyQuery = supabaseAdmin
     .from('form_submissions').select('submitted_at, is_converted')
-    .eq('org_id', user.org_id)
     .gte('submitted_at', `${date}T00:00:00`).lte('submitted_at', `${date}T23:59:59`);
   
-  if (isUUID(user.client_id)) {
-    hourlyQuery = hourlyQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id)) {
-    hourlyQuery = hourlyQuery.eq('client_id', req.query.client_id as string);
+  if (targetCid && isUUID(targetCid)) {
+    hourlyQuery = hourlyQuery.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
+  } else {
+    hourlyQuery = hourlyQuery.eq('org_id', user.org_id);
   }
   const { data, error } = await hourlyQuery;
 
@@ -321,18 +310,19 @@ export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
   const endStr   = isoDate(toIST(new Date()));
   const startStr = isoDate(new Date(toIST(new Date()).getTime() - 6 * 24 * 60 * 60 * 1000));
 
+  const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
+
   // Filter by 'date' column (YYYY-MM-DD) which is more reliable than submitted_at ISO strings in this app
   let heatmapQuery = supabaseAdmin
     .from('form_submissions')
     .select('submitted_at, is_converted, date')
-    .eq('org_id', user.org_id)
     .gte('date', startStr)
     .lte('date', endStr);
   
-  if (isUUID(user.client_id)) {
-    heatmapQuery = heatmapQuery.eq('client_id', user.client_id);
-  } else if (isUUID(req.query.client_id as string)) {
-    heatmapQuery = heatmapQuery.eq('client_id', req.query.client_id as string);
+  if (targetCid && isUUID(targetCid)) {
+    heatmapQuery = heatmapQuery.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
+  } else {
+    heatmapQuery = heatmapQuery.eq('org_id', user.org_id);
   }
   const { data, error } = await heatmapQuery;
 
