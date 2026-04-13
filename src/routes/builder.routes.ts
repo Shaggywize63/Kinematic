@@ -204,7 +204,10 @@ router.get(
       .eq("form_id", req.params.id)
       .order("q_order");
 
-    if (error) throw new AppError(500, error.message, "DB_ERROR");
+    if (error) {
+      console.error(`[DB ERROR] Fetching questions for form ${req.params.id}:`, error);
+      throw new AppError(500, error.message, "DB_ERROR");
+    }
 
     return sendSuccess(res, data);
   })
