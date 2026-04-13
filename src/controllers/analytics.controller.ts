@@ -196,8 +196,8 @@ export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
   let trendQuery = supabaseAdmin
     .from('form_submissions')
     .select('submitted_at, is_converted')
-    .gte('submitted_at', `${from}T00:00:00`)
-    .lte('submitted_at', `${to}T23:59:59`);
+    .gte('submitted_at', `${from}T00:00:00+05:30`)
+    .lte('submitted_at', `${to}T23:59:59+05:30`);
   
   if (targetCid && isUUID(targetCid)) {
     trendQuery = trendQuery.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
@@ -285,7 +285,7 @@ export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {
 
   let hourlyQuery = supabaseAdmin
     .from('form_submissions').select('submitted_at, is_converted')
-    .gte('submitted_at', `${date}T00:00:00`).lte('submitted_at', `${date}T23:59:59`);
+    .gte('submitted_at', `${date}T00:00:00+05:30`).lte('submitted_at', `${date}T23:59:59+05:30`);
   
   if (targetCid && isUUID(targetCid)) {
     hourlyQuery = hourlyQuery.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
@@ -413,8 +413,8 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
   }
 
   // Build date range array using stable local date generation
-  const start = new Date(from + 'T00:00:00');
-  const end = new Date(to + 'T23:59:59');
+  const start = new Date(from + 'T00:00:00+05:30');
+  const end = new Date(to + 'T23:59:59+05:30');
   const days: string[] = [];
   const curr = new Date(start);
   while (curr <= end) {
@@ -426,8 +426,8 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
     .from('form_submissions')
     .select('submitted_at, is_converted, date')
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${from}T00:00:00`)
-    .lte('submitted_at', `${to}T23:59:59`);
+    .gte('submitted_at', `${from}T00:00:00+05:30`)
+    .lte('submitted_at', `${to}T23:59:59+05:30`);
   
   if (isUUID(user.client_id)) {
     weeklyQuery = weeklyQuery.eq('client_id', user.client_id);
@@ -452,8 +452,8 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 
   const result = days.map((d) => ({
     date: d,
-    label: new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }),
-    short_label: new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short' }),
+    label: new Date(d + 'T00:00:00+05:30').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }),
+    short_label: new Date(d + 'T00:00:00+05:30').toLocaleDateString('en-IN', { weekday: 'short' }),
     engagements: byDay[d].engagements, 
     tff: byDay[d].engagements, // Use engagements for TFF to match 32 total
     tff_rate: 100,
@@ -653,8 +653,8 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
     .from('form_submissions')
     .select('outlet_name, is_converted, user_id, submitted_at, date, users!user_id(city)')
     .eq('org_id', user.org_id)
-    .gte('submitted_at', `${from}T00:00:00`)
-    .lte('submitted_at', `${to}T23:59:59`);
+    .gte('submitted_at', `${from}T00:00:00+05:30`)
+    .lte('submitted_at', `${to}T23:59:59+05:30`);
   
   if (isUUID(user.client_id)) {
     formsQuery = formsQuery.eq('client_id', user.client_id);
@@ -718,7 +718,7 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
   let execInitQuery = supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
   let kpisInitQuery = supabaseAdmin.from('v_daily_kpis').select('*').eq('org_id', user.org_id).eq('date', today);
   let grievanceInitQuery = supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'submitted');
-  let weekSubsInitQuery = supabaseAdmin.from('form_submissions').select('submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${sevenDaysAgo}T00:00:00`);
+  let weekSubsInitQuery = supabaseAdmin.from('form_submissions').select('submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${sevenDaysAgo}T00:00:00+05:30`);
 
   // 2. Application of client_id filter
   if (isUUID(user.client_id)) {
@@ -773,8 +773,8 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
 
   const weeklyDays = Object.entries(dayMap).map(([date, tff]) => ({
     date,
-    label: new Date(date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }),
-    short_label: new Date(date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short' }),
+    label: new Date(date + 'T00:00:00+05:30').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }),
+    short_label: new Date(date + 'T00:00:00+05:30').toLocaleDateString('en-IN', { weekday: 'short' }),
     tff
   })).sort((a,b) => a.date.localeCompare(b.date));
 
@@ -1048,7 +1048,7 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   const { data: att } = await attPerfQuery;
 
   // Fetch form submissions in range
-  let formsPerfQuery = supabaseAdmin.from('form_submissions').select('user_id, is_converted, outlet_name, submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${from}T00:00:00`).lte('submitted_at', `${to}T23:59:59`);
+  let formsPerfQuery = supabaseAdmin.from('form_submissions').select('user_id, is_converted, outlet_name, submitted_at').eq('org_id', user.org_id).gte('submitted_at', `${from}T00:00:00+05:30`).lte('submitted_at', `${to}T23:59:59+05:30`);
   if (isUUID(user.client_id)) formsPerfQuery = formsPerfQuery.eq('client_id', user.client_id);
   const { data: forms } = await formsPerfQuery;
 
