@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, formatAppDate, parseAppDate } from '../utils';
+import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { DEMO_ORG_ID, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations } from '../utils/demoData';
 
@@ -856,8 +856,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const { data: profile } = await supabaseAdmin.from('users').select('email').eq('id', user.id).single();
   const userEmail = profile?.email || user.email;
 
-  const startRange = `${today}T00:00:00.000Z`;
-  const endRange   = `${today}T23:59:59.999Z`;
+  const { start: startRange, end: endRange } = getISTSearchRange(parseAppDate(today));
 
   // Fetch planned activities
   let { data: rawPlans } = await supabaseAdmin
