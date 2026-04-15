@@ -666,7 +666,7 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
     return q.eq('org_id', user.org_id);
   };
 
-  let aQ = applyFilter(supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, users!attendance_user_id_fkey(name, zones(name))'));
+  let aQ = applyFilter(supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, checkout_at, checkin_selfie_url, checkout_selfie_url, users!attendance_user_id_fkey(name, zones(name))'));
   let fQ = applyFilter(supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users!user_id(name)'));
   let sQ = applyFilter(supabaseAdmin.from('sos_alerts').select('id, user_id, created_at, status, users!user_id(name)'));
 
@@ -676,7 +676,15 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
     sQ.order('created_at', { ascending: false }).limit(5),
   ]);
   const feed = [
-    ...(attRes.data || []).map((a: any) => ({ type: 'attendance', event: a.status === 'checked_in' ? 'Check-in' : 'Check-out', user: a.users?.name, zone: a.users?.zones?.name, time: a.checkin_at, id: a.id })),
+    ...(attRes.data || []).map((a: any) => ({ 
+      type: 'attendance', 
+      event: a.status === 'checked_in' || a.status === 'on-break' ? 'Check-in' : 'Check-out', 
+      user: a.users?.name, 
+      zone: a.users?.zones?.name, 
+      time: a.status === 'checked_out' ? a.checkout_at : a.checkin_at, 
+      id: a.id,
+      photo_url: a.status === 'checked_out' ? a.checkout_selfie_url : a.checkin_selfie_url
+    })),
     ...(subRes.data || []).map((s: any) => ({ type: 'form', event: 'Form submitted' + (s.is_converted ? ' ✓ TFF' : ''), user: s.users?.name, outlet: s.outlet_name, time: s.submitted_at, id: s.id })),
     ...(sosRes.data || []).map((s: any) => ({ type: 'sos', event: 'SOS Alert', user: s.users?.name, status: s.status, time: s.created_at, id: s.id })),
   ].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 20)
