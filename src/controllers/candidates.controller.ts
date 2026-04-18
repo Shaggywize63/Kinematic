@@ -1,11 +1,12 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
-import { asyncHandler, sendSuccess, AppError } from '../utils';
+import { asyncHandler, sendSuccess, AppError, isDemo } from '../utils';
 
 const ORG_ID = '00000000-0000-0000-0000-000000000001';
 
 /* ── GET /api/v1/candidates ─────────────────────────── */
 export const getCandidates = asyncHandler(async (req: Request, res: Response) => {
+  if (isDemo((req as any).user)) return sendSuccess(res, []);
   const { stage, search } = req.query;
   let query = supabaseAdmin
     .from('candidates')
@@ -27,6 +28,7 @@ export const getCandidates = asyncHandler(async (req: Request, res: Response) =>
 
 /* ── POST /api/v1/candidates ────────────────────────── */
 export const createCandidate = asyncHandler(async (req: Request, res: Response) => {
+  if (isDemo((req as any).user)) return sendSuccess(res, { id: 'demo-cand' }, 'Candidate added (Demo)', 201);
   const {
     name, mobile, email, applied_role = 'executive', city,
     applied_zone, source, notes, resume_url,
@@ -57,6 +59,7 @@ export const createCandidate = asyncHandler(async (req: Request, res: Response) 
 
 /* ── GET /api/v1/candidates/:id ─────────────────────── */
 export const getCandidateById = asyncHandler(async (req: Request, res: Response) => {
+  if (isDemo((req as any).user)) return sendSuccess(res, { id: req.params.id, name: 'Demo Candidate' });
   const { data, error } = await supabaseAdmin
     .from('candidates')
     .select('*')

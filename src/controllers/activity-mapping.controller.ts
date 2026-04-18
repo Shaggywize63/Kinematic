@@ -1,11 +1,12 @@
 import { Response } from 'express';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
-import { asyncHandler, sendSuccess, AppError } from '../utils';
+import { asyncHandler, sendSuccess, AppError, isDemo } from '../utils';
 
 /* ── GET /api/v1/activity-mappings ── */
 export const listAllMappings = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return sendSuccess(res, []);
   const { data, error } = await supabaseAdmin
     .from('activity_users')
     .select('activity_id, user_id')
@@ -19,6 +20,7 @@ export const listAllMappings = asyncHandler<AuthRequest>(async (req, res) => {
 export const getFEsByActivity = asyncHandler<AuthRequest>(async (req, res) => {
   const { activityId } = req.params;
   const user = req.user!;
+  if (isDemo(user)) return sendSuccess(res, []);
 
   const { data, error } = await supabaseAdmin
     .from('activity_users')
@@ -34,6 +36,7 @@ export const getFEsByActivity = asyncHandler<AuthRequest>(async (req, res) => {
 export const getActivitiesByUser = asyncHandler<AuthRequest>(async (req, res) => {
   const { userId } = req.params;
   const user = req.user!;
+  if (isDemo(user)) return sendSuccess(res, []);
 
   const { data, error } = await supabaseAdmin
     .from('activity_users')
@@ -49,6 +52,7 @@ export const getActivitiesByUser = asyncHandler<AuthRequest>(async (req, res) =>
 export const mapActivityUser = asyncHandler<AuthRequest>(async (req, res) => {
   const { activity_id, user_ids } = req.body;
   const admin = req.user!;
+  if (isDemo(admin)) return sendSuccess(res, null, 'Mappings updated (Demo)');
 
   if (!activity_id || !Array.isArray(user_ids)) {
     throw new AppError(400, 'activity_id and user_ids[] are required', 'VALIDATION_ERROR');

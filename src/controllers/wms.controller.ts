@@ -4,7 +4,8 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
+import { asyncHandler, ok, created, badRequest, notFound, isDemo } from '../utils';
+import { getMockWarehouses, getMockWMSSummary, getMockWMSInventory } from '../utils/demoData';
 
 const MOVEMENT_SELECT = `
   *,
@@ -16,7 +17,8 @@ const MOVEMENT_SELECT = `
 /* ── WAREHOUSES ─────────────────────────────────────────── */
 
 export const listWarehouses = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, ...user } = req.user!;
+  if (isDemo(user)) return ok(res, getMockWarehouses());
   const { data, error } = await supabaseAdmin
     .from('warehouses')
     .select('*, manager:manager_id(id, name)')
@@ -27,7 +29,8 @@ export const listWarehouses = asyncHandler(async (req: AuthRequest, res: Respons
 });
 
 export const getWarehouse = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, ...user } = req.user!;
+  if (isDemo(user)) return ok(res, getMockWarehouses()[0]);
   const { id } = req.params;
   const { data, error } = await supabaseAdmin
     .from('warehouses')
@@ -38,7 +41,8 @@ export const getWarehouse = asyncHandler(async (req: AuthRequest, res: Response)
 });
 
 export const createWarehouse = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, ...user } = req.user!;
+  if (isDemo(user)) return created(res, { id: 'demo-wh' }, 'Warehouse created (Demo)');
   const body = req.body;
   if (!body.warehouse_code) { badRequest(res, 'warehouse_code is required'); return; }
   if (!body.name)           { badRequest(res, 'name is required'); return; }
@@ -52,7 +56,8 @@ export const createWarehouse = asyncHandler(async (req: AuthRequest, res: Respon
 });
 
 export const updateWarehouse = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, ...user } = req.user!;
+  if (isDemo(user)) return ok(res, { id: req.params.id }, 'Warehouse updated (Demo)');
   const { id } = req.params;
   const { org_id: _, ...rest } = req.body;
   const { data, error } = await supabaseAdmin
@@ -67,7 +72,8 @@ export const updateWarehouse = asyncHandler(async (req: AuthRequest, res: Respon
 });
 
 export const deleteWarehouse = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, ...user } = req.user!;
+  if (isDemo(user)) return ok(res, { deleted: true }, 'Warehouse deleted (Demo)');
   const { id } = req.params;
   const { error } = await supabaseAdmin
     .from('warehouses').delete().eq('id', id).eq('org_id', org_id);
@@ -78,7 +84,8 @@ export const deleteWarehouse = asyncHandler(async (req: AuthRequest, res: Respon
 /* ── INVENTORY MOVEMENTS ────────────────────────────────── */
 
 export const listMovements = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, ...user } = req.user!;
+  if (isDemo(user)) return ok(res, []);
   const { warehouseId } = req.params;
   const limit  = Math.min(Number(req.query.limit)  || 50, 200);
   const offset = Number(req.query.offset) || 0;
@@ -100,7 +107,8 @@ export const listMovements = asyncHandler(async (req: AuthRequest, res: Response
 });
 
 export const createMovement = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id, id: user_id } = req.user!;
+  const { org_id, id: user_id, ...user } = req.user!;
+  if (isDemo(user)) return created(res, { id: 'demo-mv' }, 'Movement created (Demo)');
   const { warehouseId } = req.params;
   const body = req.body;
 
@@ -176,7 +184,8 @@ export const deleteMovement = asyncHandler(async (req: AuthRequest, res: Respons
 /* ── WMS SUMMARY ────────────────────────────────────────── */
 
 export const getWmsSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, ...user } = req.user!;
+  if (isDemo(user)) return ok(res, getMockWMSSummary());
 
   const { data: whs, error: whErr } = await supabaseAdmin
     .from('warehouses')
