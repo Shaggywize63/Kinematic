@@ -43,7 +43,9 @@ export const getMockTrends = () => {
       date: dateStr,
       tff: 120 + Math.floor(Math.random() * 40),
       engagements: 150 + Math.floor(Math.random() * 50),
-      label: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+      tff_rate: 80,
+      label: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
+      short_label: d.toLocaleDateString('en-IN', { weekday: 'short' }).substring(0, 1)
     };
   });
   return days;
@@ -281,18 +283,27 @@ export const getMockAttendanceHistory = (today: string) => [
 ];
 
 export const getMockCityPerformance = () => [
-  { city: 'Bangalore', score: 92, status: 'excellent', executives: 45, tff: 450 },
-  { city: 'Mumbai', score: 88, status: 'good', executives: 38, tff: 380 },
-  { city: 'Delhi', score: 85, status: 'good', executives: 32, tff: 320 },
-  { city: 'Hyderabad', score: 79, status: 'average', executives: 28, tff: 280 }
+  { city: 'Bangalore', zones: 12, active_fes: 45, checkins: 850, engagements: 1240, tff: 450, tff_rate: 36, unique_outlets: 380, avg_hours: 8.2, lat: 12.9716, lng: 77.5946 },
+  { city: 'Mumbai', zones: 18, active_fes: 38, checkins: 720, engagements: 980, tff: 380, tff_rate: 38, unique_outlets: 320, avg_hours: 7.9, lat: 19.0760, lng: 72.8777 },
+  { city: 'Delhi', zones: 15, active_fes: 32, checkins: 640, engagements: 850, tff: 320, tff_rate: 37, unique_outlets: 280, avg_hours: 8.5, lat: 28.6139, lng: 77.2090 },
+  { city: 'Hyderabad', zones: 10, active_fes: 28, checkins: 510, engagements: 620, tff: 280, tff_rate: 45, unique_outlets: 240, avg_hours: 8.0, lat: 17.3850, lng: 78.4867 }
 ];
 
-export const getMockOutletCoverage = () => [
-  { zone: 'Koramangala', total: 50, covered: 42, percentage: 84 },
-  { zone: 'Indiranagar', total: 40, covered: 35, percentage: 88 },
-  { zone: 'HSR Layout', total: 35, covered: 28, percentage: 80 },
-  { zone: 'Whitefield', total: 60, covered: 45, percentage: 75 }
-];
+export const getMockOutletCoverage = () => ({
+  summary: { total_outlets: 1240, total_checkins: 4500, total_tff: 1560 },
+  cities: [
+    { city: 'Bangalore', total_outlets: 450, covered: 380, percentage: 84 },
+    { city: 'Mumbai', total_outlets: 380, covered: 320, percentage: 84 },
+    { city: 'Delhi', total_outlets: 320, covered: 280, percentage: 87 }
+  ],
+  outlets: [
+    { name: 'Reliance Fresh - Koramangala', checkins: 12, tff: 8, city: 'Bangalore', tff_rate: 66 },
+    { name: 'Big Bazaar - Lower Parel', checkins: 15, tff: 10, city: 'Mumbai', tff_rate: 66 },
+    { name: 'Star Market - Indiranagar', checkins: 10, tff: 7, city: 'Bangalore', tff_rate: 70 },
+    { name: 'Spar - HSR Layout', checkins: 8, tff: 5, city: 'Bangalore', tff_rate: 62 },
+    { name: 'More - Powai', checkins: 14, tff: 9, city: 'Mumbai', tff_rate: 64 }
+  ]
+});
 
 export const getMockMobileHome = () => ({
   attendance: { status: 'checked_in', time: '09:00 AM' },
