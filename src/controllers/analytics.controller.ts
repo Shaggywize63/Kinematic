@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
-import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome, getMockBroadcasts, getMockLearningMaterials } from '../utils/demoData';
 
 /* ─────────────────────────────────────────────────────────────
    HELPERS
@@ -1118,4 +1118,17 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   })).sort((a, b) => b.engagements - a.engagements);
 
   return ok(res, { from, to, cities: result });
+});
+
+export const getMobileBroadcasts = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockBroadcasts());
+  // Mobile app fallback to main broadcast list
+  return ok(res, []);
+});
+
+export const getMobileLearning = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockLearningMaterials());
+  return ok(res, []);
 });

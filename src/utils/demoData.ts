@@ -542,3 +542,9 @@ export const getMockUsers = () => [
   { id: 'fe5', name: 'Amit Singh', employee_id: 'KIN-005', role: 'executive', city: 'Pune', is_active: true, zones: { name: 'Pune East' } }
 ];
 
+
+export const getMockLearningMaterials = () => [
+  { id: 'm1', title: 'Retail Excellence 101', description: 'Master the basics of store presentation and customer service.', category: 'Standards', type: 'video', file_url: 'https://vimeo.com/836444777', thumbnail_url: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=400&q=80', duration_min: 15, is_mandatory: true },
+  { id: 'm2', title: 'Merchandising Guidelines V4', description: 'Updated planogram rules for Q2 launch.', category: 'Operations', type: 'pdf', file_url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf', thumbnail_url: 'https://images.unsplash.com/photo-1534723452862-4c874018d66d?auto=format&fit=crop&w=400&q=80', page_count: 24, is_mandatory: true },
+  { id: 'm3', title: 'Conflict Resolution', description: 'How to handle difficult customer interactions.', category: 'Soft Skills', type: 'slides', file_url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf', thumbnail_url: 'https://images.unsplash.com/photo-1573497019940-1c28c88b4f3e?auto=format&fit=crop&w=400&q=80', is_mandatory: false }
+];
