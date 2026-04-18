@@ -13,8 +13,8 @@ router.post('/chat', requireAuth, asyncHandler(async (req: Request, res: Respons
     throw new AppError(400, 'messages array is required', 'VALIDATION_ERROR');
   }
 
-  const text = await AIService.callClaude({
-    system: system || 'You are Kinematic AI, an operations assistant for a field force management platform.',
+  const text = await AIService.callKiniAI({
+    system: system || 'You are Kini AI, an operations assistant for a field force management platform.',
     messages,
     max_tokens: 1000
   });
@@ -51,7 +51,7 @@ Return an object with:
 2. "questions": Array of { "qtype": string, "label": string, "placeholder": string, "is_required": boolean, "options": Array<{label:string, value:string}>, "helper_text": string }
 `;
 
-  const text = await AIService.callClaude({
+  const text = await AIService.callKiniAI({
     system: systemPrompt,
     messages: [{ role: 'user', content: `Problem Statement: ${problemStatement}` }],
     max_tokens: 2000
@@ -94,7 +94,7 @@ You MUST return ONLY a valid JSON object. No preamble.
 ${JSON.stringify(activities || [])}
 `;
 
-  const text = await AIService.callClaude({
+  const text = await AIService.callKiniAI({
     system: systemPrompt,
     messages: [{ role: 'user', content: `Description Prompt: ${prompt}` }],
     max_tokens: 500

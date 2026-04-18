@@ -15,4 +15,4 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.exec_sql IS 'Enables Kinematic AI to perform automated database migrations and system-wide audits.';
+COMMENT ON FUNCTION public.exec_sql IS 'Enables Kini AI to perform automated database migrations and system-wide audits.';

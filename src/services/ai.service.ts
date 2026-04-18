@@ -62,7 +62,7 @@ export class AIService {
   /**
    * Centralized helper for Anthropics Messages API
    */
-  static async callClaude(payload: { system?: string; messages: any[]; model?: string; max_tokens?: number }) {
+  static async callKiniAI(payload: { system?: string; messages: any[]; model?: string; max_tokens?: number }) {
     const apiKey = await this.getFunctionalKey();
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
