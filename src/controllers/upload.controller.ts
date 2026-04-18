@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest, serverError } from '../utils/response';
+import { ok, badRequest, serverError, isDemo } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -18,6 +18,7 @@ const BUCKET_MAP: Record<string, string> = {
 // POST /api/v1/upload/:type
 export const uploadFile = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { url: 'https://images.unsplash.com/photo-1504384308090-c894fdcc538d?q=80&w=2070&auto=format&fit=crop', path: 'demo/demo.jpg', bucket: 'demo' });
   const { type } = req.params;
 
   if (!BUCKET_MAP[type]) return badRequest(res, `Invalid upload type. Valid: ${Object.keys(BUCKET_MAP).join(', ')}`);

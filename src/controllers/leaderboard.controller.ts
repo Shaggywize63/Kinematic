@@ -1,13 +1,14 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest } from '../utils/response';
+import { ok, badRequest, isDemo } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
-import { isUUID } from '../utils';
+import { getMockLeaderboard } from '../utils/demoData';
 
 // GET /api/v1/leaderboard?period=weekly&limit=20
 export const getLeaderboard = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { period: req.query.period || 'weekly', period_start: new Date().toISOString().split('T')[0], entries: getMockLeaderboard() });
   const period = (req.query.period as string) || 'weekly';
   const limit = Math.min(50, parseInt(req.query.limit as string || '20', 10));
   const zoneId = req.query.zone_id as string | undefined;
@@ -52,6 +53,7 @@ export const getLeaderboard = asyncHandler(async (req: AuthRequest, res: Respons
 // GET /api/v1/leaderboard/me — current user's score and rank
 export const getMyScore = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockLeaderboard().find(e => e.is_me) || null);
   const period = (req.query.period as string) || 'weekly';
 
   const now = new Date();
