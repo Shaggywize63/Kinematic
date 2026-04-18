@@ -5,7 +5,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isDemo } from '../utils';
-import { getMockWarehouses, getMockWMSSummary, getMockWMSInventory } from '../utils/demoData';
+import { getMockWarehouses, getMockWMSSummary, getMockWMSInventory, getMockMovements } from '../utils/demoData';
 
 const MOVEMENT_SELECT = `
   *,
