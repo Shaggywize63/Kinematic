@@ -1,13 +1,15 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin as supabase } from '../lib/supabase';
-import { ok, created, badRequest, notFound, isUUID, parseAppDate, dbToday, getISTSearchRange } from '../utils';
+import { ok, created, badRequest, notFound, isUUID, parseAppDate, dbToday, getISTSearchRange, todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
+import { isDemo, getMockRoutePlans, getMockMyRoutePlan } from '../utils/demoData';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
 
 export const getRoutePlans = asyncHandler(async (req, res) => {
   const user = (req as any).user;
+  if (isDemo(user)) return ok(res, getMockRoutePlans(todayDate()));
   const { client_id, date } = req.query;
   
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
@@ -48,6 +50,8 @@ export const getRoutePlans = asyncHandler(async (req, res) => {
 });
 
 export const getMyRoutePlan = asyncHandler(async (req, res) => {
+  const user = (req as any).user;
+  if (isDemo(user)) return ok(res, [getMockMyRoutePlan(todayDate())]);
   const uid = userId(req);
   const istDate = parseAppDate((req.query.date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
@@ -139,6 +143,16 @@ export const deleteRoutePlan = asyncHandler(async (req, res) => {
 
 export const getRoutePlanSummary = asyncHandler(async (req, res) => {
   const user = (req as any).user;
+  if (isDemo(user)) {
+    const plans = getMockRoutePlans(todayDate());
+    return ok(res, {
+      total_fes: 1,
+      total_outlets: plans[0].total_outlets,
+      visited_outlets: plans[0].visited_outlets,
+      pending_plans: 1,
+      completed_plans: 0
+    });
+  }
   const { client_id, date } = req.query;
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');

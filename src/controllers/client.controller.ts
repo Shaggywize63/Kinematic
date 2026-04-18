@@ -9,6 +9,7 @@ import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../util
  */
 export const getClients = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockClients());
   const { data, error } = await supabaseAdmin
     .from('clients')
     .select('*')

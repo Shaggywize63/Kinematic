@@ -1,6 +1,9 @@
 import { isoDate } from './index';
 
 export const DEMO_ORG_ID = 'demo-org-999';
+export const DEMO_USER_ID = 'demo-user-id';
+
+export const isDemo = (user?: { org_id?: string }) => user?.org_id === DEMO_ORG_ID;
 
 export const getMockSummary = (date: string) => ({
   date,
@@ -208,5 +211,72 @@ export const getMockSecurityAlerts = (today: string) => [
 export const getMockDeviceInfo = () => [
   { id: 'd1', user_id: 'fe1', device_model: 'Pixel 7 Pro', device_brand: 'Google', os_version: '14', battery_percentage: 85, last_updated: new Date().toISOString() },
   { id: 'd2', user_id: 'fe2', device_model: 'Galaxy S23', device_brand: 'Samsung', os_version: '13', battery_percentage: 42, last_updated: new Date().toISOString() },
+];
+
+// --- MOBILE APP MOCKS ---
+
+export const getMockFormTemplates = () => [
+  {
+    id: 'f1',
+    activity_id: 'a1',
+    name: 'Daily Store Audit',
+    description: 'General store hygiene and stock audit',
+    requires_photo: true,
+    requires_gps: true,
+    form_fields: [
+      { id: 'q1', label: 'Store Cleanliness', field_key: 'cleanliness', field_type: 'select', options: ['Excellent', 'Good', 'Average', 'Poor'], is_required: true, sort_order: 1 },
+      { id: 'q2', label: 'Stock Available', field_key: 'stock', field_type: 'number', is_required: true, sort_order: 2 },
+      { id: 'q3', label: 'Display Setup Photo', field_key: 'photo', field_type: 'camera', is_required: true, sort_order: 3 }
+    ]
+  },
+  {
+    id: 'f2',
+    activity_id: 'a2',
+    name: 'Competitor Tracking',
+    description: 'Log competitor pricing and promos',
+    requires_photo: false,
+    requires_gps: true,
+    form_fields: [
+      { id: 'q4', label: 'Competitor Name', field_key: 'comp_name', field_type: 'text', placeholder: 'Brand name', is_required: true, sort_order: 1 },
+      { id: 'q5', label: 'Price (INR)', field_key: 'price', field_type: 'number', is_required: true, sort_order: 2 }
+    ]
+  }
+];
+
+export const getMockRoutePlans = (today: string) => [
+  {
+    id: 'rp1',
+    user_id: 'demo-user-id',
+    fe_name: 'Demo Admin',
+    plan_date: today,
+    status: 'pending',
+    total_outlets: 5,
+    visited_outlets: 2,
+    outlets: [
+      { id: 'o1', name: 'Reliance Fresh - Koramangala', visit_order: 1, status: 'visited', address: '123 Koramangala', activities: [{ id: 'a1', name: 'Store Visit', status: 'visited' }] },
+      { id: 'o2', name: 'Big Bazaar - Indiranagar', visit_order: 2, status: 'visited', address: '456 Indiranagar', activities: [{ id: 'a1', name: 'Store Visit', status: 'visited' }] },
+      { id: 'o3', name: 'Star Market - HSR', visit_order: 3, status: 'pending', address: '789 HSR Layout', activities: [{ id: 'a1', name: 'Store Visit', status: 'pending' }] },
+      { id: 'o4', name: 'Metro Cash & Carry', visit_order: 4, status: 'pending', address: '101 Whitefield', activities: [{ id: 'a1', name: 'Store Visit', status: 'pending' }] },
+      { id: 'o5', name: 'Spencer\'s - MG Road', visit_order: 5, status: 'pending', address: '202 MG Road', activities: [{ id: 'a1', name: 'Store Visit', status: 'pending' }] }
+    ]
+  }
+];
+
+export const getMockMyRoutePlan = (today: string) => ({
+  ...getMockRoutePlans(today)[0],
+  id: 'unified-' + today,
+  multi_plan_ids: ['rp1']
+});
+
+export const getMockActivityMapping = () => [
+  { id: 'a1', name: 'Store Visit', type: 'visit', description: 'Regular store check-in' },
+  { id: 'a2', name: 'Merchandising', type: 'form', description: 'Setup display and take photos' },
+  { id: 'a3', name: 'Audit', type: 'audit', description: 'Inventory verify' }
+];
+
+export const getMockAttendanceHistory = (today: string) => [
+  { date: today, status: 'checked_in', checkin_at: `${today}T09:00:00Z`, checkout_at: null, total_hours: 4.5 },
+  { date: '2024-04-17', status: 'checked_out', checkin_at: '2024-04-17T09:15:00Z', checkout_at: '2024-04-17T18:30:00Z', total_hours: 9.25 },
+  { date: '2024-04-16', status: 'checked_out', checkin_at: '2024-04-16T08:45:00Z', checkout_at: '2024-04-16T17:45:00Z', total_hours: 9.0 }
 ];
 

@@ -3,10 +3,12 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSearchRange, sendSuccess, buildPaginatedResult, isUUID } from '../utils';
 import { getPagination } from '../utils/pagination';
+import { DEMO_ORG_ID, isDemo, getMockFormTemplates, getMockSubmissions, getMockSubmissionDetails } from '../utils/demoData';
 import { logger } from '../lib/logger';
 
 export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockFormTemplates());
   const { is_active, activity_id } = req.query;
   
   logger.info(`[Forms] Fetching templates: org_id=${user.org_id}, activity_id=${activity_id}, is_active=${is_active}`);
@@ -114,6 +116,7 @@ export const addField = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return created(res, { id: 'demo-sub-id', ...req.body }, 'Submission successful (Demo)');
   const { 
     template_id, activity_id, outlet_id, outlet_name, latitude, longitude, 
     check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address, responses 
@@ -152,6 +155,7 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, buildPaginatedResult(getMockSubmissions(new Date().toISOString().split('T')[0]).data, 5, 1, 20));
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
   const { data, error, count } = await supabaseAdmin.from('form_submissions').select('*, builder_forms!left(title), houses!left(name)', { count: 'exact' }).eq('user_id', user.id).order('submitted_at', { ascending: false }).range(from, to);
   if (error) return badRequest(res, error.message);
@@ -159,6 +163,8 @@ export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 });
 
 export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockSubmissionDetails(req.params.id));
   const { id } = req.params;
   const { data: sub } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title), activities(name)').eq('id', id).single();
   if (sub) {
@@ -172,6 +178,10 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) {
+    const mock = getMockSubmissions(new Date().toISOString().split('T')[0]);
+    return sendSuccess(res, buildPaginatedResult(mock.data, mock.total, 1, 20));
+  }
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
   const { client_id, date_from, date_to, search, user_id, template_id, activity_id, city_id, zone_id, include_responses } = req.query as any;
   const uId = (user_id as string)?.trim();

@@ -23,7 +23,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
       email: 'demo@kinematic.com',
       role: 'admin',
       is_active: true,
-      permissions: ['dashboard', 'analytics', 'users', 'attendance'],
+      permissions: ['dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory', 'form_builder'],
       assigned_cities: []
     } as any;
     req.accessToken = token;
