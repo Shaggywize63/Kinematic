@@ -142,113 +142,63 @@ export const getMockAttendanceToday = (today: string) => ({
   ]
 });
 
-export const getMockSubmissions = (today: string) => ({
-  total: 10,
-  data: [
-    { 
-      id: 's1', user_id: 'fe1', submitted_at: `${today}T12:05:00Z`, is_converted: true, 
-      outlet_name: 'Reliance Fresh - Koramangala', address: '123 Koramangala, Bangalore',
-      latitude: 12.9352, longitude: 77.6245,
-      check_in_at: `${today}T11:45:00Z`, check_out_at: `${today}T12:15:00Z`,
-      check_in_gps: '12.9352,77.6245', check_out_gps: '12.9353,77.6246',
-      users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, 
-      builder_forms: { title: 'Product Audit' }, 
-      activities: { name: 'Store Visit' },
-      photo_url: 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's2', user_id: 'fe2', submitted_at: `${today}T11:50:00Z`, is_converted: false, 
-      outlet_name: 'Big Bazaar - Indiranagar', address: '456 Indiranagar, Bangalore',
-      latitude: 12.9716, longitude: 77.5946,
-      check_in_at: `${today}T11:00:00Z`, check_out_at: `${today}T11:55:00Z`,
-      check_in_gps: '12.9716,77.5946', check_out_gps: '12.9717,77.5947',
-      users: { name: 'Priya Patel', employee_id: 'KIN-002' }, 
-      builder_forms: { title: 'Merchandising Audit' }, 
-      activities: { name: 'Merchandising' },
-      photo_url: 'https://images.unsplash.com/photo-1534723452862-4c874018d66d?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's3', user_id: 'fe3', submitted_at: `${today}T11:30:00Z`, is_converted: true, 
-      outlet_name: 'Star Market - HSR', address: '789 HSR Layout, Bangalore',
-      latitude: 12.9141, longitude: 77.6413,
-      check_in_at: `${today}T11:10:00Z`, check_out_at: `${today}T11:40:00Z`,
-      users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, 
-      builder_forms: { title: 'Stock Report' }, 
-      activities: { name: 'Store Visit' },
-      photo_url: 'https://images.unsplash.com/photo-1578916171728-46686eac8d58?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's4', user_id: 'fe4', submitted_at: `${today}T11:15:00Z`, is_converted: true, 
-      outlet_name: 'Metro Cash & Carry', address: '101 Whitefield, Bangalore',
-      latitude: 12.9698, longitude: 77.7500,
-      check_in_at: `${today}T10:45:00Z`, check_out_at: `${today}T11:20:00Z`,
-      users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, 
-      builder_forms: { title: 'Compliance Checklist' }, 
-      activities: { name: 'Compliance' },
-      photo_url: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's5', user_id: 'fe5', submitted_at: `${today}T10:55:00Z`, is_converted: false, 
-      outlet_name: 'Reliance Smart - Jayanagar', address: '202 Jayanagar, Bangalore',
-      latitude: 12.9250, longitude: 77.5897,
-      check_in_at: `${today}T10:20:00Z`, check_out_at: `${today}T11:00:00Z`,
-      users: { name: 'Amit Singh', employee_id: 'KIN-005' }, 
-      builder_forms: { title: 'Inventory Update' }, 
-      activities: { name: 'Inventory' },
-      photo_url: 'https://images.unsplash.com/photo-1604719312563-8912e922e9d5?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's6', user_id: 'fe1', submitted_at: `${today}T16:05:00Z`, is_converted: true, 
-      outlet_name: 'Village Hypermarket', address: 'Whitefield Main Road',
-      latitude: 12.9698, longitude: 77.7500,
-      check_in_at: `${today}T15:30:00Z`, check_out_at: `${today}T16:10:00Z`,
-      users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, 
-      builder_forms: { title: 'Price Survey' }, 
-      activities: { name: 'Marketing' },
-      photo_url: 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's7', user_id: 'fe2', submitted_at: `${today}T09:40:00Z`, is_converted: true, 
-      outlet_name: 'D-Mart - Bellandur', address: 'Sarjapur Road, Bangalore',
-      latitude: 12.9250, longitude: 77.6750,
-      check_in_at: `${today}T09:00:00Z`, check_out_at: `${today}T09:50:00Z`,
-      users: { name: 'Priya Patel', employee_id: 'KIN-002' }, 
-      builder_forms: { title: 'Visual Merchandising' }, 
-      activities: { name: 'Merchandising' },
-      photo_url: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's8', user_id: 'fe3', submitted_at: `${today}T14:55:00Z`, is_converted: false, 
-      outlet_name: 'More Megastore', address: 'Mahadevapura, Bangalore',
-      latitude: 12.9900, longitude: 77.6900,
-      check_in_at: `${today}T14:10:00Z`, check_out_at: `${today}T15:00:00Z`,
-      users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, 
-      builder_forms: { title: 'New Product Launch' }, 
-      activities: { name: 'Marketing' },
-      photo_url: 'https://images.unsplash.com/photo-1604719312563-8912e922e9d5?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's9', user_id: 'fe4', submitted_at: `${today}T10:30:00Z`, is_converted: true, 
-      outlet_name: 'Spencer\'s - MG Road', address: '202 MG Road, Bangalore',
-      latitude: 12.9716, longitude: 77.6000,
-      check_in_at: `${today}T10:00:00Z`, check_out_at: `${today}T10:45:00Z`,
-      users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, 
-      builder_forms: { title: 'Inventory Check' }, 
-      activities: { name: 'Stock Reporting' },
-      photo_url: 'https://images.unsplash.com/photo-1583258292688-d0213dc5a3a8?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: 's10', user_id: 'fe5', submitted_at: `${today}T13:15:00Z`, is_converted: true, 
-      outlet_name: 'Big Bazaar - Richmond Road', address: 'Richmond Town, Bangalore',
-      latitude: 12.9600, longitude: 77.5900,
-      check_in_at: `${today}T12:45:00Z`, check_out_at: `${today}T13:25:00Z`,
-      users: { name: 'Amit Singh', employee_id: 'KIN-005' }, 
-      builder_forms: { title: 'Compliance Audit' }, 
-      activities: { name: 'Compliance' },
-      photo_url: 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80'
-    }
-  ]
-});
+export const getMockSubmissions = (today: string) => {
+  const yesterday = new Date(new Date(today).getTime() - 86400000).toISOString().split('T')[0];
+  
+  const pics = [
+    'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1534723452862-4c874018d66d?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1578916171728-46686eac8d58?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1604719312563-8912e922e9d5?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1583258292688-d0213dc5a3a8?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1472851294608-062f824d29cc?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1516594798947-e65505dbb29d?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1570126618953-d437176e8c79?auto=format&fit=crop&w=800&q=80',
+    'https://images.unsplash.com/photo-1513817692823-39acdf45550a?auto=format&fit=crop&w=800&q=80'
+  ];
+
+  const data = [
+    { id: 's1', user_id: 'fe1', submitted_at: `${today}T12:05:00Z`, outlet_name: 'Reliance Fresh - Koramangala', users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, activities: { name: 'Product Audit' }, photo_url: pics[0] },
+    { id: 's2', user_id: 'fe2', submitted_at: `${today}T11:50:00Z`, outlet_name: 'Big Bazaar - Indiranagar', users: { name: 'Priya Patel', employee_id: 'KIN-002' }, activities: { name: 'Merchandising' }, photo_url: pics[1] },
+    { id: 's3', user_id: 'fe3', submitted_at: `${today}T11:30:00Z`, outlet_name: 'Star Market - HSR', users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, activities: { name: 'Stock Check' }, photo_url: pics[2] },
+    { id: 's4', user_id: 'fe4', submitted_at: `${today}T10:15:00Z`, outlet_name: 'Metro Cash & Carry', users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, activities: { name: 'Compliance' }, photo_url: pics[3] },
+    { id: 's5', user_id: 'fe5', submitted_at: `${today}T09:45:00Z`, outlet_name: 'Reliance Smart - Jayanagar', users: { name: 'Amit Singh', employee_id: 'KIN-005' }, activities: { name: 'Inventory' }, photo_url: pics[4] },
+    { id: 's6', user_id: 'fe1', submitted_at: `${yesterday}T16:05:00Z`, outlet_name: 'Village Hypermarket', users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, activities: { name: 'Marketing' }, photo_url: pics[5] },
+    { id: 's7', user_id: 'fe2', submitted_at: `${yesterday}T14:40:00Z`, outlet_name: 'D-Mart - Bellandur', users: { name: 'Priya Patel', employee_id: 'KIN-002' }, activities: { name: 'Visual Display' }, photo_url: pics[6] },
+    { id: 's8', user_id: 'fe3', submitted_at: `${yesterday}T10:30:00Z`, outlet_name: 'More Megastore', users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, activities: { name: 'Shelf Stock' }, photo_url: pics[7] },
+    { id: 's9', user_id: 'fe4', submitted_at: `${yesterday}T09:15:00Z`, outlet_name: 'Spencer\'s - MG Road', users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, activities: { name: 'Audit' }, photo_url: pics[8] },
+    { id: 's10', user_id: 'fe5', submitted_at: `${yesterday}T13:25:00Z`, outlet_name: 'Big Bazaar - Richmond Road', users: { name: 'Amit Singh', employee_id: 'KIN-005' }, activities: { name: 'Branding' }, photo_url: pics[9] },
+    // 10 more to ensure density
+    { id: 's11', user_id: 'fe1', submitted_at: `${today}T15:20:00Z`, outlet_name: 'Apollo Pharmacy', users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, activities: { name: 'Stock Check' }, photo_url: pics[0] },
+    { id: 's12', user_id: 'fe2', submitted_at: `${today}T16:45:00Z`, outlet_name: 'Health & Glow', users: { name: 'Priya Patel', employee_id: 'KIN-002' }, activities: { name: 'Merchandising' }, photo_url: pics[1] },
+    { id: 's13', user_id: 'fe3', submitted_at: `${today}T14:10:00Z`, outlet_name: 'Croma - Koramangala', users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, activities: { name: 'Asset Check' }, photo_url: pics[2] },
+    { id: 's14', user_id: 'fe4', submitted_at: `${today}T08:30:00Z`, outlet_name: 'Westside', users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, activities: { name: 'Visual Audit' }, photo_url: pics[3] },
+    { id: 's15', user_id: 'fe1', submitted_at: `${today}T17:55:00Z`, outlet_name: 'FabIndia', users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, activities: { name: 'Planogram' }, photo_url: pics[4] },
+    { id: 's16', user_id: 'fe5', submitted_at: `${yesterday}T12:00:00Z`, outlet_name: 'Crossword', users: { name: 'Amit Singh', employee_id: 'KIN-005' }, activities: { name: 'Hygiene' }, photo_url: pics[5] },
+    { id: 's17', user_id: 'fe4', submitted_at: `${yesterday}T15:15:00Z`, outlet_name: 'Hamleys', users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, activities: { name: 'Promo Check' }, photo_url: pics[6] },
+    { id: 's18', user_id: 'fe3', submitted_at: `${yesterday}T11:45:00Z`, outlet_name: 'Decathlon', users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, activities: { name: 'Merchandising' }, photo_url: pics[7] },
+    { id: 's19', user_id: 'fe2', submitted_at: `${yesterday}T08:50:00Z`, outlet_name: 'Shoppers Stop', users: { name: 'Priya Patel', employee_id: 'KIN-002' }, activities: { name: 'Audit' }, photo_url: pics[8] },
+    { id: 's20', user_id: 'fe1', submitted_at: `${yesterday}T18:10:00Z`, outlet_name: 'Zudio', users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, activities: { name: 'Stock Survey' }, photo_url: pics[9] }
+  ];
+
+  return {
+    total: data.length,
+    data: data.map(sub => ({
+      ...sub,
+      check_in_at: sub.submitted_at,
+      check_out_at: sub.submitted_at,
+      check_in_gps: '12.9716,77.5946',
+      check_out_gps: '12.9717,77.5947',
+      address: 'Electronic City, Bangalore, KA, 560100',
+      form_responses: [
+        { builder_questions: { label: 'Primary Display' }, qtype: 'camera', value_text: sub.photo_url },
+        { builder_questions: { label: 'Shelf Condition' }, qtype: 'text', value_text: 'Excellent' },
+        { builder_questions: { label: 'Out of Stock SKUs' }, qtype: 'number', value_number: 2 }
+      ]
+    }))
+  };
+};
 
 export const getMockSubmissionDetails = (id: string) => ({
   id,
