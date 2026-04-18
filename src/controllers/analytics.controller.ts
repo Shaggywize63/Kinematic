@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
-import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome } from '../utils/demoData';
 
 /* ─────────────────────────────────────────────────────────────
    HELPERS
@@ -407,6 +407,7 @@ export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
 /* Now supports ?from=YYYY-MM-DD&to=YYYY-MM-DD for date range  */
 export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockTrends());
 
   let from = req.query.from as string;
   let to   = req.query.to   as string;
@@ -651,6 +652,7 @@ export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => 
 /* Unique outlets visited (based on FE check-ins + form submissions) */
 export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockOutletCoverage());
   const from  = (req.query.from  as string) || isoDate(new Date());
   const to    = (req.query.to    as string) || isoDate(new Date());
 
@@ -715,6 +717,7 @@ export const getOutletCoverage = asyncHandler(async (req: AuthRequest, res: Resp
 /* ── GET /api/v1/analytics/dashboard-init ────────────────── */
 export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { summary: getMockSummary(isoDate(new Date())), trends: getMockTrends(), feed: getMockFeed(), heatmap: getMockHeatmap() });
 
   const today = isoDate(toIST(new Date()));
   const sevenDaysAgo = isoDate(new Date(Date.now() - 6 * 86400000));
@@ -798,6 +801,7 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/mobile-home ───────────────────── */
 export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockMobileHome());
   const today = dbToday();
   const appToday = todayDate();
   console.log(`[MobileHome] User ${user.id} fetching home. Date=${today} (App Date: ${appToday})`);
@@ -1035,6 +1039,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
 /* Zone+city-wise KPIs for date range */
 export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { from: isoDate(new Date()), to: isoDate(new Date()), cities: getMockCityPerformance() });
   const from = (req.query.from as string) || isoDate(toIST(new Date()));
   const to   = (req.query.to   as string) || isoDate(toIST(new Date()));
 

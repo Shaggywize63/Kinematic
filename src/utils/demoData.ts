@@ -280,3 +280,64 @@ export const getMockAttendanceHistory = (today: string) => [
   { date: '2024-04-16', status: 'checked_out', checkin_at: '2024-04-16T08:45:00Z', checkout_at: '2024-04-16T17:45:00Z', total_hours: 9.0 }
 ];
 
+export const getMockCityPerformance = () => [
+  { city: 'Bangalore', score: 92, status: 'excellent', executives: 45, tff: 450 },
+  { city: 'Mumbai', score: 88, status: 'good', executives: 38, tff: 380 },
+  { city: 'Delhi', score: 85, status: 'good', executives: 32, tff: 320 },
+  { city: 'Hyderabad', score: 79, status: 'average', executives: 28, tff: 280 }
+];
+
+export const getMockOutletCoverage = () => [
+  { zone: 'Koramangala', total: 50, covered: 42, percentage: 84 },
+  { zone: 'Indiranagar', total: 40, covered: 35, percentage: 88 },
+  { zone: 'HSR Layout', total: 35, covered: 28, percentage: 80 },
+  { zone: 'Whitefield', total: 60, covered: 45, percentage: 75 }
+];
+
+export const getMockMobileHome = () => ({
+  attendance: { status: 'checked_in', time: '09:00 AM' },
+  today_plan: { total: 5, visited: 2, pending: 3 },
+  announcements: [
+    { title: 'New Product Launch', body: 'Introducing the new Organic Range tomorrow.' },
+    { title: 'Holiday Notice', body: 'Stores will remain closed on May 1st.' }
+  ],
+  kpis: {
+    monthly_tff: 124,
+    monthly_earnings: 15400,
+    target_pct: 85
+  }
+});
+
+export const getMockWMSInventory = () => [
+  { id: 'p1', name: 'Product A', sku: 'SKU-001', category: 'FMCG', stock_level: 450, warehouse: 'Bangalore-Central' },
+  { id: 'p2', name: 'Product B', sku: 'SKU-002', category: 'Electronics', stock_level: 120, warehouse: 'Bangalore-Central' },
+  { id: 'p3', name: 'Product C', sku: 'SKU-003', category: 'Apparel', stock_level: 890, warehouse: 'Mumbai-Hub' }
+];
+
+export const getMockWarehouses = () => [
+  { id: 'w1', name: 'Bangalore-Central', city: 'Bangalore', type: 'Distribution Center', capacity: '90%' },
+  { id: 'w2', name: 'Mumbai-Hub', city: 'Mumbai', type: 'Regional Warehouse', capacity: '75%' }
+];
+
+export const getMockStockAllocations = () => [
+  { 
+    id: 'sa1', 
+    date: isoDate(new Date()), 
+    status: 'pending', 
+    users: { name: 'Arjun Sharma' },
+    stock_items: [
+      { id: 'si1', product_name: 'Product A', quantity_allocated: 100, status: 'pending' },
+      { id: 'si2', product_name: 'Product B', quantity_allocated: 50, status: 'pending' }
+    ]
+  }
+];
+
+export const getMockWMSSummary = () => ({
+  warehouses: getMockWarehouses().map(w => ({ ...w, is_active: true, stats: { inbound: 1200, outbound: 800, total_moves: 45 } })),
+  total_warehouses: 2,
+  active_warehouses: 2,
+  total_skus: 150,
+  total_assets: 45,
+  total_movements_30d: 850
+});
+

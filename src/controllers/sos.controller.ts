@@ -17,6 +17,7 @@ const triggerSchema = z.object({
 // POST /api/v1/sos/trigger
 export const trigger = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return created(res, { id: 'demo-sos' }, 'SOS alert sent (Demo)');
   const body = triggerSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
@@ -73,6 +74,7 @@ export const trigger = asyncHandler<AuthRequest>(async (req, res) => {
 // PATCH /api/v1/sos/:id/acknowledge  (supervisor+)
 export const acknowledge = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: req.params.id, status: 'acknowledged' });
   const { id } = req.params;
 
   const { data, error } = await supabaseAdmin
@@ -90,6 +92,7 @@ export const acknowledge = asyncHandler<AuthRequest>(async (req, res) => {
 // PATCH /api/v1/sos/:id/resolve  (supervisor+)
 export const resolve = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: req.params.id, status: 'resolved' });
   const { id } = req.params;
   const { resolution_notes } = req.body;
 
@@ -113,6 +116,7 @@ export const resolve = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/sos  (supervisor+)
 export const getAlerts = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockSOS());
   
   const status = req.query.status as string | undefined;
 

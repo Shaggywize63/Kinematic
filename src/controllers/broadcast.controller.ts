@@ -28,6 +28,7 @@ const answerSchema = z.object({
 // GET /api/v1/broadcast — active questions for current user (FE/supervisor)
 export const getQuestions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockBroadcasts());
 
   let query = supabaseAdmin
     .from('broadcast_questions')
@@ -65,6 +66,7 @@ export const getQuestions = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/broadcast/admin — all questions for admin dashboard
 export const getAdminQuestions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockBroadcasts());
 
   const { data: questions, error } = await supabaseAdmin
     .from('broadcast_questions')
@@ -144,6 +146,7 @@ export const getAdminQuestions = asyncHandler<AuthRequest>(async (req, res) => {
 // POST /api/v1/broadcast — create question (admin+)
 export const createQuestion = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: 'demo-br-new' }, 'Question posted (Demo)');
   const body = questionSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
@@ -164,6 +167,7 @@ export const createQuestion = asyncHandler<AuthRequest>(async (req, res) => {
 // PATCH /api/v1/broadcast/:id — update question (admin+)
 export const updateQuestion = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: req.params.id }, 'Question updated (Demo)');
   const { id } = req.params;
   const body = questionSchema.partial().safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
@@ -184,6 +188,7 @@ export const updateQuestion = asyncHandler<AuthRequest>(async (req, res) => {
 // DELETE /api/v1/broadcast/:id — delete question (admin+)
 export const deleteQuestion = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, null, 'Question deleted (Demo)');
   const { id } = req.params;
 
   // Delete answers first
@@ -205,6 +210,7 @@ export const deleteQuestion = asyncHandler<AuthRequest>(async (req, res) => {
 // PATCH /api/v1/broadcast/:id/status — close/reopen (admin+)
 export const updateStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: req.params.id, status: req.body.status });
   const { id } = req.params;
   const { status } = req.body as { status: string };
 
@@ -226,6 +232,7 @@ export const updateStatus = asyncHandler<AuthRequest>(async (req, res) => {
 // POST /api/v1/broadcast/:id/answer — submit answer (FE/supervisor)
 export const submitAnswer = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { status: 'success' }, 'Answer submitted (Demo)');
   const { id } = req.params;
   const body = answerSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
@@ -279,6 +286,7 @@ export const submitAnswer = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/broadcast/:id/results (admin+)
 export const getResults = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockBroadcasts()[0]);
   const { id } = req.params;
 
   const { data: question } = await supabaseAdmin

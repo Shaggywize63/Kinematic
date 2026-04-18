@@ -23,6 +23,7 @@ const updateStatusSchema = z.object({
 // POST /api/v1/grievances
 export const submit = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return created(res, { id: 'demo-grv' }, 'Grievance submitted (Demo)');
   const body = submitSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
@@ -39,6 +40,7 @@ export const submit = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/grievances/mine
 export const getMine = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockGrievances());
   const { data, error } = await supabaseAdmin
     .from('grievances')
     .select('id, reference_no, category, status, incident_date, created_at, resolution')
@@ -51,6 +53,7 @@ export const getMine = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/admin/grievances  (admin+)
 export const getAll = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockGrievances());
   
   const status = req.query.status as string | undefined;
 
@@ -84,6 +87,7 @@ export const getAll = asyncHandler<AuthRequest>(async (req, res) => {
 // PATCH /api/v1/admin/grievances/:id  (admin+)
 export const updateStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: req.params.id, status: 'resolved' });
   const { id } = req.params;
   const body = updateStatusSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);

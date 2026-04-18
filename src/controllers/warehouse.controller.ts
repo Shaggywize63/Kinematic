@@ -1,11 +1,13 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest } from '../utils/response';
+import { ok, badRequest, isDemo } from '../utils';
+import { getMockWMSInventory } from '../utils/demoData';
 import { asyncHandler } from '../utils/asyncHandler';
 
 export const getWarehouseSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { total_skus: 156, low_stock: 12, fully_allocated: 85 });
 
   const { data, error } = await supabaseAdmin
     .from('warehouse_inventory')
@@ -28,6 +30,7 @@ export const getWarehouseSummary = asyncHandler(async (req: AuthRequest, res: Re
 
 export const getWarehouseInventory = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockWMSInventory());
 
   const { data, error } = await supabaseAdmin
     .from('warehouse_inventory')

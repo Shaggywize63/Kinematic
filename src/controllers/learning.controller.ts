@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, notFound } from '../utils/response';
+import { ok, created, badRequest, notFound, isDemo } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 
 const materialSchema = z.object({
@@ -21,6 +21,7 @@ const materialSchema = z.object({
 // GET /api/v1/learning
 export const getMaterials = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, []);
 
   const { data, error } = await supabaseAdmin
     .from('learning_materials')
@@ -50,6 +51,7 @@ export const getMaterials = asyncHandler(async (req: AuthRequest, res: Response)
 // POST /api/v1/learning  (admin+)
 export const createMaterial = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: 'demo-mat' }, 'Material published (Demo)');
   const body = materialSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
@@ -66,6 +68,7 @@ export const createMaterial = asyncHandler(async (req: AuthRequest, res: Respons
 // POST /api/v1/learning/:id/progress
 export const updateProgress = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { status: 'success' });
   const { id } = req.params;
   const { progress_pct, is_completed } = req.body;
 
@@ -98,6 +101,7 @@ export const updateProgress = asyncHandler(async (req: AuthRequest, res: Respons
 // DELETE /api/v1/learning/:id (admin+)
 export const deleteMaterial = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, null, 'Material deleted (Demo)');
   const { id } = req.params;
 
   const { data, error } = await supabaseAdmin

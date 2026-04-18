@@ -2,7 +2,8 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest, notFound } from '../utils';
+import { asyncHandler, ok, created, badRequest, notFound, isDemo } from '../utils';
+import { getMockStockAllocations } from '../utils/demoData';
 
 const allocateSchema = z.object({
   user_id: z.string().uuid(),
@@ -28,6 +29,7 @@ const reviewItemSchema = z.object({
 // GET /api/v1/stock/my  — exec's allocation for today or given date
 export const getMyAllocation = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockStockAllocations()[0]);
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
   const { data, error } = await supabaseAdmin
@@ -44,6 +46,7 @@ export const getMyAllocation = asyncHandler(async (req: AuthRequest, res: Respon
 // POST /api/v1/stock/allocate  (admin+)
 export const allocate = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return created(res, { id: 'demo-alloc' }, 'Stock allocated (Demo)');
   const body = allocateSchema.safeParse(req.body);
   if (!body.success) { badRequest(res, 'Validation failed', body.error.errors); return; }
 
@@ -75,6 +78,7 @@ export const allocate = asyncHandler(async (req: AuthRequest, res: Response) => 
 // PATCH /api/v1/stock/items/:id  — exec accepts/rejects individual item
 export const reviewItem = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: req.params.id, status: req.body.status });
   const { id } = req.params;
   const body = reviewItemSchema.safeParse(req.body);
   if (!body.success) { badRequest(res, 'Validation failed', body.error.errors); return; }
@@ -132,6 +136,7 @@ export const reviewItem = asyncHandler(async (req: AuthRequest, res: Response) =
 // GET /api/v1/stock/team  (supervisor+)
 export const getTeamAllocations = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockStockAllocations());
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
   const { data, error } = await supabaseAdmin
