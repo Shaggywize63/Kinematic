@@ -37,7 +37,14 @@ export const getRoutePlans = asyncHandler(async (req, res) => {
     if (!outletsByPlan[o.route_plan_id]) outletsByPlan[o.route_plan_id] = [];
     outletsByPlan[o.route_plan_id].push(o);
   });
-  return ok(res, plans.map((p: any) => ({ ...p, outlets: outletsByPlan[p.id] || [] })));
+  
+  return ok(res, plans.map((p: any) => ({ 
+    ...p, 
+    outlets: (outletsByPlan[p.id] || []).map((o: any) => ({
+        ...o,
+        activities: [{ id: p.activity_id, name: p.activity_name || "Activity", status: o.status }]
+    }))
+  })));
 });
 
 export const getMyRoutePlan = asyncHandler(async (req, res) => {
@@ -58,12 +65,25 @@ export const getMyRoutePlan = asyncHandler(async (req, res) => {
   if (outErr) return badRequest(res, outErr.message);
   
   const unifiedOutlets: any[] = [];
-  const storeMap = new Map();
+  const storeMap = new Map<string, any>();
+  
   (outlets || []).forEach((o: any) => {
     const key = o.store_id || o.outlet_id;
+    const activity = { 
+        id: o.activity_id, 
+        name: o.activity_name || "Activity", 
+        status: o.status || "pending" 
+    };
+
     if (!storeMap.has(key)) {
-      storeMap.set(key, o);
-      unifiedOutlets.push(o);
+      const outletWithActivity = { ...o, id: key, activities: [activity] };
+      storeMap.set(key, outletWithActivity);
+      unifiedOutlets.push(outletWithActivity);
+    } else {
+      const existing = storeMap.get(key);
+      if (existing.activities) {
+          existing.activities.push(activity);
+      }
     }
   });
   return ok(res, [{
