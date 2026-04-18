@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
+import { isDemo, getMockClients } from '../utils/demoData';
 
 /**
  * GET /api/v1/clients
