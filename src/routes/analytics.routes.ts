@@ -6,7 +6,8 @@ import {
   getContactHeatmap, getWeeklyContacts,
   getLiveLocations, getAttendanceToday,
   getOutletCoverage, getCityPerformance,
-  getTffTrends, getDashboardInit, getMobileHome
+  getTffTrends, getDashboardInit, getMobileHome,
+  getMobileBroadcasts, getMobileLearning
 } from '../controllers/analytics.controller';
 
 const router = Router();
@@ -27,5 +28,10 @@ router.get('/live-locations',   checkAnalytics, getLiveLocations);
 router.get('/attendance-today', checkAnalytics, getAttendanceToday);
 router.get('/outlet-coverage',  checkAnalytics, getOutletCoverage);   // ?from=&to=
 router.get('/city-performance', checkAnalytics, getCityPerformance);  // ?from=&to=
+
+// Mobile Compatibility (iOS prefixes these with /analytics)
+router.get('/broadcasts',        getMobileBroadcasts);
+router.post('/broadcasts/:id/answer', getMobileBroadcasts); // Re-use or proxy
+router.get('/learning',          getMobileLearning);
 
 export default router;

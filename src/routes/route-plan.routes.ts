@@ -28,6 +28,7 @@ router.delete('/:id',            requireRole('admin', 'super_admin', 'main_admin
 
 // ── FE ─────────────────────────────────────────────────────
 router.get('/me',                getMyRoutePlan);
+router.get('/my-plan',           getMyRoutePlan); // Mobile compatibility
 router.patch('/outlets/:outletId', updateOutletVisit);
 
 export default router;
