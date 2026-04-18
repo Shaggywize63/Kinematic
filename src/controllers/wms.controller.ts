@@ -85,7 +85,7 @@ export const deleteWarehouse = asyncHandler(async (req: AuthRequest, res: Respon
 
 export const listMovements = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
-  if (isDemo(req.user)) return ok(res, []);
+  if (isDemo(req.user)) return ok(res, getMockMovements());
   const { warehouseId } = req.params;
   const limit  = Math.min(Number(req.query.limit)  || 50, 200);
   const offset = Number(req.query.offset) || 0;

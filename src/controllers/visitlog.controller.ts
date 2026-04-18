@@ -98,7 +98,7 @@ export const logVisit = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/visits/mine
 export const getMyVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, getMockVisitLogs(new Date().toISOString().split('T')[0]));
+  if (isDemo(user)) return ok(res, { data: getMockVisitLogs(new Date().toISOString().split('T')[0]) });
 
   const { date } = req.query as Record<string, string>;
 
@@ -119,7 +119,7 @@ export const getMyVisits = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/visits/received
 export const getReceivedVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, getMockVisitLogs(new Date().toISOString().split('T')[0]));
+  if (isDemo(user)) return ok(res, { data: getMockVisitLogs(new Date().toISOString().split('T')[0]) });
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
     .select(ALL_COLUMNS)
@@ -156,7 +156,7 @@ export const updateFEFeedback = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/visits/team
 export const getTeamVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, getMockVisitLogs(new Date().toISOString().split('T')[0]));
+  if (isDemo(user)) return ok(res, { data: getMockVisitLogs(new Date().toISOString().split('T')[0]) });
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
   let query = supabaseAdmin

@@ -188,7 +188,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, n
 /* ── GET /api/v1/analytics/tff-trends ─────────────────────── */
 export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, { days: getMockTrends(), total_tff: 1248, total_cc: 1560 });
+  if (isDemo(user)) return ok(res, getMockTrends());
 
   const from = (req.query.from as string) || isoDate(new Date(Date.now() - 7 * 86400000));
   const to   = (req.query.to   as string) || isoDate(new Date());
@@ -407,7 +407,7 @@ export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
 /* Now supports ?from=YYYY-MM-DD&to=YYYY-MM-DD for date range  */
 export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, { days: getMockTrends(), total_tff: 1248, total_cc: 1560 });
+  if (isDemo(user)) return ok(res, getMockTrends());
 
   let from = req.query.from as string;
   let to   = req.query.to   as string;
@@ -1050,7 +1050,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
 /* Zone+city-wise KPIs for date range */
 export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, { cities: getMockCityPerformance() });
+  if (isDemo(user)) return ok(res, getMockCityPerformance());
   const from = (req.query.from as string) || isoDate(toIST(new Date()));
   const to   = (req.query.to   as string) || isoDate(toIST(new Date()));
 
