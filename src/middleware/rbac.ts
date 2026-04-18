@@ -1,6 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../types';
 import { forbidden, unauthorized } from '../utils/response';
+import { isDemo } from '../utils/demoData';
 
 /**
  * Middleware to check for module-level access.
@@ -9,6 +10,7 @@ import { forbidden, unauthorized } from '../utils/response';
 export function requireModule(moduleName: string) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) return unauthorized(res);
+    if (isDemo(req.user)) return next();
 
     const { role, permissions } = req.user;
 
@@ -33,6 +35,7 @@ export function requireModule(moduleName: string) {
  */
 export function enforceCityScope(req: AuthRequest, res: Response, next: NextFunction) {
   if (!req.user) return unauthorized(res);
+  if (isDemo(req.user)) return next();
 
   const { role, assigned_cities } = req.user;
 
