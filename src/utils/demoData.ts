@@ -142,12 +142,6 @@ export const getMockAttendanceToday = (today: string) => ({
   ]
 });
 
-export const getMockVisitLogs = (today: string) => [
-  { id: 'v1', visitor_name: 'Manish Kumar', visitor_role: 'Operations Manager', executive: { name: 'Arjun Sharma' }, rating: 'Excellent', remarks: 'Good shelf discipline. Product display is perfect.', visited_at: `${today}T11:20:00Z`, visit_response: 'Thanks, working on the inventory update now.', visit_response_at: `${today}T12:05:00Z`, stores: { name: 'Reliance Fresh - Koramangala' } },
-  { id: 'v2', visitor_name: 'Anita Desai', visitor_role: 'Supervisor', executive: { name: 'Priya Patel' }, rating: 'Good', remarks: 'Store compliance met. Need focus on SKU expansion.', visited_at: `${today}T10:45:00Z`, visit_response: null, stores: { name: 'Big Bazaar - Indiranagar' } },
-  { id: 'v3', visitor_name: 'Manish Kumar', visitor_role: 'Operations Manager', executive: { name: 'Rahul Verma' }, rating: 'Average', remarks: 'Uniform missing. Grooming standards need improvement.', visited_at: `${today}T09:30:00Z`, visit_response: 'Noted. Will ensure from tomorrow.', visit_response_at: `${today}T09:45:00Z`, stores: { name: 'Star Market - HSR' } }
-];
-
 export const getMockSubmissions = (today: string) => ({
   total: 10,
   data: [
@@ -332,12 +326,6 @@ export const getMockZones = () => [
   { id: 'z3', name: 'Cannaught Place', city: 'Delhi', is_active: true, created_at: new Date().toISOString() },
   { id: 'z4', name: 'Banjara Hills', city: 'Hyderabad', is_active: true, created_at: new Date().toISOString() },
   { id: 'z5', name: 'Viman Nagar', city: 'Pune', is_active: true, created_at: new Date().toISOString() }
-];
-
-export const getMockClients = () => [
-  { id: 'cl1', name: 'Hindustan Unilever', is_active: true, modules: ['analytics', 'attendance', 'inventory', 'broadcast', 'reports'] },
-  { id: 'cl2', name: 'ITC Limited', is_active: true, modules: ['analytics', 'attendance', 'inventory'] },
-  { id: 'cl3', name: 'Nestle India', is_active: true, modules: ['analytics', 'attendance'] }
 ];
 
 export const getMockStores = () => [

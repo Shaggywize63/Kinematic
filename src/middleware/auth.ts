@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest, UserRole } from '../types';
-import { DEMO_ORG_ID } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
 import { logger } from '../lib/logger';
 
