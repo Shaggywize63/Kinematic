@@ -345,6 +345,22 @@ export const getMockStores = () => [
   { id: 'st2', name: 'Big Bazaar - Indiranagar', city_id: 'c1', zone_id: 'z1', address: '456 Side Rd', is_active: true, cities: { name: 'Bangalore' }, zones: { name: 'Indiranagar Main Rd' } }
 ];
 
+export const getMockClients = () => [
+  { id: 'c1', name: 'Horizonn Retail', contact_person: 'Rahul Jain', email: 'rahul@horizonn.com', is_active: true, modules: ['analytics', 'live_tracking', 'broadcast', 'attendance', 'work_activities', 'visit_logs', 'inventory', 'skus', 'assets', 'grievances', 'form_builder', 'cities'] },
+  { id: 'c2', name: 'Metro Distribution', contact_person: 'Amit Shah', email: 'amit@metro.in', is_active: true, modules: ['analytics', 'inventory', 'skus', 'assets', 'cities', 'zones'] },
+  { id: 'c3', name: 'Apex FMCG', contact_person: 'Priya Das', email: 'priya@apex.com', is_active: true, modules: ['analytics', 'attendance', 'work_activities', 'visit_logs', 'form_builder'] },
+  { id: 'c4', name: 'Global Logistics', contact_person: 'Sunil Rao', email: 'sunil@global.log', is_active: true, modules: ['analytics', 'live_tracking', 'inventory', 'assets'] },
+  { id: 'c5', name: 'Urban Fresh', contact_person: 'Sneha Kapur', email: 'sneha@urban.fresh', is_active: false, modules: ['analytics', 'attendance', 'work_activities'] },
+];
+
+export const getMockVisitLogs = (today: string) => [
+  { id: 'v1', user_id: 'fe1', outlet_name: 'Reliance Fresh - Koramangala', check_in_at: `${today}T10:00:00Z`, check_out_at: `${today}T10:45:00Z`, duration_min: 45, status: 'completed', users: { name: 'Arjun Sharma' } },
+  { id: 'v2', user_id: 'fe1', outlet_name: 'Big Bazaar - Indiranagar', check_in_at: `${today}T11:20:00Z`, check_out_at: `${today}T12:05:00Z`, duration_min: 45, status: 'completed', users: { name: 'Arjun Sharma' } },
+  { id: 'v3', user_id: 'fe2', outlet_name: 'Star Market - HSR', check_in_at: `${today}T09:45:00Z`, check_out_at: `${today}T10:30:00Z`, duration_min: 45, status: 'completed', users: { name: 'Priya Patel' } },
+  { id: 'v4', user_id: 'fe3', outlet_name: 'Spencer\'s - MG Road', check_in_at: `${today}T10:15:00Z`, check_out_at: `${today}T11:00:00Z`, duration_min: 45, status: 'completed', users: { name: 'Rahul Verma' } },
+  { id: 'v5', user_id: 'fe4', outlet_name: 'Village Hypermarket', check_in_at: `${today}T13:40:00Z`, check_out_at: `${today}T14:30:00Z`, duration_min: 50, status: 'completed', users: { name: 'Sneha Rao' } },
+];
+
 export const getMockActivities = () => [
   { id: 'a1', name: 'Store Visit', type: 'visit', is_active: true },
   { id: 'a2', name: 'Product Audit', type: 'form', is_active: true },

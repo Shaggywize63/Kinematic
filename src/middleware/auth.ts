@@ -99,6 +99,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
 export function requireRole(...roles: UserRole[]) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (isDemo(req.user)) return next();
     const userRole = req.user.role?.toLowerCase();
     const allowedRoles = roles.map(r => r.toLowerCase());
     
