@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { supabase, supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, unauthorized, serverError } from '../utils/response';
+import { ok, created, badRequest, unauthorized, serverError, isDemo } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID } from '../utils/demoData';
