@@ -9,7 +9,7 @@ const userId = (req: Request) => (req as any).user.id as string;
 
 export const getRoutePlans = asyncHandler(async (req, res) => {
   const user = (req as any).user;
-  if (isDemo(user)) return ok(res, { data: getMockRoutePlans(todayDate()) });
+  if (isDemo(user)) return ok(res, getMockRoutePlans(todayDate()));
   const { client_id, date } = req.query;
   
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
