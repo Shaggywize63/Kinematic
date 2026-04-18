@@ -25,6 +25,27 @@ export const login = asyncHandler<Request>(async (req, res) => {
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
   let { email, password, fcm_token, device_id } = body.data;
+  
+  // --- DEMO LOGIN BYPASS ---
+  if (email.trim() === 'demo@kinematic.com' && password === 'kinematic-demo-2024') {
+    logger.info('Restoring Demo Admin access via bypass');
+    return ok(res, {
+      access_token: 'demo-token-jwt-placeholder',
+      refresh_token: 'demo-refresh-token-placeholder',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user: {
+        id: 'demo-user-id',
+        org_id: DEMO_ORG_ID,
+        client_id: null,
+        name: 'Demo Admin',
+        email: 'demo@kinematic.com',
+        role: 'admin',
+        is_active: true,
+        permissions: ['dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory', 'form_builder']
+      },
+    });
+  }
+
 
   // If login identifier is a mobile number or an @kinematic.app email, resolve to real email
   const isMobile = /^\d{10,15}$/.test(email.trim());
