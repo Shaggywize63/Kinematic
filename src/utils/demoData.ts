@@ -192,9 +192,9 @@ export const getMockSubmissions = (today: string) => {
       check_out_gps: '12.9717,77.5947',
       address: 'Electronic City, Bangalore, KA, 560100',
       form_responses: [
-        { builder_questions: { label: 'Primary Display' }, qtype: 'camera', value_text: sub.photo_url },
-        { builder_questions: { label: 'Shelf Condition' }, qtype: 'text', value_text: 'Excellent' },
-        { builder_questions: { label: 'Out of Stock SKUs' }, qtype: 'number', value_number: 2 }
+        { builder_questions: { label: 'Primary Display', qtype: 'camera' }, value_text: sub.photo_url },
+        { builder_questions: { label: 'Shelf Condition', qtype: 'text' }, value_text: 'Excellent' },
+        { builder_questions: { label: 'Out of Stock SKUs', qtype: 'number' }, value_number: 2 }
       ]
     }))
   };
