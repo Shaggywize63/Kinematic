@@ -52,11 +52,33 @@ export const getMockTrends = () => {
 };
 
 export const getMockFeed = () => [
-  { id: '1', time: new Date().toISOString(), description: 'Arjun Sharma submitted TFF ✓', meta: { activity: 'Product Launch', outlet: 'Reliance Fresh' } },
-  { id: '2', time: new Date(Date.now() - 3600000).toISOString(), description: 'Priya Patel checked in', meta: { activity: 'Attendance', outlet: 'Big Bazaar' } },
-  { id: '3', time: new Date(Date.now() - 7200000).toISOString(), description: 'Rahul Verma submitted Form', meta: { activity: 'Price Audit', outlet: 'Star Market' } },
-  { id: '4', time: new Date(Date.now() - 10800000).toISOString(), description: 'Sneha Rao submitted TFF ✓', meta: { activity: 'Store Branding', outlet: 'Metro Cash' } },
-  { id: '5', time: new Date(Date.now() - 14400000).toISOString(), description: 'Amit Singh checked out', meta: { activity: 'Attendance', outlet: 'Spencer\'s' } }
+  { 
+    id: '1', 
+    outlet_name: 'Reliance Fresh - Koramangala',
+    submitted_at: new Date().toISOString(),
+    is_converted: true,
+    user: { name: 'Arjun Sharma', zones: { city: 'Bangalore', name: 'North' } },
+    description: 'Arjun Sharma submitted TFF ✓',
+    form_name: 'Product Audit'
+  },
+  { 
+    id: '2', 
+    outlet_name: 'Big Bazaar - Indiranagar',
+    submitted_at: new Date(Date.now() - 3600000).toISOString(),
+    is_converted: false,
+    user: { name: 'Priya Patel', zones: { city: 'Bangalore', name: 'East' } },
+    description: 'Priya Patel checked in',
+    form_name: 'Attendance'
+  },
+  { 
+    id: '3', 
+    outlet_name: 'Star Market - HSR',
+    submitted_at: new Date(Date.now() - 7200000).toISOString(),
+    is_converted: true,
+    user: { name: 'Rahul Verma', zones: { city: 'Bangalore', name: 'South' } },
+    description: 'Rahul Verma submitted Form',
+    form_name: 'Merchandising'
+  }
 ];
 
 export const getMockHeatmap = () => {
@@ -188,9 +210,9 @@ export const getMockZones = () => [
 ];
 
 export const getMockClients = () => [
-  { id: 'cl1', name: 'Hindustan Unilever', is_active: true },
-  { id: 'cl2', name: 'ITC Limited', is_active: true },
-  { id: 'cl3', name: 'Nestle India', is_active: true }
+  { id: 'cl1', name: 'Hindustan Unilever', is_active: true, modules: ['analytics', 'attendance', 'inventory', 'broadcast', 'reports'] },
+  { id: 'cl2', name: 'ITC Limited', is_active: true, modules: ['analytics', 'attendance', 'inventory'] },
+  { id: 'cl3', name: 'Nestle India', is_active: true, modules: ['analytics', 'attendance'] }
 ];
 
 export const getMockStores = () => [
@@ -250,16 +272,21 @@ export const getMockRoutePlans = (today: string) => [
     id: 'rp1',
     user_id: 'demo-user-id',
     fe_name: 'Demo Admin',
+    fe_employee_id: 'DEMO-001',
     plan_date: today,
-    status: 'pending',
+    status: 'partial',
     total_outlets: 5,
     visited_outlets: 2,
+    missed_outlets: 0,
+    completion_pct: 40,
+    zone_name: 'Bangalore Central',
+    city_name: 'Bangalore',
     outlets: [
-      { id: 'o1', name: 'Reliance Fresh - Koramangala', visit_order: 1, status: 'visited', address: '123 Koramangala', activities: [{ id: 'a1', name: 'Store Visit', status: 'visited' }] },
-      { id: 'o2', name: 'Big Bazaar - Indiranagar', visit_order: 2, status: 'visited', address: '456 Indiranagar', activities: [{ id: 'a1', name: 'Store Visit', status: 'visited' }] },
-      { id: 'o3', name: 'Star Market - HSR', visit_order: 3, status: 'pending', address: '789 HSR Layout', activities: [{ id: 'a1', name: 'Store Visit', status: 'pending' }] },
-      { id: 'o4', name: 'Metro Cash & Carry', visit_order: 4, status: 'pending', address: '101 Whitefield', activities: [{ id: 'a1', name: 'Store Visit', status: 'pending' }] },
-      { id: 'o5', name: 'Spencer\'s - MG Road', visit_order: 5, status: 'pending', address: '202 MG Road', activities: [{ id: 'a1', name: 'Store Visit', status: 'pending' }] }
+      { id: 'o1', store_id: 'st1', store_name: 'Reliance Fresh - Koramangala', visit_order: 1, status: 'completed', store_address: '123 Koramangala', target_type: 'general', visited_at: `${today}T10:00:00Z`, checkin_at: `${today}T10:00:00Z`, checkout_at: `${today}T10:30:00Z` },
+      { id: 'o2', store_id: 'st2', store_name: 'Big Bazaar - Indiranagar', visit_order: 2, status: 'completed', store_address: '456 Indiranagar', target_type: 'merchandising', visited_at: `${today}T11:15:00Z`, checkin_at: `${today}T11:15:00Z`, checkout_at: `${today}T11:50:00Z` },
+      { id: 'o3', store_id: 'st3', store_name: 'Star Market - HSR', visit_order: 3, status: 'pending', store_address: '789 HSR Layout', target_type: 'general' },
+      { id: 'o4', store_id: 'st4', store_name: 'Metro Cash & Carry', visit_order: 4, status: 'pending', store_address: '101 Whitefield', target_type: 'stock_check' },
+      { id: 'o5', store_id: 'st5', store_name: 'Spencer\'s - MG Road', visit_order: 5, status: 'pending', store_address: '202 MG Road', target_type: 'general' }
     ]
   }
 ];
@@ -328,6 +355,12 @@ export const getMockWMSInventory = () => [
 export const getMockWarehouses = () => [
   { id: 'w1', name: 'Bangalore-Central', city: 'Bangalore', type: 'Distribution Center', capacity: '90%' },
   { id: 'w2', name: 'Mumbai-Hub', city: 'Mumbai', type: 'Regional Warehouse', capacity: '75%' }
+];
+
+export const getMockMovements = () => [
+  { id: 'm1', movement_type: 'inbound', quantity: 156, moved_at: new Date(Date.now() - 3600000).toISOString(), sku: { sku_code: 'SKU-001', name: 'Product A', unit: 'pcs' }, performer: { name: 'Demo Admin' } },
+  { id: 'm2', movement_type: 'outbound', quantity: 45, moved_at: new Date(Date.now() - 7200000).toISOString(), sku: { sku_code: 'SKU-002', name: 'Product B', unit: 'pcs' }, performer: { name: 'Demo Admin' } },
+  { id: 'm3', movement_type: 'inbound', quantity: 200, moved_at: new Date(Date.now() - 10800000).toISOString(), sku: { sku_code: 'SKU-003', name: 'Product C', unit: 'pcs' }, performer: { name: 'Demo Admin' } },
 ];
 
 export const getMockStockAllocations = () => [
