@@ -24,6 +24,12 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
   const list = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
+    if (isDemo(user)) {
+      if (tableName === 'cities') return ok(res, getMockCities());
+      if (tableName === 'stores') return ok(res, getMockStores());
+      if (tableName === 'activities') return ok(res, getMockActivities());
+      return ok(res, []);
+    }
 
     let q = supabaseAdmin
       .from(tableName)
@@ -44,6 +50,12 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const getOne = asyncHandler<AuthRequest>(async (req, res) => {
     const { id } = req.params;
     const user = req.user!;
+    if (isDemo(user)) {
+       // Return something generic or from mock list
+       const mock = (tableName === 'cities' ? getMockCities() : (tableName === 'stores' ? getMockStores() : (tableName === 'activities' ? getMockActivities() : []))) as any[];
+       const record = mock.find(m => m.id === id) || mock[0];
+       return ok(res, record);
+    }
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     let q = supabaseAdmin
       .from(tableName).select('*').eq('id', id).eq('org_id', user.org_id);
@@ -57,6 +69,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
   const create = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
+    if (isDemo(user)) return created(res, { id: 'demo-new-id', ...req.body }, 'Created (Demo)');
     const body = req.body;
     for (const f of requiredFields) {
       if (!body[f]) { badRequest(res, `${f} is required`); return; }
@@ -74,6 +87,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const update = asyncHandler<AuthRequest>(async (req, res) => {
     const { id } = req.params;
     const user = req.user!;
+    if (isDemo(user)) return ok(res, { id, ...req.body }, 'Updated (Demo)');
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     const { org_id, client_id: _, ...rest } = req.body; // strip sensitive IDs
     let q = supabaseAdmin
@@ -91,6 +105,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
   const remove = asyncHandler<AuthRequest>(async (req, res) => {
     const { id } = req.params;
     const user = req.user!;
+    if (isDemo(user)) return ok(res, { deleted: true }, 'Deleted (Demo)');
     
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     let q = supabaseAdmin

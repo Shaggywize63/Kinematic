@@ -528,6 +528,7 @@ export const resetUserPassword = asyncHandler<AuthRequest>(async (req, res) => {
 // ZONES
 export const getZones = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockZones());
   
   let query = supabaseAdmin.from('zones')
     .select('*').eq('is_active', true);

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, isUUID } from '../utils';
-import { DEMO_ORG_ID, getMockVisitLogs } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo, getMockVisitLogs } from '../utils/demoData';
 
 const visitSchema = z.object({
   visitor_role: z.string().optional(),
@@ -62,7 +62,7 @@ const ALL_COLUMNS = 'id, visitor_id, executive_id, zone_id, client_id, visit_out
 // POST /api/v1/visits
 export const logVisit = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const body = visitSchema.safeParse(req.body);
+  if (isDemo(user)) return created(res, { id: 'demo-visit-id', ...req.body }, 'Visit logged (Demo)');
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
   // Use the new column name in Insert
@@ -96,7 +96,7 @@ export const logVisit = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/visits/mine
 export const getMyVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const date = req.query.date as string | undefined;
+  if (isDemo(user)) return ok(res, getMockVisitLogs(new Date().toISOString().split('T')[0]));
 
   let query = supabaseAdmin
     .from('visit_logs')
@@ -115,6 +115,7 @@ export const getMyVisits = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/visits/received
 export const getReceivedVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockVisitLogs(new Date().toISOString().split('T')[0]));
   const { data, error } = await supabaseAdmin
     .from('visit_logs')
     .select(ALL_COLUMNS)
@@ -128,7 +129,7 @@ export const getReceivedVisits = asyncHandler<AuthRequest>(async (req, res) => {
 // PATCH /api/v1/visits/:id/feedback
 export const updateFEFeedback = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { id } = req.params;
+  if (isDemo(user)) return ok(res, { success: true }, 'Feedback updated (Demo)');
   const body = feedbackSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
@@ -150,6 +151,7 @@ export const updateFEFeedback = asyncHandler<AuthRequest>(async (req, res) => {
 // GET /api/v1/visits/team
 export const getTeamVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockVisitLogs(new Date().toISOString().split('T')[0]));
   const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
 
   let query = supabaseAdmin

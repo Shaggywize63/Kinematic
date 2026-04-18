@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
-import { DEMO_ORG_ID, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations } from '../utils/demoData';
 
 /* ─────────────────────────────────────────────────────────────
    HELPERS
@@ -29,7 +29,7 @@ const enrichWithHours = (r: any) => {
 };
 export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
   const user = req.user!;
-  // DEMO MODE REMOVED: Always show real data to ensure testing progress is visible.
+  if (isDemo(user)) return ok(res, getMockSummary(isoDate(toIST(new Date()))));
 
   const from = (req.query.from as string) || (req.query.date as string) || isoDate(toIST(new Date()));
   const to   = (req.query.to   as string) || (req.query.date as string) || isoDate(toIST(new Date()));
@@ -187,6 +187,7 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, n
 /* ── GET /api/v1/analytics/tff-trends ─────────────────────── */
 export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockTrends());
 
   const from = (req.query.from as string) || isoDate(new Date(Date.now() - 7 * 86400000));
   const to   = (req.query.to   as string) || isoDate(new Date());
@@ -237,6 +238,7 @@ export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/activity-feed ─────────────────── */
 export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockFeed());
 
   const limit = Math.min(50, parseInt(req.query.limit as string || '20', 10));
 
@@ -279,6 +281,7 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/hourly ────────────────────────── */
 export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockHeatmap().rows); // hourly matches heatmap rows format mostly
   const date = (req.query.date as string) || isoDate(toIST(new Date()));
 
   const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
@@ -304,6 +307,7 @@ export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/contact-heatmap ───────────────── */
 export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockHeatmap());
   
   
   // Strictly last 7 days for heatmap as requested
@@ -469,8 +473,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 /* ── GET /api/v1/analytics/live-locations ────────────────── */
 export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = todayDate();
-  // DEMO MODE REMOVED: Always show real data to ensure testing progress is visible.
+  if (isDemo(user)) return ok(res, getMockLocations(todayDate()));
 
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
@@ -557,6 +560,7 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
 /* ── GET /api/v1/analytics/attendance-today ──────────────── */
 export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockAttendanceToday(isoDate(new Date())));
   const { city, city_id, zone_id, fe_id, user_id, date: passedDate } = req.query as Record<string, string>;
   const today = passedDate || isoDate(new Date());
 

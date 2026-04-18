@@ -4,7 +4,7 @@ import { supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess, todayDate, dbToday, isoDate, isUUID, parseAppDate, formatAppDate } from '../utils';
 import { isWithinGeofence } from '../lib/haversine';
-import { DEMO_ORG_ID, getMockAttendanceToday } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo, getMockAttendanceToday, getMockAttendanceHistory } from '../utils/demoData';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 import { logger } from '../lib/logger';
 
@@ -26,10 +26,7 @@ const checkoutSchema = z.object({
 // POST /api/v1/attendance/checkin
 export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = todayDate();
-  const { latitude, longitude, selfie_url, activity_id, zone_id, battery_percentage, date: passedDate } = req.body;
-  
-  logger.info(`[Attendance] Check-in: user=${user.id}, selfie=${selfie_url ? 'PRESENT' : 'MISSING'}`);
+  if (isDemo(user)) return created(res, { id: 'demo-att-id', status: 'checked_in', checkin_at: new Date().toISOString() }, 'Checked in successfully (Demo)');
   
   // Enforce DD--MM--YYYY parsing
   const attendanceDate = parseAppDate(passedDate || today);
@@ -126,12 +123,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
 // POST /api/v1/attendance/checkout
 export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { latitude, longitude, selfie_url, date: passedDate } = req.body;
-  
-  const today = todayDate();
-  const attendanceDate = parseAppDate(passedDate || today);
-
-  logger.info(`[Attendance] Check-out: user=${user.id}, explicitDate=${passedDate || 'NONE'}`);
+  if (isDemo(user)) return ok(res, { id: 'demo-att-id', status: 'checked_out', checkout_at: new Date().toISOString() }, 'Checked out successfully (Demo)');
 
   // 1. Try to find record for the specific date
   let { data: record, error: findError } = await supabaseAdmin
@@ -217,7 +209,7 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
 // POST /api/v1/attendance/break/start
 export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = dbToday();
+  if (isDemo(user)) return created(res, { status: 'on_break' }, 'Break started (Demo)');
 
   // Unified lookup: today or most recent open shift
   let { data: record } = await supabaseAdmin
@@ -256,7 +248,7 @@ export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
 // POST /api/v1/attendance/break/end
 export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const today = dbToday();
+  if (isDemo(user)) return ok(res, { status: 'checked_in' }, 'Break ended (Demo)');
 
   let { data: record } = await supabaseAdmin
     .from('attendance')
@@ -324,6 +316,7 @@ const enrichWithHours = (r: any) => {
 
 export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockAttendanceHistory(isoDate(new Date()))[0]);
   const todayStr = parseAppDate((req.query.date as string) || todayDate());
 
   let { data, error } = await supabaseAdmin
@@ -357,6 +350,7 @@ export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
+  if (isDemo(user)) return ok(res, buildPaginatedResult(getMockAttendanceHistory(isoDate(new Date())), 3, 1, 20));
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
   const { data, error, count } = await supabaseAdmin
     .from('attendance')
@@ -372,13 +366,7 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const { from, to, date, from_date, to_date, zone_id, user_id, fe_id, client_id } = req.query as Record<string, string>;
-  
-  // Universal standards: from and to are primary, fallback to date or today
-  const f = (from || from_date || date || dbToday()).trim();
-  const t = (to   || to_date   || date || f).trim();
-
-  logger.info(`[Attendance] getTeamToday: user=${user.id}, from=${f}, to=${t}, role=${user.role}`);
+  if (isDemo(user)) return ok(res, getMockAttendanceToday(isoDate(new Date())).executives);
 
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
