@@ -82,6 +82,7 @@ export const getMyGrievances = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getAllGrievances = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
+  if (isDemo(user)) return ok(res, getMockGrievances());
   const { status } = req.query
   const { page, limit, offset } = getPagination(
     parseInt(req.query.page as string) || 1,

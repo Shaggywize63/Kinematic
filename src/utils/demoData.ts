@@ -149,7 +149,7 @@ export const getMockVisitLogs = (today: string) => [
 ];
 
 export const getMockSubmissions = (today: string) => ({
-  total: 5,
+  total: 8,
   data: [
     { 
       id: 's1', user_id: 'fe1', submitted_at: `${today}T12:05:00Z`, is_converted: true, 
@@ -159,44 +159,78 @@ export const getMockSubmissions = (today: string) => ({
       check_in_gps: '12.9352,77.6245', check_out_gps: '12.9353,77.6246',
       users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, 
       builder_forms: { title: 'Product Audit' }, 
-      activities: { name: 'Store Visit' } 
+      activities: { name: 'Store Visit' },
+      photo_url: 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80'
     },
     { 
-      id: 's2', user_id: 'fe2', submitted_at: `${today}T11:50:00Z`, is_converted: false, 
+      id: 's2', user_id: 'fe1', submitted_at: `${today}T15:20:00Z`, is_converted: true, 
       outlet_name: 'Big Bazaar - Indiranagar', address: '456 Indiranagar, Bangalore',
       latitude: 12.9716, longitude: 77.5946,
-      check_in_at: `${today}T11:00:00Z`, check_out_at: `${today}T11:55:00Z`,
-      check_in_gps: '12.9716,77.5946', check_out_gps: '12.9717,77.5947',
-      users: { name: 'Priya Patel', employee_id: 'KIN-002' }, 
-      builder_forms: { title: 'Merchandising' }, 
-      activities: { name: 'Merchandising' } 
+      check_in_at: `${today}T14:50:00Z`, check_out_at: `${today}T15:30:00Z`,
+      users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, 
+      builder_forms: { title: 'Merchandising Audit' }, 
+      activities: { name: 'Merchandising' },
+      photo_url: 'https://images.unsplash.com/photo-1534723452862-4c874018d66d?auto=format&fit=crop&w=800&q=80'
     },
     { 
-      id: 's3', user_id: 'fe3', submitted_at: `${today}T11:30:00Z`, is_converted: true, 
+      id: 's3', user_id: 'fe2', submitted_at: `${today}T11:30:00Z`, is_converted: true, 
       outlet_name: 'Star Market - HSR', address: '789 HSR Layout, Bangalore',
       latitude: 12.9141, longitude: 77.6413,
       check_in_at: `${today}T11:10:00Z`, check_out_at: `${today}T11:40:00Z`,
-      users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, 
-      builder_forms: { title: 'Product Audit' }, 
-      activities: { name: 'Store Visit' } 
+      users: { name: 'Priya Patel', employee_id: 'KIN-002' }, 
+      builder_forms: { title: 'Availability Check' }, 
+      activities: { name: 'Stock Reporting' },
+      photo_url: 'https://images.unsplash.com/photo-1578916171728-46686eac8d58?auto=format&fit=crop&w=800&q=80'
     },
     { 
-      id: 's4', user_id: 'fe4', submitted_at: `${today}T11:15:00Z`, is_converted: true, 
+      id: 's4', user_id: 'fe2', submitted_at: `${today}T16:45:00Z`, is_converted: false, 
       outlet_name: 'Metro Cash & Carry', address: '101 Whitefield, Bangalore',
       latitude: 12.9698, longitude: 77.7500,
-      check_in_at: `${today}T10:45:00Z`, check_out_at: `${today}T11:20:00Z`,
-      users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, 
-      builder_forms: { title: 'Compliance Checklist' }, 
-      activities: { name: 'Compliance' } 
+      check_in_at: `${today}T16:15:00Z`, check_out_at: `${today}T16:50:00Z`,
+      users: { name: 'Priya Patel', employee_id: 'KIN-002' }, 
+      builder_forms: { title: 'Display Visibility' }, 
+      activities: { name: 'Compliance' },
+      photo_url: 'https://images.unsplash.com/photo-1604719312563-8912e922e9d5?auto=format&fit=crop&w=800&q=80'
     },
     { 
-      id: 's5', user_id: 'fe5', submitted_at: `${today}T10:55:00Z`, is_converted: false, 
-      outlet_name: 'Reliance Smart - Jayanagar', address: '202 Jayanagar, Bangalore',
-      latitude: 12.9250, longitude: 77.5897,
-      check_in_at: `${today}T10:20:00Z`, check_out_at: `${today}T11:00:00Z`,
+      id: 's5', user_id: 'fe3', submitted_at: `${today}T10:15:00Z`, is_converted: true, 
+      outlet_name: 'Spencer\'s - MG Road', address: '202 MG Road, Bangalore',
+      latitude: 12.9716, longitude: 77.6000,
+      check_in_at: `${today}T09:45:00Z`, check_out_at: `${today}T10:25:00Z`,
+      users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, 
+      builder_forms: { title: 'Inventory Count' }, 
+      activities: { name: 'Stock Reporting' },
+      photo_url: 'https://images.unsplash.com/photo-1583258292688-d0213dc5a3a8?auto=format&fit=crop&w=800&q=80'
+    },
+    { 
+      id: 's6', user_id: 'fe4', submitted_at: `${today}T13:40:00Z`, is_converted: true, 
+      outlet_name: 'Village Hypermarket', address: 'Whitefield Main Road',
+      latitude: 12.9698, longitude: 77.7500,
+      check_in_at: `${today}T13:10:00Z`, check_out_at: `${today}T13:45:00Z`,
+      users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, 
+      builder_forms: { title: 'Price Audit' }, 
+      activities: { name: 'Compliance' },
+      photo_url: 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80'
+    },
+    { 
+      id: 's7', user_id: 'fe5', submitted_at: `${today}T09:55:00Z`, is_converted: false, 
+      outlet_name: 'D-Mart - Bellandur', address: 'Sarjapur Road, Bangalore',
+      latitude: 12.9250, longitude: 77.6750,
+      check_in_at: `${today}T09:20:00Z`, check_out_at: `${today}T10:00:00Z`,
       users: { name: 'Amit Singh', employee_id: 'KIN-005' }, 
-      builder_forms: { title: 'Stock Reporting' }, 
-      activities: { name: 'Inventory' } 
+      builder_forms: { title: 'Store Health' }, 
+      activities: { name: 'Audits' },
+      photo_url: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=800&q=80'
+    },
+    { 
+      id: 's8', user_id: 'fe5', submitted_at: `${today}T14:10:00Z`, is_converted: true, 
+      outlet_name: 'More Megastore', address: 'Mahadevapura, Bangalore',
+      latitude: 12.9900, longitude: 77.6900,
+      check_in_at: `${today}T13:40:00Z`, check_out_at: `${today}T14:20:00Z`,
+      users: { name: 'Amit Singh', employee_id: 'KIN-005' }, 
+      builder_forms: { title: 'New Product Launch' }, 
+      activities: { name: 'Marketing' },
+      photo_url: 'https://images.unsplash.com/photo-1604719312563-8912e922e9d5?auto=format&fit=crop&w=800&q=80'
     }
   ]
 });
@@ -338,23 +372,23 @@ export const getMockFormTemplates = () => [
 export const getMockRoutePlans = (today: string) => [
   {
     id: 'rp1',
-    user_id: 'demo-user-id',
-    fe_name: 'Demo Admin',
-    fe_employee_id: 'DEMO-001',
+    user_id: 'fe1',
+    fe_name: 'Arjun Sharma',
+    fe_employee_id: 'KIN-001',
     plan_date: today,
     status: 'partial',
     total_outlets: 5,
     visited_outlets: 2,
     missed_outlets: 0,
     completion_pct: 40,
-    zone_name: 'Bangalore Central',
+    zone_name: 'Bangalore North',
     city_name: 'Bangalore',
     outlets: [
-      { id: 'o1', store_id: 'st1', store_name: 'Reliance Fresh - Koramangala', visit_order: 1, status: 'completed', store_address: '123 Koramangala', target_type: 'general', visited_at: `${today}T10:00:00Z`, checkin_at: `${today}T10:00:00Z`, checkout_at: `${today}T10:30:00Z` },
-      { id: 'o2', store_id: 'st2', store_name: 'Big Bazaar - Indiranagar', visit_order: 2, status: 'completed', store_address: '456 Indiranagar', target_type: 'merchandising', visited_at: `${today}T11:15:00Z`, checkin_at: `${today}T11:15:00Z`, checkout_at: `${today}T11:50:00Z` },
-      { id: 'o3', store_id: 'st3', store_name: 'Star Market - HSR', visit_order: 3, status: 'pending', store_address: '789 HSR Layout', target_type: 'general' },
-      { id: 'o4', store_id: 'st4', store_name: 'Metro Cash & Carry', visit_order: 4, status: 'pending', store_address: '101 Whitefield', target_type: 'stock_check' },
-      { id: 'o5', store_id: 'st5', store_name: 'Spencer\'s - MG Road', visit_order: 5, status: 'pending', store_address: '202 MG Road', target_type: 'general' }
+      { id: 'o1', store_id: 'st1', store_name: 'Reliance Fresh - Koramangala', visit_order: 1, status: 'completed', store_address: '123 Koramangala', target_type: 'general', visited_at: `${today}T10:00:00Z`, checkin_at: `${today}T10:00:00Z`, checkout_at: `${today}T10:30:00Z`, planned_duration_min: 30, actual_duration_min: 30, activities: [{ name: 'FMCG Sales', status: 'completed' }] },
+      { id: 'o2', store_id: 'st2', store_name: 'Big Bazaar - Indiranagar', visit_order: 2, status: 'completed', store_address: '456 Indiranagar', target_type: 'merchandising', visited_at: `${today}T11:15:00Z`, checkin_at: `${today}T11:15:00Z`, checkout_at: `${today}T11:50:00Z`, planned_duration_min: 30, actual_duration_min: 35, activities: [{ name: 'Merchandising', status: 'completed' }] },
+      { id: 'o3', store_id: 'st3', store_name: 'Star Market - HSR', visit_order: 3, status: 'pending', store_address: '789 HSR Layout', target_type: 'general', planned_duration_min: 20, activities: [{ name: 'Stock Check', status: 'pending' }] },
+      { id: 'o4', store_id: 'st4', store_name: 'Metro Cash & Carry', visit_order: 4, status: 'pending', store_address: '101 Whitefield', target_type: 'stock_check', planned_duration_min: 45, activities: [{ name: 'Audit', status: 'pending' }] },
+      { id: 'o5', store_id: 'st5', store_name: 'Spencer\'s - MG Road', visit_order: 5, status: 'pending', store_address: '202 MG Road', target_type: 'general', planned_duration_min: 30, activities: [{ name: 'FMCG Sales', status: 'pending' }] }
     ]
   }
 ];

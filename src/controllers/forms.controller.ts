@@ -180,6 +180,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) {
     const mock = getMockSubmissions(new Date().toISOString().split('T')[0]);
+    // Always return mock data in demo mode, ignoring filters
     return sendSuccess(res, buildPaginatedResult(mock.data, mock.total, 1, 20));
   }
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
