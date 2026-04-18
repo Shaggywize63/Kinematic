@@ -128,9 +128,9 @@ export const getMockAttendanceToday = (today: string) => ({
 });
 
 export const getMockVisitLogs = (today: string) => [
-  { id: 'v1', visitor_name: 'Manish Kumar', visitor_role: 'Operations Manager', executive: { name: 'Arjun Sharma' }, rating: 'Excellent', remarks: 'Good shelf discipline. Product display is perfect.', visited_at: `${today}T11:20:00Z`, visit_response: 'Thanks, working on the inventory update now.' },
-  { id: 'v2', visitor_name: 'Anita Desai', visitor_role: 'Supervisor', executive: { name: 'Priya Patel' }, rating: 'Good', remarks: 'Store compliance met. Need focus on SKU expansion.', visited_at: `${today}T10:45:00Z`, visit_response: null },
-  { id: 'v3', visitor_name: 'Manish Kumar', visitor_role: 'Operations Manager', executive: { name: 'Rahul Verma' }, rating: 'Average', remarks: 'Uniform missing. Grooming standards need improvement.', visited_at: `${today}T09:30:00Z`, visit_response: 'Noted. Will ensure from tomorrow.' }
+  { id: 'v1', visitor_name: 'Manish Kumar', visitor_role: 'Operations Manager', executive: { name: 'Arjun Sharma' }, rating: 'Excellent', remarks: 'Good shelf discipline. Product display is perfect.', visited_at: `${today}T11:20:00Z`, visit_response: 'Thanks, working on the inventory update now.', visit_response_at: `${today}T12:05:00Z`, stores: { name: 'Reliance Fresh - Koramangala' } },
+  { id: 'v2', visitor_name: 'Anita Desai', visitor_role: 'Supervisor', executive: { name: 'Priya Patel' }, rating: 'Good', remarks: 'Store compliance met. Need focus on SKU expansion.', visited_at: `${today}T10:45:00Z`, visit_response: null, stores: { name: 'Big Bazaar - Indiranagar' } },
+  { id: 'v3', visitor_name: 'Manish Kumar', visitor_role: 'Operations Manager', executive: { name: 'Rahul Verma' }, rating: 'Average', remarks: 'Uniform missing. Grooming standards need improvement.', visited_at: `${today}T09:30:00Z`, visit_response: 'Noted. Will ensure from tomorrow.', visit_response_at: `${today}T09:45:00Z`, stores: { name: 'Star Market - HSR' } }
 ];
 
 export const getMockSubmissions = (today: string) => ({
@@ -175,18 +175,22 @@ export const getMockBroadcasts = () => [
     id: 'b1', 
     question: 'How do you like the new Kinematic 2.0 interface?', 
     options: [{ label: 'Love it!', value: 'love' }, { label: 'It is OK', value: 'ok' }, { label: 'Needs work', value: 'work' }],
+    correct_option: 0,
     status: 'active',
     is_urgent: true,
+    target_roles: ['executive', 'supervisor'],
+    target_zone_ids: [],
+    target_cities: ['Bangalore', 'Mumbai'],
     response_count: 156,
-    created_at: new Date().toISOString(),
+    created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
     tally: [
-      { label: 'Love it!', count: 120 },
-      { label: 'It is OK', count: 30 },
-      { label: 'Needs work', count: 6 }
+      { label: 'Love it!', count: 120, index: 0 },
+      { label: 'It is OK', count: 30, index: 1 },
+      { label: 'Needs work', count: 6, index: 2 }
     ],
     responses: [
-      { user_name: 'Arjun Sharma', employee_id: 'KIN-001', selected_label: 'Love it!', is_correct: null, answered_at: new Date().toISOString() },
-      { user_name: 'Priya Patel', employee_id: 'KIN-002', selected_label: 'Love it!', is_correct: null, answered_at: new Date().toISOString() }
+      { user_name: 'Arjun Sharma', employee_id: 'KIN-001', selected_label: 'Love it!', is_correct: true, answered_at: new Date(Date.now() - 86400000).toISOString() },
+      { user_name: 'Priya Patel', employee_id: 'KIN-002', selected_label: 'Love it!', is_correct: true, answered_at: new Date(Date.now() - 86400000).toISOString() }
     ]
   }
 ];
