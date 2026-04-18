@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID } from '../utils';
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
-import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlerts } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlerts, getMockUsers } from '../utils/demoData';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -178,6 +178,23 @@ export const markRead = asyncHandler<AuthRequest>(async (req, res) => {
 // USERS
 export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
   const user = req.user!
+  if (isDemo(user)) {
+    const mock = getMockUsers();
+    const { page, limit, offset } = getPagination(
+      parseInt(req.query.page as string) || 1,
+      parseInt(req.query.limit as string) || 100
+    );
+    const search = (req.query.search as string || '').toLowerCase();
+    let filtered = mock;
+    if (search) {
+      filtered = mock.filter(u => 
+        u.name.toLowerCase().includes(search) || 
+        u.employee_id.toLowerCase().includes(search)
+      );
+    }
+    const data = filtered.slice(offset, offset + limit);
+    return sendSuccess(res, data, 'Success', 200);
+  }
   
   const { role: filterRole, zone_id, is_active, client_id } = req.query;
   const { page, limit, offset } = getPagination(
