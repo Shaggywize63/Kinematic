@@ -179,9 +179,10 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) {
-    const mock = getMockSubmissions(new Date().toISOString().split('T')[0]);
-    // Always return mock data in demo mode, ignoring filters
-    return sendSuccess(res, buildPaginatedResult(mock.data, mock.total, 1, 20));
+    const today = new Date().toISOString().split('T')[0];
+    const mock = getMockSubmissions(today);
+    // Return all mock data in demo mode, ignoring date/user filters
+    return sendSuccess(res, buildPaginatedResult(mock.data, mock.data.length, 1, 50));
   }
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
   const { client_id, date_from, date_to, search, user_id, template_id, activity_id, city_id, zone_id, include_responses } = req.query as any;
