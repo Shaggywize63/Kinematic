@@ -119,11 +119,26 @@ export const getMockAttendanceToday = (today: string) => ({
   date: today,
   summary: { total: 145, present: 132, on_break: 5, checked_out: 4, absent: 4, regularised: 0 },
   executives: [
-    { id: 'fe1', name: 'Arjun Sharma', display_status: 'present', checkin_at: `${today}T09:15:00Z`, total_hours: 4.5 },
-    { id: 'fe2', name: 'Priya Patel', display_status: 'present', checkin_at: `${today}T09:30:00Z`, total_hours: 4.2 },
-    { id: 'fe3', name: 'Rahul Verma', display_status: 'on_break', checkin_at: `${today}T09:00:00Z`, total_hours: 4.8 },
-    { id: 'fe4', name: 'Sneha Rao', display_status: 'present', checkin_at: `${today}T10:00:00Z`, total_hours: 3.7 },
-    { id: 'fe5', name: 'Amit Singh', display_status: 'checked_out', checkin_at: `${today}T08:45:00Z`, checkout_at: `${today}T13:00:00Z`, total_hours: 4.25 }
+    { 
+      id: 'att-1', user_id: 'fe1', status: 'checked_in', date: today, checkin_at: `${today}T09:15:00Z`, total_hours: 4.5,
+      users: { name: 'Arjun Sharma', employee_id: 'KIN-001', role: 'executive', zones: { name: 'Bangalore North' } }
+    },
+    { 
+      id: 'att-2', user_id: 'fe2', status: 'checked_out', date: today, checkin_at: `${today}T09:30:00Z`, checkout_at: `${today}T18:30:00Z`, total_hours: 9.0,
+      users: { name: 'Priya Patel', employee_id: 'KIN-002', role: 'executive', zones: { name: 'Mumbai West' } }
+    },
+    { 
+      id: 'att-3', user_id: 'fe3', status: 'checked_in', date: today, checkin_at: `${today}T09:00:00Z`, total_hours: 4.8,
+      users: { name: 'Rahul Verma', employee_id: 'KIN-003', role: 'executive', zones: { name: 'Delhi Central' } }
+    },
+    { 
+      id: 'att-4', user_id: 'fe4', status: 'checked_in', date: today, checkin_at: `${today}T10:00:00Z`, total_hours: 3.7,
+      users: { name: 'Sneha Rao', employee_id: 'KIN-004', role: 'supervisor', zones: { name: 'Hyderabad South' } }
+    },
+    { 
+      id: 'att-5', user_id: 'fe5', status: 'checked_out', date: today, checkin_at: `${today}T08:45:00Z`, checkout_at: `${today}T17:45:00Z`, total_hours: 9.0,
+      users: { name: 'Amit Singh', employee_id: 'KIN-005', role: 'executive', zones: { name: 'Pune East' } }
+    }
   ]
 });
 
@@ -134,13 +149,55 @@ export const getMockVisitLogs = (today: string) => [
 ];
 
 export const getMockSubmissions = (today: string) => ({
-  total: 1560,
+  total: 5,
   data: [
-    { id: 's1', submitted_at: `${today}T12:05:00Z`, is_converted: true, outlet_name: 'Reliance Fresh - Koramangala', users: { name: 'Arjun Sharma' }, form_templates: { name: 'Product Audit' }, activities: { name: 'Store Visit' } },
-    { id: 's2', submitted_at: `${today}T11:50:00Z`, is_converted: false, outlet_name: 'Big Bazaar - Indiranagar', users: { name: 'Priya Patel' }, form_templates: { name: 'Merchandising' }, activities: { name: 'Merchandising' } },
-    { id: 's3', submitted_at: `${today}T11:30:00Z`, is_converted: true, outlet_name: 'Star Market - HSR', users: { name: 'Rahul Verma' }, form_templates: { name: 'Product Audit' }, activities: { name: 'Store Visit' } },
-    { id: 's4', submitted_at: `${today}T11:15:00Z`, is_converted: true, outlet_name: 'Metro Cash & Carry', users: { name: 'Sneha Rao' }, form_templates: { name: 'Compliance Checklist' }, activities: { name: 'Compliance' } },
-    { id: 's5', submitted_at: `${today}T10:55:00Z`, is_converted: false, outlet_name: 'Reliance Smart - Jayanagar', users: { name: 'Amit Singh' }, form_templates: { name: 'Stock Reporting' }, activities: { name: 'Inventory' } }
+    { 
+      id: 's1', user_id: 'fe1', submitted_at: `${today}T12:05:00Z`, is_converted: true, 
+      outlet_name: 'Reliance Fresh - Koramangala', address: '123 Koramangala, Bangalore',
+      latitude: 12.9352, longitude: 77.6245,
+      check_in_at: `${today}T11:45:00Z`, check_out_at: `${today}T12:15:00Z`,
+      check_in_gps: '12.9352,77.6245', check_out_gps: '12.9353,77.6246',
+      users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, 
+      builder_forms: { title: 'Product Audit' }, 
+      activities: { name: 'Store Visit' } 
+    },
+    { 
+      id: 's2', user_id: 'fe2', submitted_at: `${today}T11:50:00Z`, is_converted: false, 
+      outlet_name: 'Big Bazaar - Indiranagar', address: '456 Indiranagar, Bangalore',
+      latitude: 12.9716, longitude: 77.5946,
+      check_in_at: `${today}T11:00:00Z`, check_out_at: `${today}T11:55:00Z`,
+      check_in_gps: '12.9716,77.5946', check_out_gps: '12.9717,77.5947',
+      users: { name: 'Priya Patel', employee_id: 'KIN-002' }, 
+      builder_forms: { title: 'Merchandising' }, 
+      activities: { name: 'Merchandising' } 
+    },
+    { 
+      id: 's3', user_id: 'fe3', submitted_at: `${today}T11:30:00Z`, is_converted: true, 
+      outlet_name: 'Star Market - HSR', address: '789 HSR Layout, Bangalore',
+      latitude: 12.9141, longitude: 77.6413,
+      check_in_at: `${today}T11:10:00Z`, check_out_at: `${today}T11:40:00Z`,
+      users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, 
+      builder_forms: { title: 'Product Audit' }, 
+      activities: { name: 'Store Visit' } 
+    },
+    { 
+      id: 's4', user_id: 'fe4', submitted_at: `${today}T11:15:00Z`, is_converted: true, 
+      outlet_name: 'Metro Cash & Carry', address: '101 Whitefield, Bangalore',
+      latitude: 12.9698, longitude: 77.7500,
+      check_in_at: `${today}T10:45:00Z`, check_out_at: `${today}T11:20:00Z`,
+      users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, 
+      builder_forms: { title: 'Compliance Checklist' }, 
+      activities: { name: 'Compliance' } 
+    },
+    { 
+      id: 's5', user_id: 'fe5', submitted_at: `${today}T10:55:00Z`, is_converted: false, 
+      outlet_name: 'Reliance Smart - Jayanagar', address: '202 Jayanagar, Bangalore',
+      latitude: 12.9250, longitude: 77.5897,
+      check_in_at: `${today}T10:20:00Z`, check_out_at: `${today}T11:00:00Z`,
+      users: { name: 'Amit Singh', employee_id: 'KIN-005' }, 
+      builder_forms: { title: 'Stock Reporting' }, 
+      activities: { name: 'Inventory' } 
+    }
   ]
 });
 
@@ -149,14 +206,21 @@ export const getMockSubmissionDetails = (id: string) => ({
   submitted_at: new Date().toISOString(),
   is_converted: true,
   outlet_name: 'Reliance Fresh - Koramangala',
+  address: '123 Koramangala, Bangalore',
+  latitude: 12.9352, longitude: 77.6245,
+  check_in_gps: '12.9352,77.6245', check_out_gps: '12.9353,77.6246',
   users: { name: 'Arjun Sharma', employee_id: 'KIN-001' },
-  form_templates: { name: 'Product Audit' },
+  builder_forms: { title: 'Product Audit' },
   activities: { name: 'Store Visit' },
+  answers: [
+    { label: 'Shelf Condition', qtype: 'text', value: 'Clean and Organized' },
+    { label: 'Stock Available', qtype: 'yes_no', value: true },
+    { label: 'Store Front Photo', qtype: 'camera', value: 'https://images.unsplash.com/photo-1534723452862-4c874018d66d?auto=format&fit=crop&w=800&q=80' },
+    { label: 'Manager Signature', qtype: 'signature', value: 'https://upload.wikimedia.org/wikipedia/commons/3/3a/Jon_Snow_Signature.png' }
+  ],
   form_responses: [
-    { field_key: 'shelf_status', form_fields: { label: 'Shelf Condition', field_type: 'text' }, value_text: 'Clean and Organized' },
-    { field_key: 'stock_available', form_fields: { label: 'Stock Available', field_type: 'yes_no' }, value_bool: true },
-    { field_key: 'store_photo', form_fields: { label: 'Store Front Photo', field_type: 'camera' }, photo_url: 'https://images.unsplash.com/photo-1534723452862-4c874018d66d?auto=format&fit=crop&w=800&q=80' },
-    { field_key: 'manager_sign', form_fields: { label: 'Manager Signature', field_type: 'signature' }, value_text: 'https://upload.wikimedia.org/wikipedia/commons/3/3a/Jon_Snow_Signature.png' }
+    { builder_questions: { label: 'Shelf Condition' }, value_text: 'Clean and Organized' },
+    { builder_questions: { label: 'Stock Available' }, value_bool: true }
   ]
 });
 
@@ -395,5 +459,13 @@ export const getMockLeaderboard = () => [
   { rank: 3, users: { name: 'Priya Patel', employee_id: 'KIN-002' }, overall_score: 920, is_me: false },
   { rank: 4, users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, overall_score: 890, is_me: false },
   { rank: 5, users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, overall_score: 860, is_me: false }
+];
+
+export const getMockUsers = () => [
+  { id: 'fe1', name: 'Arjun Sharma', employee_id: 'KIN-001', role: 'executive', city: 'Bangalore', is_active: true, zones: { name: 'Bangalore North' } },
+  { id: 'fe2', name: 'Priya Patel', employee_id: 'KIN-002', role: 'executive', city: 'Mumbai', is_active: true, zones: { name: 'Mumbai West' } },
+  { id: 'fe3', name: 'Rahul Verma', employee_id: 'KIN-003', role: 'executive', city: 'Delhi', is_active: true, zones: { name: 'Delhi Central' } },
+  { id: 'fe4', name: 'Sneha Rao', employee_id: 'KIN-004', role: 'supervisor', city: 'Hyderabad', is_active: true, zones: { name: 'Hyderabad South' } },
+  { id: 'fe5', name: 'Amit Singh', employee_id: 'KIN-005', role: 'executive', city: 'Pune', is_active: true, zones: { name: 'Pune East' } }
 ];
 
