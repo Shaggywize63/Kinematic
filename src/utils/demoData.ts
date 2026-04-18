@@ -341,3 +341,11 @@ export const getMockWMSSummary = () => ({
   total_movements_30d: 850
 });
 
+export const getMockLeaderboard = () => [
+  { rank: 1, users: { name: 'Arjun Sharma', employee_id: 'KIN-001' }, overall_score: 980, is_me: false },
+  { rank: 2, users: { name: 'Demo Admin', employee_id: 'DEMO-001' }, overall_score: 945, is_me: true },
+  { rank: 3, users: { name: 'Priya Patel', employee_id: 'KIN-002' }, overall_score: 920, is_me: false },
+  { rank: 4, users: { name: 'Rahul Verma', employee_id: 'KIN-003' }, overall_score: 890, is_me: false },
+  { rank: 5, users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, overall_score: 860, is_me: false }
+];
+
