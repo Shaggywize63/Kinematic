@@ -378,6 +378,7 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockAttendanceToday(isoDate(new Date())).executives);
+  const { f, t, client_id, zone_id, user_id, fe_id } = req.query as Record<string, string>;
 
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
