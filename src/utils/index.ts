@@ -1,6 +1,7 @@
 import { Response, NextFunction, RequestHandler, Request } from 'express'
 export * from './asyncHandler';
 export * from './pagination';
+export * from './demoData';
 
 export class AppError extends Error {
   constructor(public statusCode: number, public message: string, public code?: string) {
@@ -44,6 +45,10 @@ export function forbidden(res: Response, error = 'Forbidden') {
 
 export function conflict(res: Response, error: string) {
   res.status(409).json({ success: false, error });
+}
+
+export function serverError(res: Response, error = 'Internal server error') {
+  res.status(500).json({ success: false, error });
 }
 
 export function sendPaginated(res: Response, data: any[], total: number, page: number, limit: number) {

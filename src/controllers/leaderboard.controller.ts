@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest, isDemo } from '../utils';
+import { ok, badRequest, isDemo, isUUID } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { getMockLeaderboard } from '../utils/demoData';
 
