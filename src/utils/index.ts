@@ -43,6 +43,10 @@ export function forbidden(res: Response, error = 'Forbidden') {
   res.status(403).json({ success: false, error });
 }
 
+export function unauthorized(res: Response, error = 'Unauthorized') {
+  res.status(401).json({ success: false, error });
+}
+
 export function conflict(res: Response, error: string) {
   res.status(409).json({ success: false, error });
 }
