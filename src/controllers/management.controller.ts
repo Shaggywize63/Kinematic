@@ -17,7 +17,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
-import { DEMO_ORG_ID, getMockCities, getMockStores, getMockActivities } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo, getMockCities, getMockStores, getMockActivities } from '../utils/demoData';
 
 // ─── Helper: build a generic CRUD controller for a table ───
 export function buildCRUD(tableName: string, requiredFields: string[] = ['name']) {

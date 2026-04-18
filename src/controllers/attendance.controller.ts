@@ -28,6 +28,10 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return created(res, { id: 'demo-att-id', status: 'checked_in', checkin_at: new Date().toISOString() }, 'Checked in successfully (Demo)');
   
+  const { latitude, longitude, selfie_url, activity_id, zone_id, battery_percentage } = req.body;
+  const { date: passedDate } = req.query as Record<string, string>;
+  const today = isoDate(new Date());
+
   // Enforce DD--MM--YYYY parsing
   const attendanceDate = parseAppDate(passedDate || today);
 
@@ -125,6 +129,11 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, { id: 'demo-att-id', status: 'checked_out', checkout_at: new Date().toISOString() }, 'Checked out successfully (Demo)');
 
+  const { latitude, longitude, selfie_url } = req.body;
+  const { date: passedDate } = req.query as Record<string, string>;
+  const today = isoDate(new Date());
+  const attendanceDate = parseAppDate(passedDate || today);
+
   // 1. Try to find record for the specific date
   let { data: record, error: findError } = await supabaseAdmin
     .from('attendance')
@@ -211,6 +220,7 @@ export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return created(res, { status: 'on_break' }, 'Break started (Demo)');
 
+  const today = isoDate(new Date());
   // Unified lookup: today or most recent open shift
   let { data: record } = await supabaseAdmin
     .from('attendance')
@@ -250,6 +260,7 @@ export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, { status: 'checked_in' }, 'Break ended (Demo)');
 
+  const today = isoDate(new Date());
   let { data: record } = await supabaseAdmin
     .from('attendance')
     .select('id, status, break_minutes')

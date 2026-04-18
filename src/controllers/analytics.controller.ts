@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
-import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations } from '../utils/demoData';
+import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday } from '../utils/demoData';
 
 /* ─────────────────────────────────────────────────────────────
    HELPERS
@@ -29,10 +29,11 @@ const enrichWithHours = (r: any) => {
 };
 export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, getMockSummary(isoDate(toIST(new Date()))));
+  const today = isoDate(toIST(new Date()));
+  if (isDemo(user)) return ok(res, getMockSummary(today));
 
-  const from = (req.query.from as string) || (req.query.date as string) || isoDate(toIST(new Date()));
-  const to   = (req.query.to   as string) || (req.query.date as string) || isoDate(toIST(new Date()));
+  const from = (req.query.from as string) || (req.query.date as string) || today;
+  const to   = (req.query.to   as string) || (req.query.date as string) || today;
   const date = to; // For backwards compatibility
 
   // Combined concurrent fetch for independent counts to minimize sequential await overhead
@@ -474,6 +475,7 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockLocations(todayDate()));
+  const today = todayDate();
 
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 

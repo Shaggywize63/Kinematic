@@ -63,6 +63,8 @@ const ALL_COLUMNS = 'id, visitor_id, executive_id, zone_id, client_id, visit_out
 export const logVisit = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return created(res, { id: 'demo-visit-id', ...req.body }, 'Visit logged (Demo)');
+  
+  const body = visitSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
   // Use the new column name in Insert
@@ -98,6 +100,8 @@ export const getMyVisits = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockVisitLogs(new Date().toISOString().split('T')[0]));
 
+  const { date } = req.query as Record<string, string>;
+
   let query = supabaseAdmin
     .from('visit_logs')
     .select(ALL_COLUMNS)
@@ -130,6 +134,7 @@ export const getReceivedVisits = asyncHandler<AuthRequest>(async (req, res) => {
 export const updateFEFeedback = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, { success: true }, 'Feedback updated (Demo)');
+  const { id } = req.params;
   const body = feedbackSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
