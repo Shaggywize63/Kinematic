@@ -884,8 +884,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     .from('v_route_plan_daily')
     .select('*')
     .or(`user_id.eq.${user.id}${userEmail ? `,fe_email.ilike.${userEmail}` : ''}`)
-    .gte('plan_date', startRange)
-    .lte('plan_date', endRange);
+    .eq('plan_date', today);
 
   // Fetch actual work performed today
   const { data: actualSubmissions } = await supabaseAdmin

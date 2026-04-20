@@ -24,7 +24,7 @@ export const getRoutePlans = asyncHandler(async (req, res) => {
   
   let q = supabase.from('v_route_plan_daily').select('*');
   if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
-  q = q.gte('plan_date', start).lte('plan_date', end);
+  q = q.eq('plan_date', istDate);
     
   const { data: plans, error } = await q.order('fe_name', { ascending: true });
   if (error) return badRequest(res, error.message);
@@ -58,8 +58,7 @@ export const getMyRoutePlan = asyncHandler(async (req, res) => {
   
   const { data: plan, error } = await supabase.from('v_route_plan_daily').select('*')
     .eq('user_id', uid)
-    .gte('plan_date', start)
-    .lte('plan_date', end);
+    .eq('plan_date', istDate);
     
   if (error) return badRequest(res, error.message);
   if (!plan?.length) return ok(res, []);
@@ -166,15 +165,9 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
   
   let q = supabase.from('route_plans').select('*');
   if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
-  q = q.gte('plan_date', start).lte('plan_date', end);
+  q = q.eq('plan_date', istDate);
 
   let { data, error } = await q;
-  
-  // EMERGENCY RECOVERY: If filtered is 0 for SuperAdmin, show some data
-  if (isGlobal && (!data || data.length === 0)) {
-      const { data: panic } = await supabase.from('route_plans').select('*').order('created_at', { ascending: false }).limit(20);
-      data = panic;
-  }
 
   if (error) return badRequest(res, error.message);
   const rows = data || [];
