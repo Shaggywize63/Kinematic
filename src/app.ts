@@ -48,7 +48,6 @@ import warehouseRoutes    from './routes/warehouse.routes';
 const app = express();
 
 // ── Security ──────────────────────────────────────────────────
-helmet();
 app.use(helmet());
 app.set('trust proxy', 1);
 
