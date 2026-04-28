@@ -34,6 +34,7 @@ import candidatesRouter   from './routes/candidates.routes';
 import activityMappingRoutes from './routes/activity-mapping.routes';
 import clientRoutes          from './routes/client.routes';
 import miscRoutes            from './routes/misc.routes';
+import planogramRoutes       from './routes/planogram.routes';
 
 // Other management routes (available, now mounted)
 import activitiesRoutes   from './routes/activities.routes';
@@ -46,11 +47,12 @@ import warehouseRoutes    from './routes/warehouse.routes';
 
 const app = express();
 
-// ── Security ─────────────────────────────────────────────────
+// ── Security ──────────────────────────────────────────────────
+helmet();
 app.use(helmet());
 app.set('trust proxy', 1);
 
-// ── CORS ──────────────────────────────────────────────────────
+// ── CORS ─────────────────────────────────────────────────────
 app.use(cors({
   origin: (origin, cb) => cb(null, true),
   credentials: true,
@@ -58,7 +60,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-org-id', 'x-client-id', 'X-Org-Id', 'X-Client-Id'],
 }));
 
-// ── Rate limiting ─────────────────────────────────────────────
+// ── Rate limiting ─────────────────────────────────────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
   max: parseInt(process.env.RATE_LIMIT_MAX || '5000', 10),
@@ -72,26 +74,26 @@ const limiter = rateLimit({
 });
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, 
-  max: 20,                   
+  windowMs: 15 * 60 * 1000,
+  max: 20,
   message: { success: false, error: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
 app.use('/api', limiter);
 app.use('/api/v1/auth/login', authLimiter);
 
-// ── HTTP logging ──────────────────────────────────────────────
+// ── HTTP logging ─────────────────────────────────────────────────
 app.use(morgan('combined', {
   stream: { write: (msg) => logger.http(msg.trim()) },
   skip: (req) => req.path === '/health',
 }));
 
-// ── Body parsing & misc ───────────────────────────────────────
+// ── Body parsing & misc ───────────────────────────────────────────────
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ── Health check ──────────────────────────────────────────────
+// ── Health check ─────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -101,7 +103,7 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// ── API routes ────────────────────────────────────────────────
+// ── API routes ────────────────────────────────────────────────────
 const V1 = '/api/v1';
 
 import { requireModule, enforceCityScope } from './middleware/rbac';
@@ -131,6 +133,7 @@ app.use('/api/v1/ai',          requireAuth, aiRouter);
 app.use(`${V1}/activity-mappings`, requireAuth, activityMappingRoutes);
 app.use(`${V1}/clients`,           requireAuth, clientRoutes);
 app.use(`${V1}/misc`,              requireAuth, miscRoutes);
+app.use(`${V1}/planograms`,        planogramRoutes);
 
 // Route plan (singular and plural alias)
 app.use(`${V1}/route-plan`,    requireAuth, enforceCityScope, routePlanRoutes);
@@ -145,7 +148,7 @@ app.use(`${V1}/skus`,          requireAuth, requireModule('inventory'), skusRout
 app.use(`${V1}/stores`,        requireAuth, enforceCityScope, storesRoutes);
 app.use(`${V1}/warehouse`,     requireAuth, requireModule('inventory'), warehouseRoutes);
 
-// ── 404 + error handlers ──────────────────────────────────────
+// ── 404 + error handlers ─────────────────────────────────────────────
 app.use(notFoundHandler);
 app.use(errorHandler);
 
