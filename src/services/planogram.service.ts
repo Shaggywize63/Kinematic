@@ -140,7 +140,7 @@ export class PlanogramService {
     }
     const position_score = positionTotal
       ? (positionMatches / positionTotal) * 100
-      : 100;
+      : 0;
 
     // ── Competitor share ──────────────────────────────────────────────
     const totalFacings = detected.reduce((s, d) => s + (d.facings || 0), 0) || 1;
