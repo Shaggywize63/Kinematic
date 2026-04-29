@@ -166,6 +166,23 @@ router.post('/captures', asyncHandler(async (req: AuthRequest, res: Response) =>
   res.status(201).json({ success: true, data: out });
 }));
 
+router.get('/captures', asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabaseAdmin
+    .from('planogram_captures')
+    .select(`
+      *,
+      fe:users!fe_id(name),
+      store:stores!store_id(name),
+      planogram:planograms!planogram_id(name),
+      compliance:planogram_compliance!capture_id(score)
+    `)
+    .eq('org_id', req.user.org_id)
+    .order('captured_at', { ascending: false });
+
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json({ success: true, data });
+}));
+
 router.get('/captures/:id', asyncHandler(async (req: AuthRequest, res: Response) => {
   const captureId = req.params.id;
   const { data: cap, error } = await supabaseAdmin.from('planogram_captures').select('*')

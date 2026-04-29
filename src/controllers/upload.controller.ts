@@ -13,6 +13,7 @@ const BUCKET_MAP: Record<string, string> = {
   file: process.env.BUCKET_FORM_PHOTOS || 'form-responses',
   material: process.env.BUCKET_MATERIALS || 'kinematic-materials',
   avatar: process.env.BUCKET_AVATARS || 'kinematic-avatars',
+  planogram: process.env.BUCKET_PLANOGRAMS || 'form-responses',
 };
 
 // POST /api/v1/upload/:type
