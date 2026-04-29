@@ -185,7 +185,8 @@ router.get('/captures', asyncHandler(async (req: AuthRequest, res: Response) => 
 
 router.get('/captures/:id', asyncHandler(async (req: AuthRequest, res: Response) => {
   const captureId = req.params.id;
-  const { data: cap, error } = await supabaseAdmin.from('planogram_captures').select('*')
+  const { data: cap, error } = await supabaseAdmin.from('planogram_captures')
+    .select('*, fe:users!fe_id(name), store:stores!store_id(name), planogram:planograms!planogram_id(name)')
     .eq('id', captureId).eq('org_id', req.user.org_id).single();
   if (error || !cap) throw new AppError(404, 'Capture not found', 'NOT_FOUND');
   const { data: rec } = await supabaseAdmin.from('planogram_recognition').select('*').eq('capture_id', captureId).single();
