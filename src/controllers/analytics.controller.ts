@@ -248,7 +248,9 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   let submissionQuery = supabaseAdmin
     .from('form_submissions')
     .select('id, submitted_at, is_converted, outlet_name, users!user_id(name, city), builder_forms:builder_forms!fk_submission_template(title)')
-    .eq('org_id', user.org_id);
+    .eq('org_id', user.org_id)
+    .order('submitted_at', { ascending: false })
+    .limit(limit);
 
   if (isUUID(user.client_id)) {
     submissionQuery = submissionQuery.or(`client_id.eq.${user.client_id},user_id.eq.${user.id}`);
@@ -259,7 +261,7 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
     submissionQuery = submissionQuery.eq('user_id', user.id);
   }
 
-  const { data: submissions } = await submissionQuery.order('submitted_at', { ascending: false }).limit(limit);
+  const { data: submissions } = await submissionQuery;
 
   const feed = (submissions || []).map((s) => {
     const u = s.users as unknown as { name: string; city: string | null } | null;
@@ -859,51 +861,92 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   if (attError) console.log(`[MobileHome] Attendance Error: ${attError.message}`);
   console.log(`[MobileHome] Result: Found=${!!attRecord}, Id=${attRecord?.id}, Status=${attRecord?.status}`);
   
-  // 2. Summary Stats
-  const istToday = today; // Sync today date
-  
+  // 2. Phase A — fan out every query that doesn't depend on userEmail.
+  // The original code awaited each one serially, which added 600-900ms on
+  // slow networks. They are all independent of each other.
+  const istToday = today;
+
   let orgTffQuery = supabaseAdmin.from('form_submissions')
     .select('id', { count: 'exact', head: true })
     .eq('org_id', user.org_id)
     .gte('submitted_at', `${istToday}T00:00:00+05:30`)
     .lte('submitted_at', `${istToday}T23:59:59+05:30`);
-    
+
   if (isUUID(user.client_id)) orgTffQuery = orgTffQuery.eq('client_id', user.client_id);
-    
-  const { count: orgTffCount } = await orgTffQuery;
+
+  const profilePromise = supabaseAdmin.from('users').select('email').eq('id', user.id).single();
+  const actualSubsPromise = supabaseAdmin
+    .from('form_submissions')
+    .select('id, outlet_name, outlet_id, submitted_at, activity_id, check_in_at, check_out_at')
+    .eq('user_id', user.id)
+    .gte('submitted_at', `${today}T00:00:00+05:30`)
+    .lte('submitted_at', `${today}T23:59:59+05:30`);
+  const unreadPromise = supabaseAdmin
+    .from('notifications')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', user.id)
+    .eq('is_read', false);
+  const quotePromise = supabaseAdmin
+    .from('motivation_quotes')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const broadcastPromise = supabaseAdmin
+    .from('broadcast_questions')
+    .select(`
+      id, question, options, correct_option, is_urgent, deadline_at,
+      status, target_roles, target_zone_ids, target_cities, created_at,
+      broadcast_answers!left(id, selected, is_correct, answered_at)
+    `)
+    .eq('org_id', user.org_id)
+    .eq('status', 'active')
+    .contains('target_roles', [user.role])
+    .eq('broadcast_answers.user_id', user.id)
+    .order('is_urgent', { ascending: false })
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const [orgTffRes, profileRes, actualSubsRes, unreadRes, quoteRes, broadcastRes] = await Promise.all([
+    orgTffQuery,
+    profilePromise,
+    actualSubsPromise,
+    unreadPromise,
+    quotePromise,
+    broadcastPromise,
+  ]);
+
+  const orgTffCount = orgTffRes.count;
+  const profile = profileRes.data;
+  const actualSubmissions = actualSubsRes.data;
+  const unread = unreadRes.count;
+  const quote = quoteRes.data;
+  const bq = broadcastRes.data;
 
   if (attRecord) {
     enrichWithHours(attRecord);
     (attRecord as any).tff_count = orgTffCount || 0;
   }
 
-  // 3. Today's Route Plans & ACTUAL VISITS (Merged)
-  const { data: profile } = await supabaseAdmin.from('users').select('email').eq('id', user.id).single();
+  // 3. Today's Route Plans (depends on userEmail from profile)
   const userEmail = profile?.email || user.email;
 
   const { start: startRange, end: endRange } = getISTSearchRange(parseAppDate(today));
 
-  // Fetch planned activities
+  // Fetch planned activities (depends on userEmail)
   let { data: rawPlans } = await supabaseAdmin
     .from('v_route_plan_daily')
     .select('*')
     .or(`user_id.eq.${user.id}${userEmail ? `,fe_email.ilike.${userEmail}` : ''}`)
     .eq('plan_date', today);
 
-  // Fetch actual work performed today
-  const { data: actualSubmissions } = await supabaseAdmin
-    .from('form_submissions')
-    .select('id, outlet_name, outlet_id, submitted_at, activity_id, check_in_at, check_out_at')
-    .eq('user_id', user.id)
-    .gte('submitted_at', `${today}T00:00:00+05:30`)
-    .lte('submitted_at', `${today}T23:59:59+05:30`);
-
   const visitedOutletNames = new Set((actualSubmissions || []).map(s => (s.outlet_name || '').toLowerCase().trim()));
   const visitedOutletIds   = new Set((actualSubmissions || []).map(s => s.outlet_id).filter(Boolean));
 
   const plans = (rawPlans || []).filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
   let routePlans = [];
-  
+
   const storeMap: Record<string, any> = {};
   const nameToIdMap: Record<string, string> = {}; // Helper for name-based merging
 
@@ -989,29 +1032,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     outlets: Object.values(storeMap)
   }];
 
-  // 4. Notifications (Unread count)
-  const { count: unread } = await supabaseAdmin.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('is_read', false);
-
-  // 5. Quote
-  const { data: quote } = await supabaseAdmin.from('motivation_quotes').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
-
-  // 6. Broadcast (New System: Active & Assigned)
-  const { data: bq } = await supabaseAdmin
-    .from('broadcast_questions')
-    .select(`
-      id, question, options, correct_option, is_urgent, deadline_at,
-      status, target_roles, target_zone_ids, target_cities, created_at,
-      broadcast_answers!left(id, selected, is_correct, answered_at)
-    `)
-    .eq('org_id', user.org_id)
-    .eq('status', 'active')
-    .contains('target_roles', [user.role])
-    .eq('broadcast_answers.user_id', user.id)
-    .order('is_urgent', { ascending: false })
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
+  // Notifications, Quote, Broadcast were fetched above in Phase A's Promise.all.
   const b = bq as any;
   const alreadyAnswered = Array.isArray(b?.broadcast_answers) && b.broadcast_answers.length > 0;
 

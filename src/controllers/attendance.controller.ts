@@ -419,7 +419,12 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
     query = query.eq('user_id', user_id || fe_id);
   }
 
-  const { data, error } = await query.order('date', { ascending: false }).order('checkin_at', { ascending: true, nullsFirst: false });
+  // Cap response size — even a 30-day range across 500 FEs would otherwise
+  // return 15k+ rows and lock the dashboard table.
+  const { data, error } = await query
+    .order('date', { ascending: false })
+    .order('checkin_at', { ascending: true, nullsFirst: false })
+    .limit(2000);
 
   if (error) { badRequest(res, error.message); return; }
   ok(res, (data || []).map(enrichWithHours));
