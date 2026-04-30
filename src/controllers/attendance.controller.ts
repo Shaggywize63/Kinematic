@@ -37,7 +37,10 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (latitude == null || longitude == null) return badRequest(res, 'Latitude and longitude are required');
 
-  // Phase 1: Check existing record for the day to avoid duplicates
+  // Idempotency: Check existing record for the day. If the user already
+  // checked in today, return the existing row instead of creating a new one.
+  // The (user_id, date) UNIQUE constraint enforces this at the DB level too,
+  // and the upsert below is the race-safe insert path.
   const { data: existing } = await supabaseAdmin
     .from('attendance')
     .select('*, breaks(*)')
@@ -46,7 +49,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     .maybeSingle();
 
   if (existing) {
-    logger.info(`[Attendance] user=${user.id} already checked in. Returning existing record.`);
+    logger.info(`[Attendance] user=${user.id} already has a record for ${attendanceDate}. Returning existing.`);
     ok(res, enrichWithHours(existing));
     return;
   }
@@ -77,9 +80,12 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
+  // Race-safe insert: if a parallel request beat us to it, the (user_id, date)
+  // unique constraint will trigger the conflict path and we return the
+  // existing row instead of throwing.
   const { data, error } = await supabaseAdmin
     .from('attendance')
-    .insert({
+    .upsert({
       user_id: user.id,
       org_id: user.org_id,
       client_id: user.client_id,
@@ -92,8 +98,8 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
       checkin_lng: longitude,
       checkin_selfie_url: selfie_url,
       checkin_distance_m: distanceMetres,
-    })
-    .select()
+    }, { onConflict: 'user_id,date', ignoreDuplicates: false })
+    .select('*, breaks(*)')
     .single();
 
   if (error) { badRequest(res, error.message); return; }
@@ -378,7 +384,10 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockAttendanceToday(isoDate(new Date())).executives);
-  const { f, t, client_id, zone_id, user_id, fe_id } = req.query as Record<string, string>;
+  // Accept both `f`/`t` and `from`/`to` as aliases for the date range
+  const { f, t, from, to, client_id, zone_id, user_id, fe_id } = req.query as Record<string, string>;
+  const rangeFrom = f || from;
+  const rangeTo   = t || to;
 
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
@@ -392,7 +401,7 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
     `);
 
   // Date Filtering: Strict range
-  query = query.gte('date', parseAppDate(f)).lte('date', parseAppDate(t));
+  query = query.gte('date', parseAppDate(rangeFrom)).lte('date', parseAppDate(rangeTo));
 
   // Auth / Org Filtering
   if (!isGlobal) {
@@ -410,13 +419,7 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
     query = query.eq('user_id', user_id || fe_id);
   }
 
-  let { data, error } = await query.order('date', { ascending: false }).order('checkin_at', { ascending: true, nullsFirst: false });
-  
-  // EMERGENCY RECOVERY: If filtered results are 0 for Sagar/Global, show latest raw data
-  if (isGlobal && (!data || data.length === 0)) {
-     const { data: panic } = await supabaseAdmin.from('attendance').select('*, users:user_id(name, role, employee_id, zones!zone_id(name))').order('created_at', { ascending: false }).limit(20);
-     data = panic;
-  }
+  const { data, error } = await query.order('date', { ascending: false }).order('checkin_at', { ascending: true, nullsFirst: false });
 
   if (error) { badRequest(res, error.message); return; }
   ok(res, (data || []).map(enrichWithHours));
