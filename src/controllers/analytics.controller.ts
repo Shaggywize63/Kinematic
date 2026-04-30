@@ -486,7 +486,7 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   
   let execQuery = supabaseAdmin
     .from('users')
-    .select('id, name, employee_id, role, battery_percentage, last_latitude, last_longitude, last_location_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
+    .select('id, name, employee_id, role, battery_percentage, device_model, device_brand, os_version, last_latitude, last_longitude, last_location_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id)
     .not('role', 'in', `(${restrictedRoles.join(',')})`);
   
@@ -536,16 +536,20 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
       employee_id: fe.employee_id,
       role: fe.role,
       battery_percentage: fe.battery_percentage,
-      zone_name: zone?.name || null, 
+      device_model: fe.device_model || null,
+      device_brand: fe.device_brand || null,
+      os_version: fe.os_version || null,
+      zone_name: zone?.name || null,
       city: zone?.city || null,
       status: rec ? (rec.checkout_at ? 'checked_out' : (rec.status === 'on_break' ? 'on_break' : 'active')) : 'absent',
-      checkin_at: rec?.checkin_at || null, 
+      checkin_at: rec?.checkin_at || null,
       checkout_at: rec?.checkout_at || null,
-      lat, 
+      lat,
       lng,
       address: rec?.checkin_address || null,
       total_hours: enrichWithHours(rec)?.total_hours || null,
       is_regularised: rec?.is_regularised || false,
+      last_location_updated_at: fe.last_location_updated_at || null,
     };
   });
 
