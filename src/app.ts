@@ -57,6 +57,9 @@ import distDispatchesRoutes    from './routes/distribution/dispatches.routes';
 import distDeliveriesRoutes    from './routes/distribution/deliveries.routes';
 import distPaymentsRoutes      from './routes/distribution/payments.routes';
 import distLedgerRoutes        from './routes/distribution/ledger.routes';
+import distSchemesRoutes       from './routes/distribution/schemes.routes';
+import distReturnsRoutes       from './routes/distribution/returns.routes';
+import distSecondaryRoutes     from './routes/distribution/secondary-sales.routes';
 
 const app = express();
 
@@ -170,6 +173,9 @@ app.use(`${V1}/distribution/dispatches`,     requireAuth, requireModule('distrib
 app.use(`${V1}/distribution/deliveries`,     requireAuth,                                              distDeliveriesRoutes);
 app.use(`${V1}/distribution/payments`,       requireAuth, requireModule('distribution_payments'),     distPaymentsRoutes);
 app.use(`${V1}/distribution/ledger`,         requireAuth, requireModule('distribution_ledger'),       distLedgerRoutes);
+app.use(`${V1}/distribution/schemes`,        requireAuth, requireModule('distribution_schemes'),      distSchemesRoutes);
+app.use(`${V1}/distribution/returns`,        requireAuth, requireModule('distribution_returns'),      distReturnsRoutes);
+app.use(`${V1}/distribution/secondary-sales`,requireAuth, requireModule('distribution_consumer'),     distSecondaryRoutes);
 app.use(`${V1}/distribution/uploads`,        requireAuth,                                              distUploadsRoutes);
 app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope,                            distSalesmanRoutes);
 
