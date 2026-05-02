@@ -13,7 +13,7 @@ export const routeToday = asyncHandler(async (req: AuthRequest, res: Response) =
 
   // Today's route plan + assigned outlets + outstanding balance + last order.
   const { data: rp } = await supabaseAdmin.from('route_plans')
-    .select('*, route_plan_outlets(*, stores!store_id(id, name, address, latitude, longitude, state))')
+    .select('*, route_plan_outlets(*, stores!store_id(id, name, address, lat, lng))')
     .eq('user_id', user.id).eq('date', today).maybeSingle();
 
   const outlets = (rp?.route_plan_outlets || []).map((rpo: any) => {
@@ -22,8 +22,8 @@ export const routeToday = asyncHandler(async (req: AuthRequest, res: Response) =
       id: s.id,
       name: s.name,
       address: s.address,
-      lat: s.latitude,
-      lng: s.longitude,
+      lat: s.lat,
+      lng: s.lng,
       route_visit_id: rpo.id,
       status: rpo.status || 'pending',
       sequence: rpo.sequence || 0,
@@ -68,15 +68,15 @@ export const visitCheckin = asyncHandler(async (req: AuthRequest, res: Response)
   if (isDemo(user)) return ok(res, { geofence_passed: true, distance_m: 12 });
 
   const { data: rpo } = await supabaseAdmin.from('route_plan_outlets')
-    .select('id, store_id, stores!store_id(latitude, longitude)').eq('id', req.params.visitId).maybeSingle();
+    .select('id, store_id, stores!store_id(lat, lng)').eq('id', req.params.visitId).maybeSingle();
   if (!rpo) return badRequest(res, 'Visit not found');
   const store: any = rpo.stores;
-  if (!store?.latitude || !store?.longitude) return ok(res, { geofence_passed: null, distance_m: null });
+  if (!store?.lat || !store?.lng) return ok(res, { geofence_passed: null, distance_m: null });
 
   const { data: ext } = await supabaseAdmin.from('outlet_distribution_ext')
     .select('geofence_radius_m').eq('outlet_id', rpo.store_id).maybeSingle();
   const radius = ext?.geofence_radius_m || 100;
-  const distance_m = haversineMeters(lat, lng, Number(store.latitude), Number(store.longitude));
+  const distance_m = haversineMeters(lat, lng, Number(store.lat), Number(store.lng));
   const geofence_passed = distance_m <= radius;
   ok(res, { geofence_passed, distance_m, radius_m: radius });
 });
@@ -88,7 +88,7 @@ export const cartSuggest = asyncHandler(async (req: AuthRequest, res: Response) 
   const outletId = req.params.id;
 
   const [{ data: outlet }, { data: ext }, { data: lastOrders }] = await Promise.all([
-    supabaseAdmin.from('stores').select('id, name, latitude, longitude').eq('id', outletId).maybeSingle(),
+    supabaseAdmin.from('stores').select('id, name, lat, lng').eq('id', outletId).maybeSingle(),
     supabaseAdmin.from('outlet_distribution_ext')
       .select('current_balance, credit_limit, customer_class').eq('outlet_id', outletId).maybeSingle(),
     supabaseAdmin.from('orders')

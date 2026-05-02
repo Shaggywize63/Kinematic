@@ -98,7 +98,7 @@ export async function priceCart(cart: CartLineInput[], ctx: PriceCartContext): P
     supabaseAdmin.from('product_distribution_ext')
       .select('sku_id, hsn_code, gst_rate, cess_rate, uom, pack_size, mrp, is_active')
       .in('sku_id', skuIds),
-    supabaseAdmin.from('skus').select('id, name, code').in('id', skuIds),
+    supabaseAdmin.from('skus').select('id, name, sku_code').in('id', skuIds),
   ]);
 
   const priceMap = new Map((priceItems || []).map((p: any) => [p.sku_id, p]));
@@ -128,7 +128,7 @@ export async function priceCart(cart: CartLineInput[], ctx: PriceCartContext): P
     return {
       sku_id: c.sku_id,
       sku_name: sku?.name || null,
-      sku_code: sku?.code || null,
+      sku_code: sku?.sku_code || null,
       hsn_code: ext?.hsn_code || null,
       qty: c.qty,
       uom: c.uom || ext?.uom || 'PCS',

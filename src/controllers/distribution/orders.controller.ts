@@ -107,7 +107,7 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
 // ── Preview / Create (used by both salesman + dashboard) ────────────────────
 async function buildPriceContext(user: any, outletId: string, distributorId?: string) {
   const { data: outlet } = await supabaseAdmin.from('stores')
-    .select('id, name, latitude, longitude, state, city_id')
+    .select('id, name, lat, lng, city_id')
     .eq('id', outletId).eq('org_id', user.org_id).maybeSingle();
   if (!outlet) throw new PricerError('OUTLET_NOT_FOUND', 'Outlet not found');
 
@@ -213,12 +213,12 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   // Geofence check.
   let geofence_passed: boolean | null = null;
   let geofence_distance_m: number | null = null;
-  if (parsed.data.gps && (ctx.outlet as any).latitude && (ctx.outlet as any).longitude) {
+  if (parsed.data.gps && (ctx.outlet as any).lat && (ctx.outlet as any).lng) {
     const ext: any = ctx.ext;
     const radius = ext?.geofence_radius_m || 100;
     geofence_distance_m = haversineMeters(
       parsed.data.gps.lat, parsed.data.gps.lng,
-      Number((ctx.outlet as any).latitude), Number((ctx.outlet as any).longitude),
+      Number((ctx.outlet as any).lat), Number((ctx.outlet as any).lng),
     );
     geofence_passed = geofence_distance_m <= radius;
   }
