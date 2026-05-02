@@ -45,6 +45,14 @@ import skusRoutes         from './routes/skus.routes';
 import storesRoutes       from './routes/stores.routes';
 import warehouseRoutes    from './routes/warehouse.routes';
 
+// Distribution module
+import distBrandsRoutes        from './routes/distribution/brands.routes';
+import distDistributorsRoutes  from './routes/distribution/distributors.routes';
+import distPriceListsRoutes    from './routes/distribution/price-lists.routes';
+import distOrdersRoutes        from './routes/distribution/orders.routes';
+import distSalesmanRoutes      from './routes/distribution/salesman.routes';
+import distUploadsRoutes       from './routes/distribution/uploads.routes';
+
 const app = express();
 
 // ── Security ──────────────────────────────────────────────────
@@ -146,6 +154,14 @@ app.use(`${V1}/management`,    requireAuth, managementRoutes);
 app.use(`${V1}/skus`,          requireAuth, requireModule('inventory'), skusRoutes);
 app.use(`${V1}/stores`,        requireAuth, enforceCityScope, storesRoutes);
 app.use(`${V1}/warehouse`,     requireAuth, requireModule('inventory'), warehouseRoutes);
+
+// ── Distribution module ─────────────────────────────────────────────
+app.use(`${V1}/distribution/brands`,         requireAuth, requireModule('distribution_brands'),       distBrandsRoutes);
+app.use(`${V1}/distribution/distributors`,   requireAuth, requireModule('distribution_distributors'), distDistributorsRoutes);
+app.use(`${V1}/distribution/price-lists`,    requireAuth, requireModule('distribution_pricing'),      distPriceListsRoutes);
+app.use(`${V1}/distribution/orders`,         requireAuth, requireModule('distribution_orders'),       distOrdersRoutes);
+app.use(`${V1}/distribution/uploads`,        requireAuth,                                              distUploadsRoutes);
+app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope,                            distSalesmanRoutes);
 
 // ── 404 + error handlers ─────────────────────────────────────────────
 app.use(notFoundHandler);
