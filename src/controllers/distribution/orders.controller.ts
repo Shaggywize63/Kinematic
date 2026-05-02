@@ -5,6 +5,8 @@ import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound, conflict, forbidden, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
 import { priceCart, haversineMeters, PricerError } from '../../services/order-pricer';
+import { applySchemes, SCHEME_ENGINE_VERSION } from '../../services/scheme-engine';
+import { summariseTotals } from '../../services/tax';
 import { getDemoOrder, getDemoOrderList } from '../../utils/demoDistribution';
 
 const lineSchema = z.object({
@@ -147,7 +149,17 @@ export const preview = asyncHandler(async (req: AuthRequest, res: Response) => {
       outlet_state_code: ctx.ext?.state_code || null,
       place_of_supply: ctx.place_of_supply,
     });
-    ok(res, result);
+    // Apply schemes (M3) then re-aggregate totals.
+    const schemeOut = await applySchemes(result.lines, {
+      org_id: user.org_id,
+      customer_class: ctx.customer_class,
+      date: new Date().toISOString().slice(0, 10),
+      outlet_id: parsed.data.outlet_id,
+      intra_state: result.intra_state,
+      brand_ids: [],
+    });
+    const totals = summariseTotals(schemeOut.lines, { roundOff: true });
+    ok(res, { ...result, lines: schemeOut.lines, applied_schemes: schemeOut.applied, totals, scheme_total: schemeOut.scheme_total });
   } catch (e: any) {
     if (e instanceof PricerError) return conflict(res, `${e.code}: ${e.message}`);
     throw e;
@@ -163,7 +175,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     return created(res, order, 'Order placed (Demo)');
   }
 
-  let ctx; let priced;
+  let ctx; let priced; let schemeOut;
   try {
     ctx = await buildPriceContext(user, parsed.data.outlet_id, parsed.data.distributor_id);
     priced = await priceCart(parsed.data.items, {
@@ -175,6 +187,17 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
       outlet_state_code: ctx.ext?.state_code || null,
       place_of_supply: ctx.place_of_supply,
     });
+    schemeOut = await applySchemes(priced.lines, {
+      org_id: user.org_id,
+      customer_class: ctx.customer_class,
+      date: new Date().toISOString().slice(0, 10),
+      outlet_id: parsed.data.outlet_id,
+      intra_state: priced.intra_state,
+      brand_ids: [],
+    });
+    // Replace pricer lines + recompute totals after scheme application.
+    priced.lines = schemeOut.lines;
+    priced.totals = summariseTotals(schemeOut.lines, { roundOff: true });
   } catch (e: any) {
     if (e instanceof PricerError) return conflict(res, `${e.code}: ${e.message}`);
     throw e;
@@ -249,7 +272,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     is_reverse_charge: false,
     subtotal: priced.totals.subtotal,
     discount_total: priced.totals.discount_total,
-    scheme_total: 0,
+    scheme_total: schemeOut.scheme_total,
     taxable_value: priced.totals.taxable_value,
     cgst: priced.totals.cgst,
     sgst: priced.totals.sgst,
@@ -296,6 +319,21 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   }));
   const { error: itemsErr } = await supabaseAdmin.from('order_items').insert(itemRows);
   if (itemsErr) return badRequest(res, itemsErr.message);
+
+  // Persist scheme application proof (one row per applied scheme).
+  if (schemeOut.applied.length) {
+    await supabaseAdmin.from('scheme_application_log').insert(
+      schemeOut.applied.map((a) => ({
+        org_id: user.org_id,
+        order_id: order.id,
+        scheme_id: a.scheme_id,
+        scheme_version: a.scheme_version,
+        engine_version: SCHEME_ENGINE_VERSION,
+        inputs: a.inputs,
+        outputs: a.outputs,
+      }))
+    );
+  }
 
   await audit(req, 'order.create', 'orders', order.id, null, { ...order, items_count: itemRows.length });
 
