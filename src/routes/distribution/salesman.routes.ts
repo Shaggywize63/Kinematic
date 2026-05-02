@@ -2,6 +2,7 @@ import { Router } from 'express';
 import * as salesman from '../../controllers/distribution/salesman.controller';
 import * as orders from '../../controllers/distribution/orders.controller';
 import * as uploads from '../../controllers/distribution/uploads.controller';
+import * as payments from '../../controllers/distribution/payments.controller';
 import { idempotency } from '../../middleware/idempotency';
 
 const router = Router();
@@ -15,6 +16,8 @@ router.post('/orders', idempotency, orders.create);
 router.get('/orders', salesman.myOrders);
 router.get('/orders/:id', orders.get);
 router.post('/orders/:id/cancel', idempotency, orders.cancel);
+
+router.post('/payments', idempotency, payments.create);
 
 router.post('/uploads/sign', idempotency, uploads.sign);
 
