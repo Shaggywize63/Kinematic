@@ -60,6 +60,7 @@ import distLedgerRoutes        from './routes/distribution/ledger.routes';
 import distSchemesRoutes       from './routes/distribution/schemes.routes';
 import distReturnsRoutes       from './routes/distribution/returns.routes';
 import distSecondaryRoutes     from './routes/distribution/secondary-sales.routes';
+import distGstinRoutes         from './routes/distribution/gstin.routes';
 
 const app = express();
 
@@ -176,6 +177,7 @@ app.use(`${V1}/distribution/ledger`,         requireAuth, requireModule('distrib
 app.use(`${V1}/distribution/schemes`,        requireAuth, requireModule('distribution_schemes'),      distSchemesRoutes);
 app.use(`${V1}/distribution/returns`,        requireAuth, requireModule('distribution_returns'),      distReturnsRoutes);
 app.use(`${V1}/distribution/secondary-sales`,requireAuth, requireModule('distribution_consumer'),     distSecondaryRoutes);
+app.use(`${V1}/distribution/gstin`,          requireAuth,                                              distGstinRoutes);
 app.use(`${V1}/distribution/uploads`,        requireAuth,                                              distUploadsRoutes);
 app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope,                            distSalesmanRoutes);
 
