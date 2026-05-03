@@ -5,7 +5,7 @@ import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound, conflict, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
 import { applySchemes } from '../../services/scheme-engine';
-import { priceCart } from '../../services/order-pricer';
+import { priceCart, CartLineInput } from '../../services/order-pricer';
 import { getDemoSchemes } from '../../utils/demoDistribution';
 
 const schemeSchema = z.object({
@@ -100,7 +100,7 @@ export const preview = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { data: ext } = await supabaseAdmin.from('outlet_distribution_ext').select('customer_class').eq('outlet_id', parsed.data.outlet_id).maybeSingle();
     cc = ext?.customer_class || 'GT';
   }
-  const priced = await priceCart(parsed.data.items, {
+  const priced = await priceCart(parsed.data.items as CartLineInput[], {
     org_id: user.org_id, customer_class: cc!, distributor_state_code: null, place_of_supply: null,
   });
   const schemeOut = await applySchemes(priced.lines, {
