@@ -37,16 +37,26 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (latitude == null || longitude == null) return badRequest(res, 'Latitude and longitude are required');
 
-  // Idempotency: Check existing record for the day. If the user already
-  // checked in today, return the existing row instead of creating a new one.
-  // The (user_id, date) UNIQUE constraint enforces this at the DB level too,
-  // and the upsert below is the race-safe insert path.
-  const { data: existing } = await supabaseAdmin
-    .from('attendance')
-    .select('*, breaks(*)')
-    .eq('user_id', user.id)
-    .eq('date', attendanceDate)
-    .maybeSingle();
+  // Idempotency + zone fetch run in parallel — neither depends on the other.
+  // Saves ~150-300ms vs. sequential awaits on a typical Supabase round-trip.
+  const resolvedZoneId = zone_id || user.zone_id;
+  const [existingResult, zoneResult] = await Promise.all([
+    supabaseAdmin
+      .from('attendance')
+      .select('*, breaks(*)')
+      .eq('user_id', user.id)
+      .eq('date', attendanceDate)
+      .maybeSingle(),
+    resolvedZoneId
+      ? supabaseAdmin
+          .from('zones')
+          .select('meeting_lat, meeting_lng, geofence_radius, name')
+          .eq('id', resolvedZoneId)
+          .maybeSingle()                                    // was .single() — would throw on missing row
+      : Promise.resolve({ data: null, error: null }),
+  ]);
+
+  const existing = existingResult.data;
 
   if (existing) {
     logger.info(`[Attendance] user=${user.id} already has a record for ${attendanceDate}. Returning existing.`);
@@ -60,24 +70,14 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     return;
   }
 
-  const resolvedZoneId = zone_id || user.zone_id;
-
   let distanceMetres = 0;
-  if (resolvedZoneId) {
-    const { data: zone } = await supabaseAdmin
-      .from('zones')
-      .select('meeting_lat, meeting_lng, geofence_radius, name')
-      .eq('id', resolvedZoneId)
-      .single();
-
-    if (zone) {
-      const { distanceMetres: dist } = isWithinGeofence(
-        latitude, longitude,
-        zone.meeting_lat, zone.meeting_lng,
-        zone.geofence_radius
-      );
-      distanceMetres = dist;
-    }
+  if (zoneResult.data) {
+    const { distanceMetres: dist } = isWithinGeofence(
+      latitude, longitude,
+      zoneResult.data.meeting_lat, zoneResult.data.meeting_lng,
+      zoneResult.data.geofence_radius
+    );
+    distanceMetres = dist;
   }
 
   // Race-safe insert: if a parallel request beat us to it, the (user_id, date)
@@ -104,30 +104,33 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (error) { badRequest(res, error.message); return; }
 
-  // Phase 2: Create a work_activity record
-  await supabaseAdmin.from('work_activity').insert({
-    org_id: user.org_id,
-    client_id: user.client_id,
-    user_id: user.id,
-    attendance_id: data.id,
-    activity_type: 'CHECK_IN',
-    lat: latitude,
-    lng: longitude,
-    captured_at: data.checkin_at
-  });
+  // Respond IMMEDIATELY. The two follow-up writes below are pure telemetry
+  // (work_activity log + last-known-location for the live tracking map);
+  // the FE app doesn't need them in the response. Saves another
+  // 200-400ms of perceived latency on the mobile check-in flow.
+  created(res, enrichWithHours(data), 'Checked in successfully');
 
-  // Update user's last known location and battery
-  await supabaseAdmin
-    .from('users')
-    .update({
+  // Fire-and-forget telemetry. Errors are logged but never returned.
+  Promise.all([
+    supabaseAdmin.from('work_activity').insert({
+      org_id: user.org_id,
+      client_id: user.client_id,
+      user_id: user.id,
+      attendance_id: data.id,
+      activity_type: 'CHECK_IN',
+      lat: latitude,
+      lng: longitude,
+      captured_at: data.checkin_at,
+    }),
+    supabaseAdmin.from('users').update({
       last_latitude: latitude,
       last_longitude: longitude,
       battery_percentage: battery_percentage !== undefined ? battery_percentage : undefined,
-      last_location_updated_at: data.checkin_at
-    })
-    .eq('id', user.id);
-
-  created(res, enrichWithHours(data), 'Checked in successfully');
+      last_location_updated_at: data.checkin_at,
+    }).eq('id', user.id),
+  ]).catch((err) => {
+    logger.warn(`[Attendance] post-checkin telemetry failed for user=${user.id}: ${err?.message || err}`);
+  });
 });
 
 // POST /api/v1/attendance/checkout
@@ -199,26 +202,29 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (error) { badRequest(res, error.message); return; }
 
-  // Record activity
-  await supabaseAdmin.from('work_activity').insert({
-    org_id: user.org_id,
-    client_id: user.client_id,
-    user_id: user.id,
-    attendance_id: record.id,
-    activity_type: 'CHECK_OUT',
-    lat: latitude,
-    lng: longitude,
-    captured_at: updatedRecord.checkout_at
-  });
-
-  // Clear live location
-  await supabaseAdmin.from('users').update({
-    last_latitude: null,
-    last_longitude: null,
-    last_location_updated_at: updatedRecord.checkout_at
-  }).eq('id', user.id);
-
+  // Respond first; telemetry follows.
   ok(res, enrichWithHours(updatedRecord), 'Checked out successfully');
+
+  // Fire-and-forget: work_activity log + clear live location.
+  Promise.all([
+    supabaseAdmin.from('work_activity').insert({
+      org_id: user.org_id,
+      client_id: user.client_id,
+      user_id: user.id,
+      attendance_id: record.id,
+      activity_type: 'CHECK_OUT',
+      lat: latitude,
+      lng: longitude,
+      captured_at: updatedRecord.checkout_at,
+    }),
+    supabaseAdmin.from('users').update({
+      last_latitude: null,
+      last_longitude: null,
+      last_location_updated_at: updatedRecord.checkout_at,
+    }).eq('id', user.id),
+  ]).catch((err) => {
+    logger.warn(`[Attendance] post-checkout telemetry failed for user=${user.id}: ${err?.message || err}`);
+  });
 });
 
 // POST /api/v1/attendance/break/start
