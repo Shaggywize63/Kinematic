@@ -4,7 +4,7 @@ import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound, conflict, forbidden, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
-import { priceCart, haversineMeters, PricerError } from '../../services/order-pricer';
+import { priceCart, haversineMeters, PricerError, CartLineInput } from '../../services/order-pricer';
 import { applySchemes, SCHEME_ENGINE_VERSION } from '../../services/scheme-engine';
 import { summariseTotals } from '../../services/tax';
 import { getDemoOrder, getDemoOrderList } from '../../utils/demoDistribution';
@@ -140,7 +140,8 @@ export const preview = asyncHandler(async (req: AuthRequest, res: Response) => {
 
   try {
     const ctx = await buildPriceContext(user, parsed.data.outlet_id, parsed.data.distributor_id);
-    const result = await priceCart(parsed.data.items, {
+    const items = parsed.data.items as CartLineInput[];
+    const result = await priceCart(items, {
       org_id: user.org_id,
       client_id: user.client_id,
       customer_class: ctx.customer_class,
@@ -178,7 +179,8 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   let ctx; let priced; let schemeOut;
   try {
     ctx = await buildPriceContext(user, parsed.data.outlet_id, parsed.data.distributor_id);
-    priced = await priceCart(parsed.data.items, {
+    const items = parsed.data.items as CartLineInput[];
+    priced = await priceCart(items, {
       org_id: user.org_id,
       client_id: user.client_id,
       customer_class: ctx.customer_class,
