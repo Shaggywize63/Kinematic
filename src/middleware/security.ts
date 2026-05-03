@@ -45,10 +45,14 @@ import { logger } from '../lib/logger';
 //      dev/staging.
 //
 const KNOWN_ORIGINS = new Set<string>([
+  // Production dashboard surfaces
+  'https://dashboard.kinematicapp.com',
+  'https://app.kinematicapp.com',
   'https://kinematic-dashboard.vercel.app',
   'https://kinematic-dashboard.kaiyo.app',
   'https://app.kinematic.app',
   'https://app.kaiyolabs.com',
+  // Local dev
   'http://localhost:3000',
   'http://localhost:3001',
   'http://127.0.0.1:3000',
@@ -57,7 +61,8 @@ const KNOWN_ORIGINS = new Set<string>([
 const KNOWN_PATTERNS: RegExp[] = [
   // Vercel preview deployments for our dashboard repo
   /^https:\/\/kinematic-dashboard-[a-z0-9-]+\.vercel\.app$/i,
-  // Kaiyo / Kinematic-branded subdomains
+  // Kinematic / Kaiyo-branded subdomains
+  /^https:\/\/[a-z0-9-]+\.kinematicapp\.com$/i,
   /^https:\/\/[a-z0-9-]+\.kinematic\.app$/i,
   /^https:\/\/[a-z0-9-]+\.kaiyo\.app$/i,
   /^https:\/\/[a-z0-9-]+\.kaiyolabs\.com$/i,
