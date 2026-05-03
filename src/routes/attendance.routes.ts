@@ -2,15 +2,20 @@ import { Router } from 'express';
 import * as ctrl from '../controllers/attendance.controller';
 import { requireAuth, requireSupervisorOrAbove } from '../middleware/auth';
 import { cacheGet } from '../utils/cache';
+import { idempotency } from '../middleware/idempotency';
 
 const router = Router();
 
 router.use(requireAuth);
 
-router.post('/checkin',      ctrl.checkin);
-router.post('/checkout',     ctrl.checkout);
-router.post('/break/start',  ctrl.startBreak);
-router.post('/break/end',    ctrl.endBreak);
+// Mutating endpoints accept Idempotency-Key so the mobile clients can safely
+// retry an offline-queued check-in without ending up with phantom records.
+// The (user_id, date) UNIQUE constraint already provides a backstop, but the
+// explicit replay returns the original response body byte-for-byte.
+router.post('/checkin',      idempotency, ctrl.checkin);
+router.post('/checkout',     idempotency, ctrl.checkout);
+router.post('/break/start',  idempotency, ctrl.startBreak);
+router.post('/break/end',    idempotency, ctrl.endBreak);
 // 15s private cache on /today lets the dashboard SWR layer + mobile clients
 // 304 instead of pulling the full JSON on every poll.
 router.get('/today',         cacheGet(15), ctrl.getToday);
