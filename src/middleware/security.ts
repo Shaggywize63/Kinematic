@@ -31,33 +31,57 @@ import { logger } from '../lib/logger';
 
 // ── 1. CORS ─────────────────────────────────────────────────────────────────
 //
-// CORS_ORIGINS is a comma-separated list. Use `*` only in dev. In prod, set
-// the Vercel preview + production domains explicitly.
-//   CORS_ORIGINS=https://kinematic-dashboard.vercel.app,https://app.kinematic.app
+// Allowlist is a UNION of three sources:
 //
-const PARSED_ORIGINS = (process.env.CORS_ORIGINS || '')
+//   1. KNOWN_ORIGINS — baked-in canonical surfaces (production dashboard,
+//      Vercel previews, localhost dev). These work out of the box; no env
+//      config required. This is what makes the dashboard "just work" after
+//      a fresh deploy.
+//
+//   2. KNOWN_PATTERNS — regex patterns (Vercel preview URLs are dynamic).
+//
+//   3. CORS_ORIGINS env var — comma-separated extras for custom domains
+//      (e.g. https://app.kinematic.app). Set `*` to unlock everything in
+//      dev/staging.
+//
+const KNOWN_ORIGINS = new Set<string>([
+  'https://kinematic-dashboard.vercel.app',
+  'https://kinematic-dashboard.kaiyo.app',
+  'https://app.kinematic.app',
+  'https://app.kaiyolabs.com',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3000',
+]);
+
+const KNOWN_PATTERNS: RegExp[] = [
+  // Vercel preview deployments for our dashboard repo
+  /^https:\/\/kinematic-dashboard-[a-z0-9-]+\.vercel\.app$/i,
+  // Kaiyo / Kinematic-branded subdomains
+  /^https:\/\/[a-z0-9-]+\.kinematic\.app$/i,
+  /^https:\/\/[a-z0-9-]+\.kaiyo\.app$/i,
+  /^https:\/\/[a-z0-9-]+\.kaiyolabs\.com$/i,
+];
+
+const PARSED_EXTRA = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-
-const VERCEL_PREVIEW_RE = /^https:\/\/kinematic-dashboard-[a-z0-9-]+\.vercel\.app$/i;
 
 export const corsOrigin: CorsOptions['origin'] = (origin, cb) => {
   // Allow same-origin / non-browser tools (no Origin header).
   if (!origin) return cb(null, true);
 
-  if (PARSED_ORIGINS.length === 0) {
-    // No allowlist configured = legacy behaviour, but warn loudly so we notice.
-    logger.warn(`[cors] CORS_ORIGINS not set; allowing ${origin} by fallback`);
-    return cb(null, true);
-  }
+  // 1. Baked-in canonical surfaces.
+  if (KNOWN_ORIGINS.has(origin)) return cb(null, true);
 
-  if (PARSED_ORIGINS.includes('*')) return cb(null, true);
-  if (PARSED_ORIGINS.includes(origin)) return cb(null, true);
-  // Vercel preview deployments — auto-allow if a wildcard pattern is opted in.
-  if (process.env.CORS_ALLOW_VERCEL_PREVIEWS === 'true' && VERCEL_PREVIEW_RE.test(origin)) {
-    return cb(null, true);
-  }
+  // 2. Pattern matches (Vercel previews, branded subdomains).
+  if (KNOWN_PATTERNS.some((re) => re.test(origin))) return cb(null, true);
+
+  // 3. Env-driven extras for custom domains.
+  if (PARSED_EXTRA.includes('*')) return cb(null, true);
+  if (PARSED_EXTRA.includes(origin)) return cb(null, true);
+
   logger.warn(`[cors] BLOCKED origin: ${origin}`);
   return cb(new Error('CORS: origin not allowed'));
 };
