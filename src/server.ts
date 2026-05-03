@@ -10,6 +10,14 @@ const server = app.listen(PORT, () => {
   logger.info(`   API base    : http://localhost:${PORT}/api/v1`);
 });
 
+// Slowloris / hung-connection protection. headersTimeout slightly exceeds
+// keepAliveTimeout per Node's recommendation; requestTimeout caps any single
+// request including its body.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout   = 70_000;
+server.requestTimeout   = 30_000;
+server.timeout          = 30_000;
+
 // Graceful shutdown
 const shutdown = (signal: string) => {
   logger.info(`${signal} received — shutting down gracefully`);

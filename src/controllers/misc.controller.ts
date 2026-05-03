@@ -303,6 +303,9 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   if (!/^\d{10}$/.test(mobile)) {
     throw new AppError(400, 'Mobile number must be exactly 10 digits', 'VALIDATION_ERROR')
   }
+  // Password policy (≥10 chars, no common/sequenced/repeated patterns).
+  const pol = require('../middleware/security').validatePassword(password)
+  if (!pol.ok) throw new AppError(400, pol.reason, 'WEAK_PASSWORD')
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (email && !emailRegex.test(email)) {
     throw new AppError(400, 'Please provide a valid email address', 'VALIDATION_ERROR')
@@ -461,8 +464,9 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
   // Sync app_password with Supabase Auth if provided
   if (req.body.app_password) {
     const pw = req.body.app_password.trim()
-    if (pw.length < 6) throw new AppError(400, 'App password must be at least 6 characters', 'VALIDATION_ERROR')
-    
+    const pol = require('../middleware/security').validatePassword(pw)
+    if (!pol.ok) throw new AppError(400, `App password rejected: ${pol.reason}`, 'WEAK_PASSWORD')
+
     try {
       const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password: pw })
       if (authErr) throw new AppError(400, `Auth password update failed: ${authErr.message}`, 'AUTH_ERROR')
