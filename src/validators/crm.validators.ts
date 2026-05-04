@@ -80,7 +80,7 @@ export const dealSchema = z.object({
   primary_contact_id: optionalUuid,
   lead_id: optionalUuid,
   amount: z.number().nonnegative().default(0),
-  currency: z.string().length(3).default('USD'),
+  currency: z.string().length(3).default('INR'),
   expected_close_date: isoDate,
   probability: z.number().min(0).max(100).optional().nullable(),
   owner_id: optionalUuid,
