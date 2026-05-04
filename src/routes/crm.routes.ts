@@ -54,9 +54,7 @@ router.get('/webhooks/whatsapp', (req, res) => {
   }
   res.sendStatus(403);
 });
-// Meta WhatsApp Business webhook event payloads (messages + statuses).
 router.post('/webhooks/whatsapp', express.json({ limit: '2mb' }), async (req, res) => {
-  // Best-effort signature check; if shared secret is configured, validate it.
   const sigHeader = req.headers['x-hub-signature-256'];
   if (process.env.CRM_WHATSAPP_APP_SECRET && typeof sigHeader === 'string') {
     const crypto = await import('crypto');
@@ -66,15 +64,11 @@ router.post('/webhooks/whatsapp', express.json({ limit: '2mb' }), async (req, re
       .update(raw).digest('hex');
     if (expected !== sigHeader) return res.sendStatus(401);
   }
-  // Org id resolution: route via the phone number id mapping (set on the org
-  // via settings.config.whatsapp_org_id_by_phone). Fallback: first org with the
-  // phone configured. For the stub, expect explicit org_id in body or header.
   const orgId = (req.body?.org_id as string | undefined)
     ?? (req.headers['x-org-id'] as string | undefined);
   if (!orgId) {
     return res.status(202).json({ ignored: 'no org context resolvable for stub provider' });
   }
-  // Meta-shaped payload: entry[].changes[].value.messages|statuses
   try {
     const entries = req.body?.entry ?? [];
     for (const entry of entries) {
@@ -173,6 +167,9 @@ leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc
 leads.get('/:id/activities', wrap(async (req, res) => res.json(
   await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
 )));
+leads.get('/:id/deals', wrap(async (req, res) => res.json(
+  await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query })
+)));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
@@ -190,8 +187,15 @@ contacts.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req)))));
 contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id); res.status(204).end(); }));
 contacts.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query })
+  await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
 )));
+contacts.get('/:id/deals', wrap(async (req, res) => res.json(
+  await crud.list('crm_deals', orgId(req), { primary_contact_id: req.params.id, ...req.query })
+)));
+contacts.get('/:id/notes', wrap(async (req, res) => res.json(
+  await crud.list('crm_notes', orgId(req), { entity_type: 'contact', entity_id: req.params.id, ...req.query }, { softDelete: false })
+)));
+contacts.get('/:id/emails', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), { contact_id: req.params.id }))));
 router.use('/contacts', contacts);
 
 // ---------- ACCOUNTS -------------------------------------------------
@@ -210,7 +214,10 @@ accounts.get('/:id/deals', wrap(async (req, res) => res.json(
   await crud.list('crm_deals', orgId(req), { account_id: req.params.id, ...req.query })
 )));
 accounts.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query })
+  await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
+)));
+accounts.get('/:id/notes', wrap(async (req, res) => res.json(
+  await crud.list('crm_notes', orgId(req), { entity_type: 'account', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
 accounts.post('/:id/summarize', wrap(async (req, res) =>
   res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), req.params.id) })));
@@ -235,7 +242,23 @@ deals.post('/:id/win-probability', wrap(async (req, res) => res.json(await winSv
 deals.post('/:id/next-action', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), req.params.id, true))));
 deals.get('/:id/history', wrap(async (req, res) => res.json(await dealsSvc.dealHistory(orgId(req), req.params.id))));
 deals.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query })
+  await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
+)));
+deals.get('/:id/contacts', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('crm_deal_contacts')
+    .select('contact_id, role, is_primary, contact:crm_contacts(*)')
+    .eq('deal_id', req.params.id);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json((data ?? []).map((r: { contact_id: string; role: string | null; is_primary: boolean; contact: unknown }) => ({
+    contact_id: r.contact_id,
+    role: r.role,
+    is_primary: r.is_primary,
+    contact: r.contact,
+  })));
+}));
+deals.get('/:id/notes', wrap(async (req, res) => res.json(
+  await crud.list('crm_notes', orgId(req), { entity_type: 'deal', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
 // Deal line items (nested under the deal).
 deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc.listLineItems(orgId(req), req.params.id))));
@@ -267,20 +290,20 @@ pipelines.get('/:id/stages', wrap(async (req, res) => res.json(
 )));
 router.use('/pipelines', pipelines);
 
-const stages = express.Router();
-stages.get('/', wrap(async (req, res) => res.json(await crud.list('crm_deal_stages', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'position', ascending: true } }))));
-stages.post('/', wrap(async (req, res) =>
+const stagesRouter = express.Router();
+stagesRouter.get('/', wrap(async (req, res) => res.json(await crud.list('crm_deal_stages', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'position', ascending: true } }))));
+stagesRouter.post('/', wrap(async (req, res) =>
   res.status(201).json(await crud.create('crm_deal_stages', orgId(req), parse(v.stageSchema, req.body)))));
-stages.patch('/:id', wrap(async (req, res) =>
+stagesRouter.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_deal_stages', orgId(req), req.params.id, parse(v.stageSchema.partial(), req.body)))));
-stages.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_deal_stages', orgId(req), req.params.id); res.status(204).end(); }));
-stages.post('/reorder', wrap(async (req, res) => {
+stagesRouter.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_deal_stages', orgId(req), req.params.id); res.status(204).end(); }));
+stagesRouter.post('/reorder', wrap(async (req, res) => {
   const body = parse(v.reorderStagesSchema, req.body);
   await Promise.all(body.stages.map(s => supabaseAdmin.from('crm_deal_stages')
     .update({ position: s.position }).eq('id', s.id).eq('org_id', orgId(req))));
   res.json({ ok: true });
 }));
-router.use('/stages', stages);
+router.use('/stages', stagesRouter);
 
 // ---------- ACTIVITIES + NOTES + TASKS ------------------------------
 const activities = express.Router();
@@ -316,7 +339,38 @@ tasks.get('/', wrap(async (req, res) => res.json(
 )));
 router.use('/tasks', tasks);
 
-// ---------- SOURCES + RULES + TERRITORIES + CAMPAIGNS + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES + PRODUCTS
+// ---------- STATES + CITIES (location management) -------------------
+const states = express.Router();
+states.get('/', wrap(async (req, res) => res.json(
+  await crud.list('crm_states', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name','code'] })
+)));
+states.post('/', wrap(async (req, res) =>
+  res.status(201).json(await crud.create('crm_states', orgId(req), parse(v.stateSchema, req.body), userId(req)))));
+states.patch('/:id', wrap(async (req, res) =>
+  res.json(await crud.update('crm_states', orgId(req), req.params.id, parse(v.stateSchema.partial(), req.body), userId(req)))));
+states.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_states', orgId(req), req.params.id); res.status(204).end(); }));
+states.get('/:id/cities', wrap(async (req, res) => res.json(
+  await crud.list('crm_cities', orgId(req), { state_id: req.params.id, ...req.query }, { softDelete: false, defaultSort: { column: 'name', ascending: true } })
+)));
+states.post('/seed-indian', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin.rpc('crm_seed_indian_locations', { p_org_id: orgId(req) });
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json(data ?? { states: 0, cities: 0 });
+}));
+router.use('/states', states);
+
+const cities = express.Router();
+cities.get('/', wrap(async (req, res) => res.json(
+  await crud.list('crm_cities', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name'] })
+)));
+cities.post('/', wrap(async (req, res) =>
+  res.status(201).json(await crud.create('crm_cities', orgId(req), parse(v.citySchema, req.body), userId(req)))));
+cities.patch('/:id', wrap(async (req, res) =>
+  res.json(await crud.update('crm_cities', orgId(req), req.params.id, parse(v.citySchema.partial(), req.body), userId(req)))));
+cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
+router.use('/cities', cities);
+
+// ---------- SOURCES + RULES + TERRITORIES + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES + PRODUCTS
 function attach(path: string, table: string, schema: z.ZodObject<z.ZodRawShape>, opts: Partial<crud.CrudOpts> = {}) {
   const r = express.Router();
   r.get('/', wrap(async (req, res) => res.json(await crud.list(table, orgId(req), req.query, opts))));
@@ -333,7 +387,6 @@ function attach(path: string, table: string, schema: z.ZodObject<z.ZodRawShape>,
 attach('/lead-sources', 'crm_lead_sources', v.leadSourceSchema, { softDelete: false });
 attach('/assignment-rules', 'crm_lead_assignment_rules', v.assignmentRuleSchema, { softDelete: false });
 attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false });
-attach('/campaigns', 'crm_campaigns', v.campaignSchema, { softDelete: false });
 attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false });
 attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false });
@@ -346,11 +399,14 @@ attach('/whatsapp-templates', 'crm_whatsapp_templates', v.whatsappTemplateSchema
 const settings = express.Router();
 settings.get('/', wrap(async (req, res) => {
   const { data } = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
-  res.json(data ?? { org_id: orgId(req), config: {} });
+  res.json(data ?? { org_id: orgId(req), config: {}, business_type: 'both' });
 }));
 settings.patch('/', wrap(async (req, res) => {
-  const body = parse(z.object({ config: z.record(z.unknown()) }), req.body);
-  const { data } = await supabaseAdmin.from('crm_settings').upsert({ org_id: orgId(req), config: body.config }, { onConflict: 'org_id' }).select('*').single();
+  const body = parse(v.settingsUpdateSchema, req.body);
+  const update: Record<string, unknown> = { org_id: orgId(req) };
+  if (body.config !== undefined) update.config = body.config;
+  if (body.business_type !== undefined) update.business_type = body.business_type;
+  const { data } = await supabaseAdmin.from('crm_settings').upsert(update, { onConflict: 'org_id' }).select('*').single();
   res.json(data);
 }));
 settings.post('/seed-defaults', wrap(async (req, res) => {
@@ -419,6 +475,22 @@ analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.
 analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(await analyticsSvc.activityHeatmap(orgId(req)))));
 analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(await analyticsSvc.leadSourceRoi(orgId(req)))));
 analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req)))));
+// Geo breakdown for dashboard filtering
+analytics.get('/by-state', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('crm_contacts')
+    .select('state')
+    .eq('org_id', orgId(req))
+    .is('deleted_at', null)
+    .not('state', 'is', null);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const counts: Record<string, number> = {};
+  for (const r of data ?? []) {
+    const s = (r as { state: string | null }).state;
+    if (s) counts[s] = (counts[s] || 0) + 1;
+  }
+  res.json(Object.entries(counts).map(([state, count]) => ({ state, count })).sort((a, b) => b.count - a.count));
+}));
 router.use('/analytics', analytics);
 
 // ---------- AI -------------------------------------------------------
