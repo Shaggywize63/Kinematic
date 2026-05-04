@@ -173,7 +173,7 @@ export const reorderStagesSchema = z.object({
 
 export const leadSourceSchema = z.object({
   name: z.string().min(1).max(120),
-  type: z.enum(['csv','manual','web_form','email','api','campaign','referral','event','social','ads']).default('manual'),
+  type: z.enum(['csv','manual','web_form','email','api','referral','event','social','ads']).default('manual'),
   is_active: z.boolean().optional(),
   cost_per_lead: z.number().nonnegative().optional(),
 });
@@ -216,19 +216,6 @@ export const sendEmailSchema = z.object({
   lead_id: optionalUuid,
   contact_id: optionalUuid,
   deal_id: optionalUuid,
-});
-
-export const campaignSchema = z.object({
-  name: z.string().min(1).max(200),
-  type: z.string().default('email'),
-  status: z.enum(['planned','active','paused','completed','cancelled']).default('planned'),
-  start_date: isoDate,
-  end_date: isoDate,
-  budget: z.number().nonnegative().default(0),
-  actual_cost: z.number().nonnegative().default(0),
-  expected_revenue: z.number().nonnegative().default(0),
-  expected_response_rate: z.number().min(0).max(100).default(0),
-  description: z.string().optional().nullable(),
 });
 
 export const automationSchema = z.object({
