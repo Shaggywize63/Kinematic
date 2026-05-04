@@ -80,7 +80,7 @@ export async function rerankWithLlm(
     };
     const response = await aiComplete({
       org_id,
-      model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-3-haiku-20240307',
+      model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-haiku-4-5',
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: JSON.stringify(userPayload) }],
       max_tokens: 300,
