@@ -262,7 +262,7 @@ cities.patch('/:id', wrap(async (req, res) =>
 cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
 router.use('/cities', cities);
 
-// ---------- SOURCES + RULES + TERRITORIES + CAMPAIGNS + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES
+// ---------- SOURCES + RULES + TERRITORIES + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES
 function attach(path: string, table: string, schema: z.ZodObject<z.ZodRawShape>, opts: Partial<crud.CrudOpts> = {}) {
   const r = express.Router();
   r.get('/', wrap(async (req, res) => res.json(await crud.list(table, orgId(req), req.query, opts))));
@@ -279,7 +279,6 @@ function attach(path: string, table: string, schema: z.ZodObject<z.ZodRawShape>,
 attach('/lead-sources', 'crm_lead_sources', v.leadSourceSchema, { softDelete: false });
 attach('/assignment-rules', 'crm_lead_assignment_rules', v.assignmentRuleSchema, { softDelete: false });
 attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false });
-attach('/campaigns', 'crm_campaigns', v.campaignSchema, { softDelete: false });
 attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false });
 attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false });
@@ -352,7 +351,6 @@ analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.
 analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(await analyticsSvc.activityHeatmap(orgId(req)))));
 analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(await analyticsSvc.leadSourceRoi(orgId(req)))));
 analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req)))));
-// Geo breakdown for dashboard filtering
 analytics.get('/by-state', wrap(async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from('crm_contacts')
