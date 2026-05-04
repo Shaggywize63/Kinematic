@@ -40,7 +40,8 @@ async function parseHeadersAndSample(fileName: string, buffer: Buffer): Promise<
   }
   if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(buffer);
+    // exceljs's typings expect a strict ArrayBuffer; Node's Buffer is a Uint8Array view over one.
+    await wb.xlsx.load(buffer as unknown as ArrayBuffer);
     const ws = wb.worksheets[0];
     const headers: string[] = [];
     const headerRow = ws.getRow(1);
@@ -79,7 +80,7 @@ async function suggestMapping(org_id: string, headers: string[]): Promise<Record
   try {
     const reply = await aiComplete({
       org_id,
-      model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-3-haiku-20240307',
+      model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-haiku-4-5',
       system: `You map CSV headers to canonical lead fields. Allowed: ${CANONICAL_FIELDS.join(', ')}. Output JSON {"<header>": "<canonical>" | null}. JSON only.`,
       messages: [{ role: 'user', content: JSON.stringify({ headers: unmapped }) }],
       max_tokens: 400,
@@ -131,7 +132,7 @@ export async function commitJob(org_id: string, job_id: string) {
 export async function getJob(org_id: string, job_id: string) {
   const { data, error } = await supabaseAdmin.from('crm_import_jobs').select('*')
     .eq('org_id', org_id).eq('id', job_id).single();
-  if (error) throw new AppError(404, 'NOT_FOUND', 'Import job not found');
+  if (error) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
   return data;
 }
 
