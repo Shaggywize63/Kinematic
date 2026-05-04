@@ -8,6 +8,27 @@ const uuid = z.string().uuid();
 const optionalUuid = uuid.nullish();
 const isoDate = z.string().datetime({ offset: true }).or(z.string().date()).optional().nullable();
 
+const contactMethod = z.enum(['email','phone','whatsapp','sms']).optional().nullable();
+const gender = z.enum(['male','female','other','prefer_not_to_say']).optional().nullable();
+const loyaltyTier = z.enum(['bronze','silver','gold','platinum','vip']).optional().nullable();
+
+// B2C fields shared by leads + contacts
+const b2cBase = {
+  is_b2c: z.boolean().optional(),
+  date_of_birth: z.string().date().optional().nullable(),
+  gender,
+  address_line1: z.string().max(200).optional().nullable(),
+  address_line2: z.string().max(200).optional().nullable(),
+  city: z.string().max(120).optional().nullable(),
+  state: z.string().max(120).optional().nullable(),
+  postal_code: z.string().max(20).optional().nullable(),
+  country: z.string().max(80).optional().nullable(),
+  preferred_contact_method: contactMethod,
+  marketing_consent: z.boolean().optional(),
+  whatsapp_consent: z.boolean().optional(),
+  interests: z.array(z.string()).optional(),
+};
+
 export const leadCreateSchema = z.object({
   first_name: z.string().min(1).max(120).optional().nullable(),
   last_name: z.string().min(1).max(120).optional().nullable(),
@@ -18,12 +39,11 @@ export const leadCreateSchema = z.object({
   source_id: optionalUuid,
   status: z.enum(['new','working','nurturing','qualified','unqualified']).optional(),
   owner_id: optionalUuid,
-  country: z.string().max(80).optional().nullable(),
-  city: z.string().max(80).optional().nullable(),
   industry: z.string().max(120).optional().nullable(),
   notes: z.string().optional().nullable(),
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
+  ...b2cBase,
 });
 
 export const leadUpdateSchema = leadCreateSchema.partial().extend({
@@ -53,6 +73,14 @@ export const contactSchema = z.object({
   email_opt_out: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
+  ...b2cBase,
+  // Customer fields (B2C only)
+  loyalty_tier: loyaltyTier,
+  customer_since: isoDate,
+  lifetime_value: z.number().nonnegative().optional(),
+  total_orders: z.number().int().nonnegative().optional(),
+  last_purchase_at: isoDate,
+  referral_source: z.string().max(120).optional().nullable(),
 });
 
 export const accountSchema = z.object({
@@ -97,9 +125,10 @@ export const winSchema = z.object({ actual_close_date: isoDate, amount: z.number
 export const loseSchema = z.object({ actual_close_date: isoDate, lost_reason: z.string().max(500).optional() });
 
 export const activitySchema = z.object({
-  type: z.enum(['call','meeting','email','note','task','sms']),
+  type: z.enum(['call','meeting','email','note','task','sms','whatsapp']),
   subject: z.string().max(200).optional().nullable(),
   body: z.string().optional().nullable(),
+  description: z.string().optional().nullable(),
   direction: z.enum(['inbound','outbound']).optional().nullable(),
   status: z.enum(['planned','completed','cancelled']).default('completed'),
   due_at: isoDate,
@@ -238,3 +267,9 @@ export const draftReplySchema = z.object({
 });
 
 export const summarizeSchema = z.object({});
+
+// Settings — including new business_type for B2B/B2C
+export const settingsUpdateSchema = z.object({
+  config: z.record(z.unknown()).optional(),
+  business_type: z.enum(['b2b','b2c','both']).optional(),
+});
