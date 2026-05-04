@@ -210,7 +210,8 @@ export async function executeTool(org_id: string, name: string, args: Record<str
   if (!tool) return null;
   const result = await tool.exec(org_id, args);
   if (typeof result === 'object' && result !== null && 'card' in result) {
-    return { tool: name, data: (result as { data: unknown }).data, card: (result as { card?: { type: string; data: unknown } }).card };
+    const r = result as unknown as { data: unknown; card?: { type: string; data: unknown } };
+    return { tool: name, data: r.data, card: r.card };
   }
   return { tool: name, data: result };
 }
