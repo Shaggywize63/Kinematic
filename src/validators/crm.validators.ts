@@ -273,3 +273,17 @@ export const settingsUpdateSchema = z.object({
   config: z.record(z.unknown()).optional(),
   business_type: z.enum(['b2b','b2c','both']).optional(),
 });
+
+// States & cities management
+export const stateSchema = z.object({
+  name: z.string().min(1).max(120),
+  code: z.string().max(10).optional().nullable(),
+  country: z.string().max(80).default('India'),
+  is_active: z.boolean().optional(),
+});
+
+export const citySchema = z.object({
+  state_id: uuid,
+  name: z.string().min(1).max(120),
+  is_active: z.boolean().optional(),
+});
