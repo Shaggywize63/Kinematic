@@ -14,7 +14,7 @@ export interface CrudOpts {
 }
 
 export async function list(table: string, org_id: string, query: Record<string, unknown> = {}, opts: Partial<CrudOpts> = {}) {
-  let q = supabaseAdmin.from(table).select('*', { count: 'exact' }).eq('org_id', org_id);
+  let q = supabaseAdmin.from(table).select('*').eq('org_id', org_id);
   if (opts.softDelete !== false) q = q.is('deleted_at', null);
   for (const [k, v] of Object.entries(query)) {
     if (['limit','page','q','sort','order'].includes(k) || v === undefined || v === null || v === '') continue;
@@ -30,9 +30,9 @@ export async function list(table: string, org_id: string, query: Record<string, 
   const sort = (query.sort as string) || opts.defaultSort?.column || 'created_at';
   const order = (query.order as string) || (opts.defaultSort?.ascending ? 'asc' : 'desc');
   q = q.order(sort, { ascending: order === 'asc' }).range((page - 1) * limit, page * limit - 1);
-  const { data, error, count } = await q;
+  const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return { data: data ?? [], total: count ?? 0, page, limit };
+  return data ?? [];
 }
 
 export async function get(table: string, org_id: string, id: string, softDelete = true) {
