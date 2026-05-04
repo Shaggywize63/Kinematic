@@ -30,6 +30,20 @@ import { chatWithTools } from '../services/crm/ai/aiClient';
 const router: Router = express.Router();
 router.use(requireAuth, requireModule('crm'));
 
+// Wrap every res.json payload in {success, data} so the dashboard's
+// Wrapped<T> typings match runtime. Pass-through if the body already has
+// a `success` field (error handler emits {success:false,...}).
+router.use((_req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (body: unknown) => {
+    if (body && typeof body === 'object' && 'success' in (body as Record<string, unknown>)) {
+      return originalJson(body);
+    }
+    return originalJson({ success: true, data: body });
+  };
+  next();
+});
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 // ---------- helpers --------------------------------------------------
