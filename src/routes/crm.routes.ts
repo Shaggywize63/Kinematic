@@ -46,7 +46,6 @@ function userId(req: Request): string | undefined {
   const r = req as Request & { user?: { id?: string; user_id?: string }; auth?: { user_id?: string } };
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
-// Generic over the schema type so z.infer<T> preserves required-vs-optional fields.
 function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> {
   try { return schema.parse(payload); }
   catch (e) {
@@ -183,20 +182,20 @@ pipelines.get('/:id/stages', wrap(async (req, res) => res.json(
 )));
 router.use('/pipelines', pipelines);
 
-const stages = express.Router();
-stages.get('/', wrap(async (req, res) => res.json(await crud.list('crm_deal_stages', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'position', ascending: true } }))));
-stages.post('/', wrap(async (req, res) =>
+const stagesRouter = express.Router();
+stagesRouter.get('/', wrap(async (req, res) => res.json(await crud.list('crm_deal_stages', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'position', ascending: true } }))));
+stagesRouter.post('/', wrap(async (req, res) =>
   res.status(201).json(await crud.create('crm_deal_stages', orgId(req), parse(v.stageSchema, req.body)))));
-stages.patch('/:id', wrap(async (req, res) =>
+stagesRouter.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_deal_stages', orgId(req), req.params.id, parse(v.stageSchema.partial(), req.body)))));
-stages.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_deal_stages', orgId(req), req.params.id); res.status(204).end(); }));
-stages.post('/reorder', wrap(async (req, res) => {
+stagesRouter.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_deal_stages', orgId(req), req.params.id); res.status(204).end(); }));
+stagesRouter.post('/reorder', wrap(async (req, res) => {
   const body = parse(v.reorderStagesSchema, req.body);
   await Promise.all(body.stages.map(s => supabaseAdmin.from('crm_deal_stages')
     .update({ position: s.position }).eq('id', s.id).eq('org_id', orgId(req))));
   res.json({ ok: true });
 }));
-router.use('/stages', stages);
+router.use('/stages', stagesRouter);
 
 // ---------- ACTIVITIES + NOTES + TASKS ------------------------------
 const activities = express.Router();
@@ -231,6 +230,37 @@ tasks.get('/', wrap(async (req, res) => res.json(
   await crud.list('crm_activities', orgId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true } })
 )));
 router.use('/tasks', tasks);
+
+// ---------- STATES + CITIES (location management) -------------------
+const states = express.Router();
+states.get('/', wrap(async (req, res) => res.json(
+  await crud.list('crm_states', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name','code'] })
+)));
+states.post('/', wrap(async (req, res) =>
+  res.status(201).json(await crud.create('crm_states', orgId(req), parse(v.stateSchema, req.body), userId(req)))));
+states.patch('/:id', wrap(async (req, res) =>
+  res.json(await crud.update('crm_states', orgId(req), req.params.id, parse(v.stateSchema.partial(), req.body), userId(req)))));
+states.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_states', orgId(req), req.params.id); res.status(204).end(); }));
+states.get('/:id/cities', wrap(async (req, res) => res.json(
+  await crud.list('crm_cities', orgId(req), { state_id: req.params.id, ...req.query }, { softDelete: false, defaultSort: { column: 'name', ascending: true } })
+)));
+states.post('/seed-indian', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin.rpc('crm_seed_indian_locations', { p_org_id: orgId(req) });
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json(data ?? { states: 0, cities: 0 });
+}));
+router.use('/states', states);
+
+const cities = express.Router();
+cities.get('/', wrap(async (req, res) => res.json(
+  await crud.list('crm_cities', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name'] })
+)));
+cities.post('/', wrap(async (req, res) =>
+  res.status(201).json(await crud.create('crm_cities', orgId(req), parse(v.citySchema, req.body), userId(req)))));
+cities.patch('/:id', wrap(async (req, res) =>
+  res.json(await crud.update('crm_cities', orgId(req), req.params.id, parse(v.citySchema.partial(), req.body), userId(req)))));
+cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
+router.use('/cities', cities);
 
 // ---------- SOURCES + RULES + TERRITORIES + CAMPAIGNS + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES
 function attach(path: string, table: string, schema: z.ZodObject<z.ZodRawShape>, opts: Partial<crud.CrudOpts> = {}) {
@@ -282,7 +312,6 @@ emails.post('/send', wrap(async (req, res) => {
   res.status(201).json(await emailsSvc.sendEmail({ ...body, org_id: orgId(req), user_id: userId(req) }));
 }));
 emails.get('/', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), req.query))));
-// Tracking endpoints — public (no auth) by design. Token is the auth.
 router.get('/emails/track/open/:token', async (req, res) => {
   await emailsSvc.recordOpen(req.params.token).catch(() => {});
   res.set('Content-Type', 'image/gif');
@@ -323,6 +352,22 @@ analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.
 analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(await analyticsSvc.activityHeatmap(orgId(req)))));
 analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(await analyticsSvc.leadSourceRoi(orgId(req)))));
 analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req)))));
+// Geo breakdown for dashboard filtering
+analytics.get('/by-state', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('crm_contacts')
+    .select('state')
+    .eq('org_id', orgId(req))
+    .is('deleted_at', null)
+    .not('state', 'is', null);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const counts: Record<string, number> = {};
+  for (const r of data ?? []) {
+    const s = (r as { state: string | null }).state;
+    if (s) counts[s] = (counts[s] || 0) + 1;
+  }
+  res.json(Object.entries(counts).map(([state, count]) => ({ state, count })).sort((a, b) => b.count - a.count));
+}));
 router.use('/analytics', analytics);
 
 // ---------- AI -------------------------------------------------------
@@ -343,7 +388,6 @@ ai.post('/tools/execute', wrap(async (req, res) => {
   if (!result) throw new AppError(404, `Tool ${body.name} not registered`, 'UNKNOWN_TOOL');
   res.json(result);
 }));
-// CRM-flavored chat: registers tools then runs the tool-use loop.
 ai.post('/chat', wrap(async (req, res) => {
   const body = parse(z.object({
     message: z.string().min(1),
