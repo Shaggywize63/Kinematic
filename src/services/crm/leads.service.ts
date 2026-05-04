@@ -74,6 +74,9 @@ export async function listLeads(org_id: string, filters: Record<string, unknown>
     const s = String(filters.q).replace(/[%_]/g, '');
     q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
   }
+  // Date range filter (default column: created_at)
+  if (filters.from) q = q.gte('created_at', String(filters.from));
+  if (filters.to) q = q.lte('created_at', String(filters.to));
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('score', { ascending: false }).order('created_at', { ascending: false })

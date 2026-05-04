@@ -60,6 +60,12 @@ function userId(req: Request): string | undefined {
   const r = req as Request & { user?: { id?: string; user_id?: string }; auth?: { user_id?: string } };
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
+// Pull the optional date range off the query string in a single place.
+function dateRange(req: Request): { from?: string; to?: string } {
+  const from = req.query.from ? String(req.query.from) : undefined;
+  const to = req.query.to ? String(req.query.to) : undefined;
+  return { from, to };
+}
 // Generic over the schema type so z.infer<T> preserves required-vs-optional fields.
 function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> {
   try { return schema.parse(payload); }
@@ -193,7 +199,7 @@ activities.get('/calendar', wrap(async (req, res) => {
     .order('due_at', { ascending: true });
   res.json(data ?? []);
 }));
-activities.get('/', wrap(async (req, res) => res.json(await crud.list('crm_activities', orgId(req), req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'] }))));
+activities.get('/', wrap(async (req, res) => res.json(await crud.list('crm_activities', orgId(req), req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at' }))));
 activities.post('/', wrap(async (req, res) =>
   res.status(201).json(await crud.create('crm_activities', orgId(req), parse(v.activitySchema, req.body), userId(req)))));
 activities.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_activities', orgId(req), req.params.id))));
@@ -213,7 +219,7 @@ router.use('/notes', notes);
 
 const tasks = express.Router();
 tasks.get('/', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true } })
+  await crud.list('crm_activities', orgId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at' })
 )));
 router.use('/tasks', tasks);
 
@@ -260,9 +266,6 @@ router.use('/settings', settings);
 // ---------- EMAILS ---------------------------------------------------
 const emails = express.Router();
 emails.post('/send', wrap(async (req, res) => {
-  // body.to & body.subject & body.body_html are required by sendEmailSchema; the
-  // `!` non-null assertions paper over a TS-zod inference quirk where required
-  // fields appear optional after a spread.
   const body = parse(v.sendEmailSchema, req.body);
   res.status(201).json(await emailsSvc.sendEmail({
     ...body,
@@ -274,7 +277,6 @@ emails.post('/send', wrap(async (req, res) => {
   }));
 }));
 emails.get('/', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), req.query))));
-// Tracking endpoints — public (no auth) by design. Token is the auth.
 router.get('/emails/track/open/:token', async (req, res) => {
   await emailsSvc.recordOpen(req.params.token).catch(() => {});
   res.set('Content-Type', 'image/gif');
@@ -306,15 +308,15 @@ router.use('/import', imp);
 
 // ---------- ANALYTICS ------------------------------------------------
 const analytics = express.Router();
-analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req)))));
+analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req), dateRange(req)))));
 analytics.get('/pipeline-value', wrap(async (req, res) => res.json(await analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined))));
-analytics.get('/funnel', wrap(async (req, res) => res.json(await analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30)))));
-analytics.get('/win-rate', wrap(async (req, res) => res.json(await analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep'))));
-analytics.get('/sales-cycle', wrap(async (req, res) => res.json(await analyticsSvc.salesCycle(orgId(req)))));
-analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter'))));
+analytics.get('/funnel', wrap(async (req, res) => res.json(await analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req)))));
+analytics.get('/win-rate', wrap(async (req, res) => res.json(await analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req)))));
+analytics.get('/sales-cycle', wrap(async (req, res) => res.json(await analyticsSvc.salesCycle(orgId(req), dateRange(req)))));
+analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req)))));
 analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(await analyticsSvc.activityHeatmap(orgId(req)))));
 analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(await analyticsSvc.leadSourceRoi(orgId(req)))));
-analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req)))));
+analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req)))));
 router.use('/analytics', analytics);
 
 // ---------- AI -------------------------------------------------------
@@ -324,7 +326,7 @@ ai.post('/draft-reply', wrap(async (req, res) => {
   const body = parse(v.draftReplySchema, req.body);
   res.json(await autoRespSvc.draftReply({
     ...body,
-    intent: body.intent!,        // required by schema; assert for the spread
+    intent: body.intent!,
     tone: body.tone ?? 'friendly',
     org_id: orgId(req),
     user_id: userId(req),
@@ -341,7 +343,6 @@ ai.post('/tools/execute', wrap(async (req, res) => {
   if (!result) throw new AppError(404, `Tool ${body.name} not registered`, 'UNKNOWN_TOOL');
   res.json(result);
 }));
-// CRM-flavored chat: registers tools then runs the tool-use loop.
 ai.post('/chat', wrap(async (req, res) => {
   const body = parse(z.object({
     message: z.string().min(1),
