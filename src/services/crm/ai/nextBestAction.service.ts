@@ -45,7 +45,7 @@ export async function compute(org_id: string, deal_id: string, force = false): P
   try {
     const response = await aiComplete({
       org_id,
-      model: process.env.CRM_NBA_MODEL || 'claude-3-haiku-20240307',
+      model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: JSON.stringify(userPayload) }],
       max_tokens: 250,

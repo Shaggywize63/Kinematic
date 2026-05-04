@@ -72,7 +72,7 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
 
   const response = await aiComplete({
     org_id,
-    model: process.env.CRM_AUTO_RESPONSE_MODEL || 'claude-3-5-sonnet-20241022',
+    model: process.env.CRM_AUTO_RESPONSE_MODEL || 'claude-sonnet-4-6',
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: JSON.stringify(ctx) }],
     max_tokens: 1200,

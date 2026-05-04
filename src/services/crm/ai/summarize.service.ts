@@ -15,7 +15,7 @@ export async function summarizeAccount(org_id: string, account_id: string): Prom
 
   const summary = await aiComplete({
     org_id,
-    model: process.env.CRM_NBA_MODEL || 'claude-3-haiku-20240307',
+    model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
     system: 'Summarize this CRM account in 3-4 sentences. Cover: company, key contacts, open opportunity value, last activity. Plain text.',
     messages: [{ role: 'user', content: JSON.stringify({ account, contacts, deals }) }],
     max_tokens: 250,
@@ -37,7 +37,7 @@ export async function summarizeDeal(org_id: string, deal_id: string): Promise<st
     .eq('org_id', org_id).eq('deal_id', deal_id).order('completed_at', { ascending: false }).limit(10);
   return aiComplete({
     org_id,
-    model: process.env.CRM_NBA_MODEL || 'claude-3-haiku-20240307',
+    model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
     system: 'Summarize this CRM deal in 3-4 sentences. Cover: opportunity, current stage, key activities, risks/next-step. Plain text.',
     messages: [{ role: 'user', content: JSON.stringify({ deal, activities }) }],
     max_tokens: 250,
