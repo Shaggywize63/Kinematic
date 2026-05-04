@@ -59,14 +59,16 @@ export async function sendEmail(input: SendEmailInput) {
 }
 
 export async function listLogs(org_id: string, filters: Record<string, unknown> = {}) {
-  let q = supabaseAdmin.from('crm_email_logs').select('*', { count: 'exact' }).eq('org_id', org_id);
+  let q = supabaseAdmin.from('crm_email_logs').select('*').eq('org_id', org_id);
   if (filters.lead_id) q = q.eq('lead_id', String(filters.lead_id));
   if (filters.deal_id) q = q.eq('deal_id', String(filters.deal_id));
+  if (filters.from) q = q.gte('created_at', String(filters.from));
+  if (filters.to) q = q.lte('created_at', String(filters.to));
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('created_at', { ascending: false }).range((page - 1) * limit, page * limit - 1);
-  const { data, count } = await q;
-  return { data: data ?? [], total: count ?? 0, page, limit };
+  const { data } = await q;
+  return data ?? [];
 }
 
 export async function recordOpen(token: string) {
