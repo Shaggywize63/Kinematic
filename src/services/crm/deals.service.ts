@@ -6,7 +6,7 @@ import { AppError } from '../../utils';
 import type { Deal } from '../../types/crm.types';
 
 export async function listDeals(org_id: string, filters: Record<string, unknown> = {}) {
-  let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)', { count: 'exact' })
+  let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)')
     .eq('org_id', org_id).is('deleted_at', null);
   if (filters.pipeline_id) q = q.eq('pipeline_id', String(filters.pipeline_id));
   if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));
@@ -17,9 +17,9 @@ export async function listDeals(org_id: string, filters: Record<string, unknown>
   const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('expected_close_date', { ascending: true, nullsFirst: false })
        .range((page - 1) * limit, page * limit - 1);
-  const { data, error, count } = await q;
+  const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return { data, total: count ?? 0, page, limit };
+  return data ?? [];
 }
 
 export async function getDeal(org_id: string, id: string) {
