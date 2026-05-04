@@ -20,6 +20,8 @@ import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
 import * as analyticsSvc from '../services/crm/analytics.service';
 import * as emailsSvc from '../services/crm/emails.service';
+import * as whatsappSvc from '../services/crm/whatsapp.service';
+import * as productsSvc from '../services/crm/products.service';
 import * as nbaSvc from '../services/crm/ai/nextBestAction.service';
 import * as winSvc from '../services/crm/ai/winProbability.service';
 import * as autoRespSvc from '../services/crm/ai/autoResponse.service';
@@ -28,7 +30,94 @@ import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 
 const router: Router = express.Router();
+
+// ----- PUBLIC ROUTES (registered before requireAuth) -----
+// Email tracking + WhatsApp webhook accept signed/tokened requests; the
+// shared secret in the URL path or body IS the auth.
+router.get('/emails/track/open/:token', async (req, res) => {
+  await emailsSvc.recordOpen(req.params.token).catch(() => {});
+  res.set('Content-Type', 'image/gif');
+  res.send(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
+});
+router.get('/emails/track/click/:token', async (req, res) => {
+  await emailsSvc.recordClick(req.params.token).catch(() => {});
+  res.redirect(302, String(req.query.u ?? '/'));
+});
+
+// Meta WhatsApp Business webhook verification (challenge handshake).
+router.get('/webhooks/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && token && token === process.env.CRM_WHATSAPP_VERIFY_TOKEN) {
+    return res.status(200).send(String(challenge ?? ''));
+  }
+  res.sendStatus(403);
+});
+router.post('/webhooks/whatsapp', express.json({ limit: '2mb' }), async (req, res) => {
+  const sigHeader = req.headers['x-hub-signature-256'];
+  if (process.env.CRM_WHATSAPP_APP_SECRET && typeof sigHeader === 'string') {
+    const crypto = await import('crypto');
+    const raw = JSON.stringify(req.body);
+    const expected = 'sha256=' + crypto
+      .createHmac('sha256', process.env.CRM_WHATSAPP_APP_SECRET)
+      .update(raw).digest('hex');
+    if (expected !== sigHeader) return res.sendStatus(401);
+  }
+  const orgId = (req.body?.org_id as string | undefined)
+    ?? (req.headers['x-org-id'] as string | undefined);
+  if (!orgId) {
+    return res.status(202).json({ ignored: 'no org context resolvable for stub provider' });
+  }
+  try {
+    const entries = req.body?.entry ?? [];
+    for (const entry of entries) {
+      for (const change of entry?.changes ?? []) {
+        const value = change?.value ?? {};
+        for (const m of value.messages ?? []) {
+          await whatsappSvc.recordInbound({
+            org_id: orgId,
+            from_phone: m.from,
+            to_phone: value.metadata?.display_phone_number,
+            body_text: m.text?.body,
+            media_url: m.image?.id ?? m.document?.id ?? m.video?.id,
+            media_type: m.type,
+            provider_message_id: m.id,
+            in_reply_to: m.context?.id,
+          });
+        }
+        for (const s of value.statuses ?? []) {
+          await whatsappSvc.recordStatusUpdate({
+            org_id: orgId,
+            provider_message_id: s.id,
+            status: s.status as 'delivered' | 'read' | 'failed',
+            error: s.errors?.[0]?.title,
+          });
+        }
+      }
+    }
+  } catch {
+    // Best-effort; never fail the webhook so Meta doesn't retry.
+  }
+  res.sendStatus(200);
+});
+
+// ----- AUTHENTICATED ROUTES BELOW -----
 router.use(requireAuth, requireModule('crm'));
+
+// Wrap every res.json payload in {success, data} so the dashboard's
+// Wrapped<T> typings match runtime. Pass-through if the body already has
+// a `success` field (error handler emits {success:false,...}).
+router.use((_req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (body: unknown) => {
+    if (body && typeof body === 'object' && 'success' in (body as Record<string, unknown>)) {
+      return originalJson(body);
+    }
+    return originalJson({ success: true, data: body });
+  };
+  next();
+});
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
@@ -45,6 +134,11 @@ function orgId(req: Request): string {
 function userId(req: Request): string | undefined {
   const r = req as Request & { user?: { id?: string; user_id?: string }; auth?: { user_id?: string } };
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
+}
+function dateRange(req: Request): { from?: string; to?: string } {
+  const from = req.query.from ? String(req.query.from) : undefined;
+  const to = req.query.to ? String(req.query.to) : undefined;
+  return { from, to };
 }
 function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> {
   try { return schema.parse(payload); }
@@ -166,7 +260,21 @@ deals.get('/:id/contacts', wrap(async (req, res) => {
 deals.get('/:id/notes', wrap(async (req, res) => res.json(
   await crud.list('crm_notes', orgId(req), { entity_type: 'deal', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
+// Deal line items (nested under the deal).
+deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc.listLineItems(orgId(req), req.params.id))));
+deals.post('/:id/line-items', wrap(async (req, res) =>
+  res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req)))));
 router.use('/deals', deals);
+
+// Top-level line item update/delete (id is unique enough).
+const lineItems = express.Router();
+lineItems.patch('/:id', wrap(async (req, res) =>
+  res.json(await productsSvc.updateLineItem(orgId(req), req.params.id, parse(v.lineItemSchema.partial(), req.body), userId(req)))));
+lineItems.delete('/:id', wrap(async (req, res) => {
+  await productsSvc.deleteLineItem(orgId(req), req.params.id);
+  res.status(204).end();
+}));
+router.use('/line-items', lineItems);
 
 // ---------- PIPELINES + STAGES --------------------------------------
 const pipelines = express.Router();
@@ -207,7 +315,7 @@ activities.get('/calendar', wrap(async (req, res) => {
     .order('due_at', { ascending: true });
   res.json(data ?? []);
 }));
-activities.get('/', wrap(async (req, res) => res.json(await crud.list('crm_activities', orgId(req), req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'] }))));
+activities.get('/', wrap(async (req, res) => res.json(await crud.list('crm_activities', orgId(req), req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at' }))));
 activities.post('/', wrap(async (req, res) =>
   res.status(201).json(await crud.create('crm_activities', orgId(req), parse(v.activitySchema, req.body), userId(req)))));
 activities.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_activities', orgId(req), req.params.id))));
@@ -227,7 +335,7 @@ router.use('/notes', notes);
 
 const tasks = express.Router();
 tasks.get('/', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true } })
+  await crud.list('crm_activities', orgId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at' })
 )));
 router.use('/tasks', tasks);
 
@@ -262,7 +370,7 @@ cities.patch('/:id', wrap(async (req, res) =>
 cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
 router.use('/cities', cities);
 
-// ---------- SOURCES + RULES + TERRITORIES + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES
+// ---------- SOURCES + RULES + TERRITORIES + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES + PRODUCTS
 function attach(path: string, table: string, schema: z.ZodObject<z.ZodRawShape>, opts: Partial<crud.CrudOpts> = {}) {
   const r = express.Router();
   r.get('/', wrap(async (req, res) => res.json(await crud.list(table, orgId(req), req.query, opts))));
@@ -282,6 +390,10 @@ attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false
 attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false });
 attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false });
+// Phase 2
+attach('/product-categories', 'crm_product_categories', v.productCategorySchema, { defaultSort: { column: 'sort_order', ascending: true } });
+attach('/products', 'crm_products', v.productSchema, { searchColumns: ['name','sku','description'] });
+attach('/whatsapp-templates', 'crm_whatsapp_templates', v.whatsappTemplateSchema, { softDelete: false });
 
 // ---------- SETTINGS -------------------------------------------------
 const settings = express.Router();
@@ -308,19 +420,31 @@ router.use('/settings', settings);
 const emails = express.Router();
 emails.post('/send', wrap(async (req, res) => {
   const body = parse(v.sendEmailSchema, req.body);
-  res.status(201).json(await emailsSvc.sendEmail({ ...body, org_id: orgId(req), user_id: userId(req) }));
+  res.status(201).json(await emailsSvc.sendEmail({
+    ...body,
+    to: body.to!,
+    subject: body.subject!,
+    body_html: body.body_html!,
+    org_id: orgId(req),
+    user_id: userId(req),
+  }));
 }));
 emails.get('/', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), req.query))));
-router.get('/emails/track/open/:token', async (req, res) => {
-  await emailsSvc.recordOpen(req.params.token).catch(() => {});
-  res.set('Content-Type', 'image/gif');
-  res.send(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
-});
-router.get('/emails/track/click/:token', async (req, res) => {
-  await emailsSvc.recordClick(req.params.token).catch(() => {});
-  res.redirect(302, String(req.query.u ?? '/'));
-});
 router.use('/emails', emails);
+
+// ---------- WHATSAPP ------------------------------------------------
+const whatsapp = express.Router();
+whatsapp.post('/send', wrap(async (req, res) => {
+  const body = parse(v.sendWhatsappSchema, req.body);
+  res.status(201).json(await whatsappSvc.sendWhatsapp({
+    ...body,
+    to: body.to!,
+    org_id: orgId(req),
+    user_id: userId(req),
+  }));
+}));
+whatsapp.get('/logs', wrap(async (req, res) => res.json(await whatsappSvc.listLogs(orgId(req), req.query))));
+router.use('/whatsapp', whatsapp);
 
 // ---------- IMPORT ---------------------------------------------------
 const imp = express.Router();
@@ -342,15 +466,16 @@ router.use('/import', imp);
 
 // ---------- ANALYTICS ------------------------------------------------
 const analytics = express.Router();
-analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req)))));
+analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req), dateRange(req)))));
 analytics.get('/pipeline-value', wrap(async (req, res) => res.json(await analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined))));
-analytics.get('/funnel', wrap(async (req, res) => res.json(await analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30)))));
-analytics.get('/win-rate', wrap(async (req, res) => res.json(await analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep'))));
-analytics.get('/sales-cycle', wrap(async (req, res) => res.json(await analyticsSvc.salesCycle(orgId(req)))));
-analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter'))));
+analytics.get('/funnel', wrap(async (req, res) => res.json(await analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req)))));
+analytics.get('/win-rate', wrap(async (req, res) => res.json(await analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req)))));
+analytics.get('/sales-cycle', wrap(async (req, res) => res.json(await analyticsSvc.salesCycle(orgId(req), dateRange(req)))));
+analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req)))));
 analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(await analyticsSvc.activityHeatmap(orgId(req)))));
 analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(await analyticsSvc.leadSourceRoi(orgId(req)))));
-analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req)))));
+analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req)))));
+// Geo breakdown for dashboard filtering
 analytics.get('/by-state', wrap(async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from('crm_contacts')
@@ -373,7 +498,13 @@ const ai = express.Router();
 ai.post('/score-lead/:id', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
 ai.post('/draft-reply', wrap(async (req, res) => {
   const body = parse(v.draftReplySchema, req.body);
-  res.json(await autoRespSvc.draftReply({ ...body, org_id: orgId(req), user_id: userId(req) }));
+  res.json(await autoRespSvc.draftReply({
+    ...body,
+    intent: body.intent!,
+    tone: body.tone ?? 'friendly',
+    org_id: orgId(req),
+    user_id: userId(req),
+  }));
 }));
 ai.post('/next-best-action/:dealId', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), req.params.dealId, true))));
 ai.post('/win-probability/:dealId', wrap(async (req, res) => res.json(await winSvc.compute(orgId(req), req.params.dealId))));
