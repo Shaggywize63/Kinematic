@@ -64,7 +64,7 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
 }
 
 export async function listLeads(org_id: string, filters: Record<string, unknown> = {}) {
-  let q = supabaseAdmin.from('crm_leads').select('*', { count: 'exact' })
+  let q = supabaseAdmin.from('crm_leads').select('*')
     .eq('org_id', org_id).is('deleted_at', null);
   if (filters.status) q = q.eq('status', String(filters.status));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
@@ -78,9 +78,9 @@ export async function listLeads(org_id: string, filters: Record<string, unknown>
   const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('score', { ascending: false }).order('created_at', { ascending: false })
        .range((page - 1) * limit, page * limit - 1);
-  const { data, error, count } = await q;
+  const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return { data: data as Lead[], total: count ?? 0, page, limit };
+  return (data ?? []) as Lead[];
 }
 
 export async function getLead(org_id: string, id: string) {
