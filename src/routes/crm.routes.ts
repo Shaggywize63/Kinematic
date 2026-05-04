@@ -246,8 +246,18 @@ router.use('/settings', settings);
 // ---------- EMAILS ---------------------------------------------------
 const emails = express.Router();
 emails.post('/send', wrap(async (req, res) => {
+  // body.to & body.subject & body.body_html are required by sendEmailSchema; the
+  // `!` non-null assertions paper over a TS-zod inference quirk where required
+  // fields appear optional after a spread.
   const body = parse(v.sendEmailSchema, req.body);
-  res.status(201).json(await emailsSvc.sendEmail({ ...body, org_id: orgId(req), user_id: userId(req) }));
+  res.status(201).json(await emailsSvc.sendEmail({
+    ...body,
+    to: body.to!,
+    subject: body.subject!,
+    body_html: body.body_html!,
+    org_id: orgId(req),
+    user_id: userId(req),
+  }));
 }));
 emails.get('/', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), req.query))));
 // Tracking endpoints — public (no auth) by design. Token is the auth.
@@ -298,7 +308,13 @@ const ai = express.Router();
 ai.post('/score-lead/:id', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
 ai.post('/draft-reply', wrap(async (req, res) => {
   const body = parse(v.draftReplySchema, req.body);
-  res.json(await autoRespSvc.draftReply({ ...body, org_id: orgId(req), user_id: userId(req) }));
+  res.json(await autoRespSvc.draftReply({
+    ...body,
+    intent: body.intent!,        // required by schema; assert for the spread
+    tone: body.tone ?? 'friendly',
+    org_id: orgId(req),
+    user_id: userId(req),
+  }));
 }));
 ai.post('/next-best-action/:dealId', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), req.params.dealId, true))));
 ai.post('/win-probability/:dealId', wrap(async (req, res) => res.json(await winSvc.compute(orgId(req), req.params.dealId))));
