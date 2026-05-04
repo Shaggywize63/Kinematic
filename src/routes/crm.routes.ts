@@ -74,6 +74,9 @@ leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc
 leads.get('/:id/activities', wrap(async (req, res) => res.json(
   await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
 )));
+leads.get('/:id/deals', wrap(async (req, res) => res.json(
+  await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query })
+)));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
@@ -91,8 +94,15 @@ contacts.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req)))));
 contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id); res.status(204).end(); }));
 contacts.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query })
+  await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
 )));
+contacts.get('/:id/deals', wrap(async (req, res) => res.json(
+  await crud.list('crm_deals', orgId(req), { primary_contact_id: req.params.id, ...req.query })
+)));
+contacts.get('/:id/notes', wrap(async (req, res) => res.json(
+  await crud.list('crm_notes', orgId(req), { entity_type: 'contact', entity_id: req.params.id, ...req.query }, { softDelete: false })
+)));
+contacts.get('/:id/emails', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), { contact_id: req.params.id }))));
 router.use('/contacts', contacts);
 
 // ---------- ACCOUNTS -------------------------------------------------
@@ -111,7 +121,10 @@ accounts.get('/:id/deals', wrap(async (req, res) => res.json(
   await crud.list('crm_deals', orgId(req), { account_id: req.params.id, ...req.query })
 )));
 accounts.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query })
+  await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
+)));
+accounts.get('/:id/notes', wrap(async (req, res) => res.json(
+  await crud.list('crm_notes', orgId(req), { entity_type: 'account', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
 accounts.post('/:id/summarize', wrap(async (req, res) =>
   res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), req.params.id) })));
@@ -136,7 +149,23 @@ deals.post('/:id/win-probability', wrap(async (req, res) => res.json(await winSv
 deals.post('/:id/next-action', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), req.params.id, true))));
 deals.get('/:id/history', wrap(async (req, res) => res.json(await dealsSvc.dealHistory(orgId(req), req.params.id))));
 deals.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query })
+  await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
+)));
+deals.get('/:id/contacts', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('crm_deal_contacts')
+    .select('contact_id, role, is_primary, contact:crm_contacts(*)')
+    .eq('deal_id', req.params.id);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json((data ?? []).map((r: { contact_id: string; role: string | null; is_primary: boolean; contact: unknown }) => ({
+    contact_id: r.contact_id,
+    role: r.role,
+    is_primary: r.is_primary,
+    contact: r.contact,
+  })));
+}));
+deals.get('/:id/notes', wrap(async (req, res) => res.json(
+  await crud.list('crm_notes', orgId(req), { entity_type: 'deal', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
 router.use('/deals', deals);
 
@@ -229,11 +258,14 @@ attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softD
 const settings = express.Router();
 settings.get('/', wrap(async (req, res) => {
   const { data } = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
-  res.json(data ?? { org_id: orgId(req), config: {} });
+  res.json(data ?? { org_id: orgId(req), config: {}, business_type: 'both' });
 }));
 settings.patch('/', wrap(async (req, res) => {
-  const body = parse(z.object({ config: z.record(z.unknown()) }), req.body);
-  const { data } = await supabaseAdmin.from('crm_settings').upsert({ org_id: orgId(req), config: body.config }, { onConflict: 'org_id' }).select('*').single();
+  const body = parse(v.settingsUpdateSchema, req.body);
+  const update: Record<string, unknown> = { org_id: orgId(req) };
+  if (body.config !== undefined) update.config = body.config;
+  if (body.business_type !== undefined) update.business_type = body.business_type;
+  const { data } = await supabaseAdmin.from('crm_settings').upsert(update, { onConflict: 'org_id' }).select('*').single();
   res.json(data);
 }));
 settings.post('/seed-defaults', wrap(async (req, res) => {
