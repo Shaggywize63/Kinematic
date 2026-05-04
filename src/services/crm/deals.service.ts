@@ -13,6 +13,9 @@ export async function listDeals(org_id: string, filters: Record<string, unknown>
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.account_id) q = q.eq('account_id', String(filters.account_id));
   if (filters.q) q = q.ilike('name', `%${String(filters.q)}%`);
+  // Date range filter on created_at
+  if (filters.from) q = q.gte('created_at', String(filters.from));
+  if (filters.to) q = q.lte('created_at', String(filters.to));
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('expected_close_date', { ascending: true, nullsFirst: false })
@@ -39,7 +42,7 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     primary_contact_id: payload.primary_contact_id ?? null,
     lead_id: payload.lead_id ?? null,
     amount: payload.amount ?? 0,
-    currency: payload.currency ?? 'USD',
+    currency: payload.currency ?? 'INR',
     expected_close_date: payload.expected_close_date ?? null,
     probability: payload.probability ?? null,
     owner_id: payload.owner_id ?? null,

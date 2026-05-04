@@ -11,13 +11,19 @@ export interface CrudOpts {
   softDelete?: boolean;
   defaultSort?: { column: string; ascending: boolean };
   searchColumns?: string[];
+  // Column to filter date range on. Defaults to created_at; activities can
+  // override to completed_at, deals to expected_close_date, etc.
+  dateRangeColumn?: string;
 }
+
+// Reserved query keys that aren't applied as direct .eq() filters.
+const RESERVED = ['limit','page','q','sort','order','from','to'];
 
 export async function list(table: string, org_id: string, query: Record<string, unknown> = {}, opts: Partial<CrudOpts> = {}) {
   let q = supabaseAdmin.from(table).select('*').eq('org_id', org_id);
   if (opts.softDelete !== false) q = q.is('deleted_at', null);
   for (const [k, v] of Object.entries(query)) {
-    if (['limit','page','q','sort','order'].includes(k) || v === undefined || v === null || v === '') continue;
+    if (RESERVED.includes(k) || v === undefined || v === null || v === '') continue;
     q = q.eq(k, v as never);
   }
   if (query.q && opts.searchColumns?.length) {
@@ -25,6 +31,9 @@ export async function list(table: string, org_id: string, query: Record<string, 
     const orExpr = opts.searchColumns.map(c => `${c}.ilike.%${s}%`).join(',');
     q = q.or(orExpr);
   }
+  const dateCol = opts.dateRangeColumn ?? 'created_at';
+  if (query.from) q = q.gte(dateCol, String(query.from));
+  if (query.to) q = q.lte(dateCol, String(query.to));
   const limit = Math.min(Number(query.limit ?? 50), 200);
   const page = Math.max(Number(query.page ?? 1), 1);
   const sort = (query.sort as string) || opts.defaultSort?.column || 'created_at';
