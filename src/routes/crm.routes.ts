@@ -46,7 +46,8 @@ function userId(req: Request): string | undefined {
   const r = req as Request & { user?: { id?: string; user_id?: string }; auth?: { user_id?: string } };
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
-function parse<T>(schema: z.ZodSchema<T>, payload: unknown): T {
+// Generic over the schema type so z.infer<T> preserves required-vs-optional fields.
+function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> {
   try { return schema.parse(payload); }
   catch (e) {
     if (e instanceof ZodError) {

@@ -7,8 +7,8 @@
  * We don't mutate the existing AIService — we just call `getFunctionalKey()`
  * and hit the Messages API directly when we need features beyond `callKiniAI`.
  */
-import { AIService } from '../ai.service';
-import { AppError } from '../../utils';
+import { AIService } from '../../ai.service';
+import { AppError } from '../../../utils';
 
 export interface CompleteInput {
   org_id?: string;        // accepted for forward-compat (per-org keys); currently unused
@@ -57,7 +57,7 @@ export interface ChatWithToolsOutput {
  */
 export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWithToolsOutput> {
   const apiKey = await AIService.getFunctionalKey();
-  const model = input.model || 'claude-3-5-sonnet-20241022';
+  const model = input.model || 'claude-haiku-4-5';
   const max_tokens = input.max_tokens ?? 1500;
   const max_turns = input.max_turns ?? 5;
 

@@ -32,7 +32,7 @@ export async function compute(org_id: string, deal_id: string): Promise<{ probab
   try {
     const llm = await aiComplete({
       org_id,
-      model: process.env.CRM_NBA_MODEL || 'claude-3-haiku-20240307',
+      model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
       system: 'You explain win probability for a sales deal in 1-2 sentences. Be concrete. No JSON, plain text.',
       messages: [{ role: 'user', content: JSON.stringify({ deal: { name: deal.name, amount: deal.amount, age_days: Math.round(ageDays), activities_30d: activityCount }, baseline }) }],
       max_tokens: 120,

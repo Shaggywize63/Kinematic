@@ -25,7 +25,7 @@ export async function dashboardSummary(org_id: string): Promise<DashboardSummary
   const open_deals = (pipelineRows ?? []).reduce((s, r) => s + Number(r.deal_count ?? 0), 0);
 
   let won = 0, lost = 0, wonCount = 0, lostCount = 0;
-  for (const r of (closedMtd ?? []) as Array<{ amount: number; crm_deal_stages: { stage_type: string } | null }>) {
+  for (const r of (closedMtd ?? []) as unknown as Array<{ amount: number; crm_deal_stages: { stage_type: string } | null }>) {
     const t = r.crm_deal_stages?.stage_type;
     if (t === 'won') { won += Number(r.amount); wonCount++; }
     if (t === 'lost') { lost += Number(r.amount); lostCount++; }
@@ -41,7 +41,7 @@ export async function dashboardSummary(org_id: string): Promise<DashboardSummary
 
   // Top owners by closed-won MTD
   const ownerMap = new Map<string, number>();
-  for (const r of (closedMtd ?? []) as Array<{ amount: number; owner_id?: string; crm_deal_stages: { stage_type: string } | null }>) {
+  for (const r of (closedMtd ?? []) as unknown as Array<{ amount: number; owner_id?: string; crm_deal_stages: { stage_type: string } | null }>) {
     if (r.crm_deal_stages?.stage_type === 'won' && r.owner_id) {
       ownerMap.set(r.owner_id, (ownerMap.get(r.owner_id) ?? 0) + Number(r.amount));
     }
@@ -91,7 +91,7 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage') {
     .select('amount, owner_id, stage_id, crm_deal_stages!inner(name, stage_type)')
     .eq('org_id', org_id).is('deleted_at', null);
   const map = new Map<string, { won: number; lost: number; total: number }>();
-  for (const d of (deals ?? []) as Array<{ amount: number; owner_id?: string; stage_id: string; crm_deal_stages: { name: string; stage_type: string } }>) {
+  for (const d of (deals ?? []) as unknown as Array<{ amount: number; owner_id?: string; stage_id: string; crm_deal_stages: { name: string; stage_type: string } }>) {
     const key = by === 'rep' ? (d.owner_id ?? 'unassigned') : d.crm_deal_stages.name;
     const e = map.get(key) ?? { won: 0, lost: 0, total: 0 };
     e.total += Number(d.amount);
@@ -111,7 +111,7 @@ export async function salesCycle(org_id: string) {
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null).limit(500);
   const buckets = new Map<string, number[]>();
-  for (const d of (data ?? []) as Array<{ created_at: string; actual_close_date: string }>) {
+  for (const d of (data ?? []) as unknown as Array<{ created_at: string; actual_close_date: string }>) {
     const month = d.actual_close_date.slice(0, 7);
     const days = (new Date(d.actual_close_date).getTime() - new Date(d.created_at).getTime()) / 86400000;
     const arr = buckets.get(month) ?? [];
@@ -132,7 +132,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
     .eq('crm_deal_stages.stage_type', 'open')
     .lte('expected_close_date', cutoff).not('expected_close_date', 'is', null);
   const buckets = new Map<string, { weighted: number; total: number }>();
-  for (const d of (data ?? []) as Array<{ amount: number; probability?: number; expected_close_date: string; crm_deal_stages: { probability: number } }>) {
+  for (const d of (data ?? []) as unknown as Array<{ amount: number; probability?: number; expected_close_date: string; crm_deal_stages: { probability: number } }>) {
     const month = d.expected_close_date.slice(0, 7);
     const p = d.probability ?? d.crm_deal_stages.probability ?? 50;
     const e = buckets.get(month) ?? { weighted: 0, total: 0 };
