@@ -238,3 +238,70 @@ export const draftReplySchema = z.object({
 });
 
 export const summarizeSchema = z.object({});
+
+// ---------- Phase 2: Products + WhatsApp ----------
+
+export const productCategorySchema = z.object({
+  name: z.string().min(1).max(160),
+  parent_category_id: optionalUuid,
+  description: z.string().optional().nullable(),
+  color: z.string().max(20).optional().nullable(),
+  sort_order: z.number().int().optional(),
+});
+
+export const productSchema = z.object({
+  category_id: optionalUuid,
+  sku: z.string().min(1).max(120),
+  name: z.string().min(1).max(200),
+  description: z.string().optional().nullable(),
+  unit: z.string().max(40).optional(),
+  price: z.number().nonnegative().default(0),
+  currency: z.string().length(3).default('INR'),
+  tax_rate_pct: z.number().min(0).max(100).default(0),
+  hsn_code: z.string().max(40).optional().nullable(),
+  image_url: z.string().url().optional().nullable(),
+  is_active: z.boolean().optional(),
+  tags: z.array(z.string()).optional(),
+  custom_fields: z.record(z.unknown()).optional(),
+});
+
+export const lineItemSchema = z.object({
+  product_id: optionalUuid,
+  name: z.string().min(1).max(200).optional(),
+  description: z.string().optional().nullable(),
+  sku: z.string().max(120).optional().nullable(),
+  unit: z.string().max(40).optional().nullable(),
+  quantity: z.number().positive().default(1),
+  unit_price: z.number().nonnegative().optional(),
+  discount_pct: z.number().min(0).max(100).optional(),
+  tax_pct: z.number().min(0).max(100).optional(),
+  position: z.number().int().nonnegative().optional(),
+  custom_fields: z.record(z.unknown()).optional(),
+});
+
+export const whatsappTemplateSchema = z.object({
+  meta_template_name: z.string().min(1).max(120),
+  category: z.enum(['utility','marketing','authentication']).default('utility'),
+  language: z.string().min(2).max(10).default('en'),
+  status: z.enum(['pending','approved','rejected']).default('pending'),
+  header_text: z.string().max(300).optional().nullable(),
+  body_text: z.string().min(1).max(2000),
+  footer_text: z.string().max(300).optional().nullable(),
+  variables: z.array(z.string()).optional(),
+  provider_template_id: z.string().max(160).optional().nullable(),
+});
+
+export const sendWhatsappSchema = z.object({
+  to: z.string().min(5).max(40),
+  body_text: z.string().max(2000).optional(),
+  template_id: optionalUuid,
+  template_variables: z.record(z.string()).optional(),
+  media_url: z.string().url().optional(),
+  media_type: z.enum(['image','document','audio','video','sticker']).optional(),
+  lead_id: optionalUuid,
+  contact_id: optionalUuid,
+  deal_id: optionalUuid,
+}).refine((b) => Boolean(b.body_text || b.template_id || b.media_url), {
+  message: 'One of body_text, template_id, or media_url is required',
+  path: ['body_text'],
+});
