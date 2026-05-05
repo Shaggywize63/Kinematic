@@ -337,6 +337,21 @@ const tasks = express.Router();
 tasks.get('/', wrap(async (req, res) => res.json(
   await crud.list('crm_activities', orgId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at' })
 )));
+tasks.post('/', wrap(async (req, res) => {
+  const parsed = parse(v.taskSchema, req.body);
+  const payload = { ...parsed, type: 'task' as const };
+  res.status(201).json(await crud.create('crm_activities', orgId(req), payload, userId(req)));
+}));
+tasks.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_activities', orgId(req), req.params.id))));
+tasks.patch('/:id', wrap(async (req, res) => {
+  const parsed = parse(v.taskSchema.partial(), req.body);
+  const payload: Record<string, unknown> = { ...parsed };
+  if (parsed.status === 'done' && !parsed.completed_at) {
+    payload.completed_at = new Date().toISOString();
+  }
+  res.json(await crud.update('crm_activities', orgId(req), req.params.id, payload, userId(req)));
+}));
+tasks.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id); res.status(204).end(); }));
 router.use('/tasks', tasks);
 
 // ---------- STATES + CITIES (location management) -------------------

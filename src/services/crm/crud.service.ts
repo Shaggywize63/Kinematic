@@ -52,15 +52,26 @@ export async function get(table: string, org_id: string, id: string, softDelete 
   return data;
 }
 
+// Tables that don't have created_by/updated_by columns (audit-light lookups)
+const NO_AUDIT_TABLES = new Set([
+  'crm_deal_stages',
+  'crm_lead_sources',
+  'crm_states',
+  'crm_cities',
+  'crm_settings',
+]);
+
 export async function create(table: string, org_id: string, payload: Record<string, unknown>, user_id?: string) {
-  const row = { ...payload, org_id, created_by: user_id ?? null };
+  const row: Record<string, unknown> = { ...payload, org_id };
+  if (user_id && !NO_AUDIT_TABLES.has(table)) row.created_by = user_id;
   const { data, error } = await supabaseAdmin.from(table).insert(row).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return data;
 }
 
 export async function update(table: string, org_id: string, id: string, payload: Record<string, unknown>, user_id?: string) {
-  const row = { ...payload, updated_by: user_id ?? null };
+  const row: Record<string, unknown> = { ...payload };
+  if (user_id && !NO_AUDIT_TABLES.has(table)) row.updated_by = user_id;
   const { data, error } = await supabaseAdmin.from(table).update(row)
     .eq('org_id', org_id).eq('id', id).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
