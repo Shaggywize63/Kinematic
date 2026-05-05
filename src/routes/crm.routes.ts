@@ -28,6 +28,7 @@ import * as autoRespSvc from '../services/crm/ai/autoResponse.service';
 import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
+import { stampOwnerNames, stampOwnerName } from '../services/crm/owners.helper';
 
 const router: Router = express.Router();
 
@@ -166,16 +167,16 @@ function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> 
 
 // ---------- LEADS ----------------------------------------------------
 const leads = express.Router();
-leads.get('/', wrap(async (req, res) => res.json(await leadsSvc.listLeads(orgId(req), req.query, clientId(req)))));
+leads.get('/', wrap(async (req, res) => res.json(await stampOwnerNames(await leadsSvc.listLeads(orgId(req), req.query, clientId(req))))));
 leads.post('/', wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
   // Stamp client_id from request scope (JWT or X-Client-Id header) unless the body explicitly set it.
   const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
-  res.status(201).json(await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload }));
+  res.status(201).json(await stampOwnerName(await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload })));
 }));
-leads.get('/:id', wrap(async (req, res) => res.json(await leadsSvc.getLead(orgId(req), req.params.id))));
+leads.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id)))));
 leads.patch('/:id', wrap(async (req, res) =>
-  res.json(await leadsSvc.updateLead(orgId(req), req.params.id, parse(v.leadUpdateSchema, req.body), userId(req)))));
+  res.json(await stampOwnerName(await leadsSvc.updateLead(orgId(req), req.params.id, parse(v.leadUpdateSchema, req.body), userId(req))))));
 leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(req), req.params.id); res.status(204).end(); }));
 leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
 leads.post('/:id/convert', wrap(async (req, res) =>
@@ -197,16 +198,16 @@ router.use('/leads', leads);
 const contacts = express.Router();
 const contactOpts = { searchColumns: ['first_name','last_name','email','phone'] };
 contacts.get('/', wrap(async (req, res) => res.json(
-  await crud.clientScopedList('crm_contacts', orgId(req), clientId(req), req.query, contactOpts)
+  await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), clientId(req), req.query, contactOpts))
 )));
 contacts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
-  res.status(201).json(await crud.create('crm_contacts', orgId(req), payload, userId(req)));
+  res.status(201).json(await stampOwnerName(await crud.create('crm_contacts', orgId(req), payload, userId(req))));
 }));
-contacts.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_contacts', orgId(req), req.params.id))));
+contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id)))));
 contacts.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req)))));
+  res.json(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req))))));
 contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id); res.status(204).end(); }));
 contacts.get('/:id/activities', wrap(async (req, res) => res.json(
   await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
@@ -223,16 +224,16 @@ router.use('/contacts', contacts);
 // ---------- ACCOUNTS -------------------------------------------------
 const accounts = express.Router();
 accounts.get('/', wrap(async (req, res) => res.json(
-  await crud.clientScopedList('crm_accounts', orgId(req), clientId(req), req.query, { searchColumns: ['name','domain','industry'] })
+  await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), clientId(req), req.query, { searchColumns: ['name','domain','industry'] }))
 )));
 accounts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
-  res.status(201).json(await crud.create('crm_accounts', orgId(req), payload, userId(req)));
+  res.status(201).json(await stampOwnerName(await crud.create('crm_accounts', orgId(req), payload, userId(req))));
 }));
-accounts.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_accounts', orgId(req), req.params.id))));
+accounts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_accounts', orgId(req), req.params.id)))));
 accounts.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_accounts', orgId(req), req.params.id, parse(v.accountSchema.partial(), req.body), userId(req)))));
+  res.json(await stampOwnerName(await crud.update('crm_accounts', orgId(req), req.params.id, parse(v.accountSchema.partial(), req.body), userId(req))))));
 accounts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_accounts', orgId(req), req.params.id); res.status(204).end(); }));
 accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
   await crud.list('crm_contacts', orgId(req), { account_id: req.params.id, ...req.query })
@@ -252,15 +253,15 @@ router.use('/accounts', accounts);
 
 // ---------- DEALS ----------------------------------------------------
 const deals = express.Router();
-deals.get('/', wrap(async (req, res) => res.json(await dealsSvc.listDeals(orgId(req), req.query, clientId(req)))));
+deals.get('/', wrap(async (req, res) => res.json(await stampOwnerNames(await dealsSvc.listDeals(orgId(req), req.query, clientId(req))))));
 deals.post('/', wrap(async (req, res) => {
   const parsed = parse(v.dealSchema, req.body);
   const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
-  res.status(201).json(await dealsSvc.createDeal(orgId(req), payload, userId(req)));
+  res.status(201).json(await stampOwnerName(await dealsSvc.createDeal(orgId(req), payload, userId(req))));
 }));
-deals.get('/:id', wrap(async (req, res) => res.json(await dealsSvc.getDeal(orgId(req), req.params.id))));
+deals.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await dealsSvc.getDeal(orgId(req), req.params.id)))));
 deals.patch('/:id', wrap(async (req, res) =>
-  res.json(await dealsSvc.updateDeal(orgId(req), req.params.id, parse(v.dealUpdateSchema, req.body), userId(req)))));
+  res.json(await stampOwnerName(await dealsSvc.updateDeal(orgId(req), req.params.id, parse(v.dealUpdateSchema, req.body), userId(req))))));
 deals.delete('/:id', wrap(async (req, res) => { await dealsSvc.deleteDeal(orgId(req), req.params.id); res.status(204).end(); }));
 deals.post('/:id/move-stage', wrap(async (req, res) => {
   const { stage_id } = parse(v.moveStageSchema, req.body);
@@ -381,19 +382,19 @@ activities.get('/calendar', wrap(async (req, res) => {
   if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
   else q = q.is('client_id', null);
   const { data } = await q.order('due_at', { ascending: true });
-  res.json(data ?? []);
+  res.json(await stampOwnerNames(data ?? []));
 }));
 activities.get('/', wrap(async (req, res) => res.json(
-  await crud.clientScopedList('crm_activities', orgId(req), clientId(req), req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at' })
+  await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientId(req), req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at' }))
 )));
 activities.post('/', wrap(async (req, res) => {
   const parsed = parse(v.activitySchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
-  res.status(201).json(await crud.create('crm_activities', orgId(req), payload, userId(req)));
+  res.status(201).json(await stampOwnerName(await crud.create('crm_activities', orgId(req), payload, userId(req))));
 }));
-activities.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_activities', orgId(req), req.params.id))));
+activities.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_activities', orgId(req), req.params.id)))));
 activities.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchema.partial(), req.body), userId(req)))));
+  res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchema.partial(), req.body), userId(req))))));
 activities.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id); res.status(204).end(); }));
 router.use('/activities', activities);
 
@@ -413,21 +414,21 @@ router.use('/notes', notes);
 
 const tasks = express.Router();
 tasks.get('/', wrap(async (req, res) => res.json(
-  await crud.clientScopedList('crm_activities', orgId(req), clientId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at' })
+  await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at' }))
 )));
 tasks.post('/', wrap(async (req, res) => {
   const parsed = parse(v.taskSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, type: 'task' as const, client_id: clientId(req) };
-  res.status(201).json(await crud.create('crm_activities', orgId(req), payload, userId(req)));
+  res.status(201).json(await stampOwnerName(await crud.create('crm_activities', orgId(req), payload, userId(req))));
 }));
-tasks.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_activities', orgId(req), req.params.id))));
+tasks.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_activities', orgId(req), req.params.id)))));
 tasks.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.taskSchema.partial(), req.body);
   const payload: Record<string, unknown> = { ...parsed };
   if (parsed.status === 'done' && !parsed.completed_at) {
     payload.completed_at = new Date().toISOString();
   }
-  res.json(await crud.update('crm_activities', orgId(req), req.params.id, payload, userId(req)));
+  res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, payload, userId(req))));
 }));
 tasks.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id); res.status(204).end(); }));
 router.use('/tasks', tasks);
