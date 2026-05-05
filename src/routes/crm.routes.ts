@@ -1,564 +1,219 @@
-/**
- * CRM module — single routes file with sub-routers per resource.
- * Mounted at /api/v1/crm in src/app.ts.
- *
- * Controllers are inlined (thin) to keep a single file as the routing
- * source-of-truth. All real logic lives in services/crm/*.
- */
-import express, { Request, Response, NextFunction, Router } from 'express';
-import multer from 'multer';
-import { z, ZodError } from 'zod';
-import { requireAuth } from '../middleware/auth';
-import { requireModule } from '../middleware/rbac';
-import { AppError } from '../utils';
-import { supabaseAdmin } from '../lib/supabase';
+import { Router } from 'express';
 
-import * as v from '../validators/crm.validators';
-import * as crud from '../services/crm/crud.service';
-import * as leadsSvc from '../services/crm/leads.service';
-import * as dealsSvc from '../services/crm/deals.service';
-import * as importSvc from '../services/crm/import.service';
-import * as analyticsSvc from '../services/crm/analytics.service';
-import * as emailsSvc from '../services/crm/emails.service';
-import * as whatsappSvc from '../services/crm/whatsapp.service';
-import * as productsSvc from '../services/crm/products.service';
-import * as nbaSvc from '../services/crm/ai/nextBestAction.service';
-import * as winSvc from '../services/crm/ai/winProbability.service';
-import * as autoRespSvc from '../services/crm/ai/autoResponse.service';
-import * as summarizeSvc from '../services/crm/ai/summarize.service';
-import * as kiniTools from '../services/crm/ai/kiniTools.service';
-import { chatWithTools } from '../services/crm/ai/aiClient';
+import * as settings   from '../controllers/crm/settings.controller';
+import * as pipeline   from '../controllers/crm/pipeline.controller';
+import * as leads      from '../controllers/crm/leads.controller';
+import * as contacts   from '../controllers/crm/contacts.controller';
+import * as accounts   from '../controllers/crm/accounts.controller';
+import * as deals      from '../controllers/crm/deals.controller';
+import * as activities from '../controllers/crm/activities.controller';
+import * as analytics  from '../controllers/crm/analytics.controller';
+import * as ai         from '../controllers/crm/ai.controller';
+import {
+  leadSources, territories, assignmentRules, customFields,
+  automations, emailTemplates, emails, products, productCategories,
+  whatsappTemplates, whatsapp, importJobs, states, cities,
+} from '../controllers/crm/lookup.controller';
 
-const router: Router = express.Router();
+const router = Router();
 
-// ----- PUBLIC ROUTES (registered before requireAuth) -----
-// Email tracking + WhatsApp webhook accept signed/tokened requests; the
-// shared secret in the URL path or body IS the auth.
-router.get('/emails/track/open/:token', async (req, res) => {
-  await emailsSvc.recordOpen(req.params.token).catch(() => {});
-  res.set('Content-Type', 'image/gif');
-  res.send(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
-});
-router.get('/emails/track/click/:token', async (req, res) => {
-  await emailsSvc.recordClick(req.params.token).catch(() => {});
-  res.redirect(302, String(req.query.u ?? '/'));
-});
+// ── Settings ─────────────────────────────────────────────────
+router.get('/settings', settings.getSettings);
+router.patch('/settings', settings.updateSettings);
+router.post('/settings/seed-defaults', settings.seedDefaults);
 
-// Meta WhatsApp Business webhook verification (challenge handshake).
-router.get('/webhooks/whatsapp', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token && token === process.env.CRM_WHATSAPP_VERIFY_TOKEN) {
-    return res.status(200).send(String(challenge ?? ''));
-  }
-  res.sendStatus(403);
-});
-router.post('/webhooks/whatsapp', express.json({ limit: '2mb' }), async (req, res) => {
-  const sigHeader = req.headers['x-hub-signature-256'];
-  if (process.env.CRM_WHATSAPP_APP_SECRET && typeof sigHeader === 'string') {
-    const crypto = await import('crypto');
-    const raw = JSON.stringify(req.body);
-    const expected = 'sha256=' + crypto
-      .createHmac('sha256', process.env.CRM_WHATSAPP_APP_SECRET)
-      .update(raw).digest('hex');
-    if (expected !== sigHeader) return res.sendStatus(401);
-  }
-  const orgId = (req.body?.org_id as string | undefined)
-    ?? (req.headers['x-org-id'] as string | undefined);
-  if (!orgId) {
-    return res.status(202).json({ ignored: 'no org context resolvable for stub provider' });
-  }
-  try {
-    const entries = req.body?.entry ?? [];
-    for (const entry of entries) {
-      for (const change of entry?.changes ?? []) {
-        const value = change?.value ?? {};
-        for (const m of value.messages ?? []) {
-          await whatsappSvc.recordInbound({
-            org_id: orgId,
-            from_phone: m.from,
-            to_phone: value.metadata?.display_phone_number,
-            body_text: m.text?.body,
-            media_url: m.image?.id ?? m.document?.id ?? m.video?.id,
-            media_type: m.type,
-            provider_message_id: m.id,
-            in_reply_to: m.context?.id,
-          });
-        }
-        for (const s of value.statuses ?? []) {
-          await whatsappSvc.recordStatusUpdate({
-            org_id: orgId,
-            provider_message_id: s.id,
-            status: s.status as 'delivered' | 'read' | 'failed',
-            error: s.errors?.[0]?.title,
-          });
-        }
-      }
-    }
-  } catch {
-    // Best-effort; never fail the webhook so Meta doesn't retry.
-  }
-  res.sendStatus(200);
-});
+// ── Pipelines ────────────────────────────────────────────────
+router.get('/pipelines', pipeline.listPipelines);
+router.post('/pipelines', pipeline.createPipeline);
+router.get('/pipelines/:id', pipeline.getPipeline);
+router.patch('/pipelines/:id', pipeline.updatePipeline);
+router.delete('/pipelines/:id', pipeline.deletePipeline);
 
-// ----- AUTHENTICATED ROUTES BELOW -----
-router.use(requireAuth, requireModule('crm'));
+// ── Stages ───────────────────────────────────────────────────
+router.get('/stages', pipeline.listStages);
+router.post('/stages', pipeline.createStage);
+router.get('/stages/:id', pipeline.getStage);
+router.patch('/stages/:id', pipeline.updateStage);
+router.delete('/stages/:id', pipeline.deleteStage);
 
-// Wrap every res.json payload in {success, data} so the dashboard's
-// Wrapped<T> typings match runtime. Pass-through if the body already has
-// a `success` field (error handler emits {success:false,...}).
-router.use((_req, res, next) => {
-  const originalJson = res.json.bind(res);
-  res.json = (body: unknown) => {
-    if (body && typeof body === 'object' && 'success' in (body as Record<string, unknown>)) {
-      return originalJson(body);
-    }
-    return originalJson({ success: true, data: body });
-  };
-  next();
-});
+// ── Leads ────────────────────────────────────────────────────
+router.get('/leads', leads.listLeads);
+router.post('/leads', leads.createLead);
+router.get('/leads/:id', leads.getLead);
+router.patch('/leads/:id', leads.updateLead);
+router.delete('/leads/:id', leads.deleteLead);
+router.post('/leads/:id/score', leads.scoreLead);
+router.post('/leads/:id/convert', leads.convertLead);
+router.get('/leads/:id/activities', leads.getLeadActivities);
+router.get('/leads/:id/score-history', leads.getLeadScoreHistory);
+router.get('/leads/:id/deals', leads.getLeadDeals);
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+// ── Contacts ─────────────────────────────────────────────────
+router.get('/contacts', contacts.listContacts);
+router.post('/contacts', contacts.createContact);
+router.get('/contacts/:id', contacts.getContact);
+router.patch('/contacts/:id', contacts.updateContact);
+router.delete('/contacts/:id', contacts.deleteContact);
+router.get('/contacts/:id/activities', contacts.getContactActivities);
+router.get('/contacts/:id/deals', contacts.getContactDeals);
+router.get('/contacts/:id/notes', contacts.getContactNotes);
 
-// ---------- helpers --------------------------------------------------
-const wrap = (fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) =>
-  (req: Request, res: Response, next: NextFunction) => fn(req, res, next).catch(next);
+// ── Accounts ─────────────────────────────────────────────────
+router.get('/accounts', accounts.listAccounts);
+router.post('/accounts', accounts.createAccount);
+router.get('/accounts/:id', accounts.getAccount);
+router.patch('/accounts/:id', accounts.updateAccount);
+router.delete('/accounts/:id', accounts.deleteAccount);
+router.get('/accounts/:id/contacts', accounts.getAccountContacts);
+router.get('/accounts/:id/deals', accounts.getAccountDeals);
+router.get('/accounts/:id/activities', accounts.getAccountActivities);
+router.get('/accounts/:id/notes', accounts.getAccountNotes);
 
-function orgId(req: Request): string {
-  const r = req as Request & { user?: { org_id?: string }; auth?: { org_id?: string } };
-  const id = r.user?.org_id ?? r.auth?.org_id ?? (req.headers['x-org-id'] as string | undefined);
-  if (!id) throw new AppError(400, 'No org context on request', 'NO_ORG');
-  return String(id);
-}
-function userId(req: Request): string | undefined {
-  const r = req as Request & { user?: { id?: string; user_id?: string }; auth?: { user_id?: string } };
-  return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
-}
-function dateRange(req: Request): { from?: string; to?: string } {
-  const from = req.query.from ? String(req.query.from) : undefined;
-  const to = req.query.to ? String(req.query.to) : undefined;
-  return { from, to };
-}
-function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> {
-  try { return schema.parse(payload); }
-  catch (e) {
-    if (e instanceof ZodError) {
-      const issues = e.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
-      throw new AppError(400, `Validation failed: ${issues}`, 'VALIDATION');
-    }
-    throw e;
-  }
-}
+// ── Deals ────────────────────────────────────────────────────
+router.get('/deals', deals.listDeals);
+router.post('/deals', deals.createDeal);
+router.get('/deals/:id', deals.getDeal);
+router.patch('/deals/:id', deals.updateDeal);
+router.delete('/deals/:id', deals.deleteDeal);
+router.post('/deals/:id/move-stage', deals.moveStage);
+router.post('/deals/:id/win', deals.winDeal);
+router.post('/deals/:id/lose', deals.loseDeal);
+router.get('/deals/:id/history', deals.getDealHistory);
+router.get('/deals/:id/activities', deals.getDealActivities);
+router.get('/deals/:id/contacts', deals.getDealContacts);
+router.get('/deals/:id/notes', deals.getDealNotes);
+router.get('/deals/:id/line-items', deals.listLineItems);
+router.post('/deals/:id/line-items', deals.addLineItem);
 
-// ---------- LEADS ----------------------------------------------------
-const leads = express.Router();
-leads.get('/', wrap(async (req, res) => res.json(await leadsSvc.listLeads(orgId(req), req.query))));
-leads.post('/', wrap(async (req, res) => res.status(201).json(await leadsSvc.createLead({
-  org_id: orgId(req), user_id: userId(req), payload: parse(v.leadCreateSchema, req.body) }))));
-leads.get('/:id', wrap(async (req, res) => res.json(await leadsSvc.getLead(orgId(req), req.params.id))));
-leads.patch('/:id', wrap(async (req, res) =>
-  res.json(await leadsSvc.updateLead(orgId(req), req.params.id, parse(v.leadUpdateSchema, req.body), userId(req)))));
-leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(req), req.params.id); res.status(204).end(); }));
-leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
-leads.post('/:id/convert', wrap(async (req, res) =>
-  res.json(await leadsSvc.convertLead(orgId(req), req.params.id, parse(v.leadConvertSchema, req.body), userId(req)))));
-leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc.listScoreHistory(orgId(req), req.params.id))));
-leads.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
-)));
-leads.get('/:id/deals', wrap(async (req, res) => res.json(
-  await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query })
-)));
-leads.post('/bulk-assign', wrap(async (req, res) => {
-  const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
-  res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
-}));
-router.use('/leads', leads);
+// ── Line Items (standalone update/delete) ────────────────────
+router.patch('/line-items/:id', deals.updateLineItem);
+router.delete('/line-items/:id', deals.removeLineItem);
 
-// ---------- CONTACTS -------------------------------------------------
-const contacts = express.Router();
-const contactOpts = { searchColumns: ['first_name','last_name','email','phone'] };
-contacts.get('/', wrap(async (req, res) => res.json(await crud.list('crm_contacts', orgId(req), req.query, contactOpts))));
-contacts.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_contacts', orgId(req), parse(v.contactSchema, req.body), userId(req)))));
-contacts.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_contacts', orgId(req), req.params.id))));
-contacts.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req)))));
-contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id); res.status(204).end(); }));
-contacts.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
-)));
-contacts.get('/:id/deals', wrap(async (req, res) => res.json(
-  await crud.list('crm_deals', orgId(req), { primary_contact_id: req.params.id, ...req.query })
-)));
-contacts.get('/:id/notes', wrap(async (req, res) => res.json(
-  await crud.list('crm_notes', orgId(req), { entity_type: 'contact', entity_id: req.params.id, ...req.query }, { softDelete: false })
-)));
-contacts.get('/:id/emails', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), { contact_id: req.params.id }))));
-router.use('/contacts', contacts);
+// ── Activities ───────────────────────────────────────────────
+router.get('/activities/calendar', activities.getCalendar);
+router.get('/activities', activities.listActivities);
+router.post('/activities', activities.createActivity);
+router.get('/activities/:id', activities.getActivity);
+router.patch('/activities/:id', activities.updateActivity);
+router.delete('/activities/:id', activities.deleteActivity);
 
-// ---------- ACCOUNTS -------------------------------------------------
-const accounts = express.Router();
-accounts.get('/', wrap(async (req, res) => res.json(await crud.list('crm_accounts', orgId(req), req.query, { searchColumns: ['name','domain','industry'] }))));
-accounts.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_accounts', orgId(req), parse(v.accountSchema, req.body), userId(req)))));
-accounts.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_accounts', orgId(req), req.params.id))));
-accounts.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_accounts', orgId(req), req.params.id, parse(v.accountSchema.partial(), req.body), userId(req)))));
-accounts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_accounts', orgId(req), req.params.id); res.status(204).end(); }));
-accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
-  await crud.list('crm_contacts', orgId(req), { account_id: req.params.id, ...req.query })
-)));
-accounts.get('/:id/deals', wrap(async (req, res) => res.json(
-  await crud.list('crm_deals', orgId(req), { account_id: req.params.id, ...req.query })
-)));
-accounts.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
-)));
-accounts.get('/:id/notes', wrap(async (req, res) => res.json(
-  await crud.list('crm_notes', orgId(req), { entity_type: 'account', entity_id: req.params.id, ...req.query }, { softDelete: false })
-)));
-accounts.post('/:id/summarize', wrap(async (req, res) =>
-  res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), req.params.id) })));
-router.use('/accounts', accounts);
+// ── Tasks ────────────────────────────────────────────────────
+router.get('/tasks', activities.listTasks);
+router.post('/tasks', activities.createTask);
+router.get('/tasks/:id', activities.getTask);
+router.patch('/tasks/:id', activities.updateTask);
+router.delete('/tasks/:id', activities.deleteTask);
 
-// ---------- DEALS ----------------------------------------------------
-const deals = express.Router();
-deals.get('/', wrap(async (req, res) => res.json(await dealsSvc.listDeals(orgId(req), req.query))));
-deals.post('/', wrap(async (req, res) =>
-  res.status(201).json(await dealsSvc.createDeal(orgId(req), parse(v.dealSchema, req.body), userId(req)))));
-deals.get('/:id', wrap(async (req, res) => res.json(await dealsSvc.getDeal(orgId(req), req.params.id))));
-deals.patch('/:id', wrap(async (req, res) =>
-  res.json(await dealsSvc.updateDeal(orgId(req), req.params.id, parse(v.dealUpdateSchema, req.body), userId(req)))));
-deals.delete('/:id', wrap(async (req, res) => { await dealsSvc.deleteDeal(orgId(req), req.params.id); res.status(204).end(); }));
-deals.post('/:id/move-stage', wrap(async (req, res) => {
-  const { stage_id } = parse(v.moveStageSchema, req.body);
-  res.json(await dealsSvc.moveStage(orgId(req), req.params.id, stage_id, userId(req)));
-}));
-deals.post('/:id/win', wrap(async (req, res) => res.json(await dealsSvc.winDeal(orgId(req), req.params.id, parse(v.winSchema, req.body), userId(req)))));
-deals.post('/:id/lose', wrap(async (req, res) => res.json(await dealsSvc.loseDeal(orgId(req), req.params.id, parse(v.loseSchema, req.body), userId(req)))));
-deals.post('/:id/win-probability', wrap(async (req, res) => res.json(await winSvc.compute(orgId(req), req.params.id))));
-deals.post('/:id/next-action', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), req.params.id, true))));
-deals.get('/:id/history', wrap(async (req, res) => res.json(await dealsSvc.dealHistory(orgId(req), req.params.id))));
-deals.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
-)));
-deals.get('/:id/contacts', wrap(async (req, res) => {
-  const { data, error } = await supabaseAdmin
-    .from('crm_deal_contacts')
-    .select('contact_id, role, is_primary, contact:crm_contacts(*)')
-    .eq('deal_id', req.params.id);
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  res.json((data ?? []).map((r: { contact_id: string; role: string | null; is_primary: boolean; contact: unknown }) => ({
-    contact_id: r.contact_id,
-    role: r.role,
-    is_primary: r.is_primary,
-    contact: r.contact,
-  })));
-}));
-deals.get('/:id/notes', wrap(async (req, res) => res.json(
-  await crud.list('crm_notes', orgId(req), { entity_type: 'deal', entity_id: req.params.id, ...req.query }, { softDelete: false })
-)));
-// Deal line items (nested under the deal).
-deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc.listLineItems(orgId(req), req.params.id))));
-deals.post('/:id/line-items', wrap(async (req, res) =>
-  res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req)))));
-router.use('/deals', deals);
+// ── Notes ────────────────────────────────────────────────────
+router.get('/notes', activities.listNotes);
+router.post('/notes', activities.createNote);
+router.get('/notes/:id', activities.getNote);
+router.patch('/notes/:id', activities.updateNote);
+router.delete('/notes/:id', activities.deleteNote);
 
-// Top-level line item update/delete (id is unique enough).
-const lineItems = express.Router();
-lineItems.patch('/:id', wrap(async (req, res) =>
-  res.json(await productsSvc.updateLineItem(orgId(req), req.params.id, parse(v.lineItemSchema.partial(), req.body), userId(req)))));
-lineItems.delete('/:id', wrap(async (req, res) => {
-  await productsSvc.deleteLineItem(orgId(req), req.params.id);
-  res.status(204).end();
-}));
-router.use('/line-items', lineItems);
+// ── Lead Sources ─────────────────────────────────────────────
+router.get('/lead-sources', leadSources.list);
+router.post('/lead-sources', leadSources.create);
+router.get('/lead-sources/:id', leadSources.getOne);
+router.patch('/lead-sources/:id', leadSources.update);
+router.delete('/lead-sources/:id', leadSources.remove);
 
-// ---------- PIPELINES + STAGES --------------------------------------
-const pipelines = express.Router();
-pipelines.get('/', wrap(async (req, res) => res.json(await crud.list('crm_pipelines', orgId(req), req.query, { defaultSort: { column: 'created_at', ascending: true } }))));
-pipelines.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_pipelines', orgId(req), parse(v.pipelineSchema, req.body), userId(req)))));
-pipelines.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_pipelines', orgId(req), req.params.id))));
-pipelines.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_pipelines', orgId(req), req.params.id, parse(v.pipelineSchema.partial(), req.body), userId(req)))));
-pipelines.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_pipelines', orgId(req), req.params.id); res.status(204).end(); }));
-pipelines.get('/:id/stages', wrap(async (req, res) => res.json(
-  await crud.list('crm_deal_stages', orgId(req), { pipeline_id: req.params.id }, { softDelete: false, defaultSort: { column: 'position', ascending: true } })
-)));
-router.use('/pipelines', pipelines);
+// ── Territories ──────────────────────────────────────────────
+router.get('/territories', territories.list);
+router.post('/territories', territories.create);
+router.get('/territories/:id', territories.getOne);
+router.patch('/territories/:id', territories.update);
+router.delete('/territories/:id', territories.remove);
 
-const stagesRouter = express.Router();
-stagesRouter.get('/', wrap(async (req, res) => res.json(await crud.list('crm_deal_stages', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'position', ascending: true } }))));
-stagesRouter.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_deal_stages', orgId(req), parse(v.stageSchema, req.body)))));
-stagesRouter.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_deal_stages', orgId(req), req.params.id, parse(v.stageSchema.partial(), req.body)))));
-stagesRouter.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_deal_stages', orgId(req), req.params.id); res.status(204).end(); }));
-stagesRouter.post('/reorder', wrap(async (req, res) => {
-  const body = parse(v.reorderStagesSchema, req.body);
-  await Promise.all(body.stages.map(s => supabaseAdmin.from('crm_deal_stages')
-    .update({ position: s.position }).eq('id', s.id).eq('org_id', orgId(req))));
-  res.json({ ok: true });
-}));
-router.use('/stages', stagesRouter);
+// ── Assignment Rules ─────────────────────────────────────────
+router.get('/assignment-rules', assignmentRules.list);
+router.post('/assignment-rules', assignmentRules.create);
+router.get('/assignment-rules/:id', assignmentRules.getOne);
+router.patch('/assignment-rules/:id', assignmentRules.update);
+router.delete('/assignment-rules/:id', assignmentRules.remove);
 
-// ---------- ACTIVITIES + NOTES + TASKS ------------------------------
-const activities = express.Router();
-activities.get('/calendar', wrap(async (req, res) => {
-  const from = String(req.query.from ?? new Date(Date.now() - 7 * 86400000).toISOString());
-  const to = String(req.query.to ?? new Date(Date.now() + 30 * 86400000).toISOString());
-  const { data } = await supabaseAdmin.from('crm_activities').select('*')
-    .eq('org_id', orgId(req)).is('deleted_at', null).gte('due_at', from).lte('due_at', to)
-    .order('due_at', { ascending: true });
-  res.json(data ?? []);
-}));
-activities.get('/', wrap(async (req, res) => res.json(await crud.list('crm_activities', orgId(req), req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at' }))));
-activities.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_activities', orgId(req), parse(v.activitySchema, req.body), userId(req)))));
-activities.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_activities', orgId(req), req.params.id))));
-activities.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchema.partial(), req.body), userId(req)))));
-activities.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id); res.status(204).end(); }));
-router.use('/activities', activities);
+// ── Custom Fields ────────────────────────────────────────────
+router.get('/custom-fields', customFields.list);
+router.post('/custom-fields', customFields.create);
+router.get('/custom-fields/:id', customFields.getOne);
+router.patch('/custom-fields/:id', customFields.update);
+router.delete('/custom-fields/:id', customFields.remove);
 
-const notes = express.Router();
-notes.get('/', wrap(async (req, res) => res.json(await crud.list('crm_notes', orgId(req), req.query, { softDelete: false }))));
-notes.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_notes', orgId(req), parse(v.noteSchema, req.body), userId(req)))));
-notes.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_notes', orgId(req), req.params.id, parse(v.noteSchema.partial(), req.body), userId(req)))));
-notes.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_notes', orgId(req), req.params.id); res.status(204).end(); }));
-router.use('/notes', notes);
+// ── Automations ──────────────────────────────────────────────
+router.get('/automations', automations.list);
+router.post('/automations', automations.create);
+router.get('/automations/:id', automations.getOne);
+router.patch('/automations/:id', automations.update);
+router.delete('/automations/:id', automations.remove);
 
-const tasks = express.Router();
-tasks.get('/', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at' })
-)));
-router.use('/tasks', tasks);
+// ── Email Templates ──────────────────────────────────────────
+router.get('/email-templates', emailTemplates.list);
+router.post('/email-templates', emailTemplates.create);
+router.get('/email-templates/:id', emailTemplates.getOne);
+router.patch('/email-templates/:id', emailTemplates.update);
+router.delete('/email-templates/:id', emailTemplates.remove);
 
-// ---------- STATES + CITIES (location management) -------------------
-const states = express.Router();
-states.get('/', wrap(async (req, res) => res.json(
-  await crud.list('crm_states', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name','code'] })
-)));
-states.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_states', orgId(req), parse(v.stateSchema, req.body), userId(req)))));
-states.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_states', orgId(req), req.params.id, parse(v.stateSchema.partial(), req.body), userId(req)))));
-states.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_states', orgId(req), req.params.id); res.status(204).end(); }));
-states.get('/:id/cities', wrap(async (req, res) => res.json(
-  await crud.list('crm_cities', orgId(req), { state_id: req.params.id, ...req.query }, { softDelete: false, defaultSort: { column: 'name', ascending: true } })
-)));
-states.post('/seed-indian', wrap(async (req, res) => {
-  const { data, error } = await supabaseAdmin.rpc('crm_seed_indian_locations', { p_org_id: orgId(req) });
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  res.json(data ?? { states: 0, cities: 0 });
-}));
-router.use('/states', states);
+// ── Emails (send + log) ──────────────────────────────────────
+router.get('/emails', emails.list);
+router.post('/emails/send', emails.send);
 
-const cities = express.Router();
-cities.get('/', wrap(async (req, res) => res.json(
-  await crud.list('crm_cities', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name'] })
-)));
-cities.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_cities', orgId(req), parse(v.citySchema, req.body), userId(req)))));
-cities.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_cities', orgId(req), req.params.id, parse(v.citySchema.partial(), req.body), userId(req)))));
-cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
-router.use('/cities', cities);
+// ── Products & Categories ────────────────────────────────────
+router.get('/product-categories', productCategories.list);
+router.post('/product-categories', productCategories.create);
+router.patch('/product-categories/:id', productCategories.update);
+router.delete('/product-categories/:id', productCategories.remove);
 
-// ---------- SOURCES + RULES + TERRITORIES + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES + PRODUCTS
-function attach(path: string, table: string, schema: z.ZodObject<z.ZodRawShape>, opts: Partial<crud.CrudOpts> = {}) {
-  const r = express.Router();
-  r.get('/', wrap(async (req, res) => res.json(await crud.list(table, orgId(req), req.query, opts))));
-  r.post('/', wrap(async (req, res) => res.status(201).json(await crud.create(table, orgId(req), parse(schema, req.body), userId(req)))));
-  r.get('/:id', wrap(async (req, res) => res.json(await crud.get(table, orgId(req), req.params.id, opts.softDelete !== false))));
-  r.patch('/:id', wrap(async (req, res) => res.json(await crud.update(table, orgId(req), req.params.id, parse(schema.partial(), req.body), userId(req)))));
-  r.delete('/:id', wrap(async (req, res) => {
-    if (opts.softDelete === false) await crud.hardDelete(table, orgId(req), req.params.id);
-    else await crud.softDelete(table, orgId(req), req.params.id);
-    res.status(204).end();
-  }));
-  router.use(path, r);
-}
-attach('/lead-sources', 'crm_lead_sources', v.leadSourceSchema, { softDelete: false });
-attach('/assignment-rules', 'crm_lead_assignment_rules', v.assignmentRuleSchema, { softDelete: false });
-attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false });
-attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false });
-attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false });
-attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false });
-// Phase 2
-attach('/product-categories', 'crm_product_categories', v.productCategorySchema, { defaultSort: { column: 'sort_order', ascending: true } });
-attach('/products', 'crm_products', v.productSchema, { searchColumns: ['name','sku','description'] });
-attach('/whatsapp-templates', 'crm_whatsapp_templates', v.whatsappTemplateSchema, { softDelete: false });
+router.get('/products', products.list);
+router.post('/products', products.create);
+router.get('/products/:id', products.getOne);
+router.patch('/products/:id', products.update);
+router.delete('/products/:id', products.remove);
 
-// ---------- SETTINGS -------------------------------------------------
-const settings = express.Router();
-settings.get('/', wrap(async (req, res) => {
-  const { data } = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
-  res.json(data ?? { org_id: orgId(req), config: {}, business_type: 'both' });
-}));
-settings.patch('/', wrap(async (req, res) => {
-  const body = parse(v.settingsUpdateSchema, req.body);
-  const update: Record<string, unknown> = { org_id: orgId(req) };
-  if (body.config !== undefined) update.config = body.config;
-  if (body.business_type !== undefined) update.business_type = body.business_type;
-  const { data } = await supabaseAdmin.from('crm_settings').upsert(update, { onConflict: 'org_id' }).select('*').single();
-  res.json(data);
-}));
-settings.post('/seed-defaults', wrap(async (req, res) => {
-  const { error } = await supabaseAdmin.rpc('crm_seed_defaults', { p_org_id: orgId(req) });
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  res.json({ ok: true });
-}));
-router.use('/settings', settings);
+// ── WhatsApp ──────────────────────────────────────────────────
+router.get('/whatsapp-templates', whatsappTemplates.list);
+router.post('/whatsapp-templates', whatsappTemplates.create);
+router.patch('/whatsapp-templates/:id', whatsappTemplates.update);
+router.delete('/whatsapp-templates/:id', whatsappTemplates.remove);
+router.post('/whatsapp/send', whatsapp.send);
+router.get('/whatsapp/logs', whatsapp.logs);
 
-// ---------- EMAILS ---------------------------------------------------
-const emails = express.Router();
-emails.post('/send', wrap(async (req, res) => {
-  const body = parse(v.sendEmailSchema, req.body);
-  res.status(201).json(await emailsSvc.sendEmail({
-    ...body,
-    to: body.to!,
-    subject: body.subject!,
-    body_html: body.body_html!,
-    org_id: orgId(req),
-    user_id: userId(req),
-  }));
-}));
-emails.get('/', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), req.query))));
-router.use('/emails', emails);
+// ── Import ───────────────────────────────────────────────────
+router.get('/import/jobs', importJobs.list);
+router.post('/import/upload', importJobs.upload);
+router.post('/import/preview', importJobs.preview);
+router.post('/import/commit', importJobs.commit);
+router.get('/import/jobs/:id', importJobs.getJob);
 
-// ---------- WHATSAPP ------------------------------------------------
-const whatsapp = express.Router();
-whatsapp.post('/send', wrap(async (req, res) => {
-  const body = parse(v.sendWhatsappSchema, req.body);
-  res.status(201).json(await whatsappSvc.sendWhatsapp({
-    ...body,
-    to: body.to!,
-    org_id: orgId(req),
-    user_id: userId(req),
-  }));
-}));
-whatsapp.get('/logs', wrap(async (req, res) => res.json(await whatsappSvc.listLogs(orgId(req), req.query))));
-router.use('/whatsapp', whatsapp);
+// ── States & Cities ──────────────────────────────────────────
+router.get('/states', states.list);
+router.post('/states', states.create);
+router.post('/states/seed-indian', states.seedIndian);
+router.get('/states/:id/cities', states.getCities);
+router.get('/cities', cities.list);
+router.post('/cities', cities.create);
+router.get('/cities/:id', cities.getOne);
+router.patch('/cities/:id', cities.update);
+router.delete('/cities/:id', cities.remove);
 
-// ---------- IMPORT ---------------------------------------------------
-const imp = express.Router();
-imp.post('/upload', upload.single('file'), wrap(async (req, res) => {
-  if (!req.file) throw new AppError(400, 'No file uploaded', 'NO_FILE');
-  res.status(201).json(await importSvc.uploadFile(orgId(req), userId(req), req.file.originalname, req.file.buffer));
-}));
-imp.post('/preview', wrap(async (req, res) => {
-  const body = parse(v.importPreviewSchema, req.body);
-  res.json(await importSvc.previewJob(orgId(req), body.job_id, body.mapping));
-}));
-imp.post('/commit', wrap(async (req, res) => {
-  const body = parse(v.importCommitSchema, req.body);
-  res.json(await importSvc.commitJob(orgId(req), body.job_id));
-}));
-imp.get('/jobs/:id', wrap(async (req, res) => res.json(await importSvc.getJob(orgId(req), req.params.id))));
-imp.get('/jobs', wrap(async (req, res) => res.json(await importSvc.listJobs(orgId(req)))));
-router.use('/import', imp);
+// ── Analytics ────────────────────────────────────────────────
+router.get('/analytics/dashboard-summary', analytics.dashboardSummary);
+router.get('/analytics/pipeline-value', analytics.pipelineValue);
+router.get('/analytics/funnel', analytics.funnel);
+router.get('/analytics/win-rate', analytics.winRate);
+router.get('/analytics/sales-cycle', analytics.salesCycle);
+router.get('/analytics/forecast', analytics.forecast);
+router.get('/analytics/activity-heatmap', analytics.activityHeatmap);
+router.get('/analytics/lead-source-roi', analytics.leadSourceRoi);
+router.get('/analytics/lead-score-distribution', analytics.leadScoreDistribution);
+router.get('/analytics/by-state', analytics.byState);
 
-// ---------- ANALYTICS ------------------------------------------------
-const analytics = express.Router();
-analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req), dateRange(req)))));
-analytics.get('/pipeline-value', wrap(async (req, res) => res.json(await analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined))));
-analytics.get('/funnel', wrap(async (req, res) => res.json(await analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req)))));
-analytics.get('/win-rate', wrap(async (req, res) => res.json(await analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req)))));
-analytics.get('/sales-cycle', wrap(async (req, res) => res.json(await analyticsSvc.salesCycle(orgId(req), dateRange(req)))));
-analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req)))));
-analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(await analyticsSvc.activityHeatmap(orgId(req)))));
-analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(await analyticsSvc.leadSourceRoi(orgId(req)))));
-analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req)))));
-// Geo breakdown for dashboard filtering
-analytics.get('/by-state', wrap(async (req, res) => {
-  const { data, error } = await supabaseAdmin
-    .from('crm_contacts')
-    .select('state')
-    .eq('org_id', orgId(req))
-    .is('deleted_at', null)
-    .not('state', 'is', null);
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  const counts: Record<string, number> = {};
-  for (const r of data ?? []) {
-    const s = (r as { state: string | null }).state;
-    if (s) counts[s] = (counts[s] || 0) + 1;
-  }
-  res.json(Object.entries(counts).map(([state, count]) => ({ state, count })).sort((a, b) => b.count - a.count));
-}));
-router.use('/analytics', analytics);
-
-// ---------- AI -------------------------------------------------------
-const ai = express.Router();
-ai.post('/score-lead/:id', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
-ai.post('/draft-reply', wrap(async (req, res) => {
-  const body = parse(v.draftReplySchema, req.body);
-  res.json(await autoRespSvc.draftReply({
-    ...body,
-    intent: body.intent!,
-    tone: body.tone ?? 'friendly',
-    org_id: orgId(req),
-    user_id: userId(req),
-  }));
-}));
-ai.post('/next-best-action/:dealId', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), req.params.dealId, true))));
-ai.post('/win-probability/:dealId', wrap(async (req, res) => res.json(await winSvc.compute(orgId(req), req.params.dealId))));
-ai.post('/summarize/account/:id', wrap(async (req, res) => res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), req.params.id) })));
-ai.post('/summarize/deal/:id', wrap(async (req, res) => res.json({ text: await summarizeSvc.summarizeDeal(orgId(req), req.params.id) })));
-ai.get('/tools', (_req, res) => res.json(kiniTools.toAnthropicTools()));
-ai.post('/tools/execute', wrap(async (req, res) => {
-  const body = parse(z.object({ name: z.string(), args: z.record(z.unknown()) }), req.body);
-  const result = await kiniTools.executeTool(orgId(req), body.name, body.args);
-  if (!result) throw new AppError(404, `Tool ${body.name} not registered`, 'UNKNOWN_TOOL');
-  res.json(result);
-}));
-ai.post('/chat', wrap(async (req, res) => {
-  const body = parse(z.object({
-    message: z.string().min(1),
-    history: z.array(z.object({ role: z.enum(['user','assistant']), content: z.string() })).optional(),
-    context: z.object({
-      route: z.string().optional(),
-      entity: z.object({ type: z.string().optional(), id: z.string().optional() }).optional(),
-    }).optional(),
-  }), req.body);
-
-  const tools = kiniTools.toAnthropicTools();
-  const systemPrompt = `You are KINI, the Kinematic CRM AI assistant. You help sales reps close deals.
-You have CRM tools available. Use them to fetch real data — never invent leads, deals, or numbers.
-When relevant, return cards via tool results so the UI can render them.
-Current route: ${body.context?.route ?? 'unknown'}.
-Current entity: ${JSON.stringify(body.context?.entity ?? {})}.`;
-
-  const out = await chatWithTools({
-    org_id: orgId(req),
-    system: systemPrompt,
-    tools,
-    messages: [
-      ...(body.history ?? []).map(m => ({ role: m.role, content: m.content as unknown })),
-      { role: 'user' as const, content: body.message as unknown },
-    ],
-    onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), name, args as Record<string, unknown>),
-    max_tokens: 1500,
-  });
-
-  res.json(out);
-}));
-router.use('/ai', ai);
-
-// ---------- ERROR HANDLER (CRM-scoped) -------------------------------
-router.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  if (err instanceof AppError) {
-    return res.status(err.statusCode).json({
-      success: false,
-      error: { code: err.code ?? 'ERROR', message: err.message },
-    });
-  }
-  return res.status(500).json({ success: false, error: { code: 'INTERNAL', message: err.message } });
-});
+// ── AI ────────────────────────────────────────────────────────
+router.post('/ai/score-lead/:id', ai.scoreLead);
+router.post('/ai/draft-reply', ai.draftReply);
+router.post('/ai/next-best-action/:dealId', ai.nextBestAction);
+router.post('/ai/win-probability/:dealId', ai.winProbability);
+router.post('/ai/summarize/account/:id', ai.summarizeAccount);
+router.post('/ai/summarize/deal/:id', ai.summarizeDeal);
+router.post('/ai/chat', ai.chat);
 
 export default router;
