@@ -12,8 +12,24 @@ export interface Icp {
   titles?: string[];
 }
 
-export async function getIcp(org_id: string): Promise<Icp> {
-  const { data } = await supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id).maybeSingle();
+export async function getIcp(org_id: string, client_id: string | null = null): Promise<Icp> {
+  // Multi-tenant: prefer client-specific settings if present, fall back to org-level.
+  if (client_id) {
+    const { data } = await supabaseAdmin
+      .from('crm_settings')
+      .select('config')
+      .eq('org_id', org_id)
+      .eq('client_id', client_id)
+      .maybeSingle();
+    const icp = ((data?.config as Record<string, unknown>)?.icp as Icp) ?? null;
+    if (icp) return icp;
+  }
+  const { data } = await supabaseAdmin
+    .from('crm_settings')
+    .select('config')
+    .eq('org_id', org_id)
+    .is('client_id', null)
+    .maybeSingle();
   return ((data?.config as Record<string, unknown>)?.icp as Icp) ?? {};
 }
 
