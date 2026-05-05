@@ -183,7 +183,8 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
 }
 
 export async function activityHeatmap(org_id: string) {
-  // Last 31 days, one cell per date (calendar-style heatmap).
+  // Last 31 days × 24 hours. Returns full grid (744 rows incl. zeros) so the
+  // frontend can render a date-by-hour heatmap without gap-filling.
   const since = new Date();
   since.setUTCHours(0, 0, 0, 0);
   since.setUTCDate(since.getUTCDate() - 30);
@@ -196,16 +197,21 @@ export async function activityHeatmap(org_id: string) {
 
   const counts = new Map<string, number>();
   for (const a of data ?? []) {
-    const date = String((a as any).created_at).slice(0, 10);
-    counts.set(date, (counts.get(date) ?? 0) + 1);
+    const dt = new Date((a as any).created_at);
+    const date = dt.toISOString().slice(0, 10);
+    const hour = dt.getUTCHours();
+    const key = `${date}|${hour}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
-  const result: Array<{ date: string; count: number }> = [];
+  const result: Array<{ date: string; hour: number; count: number }> = [];
   for (let i = 0; i < 31; i++) {
     const d = new Date(since);
     d.setUTCDate(since.getUTCDate() + i);
-    const key = d.toISOString().slice(0, 10);
-    result.push({ date: key, count: counts.get(key) ?? 0 });
+    const date = d.toISOString().slice(0, 10);
+    for (let h = 0; h < 24; h++) {
+      result.push({ date, hour: h, count: counts.get(`${date}|${h}`) ?? 0 });
+    }
   }
   return result;
 }
