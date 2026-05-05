@@ -17,42 +17,67 @@ export async function getIcp(org_id: string): Promise<Icp> {
   return ((data?.config as Record<string, unknown>)?.icp as Icp) ?? {};
 }
 
-export function computeHeuristic(lead: Partial<Lead>, icp: Icp): { score: number; breakdown: ScoreBreakdown } {
-  const breakdown: ScoreBreakdown = { base: 0, title: 0, company_size: 0, source: 0, engagement: 0, recency: 0, icp: 0, model: 'heuristic_v1' };
+// B2B leans on title seniority, company match, and ICP industry signals.
+function scoreB2B(lead: Partial<Lead>, icp: Icp): ScoreBreakdown {
+  const b: ScoreBreakdown = { base: 0, title: 0, company_size: 0, source: 0, engagement: 0, recency: 0, icp: 0, model: 'heuristic_b2b_v1' };
 
   const t = (lead.title || '').toLowerCase();
-  if (/(ceo|cto|cfo|cmo|coo|chief|founder|owner)/.test(t)) breakdown.title = 20;
-  else if (/(vp|vice president|head of)/.test(t)) breakdown.title = 15;
-  else if (/(director)/.test(t)) breakdown.title = 10;
-  else if (/(manager|lead)/.test(t)) breakdown.title = 5;
-  else if (t) breakdown.title = 2;
+  if (/(ceo|cto|cfo|cmo|coo|chief|founder|owner)/.test(t)) b.title = 20;
+  else if (/(vp|vice president|head of)/.test(t)) b.title = 15;
+  else if (/(director)/.test(t)) b.title = 10;
+  else if (/(manager|lead)/.test(t)) b.title = 5;
+  else if (t) b.title = 2;
 
-  const company = (lead.company || '').toLowerCase();
-  if (company.length > 0) breakdown.company_size = 8;
-
-  const sourceWeights: Record<string, number> = {
-    web_form: 15, referral: 18, manual: 5, csv: 5, email: 8, api: 10, campaign: 12, ads: 10, social: 7, event: 12,
-  };
-  if (lead.source_id) {
-    breakdown.source = 10;
-  }
+  if ((lead.company || '').length > 0) b.company_size = 8;
+  if (lead.source_id) b.source = 10;
 
   if (lead.last_activity_at) {
     const days = (Date.now() - new Date(lead.last_activity_at).getTime()) / (1000 * 60 * 60 * 24);
-    breakdown.recency = Math.max(0, Math.round(10 - days * 0.3));
-    breakdown.engagement = days < 7 ? 15 : days < 30 ? 8 : 3;
+    b.recency = Math.max(0, Math.round(10 - days * 0.3));
+    b.engagement = days < 7 ? 15 : days < 30 ? 8 : 3;
   }
 
   const industryMatch = icp.industries && lead.industry &&
-    icp.industries.some(i => i.toLowerCase() === lead.industry!.toLowerCase());
+    icp.industries.some((i) => i.toLowerCase() === (lead.industry || '').toLowerCase());
   const titleMatch = icp.titles && lead.title &&
-    icp.titles.some(i => lead.title!.toLowerCase().includes(i.toLowerCase()));
-  if (industryMatch) breakdown.icp! += 5;
-  if (titleMatch) breakdown.icp! += 5;
+    icp.titles.some((i) => (lead.title || '').toLowerCase().includes(i.toLowerCase()));
+  if (industryMatch) b.icp = (b.icp ?? 0) + 5;
+  if (titleMatch) b.icp = (b.icp ?? 0) + 5;
+  return b;
+}
+
+// B2C ignores company/title and weighs reachability, consent, recency, and source quality.
+function scoreB2C(lead: Partial<Lead>, _icp: Icp): ScoreBreakdown {
+  const b: ScoreBreakdown = { base: 0, title: 0, company_size: 0, source: 0, engagement: 0, recency: 0, icp: 0, model: 'heuristic_b2c_v1' };
+
+  if (lead.phone) (b as any).phone_present = 12;
+  if (lead.email) (b as any).email_quality = 8;
+
+  if ((lead as any).marketing_consent) (b as any).marketing_consent = 10;
+  if ((lead as any).whatsapp_consent) (b as any).whatsapp_consent = 8;
+
+  const referralLike = String(lead.source_id || '').toLowerCase().includes('referral');
+  b.source = referralLike ? 15 : (lead.source_id ? 8 : 0);
+
+  if (lead.city || lead.country) (b as any).geo = 5;
+
+  if (lead.last_activity_at) {
+    const days = (Date.now() - new Date(lead.last_activity_at).getTime()) / (1000 * 60 * 60 * 24);
+    b.recency = Math.max(0, Math.round(15 - days * 0.5));
+    b.engagement = days < 3 ? 20 : days < 14 ? 12 : days < 30 ? 6 : 2;
+  }
+  return b;
+}
+
+export function computeHeuristic(lead: Partial<Lead>, icp: Icp): { score: number; breakdown: ScoreBreakdown } {
+  const isB2C = (lead as any).is_b2c === true;
+  const breakdown = isB2C ? scoreB2C(lead, icp) : scoreB2B(lead, icp);
 
   const total = Math.max(0, Math.min(100,
-    (breakdown.base ?? 0) + (breakdown.title ?? 0) + (breakdown.company_size ?? 0) +
-    (breakdown.source ?? 0) + (breakdown.engagement ?? 0) + (breakdown.recency ?? 0) + (breakdown.icp ?? 0)
+    Object.entries(breakdown).reduce((sum, [k, v]) => {
+      if (k === 'model' || k === 'total') return sum;
+      return sum + (typeof v === 'number' ? v : 0);
+    }, 0),
   ));
   breakdown.total = total;
   return { score: total, breakdown };

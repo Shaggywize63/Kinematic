@@ -183,13 +183,55 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
 }
 
 export async function activityHeatmap(org_id: string) {
-  const { data } = await supabaseAdmin.from('crm_mv_activity_heatmap').select('*').eq('org_id', org_id);
-  return data ?? [];
+  // Last 31 days, one cell per date (calendar-style heatmap).
+  const since = new Date();
+  since.setUTCHours(0, 0, 0, 0);
+  since.setUTCDate(since.getUTCDate() - 30);
+  const { data } = await supabaseAdmin
+    .from('crm_activities')
+    .select('created_at')
+    .eq('org_id', org_id)
+    .is('deleted_at', null)
+    .gte('created_at', since.toISOString());
+
+  const counts = new Map<string, number>();
+  for (const a of data ?? []) {
+    const date = String((a as any).created_at).slice(0, 10);
+    counts.set(date, (counts.get(date) ?? 0) + 1);
+  }
+
+  const result: Array<{ date: string; count: number }> = [];
+  for (let i = 0; i < 31; i++) {
+    const d = new Date(since);
+    d.setUTCDate(since.getUTCDate() + i);
+    const key = d.toISOString().slice(0, 10);
+    result.push({ date: key, count: counts.get(key) ?? 0 });
+  }
+  return result;
 }
 
 export async function leadSourceRoi(org_id: string) {
-  const { data } = await supabaseAdmin.from('crm_mv_lead_source_roi').select('*').eq('org_id', org_id);
-  return data ?? [];
+  const { data } = await supabaseAdmin
+    .from('crm_mv_lead_source_roi')
+    .select('*')
+    .eq('org_id', org_id);
+
+  // Transform raw MV columns to the canonical SourceROIRow shape the frontend expects.
+  return (data ?? []).map((r: any) => {
+    const revenue = Number(r.revenue_won ?? 0);
+    const cost = Number(r.total_cost ?? 0);
+    const leads = Number(r.lead_count ?? 0);
+    const deals = Number(r.converted_count ?? 0);
+    const roi = cost > 0 ? (revenue - cost) / cost : (revenue > 0 ? 1 : 0);
+    return {
+      source: r.source_name ?? 'Unspecified',
+      leads,
+      deals,
+      revenue,
+      cost,
+      roi,
+    };
+  });
 }
 
 export async function leadScoreDistribution(org_id: string, range?: DateRange) {
