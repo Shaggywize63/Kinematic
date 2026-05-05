@@ -135,6 +135,12 @@ function userId(req: Request): string | undefined {
   const r = req as Request & { user?: { id?: string; user_id?: string }; auth?: { user_id?: string } };
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
+// Multi-tenant: client_id scopes CRM data within an org. Optional — if user has no client_id,
+// they're an org-level user and see/manage org-level (NULL client_id) records.
+function clientId(req: Request): string | null {
+  const r = req as Request & { user?: { client_id?: string | null } };
+  return r.user?.client_id ?? null;
+}
 function dateRange(req: Request): { from?: string; to?: string } {
   const from = req.query.from ? String(req.query.from) : undefined;
   const to = req.query.to ? String(req.query.to) : undefined;
@@ -278,10 +284,34 @@ router.use('/line-items', lineItems);
 
 // ---------- PIPELINES + STAGES --------------------------------------
 const pipelines = express.Router();
-pipelines.get('/', wrap(async (req, res) => res.json(await crud.list('crm_pipelines', orgId(req), req.query, { defaultSort: { column: 'created_at', ascending: true } }))));
+pipelines.get('/', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('crm_pipelines')
+    .select('*, stages:crm_deal_stages(*)')
+    .eq('org_id', orgId(req))
+    .is('deleted_at', null)
+    .order('created_at', { ascending: true });
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  // Sort stages by position within each pipeline
+  const sorted = (data || []).map((p: any) => ({
+    ...p,
+    stages: Array.isArray(p.stages) ? [...p.stages].sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0)) : [],
+  }));
+  res.json(sorted);
+}));
 pipelines.post('/', wrap(async (req, res) =>
   res.status(201).json(await crud.create('crm_pipelines', orgId(req), parse(v.pipelineSchema, req.body), userId(req)))));
-pipelines.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_pipelines', orgId(req), req.params.id))));
+pipelines.get('/:id', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('crm_pipelines')
+    .select('*, stages:crm_deal_stages(*)')
+    .eq('id', req.params.id).eq('org_id', orgId(req))
+    .is('deleted_at', null)
+    .single();
+  if (error || !data) throw new AppError(404, 'Pipeline not found', 'NOT_FOUND');
+  const sortedStages = Array.isArray(data.stages) ? [...data.stages].sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0)) : [];
+  res.json({ ...data, stages: sortedStages });
+}));
 pipelines.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_pipelines', orgId(req), req.params.id, parse(v.pipelineSchema.partial(), req.body), userId(req)))));
 pipelines.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_pipelines', orgId(req), req.params.id); res.status(204).end(); }));
@@ -386,10 +416,37 @@ cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_citi
 router.use('/cities', cities);
 
 // ---------- SOURCES + RULES + TERRITORIES + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES + PRODUCTS
-function attach(path: string, table: string, schema: z.ZodObject<z.ZodRawShape>, opts: Partial<crud.CrudOpts> = {}) {
+//
+// `clientScoped: true` opts in to multi-tenant per-client behaviour:
+//   - LIST returns rows where (client_id IS NULL) OR (client_id = user.client_id)
+//     so org-level defaults are visible to client users alongside their own.
+//   - CREATE stamps client_id from the JWT (or NULL for org-level admins).
+function attach(
+  path: string,
+  table: string,
+  schema: z.ZodObject<z.ZodRawShape>,
+  opts: Partial<crud.CrudOpts> & { clientScoped?: boolean } = {},
+) {
   const r = express.Router();
-  r.get('/', wrap(async (req, res) => res.json(await crud.list(table, orgId(req), req.query, opts))));
-  r.post('/', wrap(async (req, res) => res.status(201).json(await crud.create(table, orgId(req), parse(schema, req.body), userId(req)))));
+  r.get('/', wrap(async (req, res) => {
+    if (opts.clientScoped) {
+      const cid = clientId(req);
+      let q = supabaseAdmin.from(table).select('*').eq('org_id', orgId(req));
+      if (opts.softDelete !== false) q = q.is('deleted_at', null);
+      if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+      else q = q.is('client_id', null);
+      const { data, error } = await q.order(opts.defaultSort?.column ?? 'created_at', { ascending: opts.defaultSort?.ascending ?? false });
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+      return res.json(data ?? []);
+    }
+    res.json(await crud.list(table, orgId(req), req.query, opts));
+  }));
+  r.post('/', wrap(async (req, res) => {
+    const parsed = parse(schema, req.body);
+    const payload: Record<string, unknown> = { ...parsed };
+    if (opts.clientScoped) payload.client_id = clientId(req);
+    res.status(201).json(await crud.create(table, orgId(req), payload, userId(req)));
+  }));
   r.get('/:id', wrap(async (req, res) => res.json(await crud.get(table, orgId(req), req.params.id, opts.softDelete !== false))));
   r.patch('/:id', wrap(async (req, res) => res.json(await crud.update(table, orgId(req), req.params.id, parse(schema.partial(), req.body), userId(req)))));
   r.delete('/:id', wrap(async (req, res) => {
@@ -403,7 +460,8 @@ attach('/lead-sources', 'crm_lead_sources', v.leadSourceSchema, { softDelete: fa
 attach('/assignment-rules', 'crm_lead_assignment_rules', v.assignmentRuleSchema, { softDelete: false });
 attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false });
 attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false });
-attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false });
+// Custom fields are client-scoped: each client can have its own field set on top of org defaults.
+attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
 attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false });
 // Phase 2
 attach('/product-categories', 'crm_product_categories', v.productCategorySchema, { defaultSort: { column: 'sort_order', ascending: true } });
@@ -411,18 +469,53 @@ attach('/products', 'crm_products', v.productSchema, { searchColumns: ['name','s
 attach('/whatsapp-templates', 'crm_whatsapp_templates', v.whatsappTemplateSchema, { softDelete: false });
 
 // ---------- SETTINGS -------------------------------------------------
+// Multi-tenant: settings scoped by (org_id, client_id). If user has a client_id
+// and no client-level row exists, fall back to org-level (NULL client_id) row
+// so org defaults still apply. PATCH writes to the user's scope (their client
+// or org-level depending on JWT).
 const settings = express.Router();
 settings.get('/', wrap(async (req, res) => {
-  const { data } = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
-  res.json(data ?? { org_id: orgId(req), config: {}, business_type: 'both' });
+  const cid = clientId(req);
+  let data: any = null;
+  if (cid) {
+    const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).eq('client_id', cid).maybeSingle();
+    data = r.data;
+  }
+  if (!data) {
+    const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).is('client_id', null).maybeSingle();
+    data = r.data;
+  }
+  res.json(data ?? { org_id: orgId(req), client_id: cid, config: {}, business_type: 'both' });
 }));
 settings.patch('/', wrap(async (req, res) => {
   const body = parse(v.settingsUpdateSchema, req.body);
-  const update: Record<string, unknown> = { org_id: orgId(req) };
-  if (body.config !== undefined) update.config = body.config;
+  const cid = clientId(req);
+  // Read existing row in scope to merge config (so we don't blow away unrelated keys)
+  let existing: any = null;
+  if (cid) {
+    const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).eq('client_id', cid).maybeSingle();
+    existing = r.data;
+  } else {
+    const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).is('client_id', null).maybeSingle();
+    existing = r.data;
+  }
+  const mergedConfig = body.config !== undefined
+    ? { ...(existing?.config || {}), ...body.config }
+    : existing?.config ?? {};
+  const update: Record<string, unknown> = {
+    org_id: orgId(req),
+    client_id: cid,
+    config: mergedConfig,
+  };
   if (body.business_type !== undefined) update.business_type = body.business_type;
-  const { data } = await supabaseAdmin.from('crm_settings').upsert(update, { onConflict: 'org_id' }).select('*').single();
-  res.json(data);
+  // Update if exists, else insert
+  if (existing?.id) {
+    const { data } = await supabaseAdmin.from('crm_settings').update(update).eq('id', existing.id).select('*').single();
+    res.json(data);
+  } else {
+    const { data } = await supabaseAdmin.from('crm_settings').insert(update).select('*').single();
+    res.json(data);
+  }
 }));
 settings.post('/seed-defaults', wrap(async (req, res) => {
   const { error } = await supabaseAdmin.rpc('crm_seed_defaults', { p_org_id: orgId(req) });
