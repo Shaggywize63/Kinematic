@@ -1,5 +1,9 @@
 /**
  * CRM analytics — reads materialized views + a few live queries for KPIs.
+ * Each method accepts optional `from`/`to` ISO timestamps to scope the window;
+ * defaults preserve the original "week / month / 30 day" rolling windows when
+ * the caller doesn't pass anything (callers that haven't been updated keep
+ * working).
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import type { DashboardSummary } from '../../types/crm.types';
@@ -16,18 +20,24 @@ export async function dashboardSummary(org_id: string, range?: DateRange): Promi
   const { fromIso, toIso } = defaultWindow(range);
   const fromDate = fromIso.slice(0, 10);
   const toDate = toIso.slice(0, 10);
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
 
   const [{ count: totalLeads }, { count: newWeek }, { count: qualified }, { data: pipelineRows }, { data: closedMtd }, { count: hot }, { count: closingThisWeek }] = await Promise.all([
     supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null),
+    // "new leads in window"
     supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso),
     supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).eq('status', 'qualified'),
     supabaseAdmin.from('crm_mv_pipeline_value').select('total_amount, weighted_amount, deal_count').eq('org_id', org_id),
+    // closed in window
     supabaseAdmin.from('crm_deals').select('amount, owner_id, crm_deal_stages!inner(stage_type)').eq('org_id', org_id).gte('actual_close_date', fromDate).lte('actual_close_date', toDate),
     supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('score', 70),
     supabaseAdmin.from('crm_deals').select('id, crm_deal_stages!inner(stage_type)', { count: 'exact', head: true })
       .eq('org_id', org_id).is('deleted_at', null).eq('crm_deal_stages.stage_type', 'open')
       .lte('expected_close_date', new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)),
   ]);
+  // weekAgo retained for legacy field 'new_leads_this_week' below.
+  const _weekAgo = weekAgo;
+  void _weekAgo;
 
   const open_pipeline_value = (pipelineRows ?? []).reduce((s, r) => s + Number(r.total_amount ?? 0), 0);
   const weighted_pipeline_value = (pipelineRows ?? []).reduce((s, r) => s + Number(r.weighted_amount ?? 0), 0);
@@ -41,29 +51,38 @@ export async function dashboardSummary(org_id: string, range?: DateRange): Promi
   }
   const win_rate_pct = wonCount + lostCount > 0 ? Math.round((wonCount * 100) / (wonCount + lostCount)) : 0;
 
+  // Avg sales cycle: (closed_at - created_at) for won deals in window
   const { data: cycleRows } = await supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null)
-    .gte('actual_close_date', fromDate).lte('actual_close_date', toDate).limit(200);
+    .gte('actual_close_date', fromDate).lte('actual_close_date', toDate)
+    .limit(200);
   const cycles = (cycleRows ?? []).map(r => (new Date(r.actual_close_date!).getTime() - new Date(r.created_at).getTime()) / 86400000);
   const avg_sales_cycle_days = cycles.length ? Math.round(cycles.reduce((a, b) => a + b, 0) / cycles.length) : 0;
 
+  // Top owners by closed-won in window
   const ownerMap = new Map<string, number>();
   for (const r of (closedMtd ?? []) as unknown as Array<{ amount: number; owner_id?: string; crm_deal_stages: { stage_type: string } | null }>) {
     if (r.crm_deal_stages?.stage_type === 'won' && r.owner_id) {
       ownerMap.set(r.owner_id, (ownerMap.get(r.owner_id) ?? 0) + Number(r.amount));
     }
   }
-  const top_owners = Array.from(ownerMap.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5)
+  const top_owners = Array.from(ownerMap.entries())
+    .sort((a, b) => b[1] - a[1]).slice(0, 5)
     .map(([owner_id, closed_won]) => ({ owner_id, closed_won }));
 
   return {
     total_leads: totalLeads ?? 0,
     new_leads_this_week: newWeek ?? 0,
     qualified_leads: qualified ?? 0,
-    open_deals, open_pipeline_value, weighted_pipeline_value,
-    closed_won_amount_mtd: won, closed_lost_amount_mtd: lost,
-    win_rate_pct, avg_sales_cycle_days, top_owners,
+    open_deals,
+    open_pipeline_value,
+    weighted_pipeline_value,
+    closed_won_amount_mtd: won,
+    closed_lost_amount_mtd: lost,
+    win_rate_pct,
+    avg_sales_cycle_days,
+    top_owners,
     deals_closing_this_week: closingThisWeek ?? 0,
     hot_leads: hot ?? 0,
   };
@@ -91,7 +110,8 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
     const { data } = await supabaseAdmin.from('crm_mv_lead_source_roi').select('*').eq('org_id', org_id);
     return data ?? [];
   }
-  let q = supabaseAdmin.from('crm_deals').select('amount, owner_id, stage_id, created_at, crm_deal_stages!inner(name, stage_type)')
+  let q = supabaseAdmin.from('crm_deals')
+    .select('amount, owner_id, stage_id, created_at, crm_deal_stages!inner(name, stage_type)')
     .eq('org_id', org_id).is('deleted_at', null);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
@@ -106,13 +126,15 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
     map.set(key, e);
   }
   return Array.from(map.entries()).map(([key, v]) => ({
-    key, won_amount: v.won, lost_amount: v.lost, total_amount: v.total,
+    key,
+    won_amount: v.won, lost_amount: v.lost, total_amount: v.total,
     win_rate: v.won + v.lost > 0 ? Math.round((v.won * 100) / (v.won + v.lost)) : 0,
   }));
 }
 
 export async function salesCycle(org_id: string, range?: DateRange) {
-  let q = supabaseAdmin.from('crm_deals').select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
+  let q = supabaseAdmin.from('crm_deals')
+    .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null);
   if (range?.from) q = q.gte('actual_close_date', range.from.slice(0, 10));
   if (range?.to) q = q.lte('actual_close_date', range.to.slice(0, 10));
@@ -125,7 +147,8 @@ export async function salesCycle(org_id: string, range?: DateRange) {
     arr.push(days);
     buckets.set(month, arr);
   }
-  return Array.from(buckets.entries()).sort(([a], [b]) => a.localeCompare(b))
+  return Array.from(buckets.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
     .map(([month, days]) => ({ month, avg_days: Math.round(days.reduce((a, b) => a + b, 0) / days.length) }));
 }
 
@@ -133,10 +156,16 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
   let cutoff: string;
   let fromCutoff: string | null = null;
   if (range?.to) cutoff = range.to.slice(0, 10);
-  else { const horizonDays = period === 'month' ? 30 : 90; cutoff = new Date(Date.now() + horizonDays * 86400000).toISOString().slice(0, 10); }
+  else {
+    const horizonDays = period === 'month' ? 30 : 90;
+    cutoff = new Date(Date.now() + horizonDays * 86400000).toISOString().slice(0, 10);
+  }
   if (range?.from) fromCutoff = range.from.slice(0, 10);
-  let q = supabaseAdmin.from('crm_deals').select('amount, probability, expected_close_date, crm_deal_stages!inner(probability, stage_type)')
-    .eq('org_id', org_id).is('deleted_at', null).eq('crm_deal_stages.stage_type', 'open')
+
+  let q = supabaseAdmin.from('crm_deals')
+    .select('amount, probability, expected_close_date, crm_deal_stages!inner(probability, stage_type)')
+    .eq('org_id', org_id).is('deleted_at', null)
+    .eq('crm_deal_stages.stage_type', 'open')
     .lte('expected_close_date', cutoff).not('expected_close_date', 'is', null);
   if (fromCutoff) q = q.gte('expected_close_date', fromCutoff);
   const { data } = await q;

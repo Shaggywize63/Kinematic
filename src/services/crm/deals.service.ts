@@ -6,20 +6,23 @@ import { AppError } from '../../utils';
 import type { Deal } from '../../types/crm.types';
 
 export async function listDeals(org_id: string, filters: Record<string, unknown> = {}) {
-  let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)', { count: 'exact' })
+  let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)')
     .eq('org_id', org_id).is('deleted_at', null);
   if (filters.pipeline_id) q = q.eq('pipeline_id', String(filters.pipeline_id));
   if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.account_id) q = q.eq('account_id', String(filters.account_id));
   if (filters.q) q = q.ilike('name', `%${String(filters.q)}%`);
+  // Date range filter on created_at
+  if (filters.from) q = q.gte('created_at', String(filters.from));
+  if (filters.to) q = q.lte('created_at', String(filters.to));
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('expected_close_date', { ascending: true, nullsFirst: false })
        .range((page - 1) * limit, page * limit - 1);
-  const { data, error, count } = await q;
+  const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return { data, total: count ?? 0, page, limit };
+  return data ?? [];
 }
 
 export async function getDeal(org_id: string, id: string) {
@@ -39,7 +42,7 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     primary_contact_id: payload.primary_contact_id ?? null,
     lead_id: payload.lead_id ?? null,
     amount: payload.amount ?? 0,
-    currency: payload.currency ?? 'USD',
+    currency: payload.currency ?? 'INR',
     expected_close_date: payload.expected_close_date ?? null,
     probability: payload.probability ?? null,
     owner_id: payload.owner_id ?? null,

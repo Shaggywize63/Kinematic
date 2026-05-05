@@ -7,6 +7,8 @@ export type StageType = 'open' | 'won' | 'lost';
 export type ActivityType = 'call' | 'meeting' | 'email' | 'note' | 'task' | 'sms';
 export type ActivityStatus = 'planned' | 'completed' | 'cancelled';
 export type EmailStatus = 'queued' | 'sent' | 'delivered' | 'opened' | 'clicked' | 'bounced' | 'failed' | 'unsubscribed';
+export type WhatsappStatus = 'queued' | 'sent' | 'delivered' | 'read' | 'failed' | 'received' | 'replied';
+export type WhatsappDirection = 'outbound' | 'inbound';
 export type EntityType = 'lead' | 'contact' | 'account' | 'deal';
 
 export interface Pipeline {
@@ -308,4 +310,101 @@ export interface KiniContext {
   module?: string;
   route?: string;
   entity?: { type?: EntityType; id?: string };
+}
+
+// ---------- Phase 2: Products + WhatsApp ----------
+
+export interface ProductCategory {
+  id: string;
+  org_id: string;
+  parent_category_id?: string | null;
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Product {
+  id: string;
+  org_id: string;
+  category_id?: string | null;
+  sku: string;
+  name: string;
+  description?: string | null;
+  unit: string;
+  price: number;
+  currency: string;
+  tax_rate_pct: number;
+  hsn_code?: string | null;
+  image_url?: string | null;
+  is_active: boolean;
+  tags: string[];
+  custom_fields: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DealLineItem {
+  id: string;
+  org_id: string;
+  deal_id: string;
+  product_id?: string | null;
+  name: string;
+  description?: string | null;
+  sku?: string | null;
+  unit: string;
+  quantity: number;
+  unit_price: number;
+  discount_pct: number;
+  tax_pct: number;
+  line_total: number;
+  position: number;
+  custom_fields: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WhatsappTemplate {
+  id: string;
+  org_id: string;
+  meta_template_name: string;
+  category: 'utility' | 'marketing' | 'authentication';
+  language: string;
+  status: 'pending' | 'approved' | 'rejected';
+  header_text?: string | null;
+  body_text: string;
+  footer_text?: string | null;
+  variables: string[];
+  provider_template_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WhatsappLog {
+  id: string;
+  org_id: string;
+  direction: WhatsappDirection;
+  template_id?: string | null;
+  from_phone?: string | null;
+  to_phone?: string | null;
+  body_text?: string | null;
+  media_url?: string | null;
+  media_type?: string | null;
+  template_variables?: Record<string, unknown> | null;
+  status: WhatsappStatus;
+  provider: string;
+  provider_message_id?: string | null;
+  error?: string | null;
+  lead_id?: string | null;
+  contact_id?: string | null;
+  deal_id?: string | null;
+  sent_at?: string | null;
+  delivered_at?: string | null;
+  read_at?: string | null;
+  replied_at?: string | null;
+  sent_by?: string | null;
+  created_at: string;
+  updated_at: string;
 }
