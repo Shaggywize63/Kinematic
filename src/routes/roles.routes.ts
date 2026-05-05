@@ -30,6 +30,17 @@ function userId(req: Request): string | undefined {
   const r = req as Request & { user?: { id?: string } };
   return r.user?.id;
 }
+// Multi-tenant: client_id scopes role hierarchies within an org. Client-level
+// users are pinned by their JWT; org-level admins can override via X-Client-Id
+// header (set by the dashboard's global client picker).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function clientId(req: Request): string | null {
+  const r = req as Request & { user?: { client_id?: string | null } };
+  if (r.user?.client_id) return r.user.client_id;
+  const headerVal = (req.headers['x-client-id'] as string | undefined)?.trim();
+  if (headerVal && UUID_RE.test(headerVal)) return headerVal;
+  return null;
+}
 function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> {
   try { return schema.parse(payload); }
   catch (e) {
@@ -55,22 +66,34 @@ const reorderSchema = z.object({
   ids: z.array(uuid),
 });
 
-// GET / — flat list
-router.get('/', wrap(async (req, res) => {
-  const { data, error } = await supabaseAdmin
+// Build a Supabase query that returns rows visible at the caller's scope.
+// LIST: client-level rows + org-level (NULL client_id) rows act as defaults.
+function scopedSelect(req: Request) {
+  const cid = clientId(req);
+  let q = supabaseAdmin
     .from('org_roles')
     .select('*')
     .eq('org_id', orgId(req))
-    .is('deleted_at', null)
-    .order('position', { ascending: true })
-    .order('created_at', { ascending: true });
+    .is('deleted_at', null);
+  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+  else q = q.is('client_id', null);
+  return q.order('position', { ascending: true }).order('created_at', { ascending: true });
+}
+
+// GET / — flat list
+router.get('/', wrap(async (req, res) => {
+  const { data, error } = await scopedSelect(req);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  // Stamp user counts (direct members)
-  const { data: counts } = await supabaseAdmin
+  // Stamp user counts (direct members) — also scope by client_id when set so
+  // the org-level row's count doesn't accidentally include other clients' users.
+  const cid = clientId(req);
+  let cQ = supabaseAdmin
     .from('users')
     .select('org_role_id')
     .eq('org_id', orgId(req))
     .not('org_role_id', 'is', null);
+  if (cid) cQ = cQ.or(`client_id.is.null,client_id.eq.${cid}`);
+  const { data: counts } = await cQ;
   const countMap = new Map<string, number>();
   for (const u of counts ?? []) {
     const id = (u as any).org_role_id as string;
@@ -81,20 +104,17 @@ router.get('/', wrap(async (req, res) => {
 
 // GET /tree — hierarchical
 router.get('/tree', wrap(async (req, res) => {
-  const { data, error } = await supabaseAdmin
-    .from('org_roles')
-    .select('*')
-    .eq('org_id', orgId(req))
-    .is('deleted_at', null)
-    .order('position', { ascending: true })
-    .order('created_at', { ascending: true });
+  const { data, error } = await scopedSelect(req);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
-  const { data: counts } = await supabaseAdmin
+  const cid = clientId(req);
+  let cQ = supabaseAdmin
     .from('users')
     .select('org_role_id')
     .eq('org_id', orgId(req))
     .not('org_role_id', 'is', null);
+  if (cid) cQ = cQ.or(`client_id.is.null,client_id.eq.${cid}`);
+  const { data: counts } = await cQ;
   const countMap = new Map<string, number>();
   for (const u of counts ?? []) {
     const id = (u as any).org_role_id as string;
@@ -132,19 +152,25 @@ router.get('/:id', wrap(async (req, res) => {
 // POST /
 router.post('/', wrap(async (req, res) => {
   const body = parse(createSchema, req.body);
-  // Compute next position among siblings if not provided.
+  const cid = clientId(req);
+  // Compute next position among siblings (within same client scope) if not provided.
   let position = body.position;
   if (position === undefined) {
-    const { data: siblings } = await supabaseAdmin
+    let sibQ = supabaseAdmin
       .from('org_roles')
       .select('position')
       .eq('org_id', orgId(req))
-      .is('deleted_at', null)
-      .is('parent_id', body.parent_id ?? null);
+      .is('deleted_at', null);
+    if (body.parent_id) sibQ = sibQ.eq('parent_id', body.parent_id);
+    else sibQ = sibQ.is('parent_id', null);
+    if (cid) sibQ = sibQ.eq('client_id', cid);
+    else sibQ = sibQ.is('client_id', null);
+    const { data: siblings } = await sibQ;
     position = (siblings ?? []).reduce((m: number, r: any) => Math.max(m, r.position ?? 0), -1) + 1;
   }
   const insertRow = {
     org_id: orgId(req),
+    client_id: cid,
     name: body.name.trim(),
     description: body.description ?? null,
     parent_id: body.parent_id ?? null,
@@ -168,11 +194,17 @@ router.patch('/:id', wrap(async (req, res) => {
     throw new AppError(400, 'A role cannot be its own parent', 'CYCLE');
   }
   if (body.parent_id) {
-    const { data: rows } = await supabaseAdmin
+    // Cycle check: walk only within visible scope (same client + org-level
+    // defaults) to ensure the proposed parent doesn't end up under us.
+    const cid = clientId(req);
+    let q = supabaseAdmin
       .from('org_roles')
       .select('id, parent_id')
       .eq('org_id', orgId(req))
       .is('deleted_at', null);
+    if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+    else q = q.is('client_id', null);
+    const { data: rows } = await q;
     const byId = new Map<string, string | null>();
     for (const r of rows ?? []) byId.set((r as any).id, (r as any).parent_id ?? null);
     let walker: string | null = body.parent_id;
