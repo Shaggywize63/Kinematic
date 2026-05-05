@@ -10,30 +10,40 @@ import type { DashboardSummary } from '../../types/crm.types';
 
 export interface DateRange { from?: string; to?: string }
 
+// Apply the multi-tenant client filter to any Supabase query builder. When
+// client_id is provided, returns rows where client_id IS NULL OR = client_id
+// (org-level defaults remain visible alongside the active client's records).
+// When client_id is null, returns only org-level rows (NULL).
+function withClient<T>(q: T, client_id: string | null): T {
+  const qb = q as any;
+  if (client_id) return qb.or(`client_id.is.null,client_id.eq.${client_id}`);
+  return qb.is('client_id', null);
+}
+
 function defaultWindow(range?: DateRange) {
   const fromIso = range?.from ?? new Date(Date.now() - 30 * 86400000).toISOString();
   const toIso = range?.to ?? new Date().toISOString();
   return { fromIso, toIso };
 }
 
-export async function dashboardSummary(org_id: string, range?: DateRange): Promise<DashboardSummary> {
+export async function dashboardSummary(org_id: string, range?: DateRange, client_id: string | null = null): Promise<DashboardSummary> {
   const { fromIso, toIso } = defaultWindow(range);
   const fromDate = fromIso.slice(0, 10);
   const toDate = toIso.slice(0, 10);
   const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
 
   const [{ count: totalLeads }, { count: newWeek }, { count: qualified }, { data: pipelineRows }, { data: closedMtd }, { count: hot }, { count: closingThisWeek }] = await Promise.all([
-    supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null),
+    withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null), client_id),
     // "new leads in window"
-    supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso),
-    supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).eq('status', 'qualified'),
+    withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), client_id),
+    withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).eq('status', 'qualified'), client_id),
     supabaseAdmin.from('crm_mv_pipeline_value').select('total_amount, weighted_amount, deal_count').eq('org_id', org_id),
     // closed in window
-    supabaseAdmin.from('crm_deals').select('amount, owner_id, crm_deal_stages!inner(stage_type)').eq('org_id', org_id).gte('actual_close_date', fromDate).lte('actual_close_date', toDate),
-    supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('score', 70),
-    supabaseAdmin.from('crm_deals').select('id, crm_deal_stages!inner(stage_type)', { count: 'exact', head: true })
+    withClient(supabaseAdmin.from('crm_deals').select('amount, owner_id, crm_deal_stages!inner(stage_type)').eq('org_id', org_id).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id),
+    withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('score', 70), client_id),
+    withClient(supabaseAdmin.from('crm_deals').select('id, crm_deal_stages!inner(stage_type)', { count: 'exact', head: true })
       .eq('org_id', org_id).is('deleted_at', null).eq('crm_deal_stages.stage_type', 'open')
-      .lte('expected_close_date', new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)),
+      .lte('expected_close_date', new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)), client_id),
   ]);
   // weekAgo retained for legacy field 'new_leads_this_week' below.
   const _weekAgo = weekAgo;
@@ -52,10 +62,10 @@ export async function dashboardSummary(org_id: string, range?: DateRange): Promi
   const win_rate_pct = wonCount + lostCount > 0 ? Math.round((wonCount * 100) / (wonCount + lostCount)) : 0;
 
   // Avg sales cycle: (closed_at - created_at) for won deals in window
-  const { data: cycleRows } = await supabaseAdmin.from('crm_deals')
+  const { data: cycleRows } = await withClient(supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null)
-    .gte('actual_close_date', fromDate).lte('actual_close_date', toDate)
+    .gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id)
     .limit(200);
   const cycles = (cycleRows ?? []).map(r => (new Date(r.actual_close_date!).getTime() - new Date(r.created_at).getTime()) / 86400000);
   const avg_sales_cycle_days = cycles.length ? Math.round(cycles.reduce((a, b) => a + b, 0) / cycles.length) : 0;
@@ -105,7 +115,7 @@ export async function funnel(org_id: string, days = 30, range?: DateRange) {
   return data ?? [];
 }
 
-export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', range?: DateRange) {
+export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', range?: DateRange, client_id: string | null = null) {
   if (by === 'source') {
     const { data } = await supabaseAdmin.from('crm_mv_lead_source_roi').select('*').eq('org_id', org_id);
     return data ?? [];
@@ -113,6 +123,7 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
   let q = supabaseAdmin.from('crm_deals')
     .select('amount, owner_id, stage_id, created_at, crm_deal_stages!inner(name, stage_type)')
     .eq('org_id', org_id).is('deleted_at', null);
+  q = withClient(q, client_id);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
   const { data: deals } = await q;
@@ -132,10 +143,11 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
   }));
 }
 
-export async function salesCycle(org_id: string, range?: DateRange) {
+export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null);
+  q = withClient(q, client_id);
   if (range?.from) q = q.gte('actual_close_date', range.from.slice(0, 10));
   if (range?.to) q = q.lte('actual_close_date', range.to.slice(0, 10));
   const { data } = await q.limit(500);
@@ -152,7 +164,7 @@ export async function salesCycle(org_id: string, range?: DateRange) {
     .map(([month, days]) => ({ month, avg_days: Math.round(days.reduce((a, b) => a + b, 0) / days.length) }));
 }
 
-export async function forecast(org_id: string, period: 'month' | 'quarter' = 'quarter', range?: DateRange) {
+export async function forecast(org_id: string, period: 'month' | 'quarter' = 'quarter', range?: DateRange, client_id: string | null = null) {
   let cutoff: string;
   let fromCutoff: string | null = null;
   if (range?.to) cutoff = range.to.slice(0, 10);
@@ -167,6 +179,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
     .eq('org_id', org_id).is('deleted_at', null)
     .eq('crm_deal_stages.stage_type', 'open')
     .lte('expected_close_date', cutoff).not('expected_close_date', 'is', null);
+  q = withClient(q, client_id);
   if (fromCutoff) q = q.gte('expected_close_date', fromCutoff);
   const { data } = await q;
   const buckets = new Map<string, { weighted: number; total: number }>();
@@ -182,18 +195,21 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
     .map(([month, v]) => ({ month, weighted: Math.round(v.weighted), total: Math.round(v.total) }));
 }
 
-export async function activityHeatmap(org_id: string) {
+export async function activityHeatmap(org_id: string, client_id: string | null = null) {
   // Last 31 days × 24 hours. Returns full grid (744 rows incl. zeros) so the
   // frontend can render a date-by-hour heatmap without gap-filling.
   const since = new Date();
   since.setUTCHours(0, 0, 0, 0);
   since.setUTCDate(since.getUTCDate() - 30);
-  const { data } = await supabaseAdmin
-    .from('crm_activities')
-    .select('created_at')
-    .eq('org_id', org_id)
-    .is('deleted_at', null)
-    .gte('created_at', since.toISOString());
+  const { data } = await withClient(
+    supabaseAdmin
+      .from('crm_activities')
+      .select('created_at')
+      .eq('org_id', org_id)
+      .is('deleted_at', null)
+      .gte('created_at', since.toISOString()),
+    client_id,
+  );
 
   const counts = new Map<string, number>();
   for (const a of data ?? []) {
@@ -240,8 +256,9 @@ export async function leadSourceRoi(org_id: string) {
   });
 }
 
-export async function leadScoreDistribution(org_id: string, range?: DateRange) {
+export async function leadScoreDistribution(org_id: string, range?: DateRange, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_leads').select('score').eq('org_id', org_id).is('deleted_at', null);
+  q = withClient(q, client_id);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
   const { data } = await q;
