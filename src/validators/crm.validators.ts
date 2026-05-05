@@ -30,6 +30,7 @@ const b2cBase = {
 };
 
 export const leadCreateSchema = z.object({
+  client_id: optionalUuid,
   first_name: z.string().min(1).max(120).optional().nullable(),
   last_name: z.string().min(1).max(120).optional().nullable(),
   email: z.string().email().optional().nullable(),
@@ -101,6 +102,7 @@ export const accountSchema = z.object({
 });
 
 export const dealSchema = z.object({
+  client_id: optionalUuid,
   name: z.string().min(1).max(200),
   pipeline_id: uuid,
   stage_id: uuid,
