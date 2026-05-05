@@ -130,7 +130,8 @@ export const activitySchema = z.object({
   body: z.string().optional().nullable(),
   description: z.string().optional().nullable(),
   direction: z.enum(['inbound','outbound']).optional().nullable(),
-  status: z.enum(['planned','completed','cancelled']).default('completed'),
+  status: z.enum(['open','planned','in_progress','completed','done','cancelled']).default('completed'),
+  priority: z.enum(['low','normal','medium','high','urgent']).optional().nullable(),
   due_at: isoDate,
   completed_at: isoDate,
   duration_seconds: z.number().int().nonnegative().optional().nullable(),
@@ -141,6 +142,22 @@ export const activitySchema = z.object({
   owner_id: optionalUuid,
   assigned_to: optionalUuid,
   metadata: z.record(z.unknown()).optional(),
+});
+
+export const taskSchema = z.object({
+  subject: z.string().min(1).max(200),
+  body: z.string().optional().nullable(),
+  description: z.string().optional().nullable(),
+  status: z.enum(['open','in_progress','done','cancelled']).default('open'),
+  priority: z.enum(['low','normal','medium','high','urgent']).optional().nullable(),
+  due_at: isoDate,
+  completed_at: isoDate,
+  lead_id: optionalUuid,
+  contact_id: optionalUuid,
+  account_id: optionalUuid,
+  deal_id: optionalUuid,
+  owner_id: optionalUuid,
+  assigned_to: optionalUuid,
 });
 
 export const noteSchema = z.object({
