@@ -311,6 +311,10 @@ export const productSchema = z.object({
   description: z.string().optional().nullable(),
   unit: z.string().max(40).optional(),
   price: z.number().nonnegative().default(0),
+  // Per-unit weight in kilograms. Lets the UI derive price-per-kg / per-tonne
+  // for weight-based goods (TMT bars, cement, sand) without forcing every
+  // product into the same pricing basis.
+  weight_kg: z.number().nonnegative().optional().nullable(),
   currency: z.string().length(3).default('INR'),
   tax_rate_pct: z.number().min(0).max(100).default(0),
   hsn_code: z.string().max(40).optional().nullable(),
