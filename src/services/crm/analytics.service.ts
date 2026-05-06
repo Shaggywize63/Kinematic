@@ -348,3 +348,29 @@ export async function leadScoreDistribution(org_id: string, range?: DateRange, c
   }
   return buckets;
 }
+
+// One-shot dashboard query — replaces 6 frontend round-trips with one. Each
+// sub-query already runs against indexed tables / materialized views, so this
+// just collapses the network overhead into a single response.
+export async function dashboardComplete(
+  org_id: string,
+  range?: DateRange,
+  client_id: string | null = null,
+) {
+  const [summary, funnelData, pipelineValueData, winRateData, forecastData, scoreDist] = await Promise.all([
+    dashboardSummary(org_id, range, client_id),
+    funnel(org_id, 30, range),
+    pipelineValue(org_id),
+    winRate(org_id, 'rep', range, client_id),
+    forecast(org_id, 'quarter', range, client_id),
+    leadScoreDistribution(org_id, range, client_id),
+  ]);
+  return {
+    summary,
+    funnel: funnelData,
+    pipelineValue: pipelineValueData,
+    winRate: winRateData,
+    forecast: forecastData,
+    leadScoreDistribution: scoreDist,
+  };
+}
