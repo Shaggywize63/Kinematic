@@ -67,10 +67,9 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
 export async function listLeads(org_id: string, filters: Record<string, unknown> = {}, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_leads').select('*')
     .eq('org_id', org_id).is('deleted_at', null);
-  // Multi-tenant: when scoped to a client, return org-level (NULL) + that client's leads;
-  // otherwise return only org-level leads.
-  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
-  else q = q.is('client_id', null);
+  // Hard isolation: when scoped to a client, only that client's leads;
+  // when no client is picked (org admin global view), no client filter.
+  if (client_id) q = q.eq('client_id', client_id);
   if (filters.status) q = q.eq('status', String(filters.status));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));

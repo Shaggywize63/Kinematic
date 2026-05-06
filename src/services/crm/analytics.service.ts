@@ -17,14 +17,15 @@ function gradeFor(score: number): 'A' | 'B' | 'C' | 'D' {
   return 'D';
 }
 
-// Apply the multi-tenant client filter to any Supabase query builder. When
-// client_id is provided, returns rows where client_id IS NULL OR = client_id
-// (org-level defaults remain visible alongside the active client's records).
-// When client_id is null, returns only org-level rows (NULL).
+// Apply the multi-tenant client filter to any Supabase query builder. Hard
+// isolation: when client_id is provided, returns rows where client_id matches
+// exactly. When client_id is null (org-admin without a client picked), returns
+// the query unchanged so org admins retain a global audit view across all
+// rows in the org.
 function withClient<T>(q: T, client_id: string | null): T {
   const qb = q as any;
-  if (client_id) return qb.or(`client_id.is.null,client_id.eq.${client_id}`);
-  return qb.is('client_id', null);
+  if (client_id) return qb.eq('client_id', client_id);
+  return qb;
 }
 
 function defaultWindow(range?: DateRange) {
