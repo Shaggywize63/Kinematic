@@ -147,6 +147,11 @@ export async function rescoreLead(org_id: string, id: string) {
 
 export async function convertLead(org_id: string, id: string, opts: {
   create_deal?: boolean; deal_name?: string; deal_amount?: number;
+  // Optional weight-based deal sizing — when both `deal_volume_kg` and
+  // `deal_product_id` are passed, the deal amount is computed from the
+  // product's price + weight_kg (volume / weight × price). Anything passed
+  // in `deal_amount` wins if also present.
+  deal_volume_kg?: number; deal_product_id?: string;
   pipeline_id?: string; stage_id?: string;
 }, user_id?: string) {
   const lead = await getLead(org_id, id);
@@ -191,11 +196,24 @@ export async function convertLead(org_id: string, id: string, opts: {
   if (opts.create_deal !== false) {
     const pipeline_id = opts.pipeline_id || await getDefaultPipelineId(org_id);
     const stage_id = opts.stage_id || await getFirstOpenStageId(pipeline_id);
+
+    // Resolve deal amount. Explicit deal_amount wins; otherwise derive from
+    // (volume × product.price / product.weight_kg) when those are passed.
+    let amount = opts.deal_amount ?? 0;
+    if ((amount == null || amount === 0) && opts.deal_volume_kg && opts.deal_product_id) {
+      const { data: product } = await supabaseAdmin.from('crm_products')
+        .select('price, weight_kg').eq('id', opts.deal_product_id).eq('org_id', org_id).maybeSingle();
+      if (product?.price && product?.weight_kg) {
+        const ppk = Number(product.price) / Number(product.weight_kg);
+        amount = Math.round(Number(opts.deal_volume_kg) * ppk);
+      }
+    }
+
     const { data: deal, error: dErr } = await supabaseAdmin.from('crm_deals').insert({
       org_id, pipeline_id, stage_id,
       name: opts.deal_name || `${lead.company || lead.email || 'New deal'} — Opportunity`,
       account_id, primary_contact_id: contact_id, lead_id: id,
-      amount: opts.deal_amount ?? 0, owner_id: lead.owner_id, source_id: lead.source_id,
+      amount, owner_id: lead.owner_id, source_id: lead.source_id,
       created_by: user_id ?? null,
     }).select('id').single();
     if (dErr) throw new AppError(500, dErr.message, 'DB_ERROR');
