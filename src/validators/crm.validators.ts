@@ -27,6 +27,9 @@ const b2cBase = {
   marketing_consent: z.boolean().optional(),
   whatsapp_consent: z.boolean().optional(),
   interests: z.array(z.string()).optional(),
+  // Secondary phone numbers — the primary stays in `phone` (lead) / `mobile`
+  // (contact). Stored as a text[] so the UI can manage them as chips.
+  alternate_mobiles: z.array(z.string().min(3).max(40)).optional(),
 };
 
 export const leadCreateSchema = z.object({
