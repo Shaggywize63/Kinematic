@@ -58,6 +58,10 @@ export const leadConvertSchema = z.object({
   create_deal: z.boolean().default(true),
   deal_name: z.string().max(200).optional(),
   deal_amount: z.number().nonnegative().optional(),
+  // Weight-based sizing — passed instead of (or alongside) deal_amount. The
+  // service derives amount = volume_kg × (product.price / product.weight_kg).
+  deal_volume_kg: z.number().nonnegative().optional(),
+  deal_product_id: optionalUuid,
   pipeline_id: optionalUuid,
   stage_id: optionalUuid,
 });
@@ -115,7 +119,7 @@ export const dealSchema = z.object({
   amount: z.number().nonnegative().default(0),
   currency: z.string().length(3).default('INR'),
   expected_close_date: isoDate,
-  probability: z.number().min(0).max(100).optional().nullable(),
+  probability: z.number().min(0).max(99).optional().nullable(),
   owner_id: optionalUuid,
   source_id: optionalUuid,
   next_step: z.string().max(500).optional().nullable(),
@@ -183,7 +187,9 @@ export const stageSchema = z.object({
   pipeline_id: uuid,
   name: z.string().min(1).max(120),
   position: z.number().int().nonnegative(),
-  probability: z.number().min(0).max(100).default(50),
+  // Capped at 99 — calling a deal "100% likely" is misleading and we want
+  // the funnel chart's drop-off math to never divide by certainty.
+  probability: z.number().min(0).max(99).default(50),
   stage_type: z.enum(['open','won','lost']).default('open'),
   color: z.string().optional(),
 });
