@@ -625,6 +625,8 @@ router.use('/import', imp);
 // ---------- ANALYTICS ------------------------------------------------
 const analytics = express.Router();
 analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req)))));
+// Single round-trip dashboard payload (summary + funnel + pipelineValue + winRate + forecast + leadScoreDistribution)
+analytics.get('/dashboard-complete', wrap(async (req, res) => res.json(await analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req)))));
 analytics.get('/pipeline-value', wrap(async (req, res) => res.json(await analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined))));
 analytics.get('/funnel', wrap(async (req, res) => res.json(await analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req)))));
 analytics.get('/win-rate', wrap(async (req, res) => res.json(await analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req), clientId(req)))));
