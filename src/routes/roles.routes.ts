@@ -60,6 +60,7 @@ const createSchema = z.object({
   color: z.string().max(20).optional().nullable(),
   position: z.number().int().nonnegative().optional(),
   permissions: z.array(z.string().max(80)).optional(),
+  permissions_write: z.array(z.string().max(80)).optional(),
   assigned_cities: z.array(z.string().max(120)).optional(),
 });
 const updateSchema = createSchema.partial();
@@ -179,6 +180,7 @@ router.post('/', wrap(async (req, res) => {
     color: body.color ?? '#6366f1',
     position,
     permissions: body.permissions ?? [],
+    permissions_write: body.permissions_write ?? [],
     assigned_cities: body.assigned_cities ?? [],
     created_by: userId(req) ?? null,
   };
@@ -230,6 +232,7 @@ router.patch('/:id', wrap(async (req, res) => {
   if (body.color !== undefined) update.color = body.color;
   if (body.position !== undefined) update.position = body.position;
   if (body.permissions !== undefined) update.permissions = body.permissions;
+  if (body.permissions_write !== undefined) update.permissions_write = body.permissions_write;
   if (body.assigned_cities !== undefined) update.assigned_cities = body.assigned_cities;
 
   const { data, error } = await supabaseAdmin
