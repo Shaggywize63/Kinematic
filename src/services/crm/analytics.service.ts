@@ -51,26 +51,38 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null), client_id),
     withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), client_id),
     withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).eq('status', 'converted').gte('created_at', fromIso).lte('created_at', toIso), client_id),
-    supabaseAdmin.from('crm_mv_pipeline_value').select('stage_name, total_amount, weighted_amount, deal_count, owner_id').eq('org_id', org_id),
+    // Live query for open pipeline — the MV (crm_mv_pipeline_value) doesn't
+    // track client_id, so reading it here would leak the org-wide totals into
+    // any per-client dashboard.
+    withClient(
+      supabaseAdmin.from('crm_deals')
+        .select('amount, owner_id, crm_deal_stages!inner(name, stage_type)')
+        .eq('org_id', org_id).is('deleted_at', null)
+        .eq('crm_deal_stages.stage_type', 'open'),
+      client_id,
+    ),
     withClient(supabaseAdmin.from('crm_deals').select('amount, owner_id, crm_deal_stages!inner(stage_type)').eq('org_id', org_id).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id),
     withClient(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), client_id),
   ]);
 
-  const open_deal_value = (pipelineRows ?? []).reduce((s, r) => s + Number(r.total_amount ?? 0), 0);
-  const open_deals = (pipelineRows ?? []).reduce((s, r) => s + Number(r.deal_count ?? 0), 0);
-
-  // by_stage / by_owner rollups from the pipeline-value MV
+  // Aggregate live open-pipeline rows. Each row is one deal.
+  let open_deal_value = 0;
+  let open_deals = 0;
   const stageMap = new Map<string, { count: number; value: number }>();
   const ownerMap = new Map<string, { count: number; value: number }>();
-  for (const r of (pipelineRows ?? []) as Array<{ stage_name: string; total_amount: number; deal_count: number; owner_id?: string | null }>) {
-    const s = stageMap.get(r.stage_name) ?? { count: 0, value: 0 };
-    s.count += Number(r.deal_count ?? 0);
-    s.value += Number(r.total_amount ?? 0);
-    stageMap.set(r.stage_name, s);
+  for (const r of (pipelineRows ?? []) as unknown as Array<{ amount: number; owner_id?: string | null; crm_deal_stages: { name: string } }>) {
+    const amt = Number(r.amount ?? 0);
+    open_deal_value += amt;
+    open_deals += 1;
+    const stageName = r.crm_deal_stages?.name ?? 'Unknown';
+    const s = stageMap.get(stageName) ?? { count: 0, value: 0 };
+    s.count += 1;
+    s.value += amt;
+    stageMap.set(stageName, s);
     const ownerKey = r.owner_id ?? 'unassigned';
     const o = ownerMap.get(ownerKey) ?? { count: 0, value: 0 };
-    o.count += Number(r.deal_count ?? 0);
-    o.value += Number(r.total_amount ?? 0);
+    o.count += 1;
+    o.value += amt;
     ownerMap.set(ownerKey, o);
   }
   const by_stage = Array.from(stageMap.entries()).map(([stage, v]) => ({ stage, count: v.count, value: v.value }));
