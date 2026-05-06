@@ -25,7 +25,8 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   }
 
   const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload));
-  const { score, breakdown } = scoring.computeHeuristic(payload, await scoring.getIcp(org_id));
+  // Use client-specific ICP if the lead has a client_id stamped, else fall back to org-level.
+  const { score, breakdown } = scoring.computeHeuristic(payload, await scoring.getIcp(org_id, payload.client_id ?? null));
 
   const insertRow = {
     org_id,
@@ -63,9 +64,13 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   return data as Lead;
 }
 
-export async function listLeads(org_id: string, filters: Record<string, unknown> = {}) {
+export async function listLeads(org_id: string, filters: Record<string, unknown> = {}, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_leads').select('*')
     .eq('org_id', org_id).is('deleted_at', null);
+  // Multi-tenant: when scoped to a client, return org-level (NULL) + that client's leads;
+  // otherwise return only org-level leads.
+  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  else q = q.is('client_id', null);
   if (filters.status) q = q.eq('status', String(filters.status));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));

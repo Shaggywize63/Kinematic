@@ -33,6 +33,7 @@ import uploadRoutes       from './routes/upload.routes';
 import wmsRoutes          from './routes/wms.routes';
 import usersRoutes        from './routes/users.routes';
 import zonesRoutes        from './routes/zones.routes';
+import rolesRoutes        from './routes/roles.routes';
 import routePlanRoutes    from './routes/route-plan.routes';
 import candidatesRouter   from './routes/candidates.routes';
 import activityMappingRoutes from './routes/activity-mapping.routes';
@@ -158,6 +159,7 @@ app.use(`${V1}/warehouses`,    requireAuth, requireModule('inventory'), wmsRoute
 app.use(`${V1}/users`,         requireAuth, requireModule('users'), usersRoutes);
 app.use(`${V1}/zones`,         requireAuth, enforceCityScope, zonesRoutes);
 app.use('/api/v1/candidates',  requireAuth, candidatesRouter);
+app.use(`${V1}/roles`,         requireAuth, rolesRoutes);
 app.use('/api/v1/ai',          requireAuth, aiRouter);
 app.use(`${V1}/activity-mappings`, requireAuth, activityMappingRoutes);
 app.use(`${V1}/clients`,           requireAuth, clientRoutes);
