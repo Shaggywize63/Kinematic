@@ -292,18 +292,19 @@ export interface ImportJob {
 
 export interface DashboardSummary {
   total_leads: number;
-  new_leads_this_week: number;
-  qualified_leads: number;
+  new_leads_30d: number;
   open_deals: number;
-  open_pipeline_value: number;
-  weighted_pipeline_value: number;
-  closed_won_amount_mtd: number;
-  closed_lost_amount_mtd: number;
-  win_rate_pct: number;
+  open_deal_value: number;
+  won_deals_30d: number;
+  won_revenue_30d: number;
+  win_rate_30d: number;          // 0-1 fraction
+  avg_deal_size: number;
   avg_sales_cycle_days: number;
-  top_owners: Array<{ owner_id: string; name?: string; closed_won: number }>;
-  deals_closing_this_week: number;
-  hot_leads: number;
+  pipeline_velocity: number;
+  activities_7d: number;
+  conversion_rate: number;        // 0-1 fraction
+  by_stage: Array<{ stage: string; count: number; value: number }>;
+  by_owner: Array<{ owner: string; count: number; value: number }>;
 }
 
 export interface KiniContext {
