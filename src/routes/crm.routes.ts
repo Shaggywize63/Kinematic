@@ -318,8 +318,9 @@ pipelines.get('/', wrap(async (req, res) => {
     .select('*, stages:crm_deal_stages(*)')
     .eq('org_id', orgId(req))
     .is('deleted_at', null);
-  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
-  else q = q.is('client_id', null);
+  // Hard isolation: client picker scopes the list to that client only;
+  // org admin (no client picked) sees all pipelines across the org.
+  if (cid) q = q.eq('client_id', cid);
   const { data, error } = await q.order('created_at', { ascending: true });
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Sort stages by position within each pipeline
@@ -341,8 +342,8 @@ pipelines.get('/:id', wrap(async (req, res) => {
     .select('*, stages:crm_deal_stages(*)')
     .eq('id', req.params.id).eq('org_id', orgId(req))
     .is('deleted_at', null);
-  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
-  else q = q.is('client_id', null);
+  // Hard isolation: client picker scopes to that client only.
+  if (cid) q = q.eq('client_id', cid);
   const { data, error } = await q.single();
   if (error || !data) throw new AppError(404, 'Pipeline not found', 'NOT_FOUND');
   const sortedStages = Array.isArray(data.stages) ? [...data.stages].sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0)) : [];
@@ -379,8 +380,8 @@ activities.get('/calendar', wrap(async (req, res) => {
   const cid = clientId(req);
   let q = supabaseAdmin.from('crm_activities').select('*')
     .eq('org_id', orgId(req)).is('deleted_at', null).gte('due_at', from).lte('due_at', to);
-  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
-  else q = q.is('client_id', null);
+  // Hard isolation: client picker scopes to that client only.
+  if (cid) q = q.eq('client_id', cid);
   const { data } = await q.order('due_at', { ascending: true });
   res.json(await stampOwnerNames(data ?? []));
 }));
@@ -482,8 +483,8 @@ function attach(
       const cid = clientId(req);
       let q = supabaseAdmin.from(table).select('*').eq('org_id', orgId(req));
       if (opts.softDelete !== false) q = q.is('deleted_at', null);
-      if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
-      else q = q.is('client_id', null);
+      // Hard isolation: client picker scopes to that client only.
+      if (cid) q = q.eq('client_id', cid);
       const { data, error } = await q.order(opts.defaultSort?.column ?? 'created_at', { ascending: opts.defaultSort?.ascending ?? false });
       if (error) throw new AppError(500, error.message, 'DB_ERROR');
       return res.json(data ?? []);

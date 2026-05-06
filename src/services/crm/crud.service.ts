@@ -59,8 +59,9 @@ export async function clientScopedList(
 ) {
   let q = supabaseAdmin.from(table).select('*').eq('org_id', org_id);
   if (opts.softDelete !== false) q = q.is('deleted_at', null);
-  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
-  else q = q.is('client_id', null);
+  // Hard isolation: client-scoped query returns only that client's rows;
+  // org admin (no client picked) sees everything.
+  if (client_id) q = q.eq('client_id', client_id);
   for (const [k, v] of Object.entries(query)) {
     if (RESERVED.includes(k) || k === 'client_id' || v === undefined || v === null || v === '') continue;
     q = q.eq(k, v as never);

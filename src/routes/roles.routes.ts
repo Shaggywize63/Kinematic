@@ -75,8 +75,8 @@ function scopedSelect(req: Request) {
     .select('*')
     .eq('org_id', orgId(req))
     .is('deleted_at', null);
-  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
-  else q = q.is('client_id', null);
+  // Hard isolation: client picker scopes to that client; org admin (no client picked) sees everything.
+  if (cid) q = q.eq('client_id', cid);
   return q.order('position', { ascending: true }).order('created_at', { ascending: true });
 }
 
@@ -92,7 +92,7 @@ router.get('/', wrap(async (req, res) => {
     .select('org_role_id')
     .eq('org_id', orgId(req))
     .not('org_role_id', 'is', null);
-  if (cid) cQ = cQ.or(`client_id.is.null,client_id.eq.${cid}`);
+  if (cid) cQ = cQ.eq('client_id', cid);
   const { data: counts } = await cQ;
   const countMap = new Map<string, number>();
   for (const u of counts ?? []) {
@@ -113,7 +113,7 @@ router.get('/tree', wrap(async (req, res) => {
     .select('org_role_id')
     .eq('org_id', orgId(req))
     .not('org_role_id', 'is', null);
-  if (cid) cQ = cQ.or(`client_id.is.null,client_id.eq.${cid}`);
+  if (cid) cQ = cQ.eq('client_id', cid);
   const { data: counts } = await cQ;
   const countMap = new Map<string, number>();
   for (const u of counts ?? []) {
@@ -202,8 +202,8 @@ router.patch('/:id', wrap(async (req, res) => {
       .select('id, parent_id')
       .eq('org_id', orgId(req))
       .is('deleted_at', null);
-    if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
-    else q = q.is('client_id', null);
+    // Hard isolation: cycle check walks within the active client's scope only.
+    if (cid) q = q.eq('client_id', cid);
     const { data: rows } = await q;
     const byId = new Map<string, string | null>();
     for (const r of rows ?? []) byId.set((r as any).id, (r as any).parent_id ?? null);

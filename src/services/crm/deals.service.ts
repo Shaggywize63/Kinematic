@@ -8,9 +8,9 @@ import type { Deal } from '../../types/crm.types';
 export async function listDeals(org_id: string, filters: Record<string, unknown> = {}, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)')
     .eq('org_id', org_id).is('deleted_at', null);
-  // Multi-tenant: org-level deals (NULL client_id) are visible everywhere; stamped deals are client-isolated.
-  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
-  else q = q.is('client_id', null);
+  // Hard isolation: stamped deals are visible only to that client; org admin
+  // (no client picked) sees everything.
+  if (client_id) q = q.eq('client_id', client_id);
   if (filters.pipeline_id) q = q.eq('pipeline_id', String(filters.pipeline_id));
   if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
