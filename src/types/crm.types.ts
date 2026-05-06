@@ -336,6 +336,7 @@ export interface Product {
   description?: string | null;
   unit: string;
   price: number;
+  weight_kg?: number | null;
   currency: string;
   tax_rate_pct: number;
   hsn_code?: string | null;
