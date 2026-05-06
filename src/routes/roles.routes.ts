@@ -59,6 +59,8 @@ const createSchema = z.object({
   parent_id: uuid.nullish(),
   color: z.string().max(20).optional().nullable(),
   position: z.number().int().nonnegative().optional(),
+  permissions: z.array(z.string().max(80)).optional(),
+  assigned_cities: z.array(z.string().max(120)).optional(),
 });
 const updateSchema = createSchema.partial();
 const reorderSchema = z.object({
@@ -176,6 +178,8 @@ router.post('/', wrap(async (req, res) => {
     parent_id: body.parent_id ?? null,
     color: body.color ?? '#6366f1',
     position,
+    permissions: body.permissions ?? [],
+    assigned_cities: body.assigned_cities ?? [],
     created_by: userId(req) ?? null,
   };
   const { data, error } = await supabaseAdmin.from('org_roles').insert(insertRow).select('*').single();
@@ -225,6 +229,8 @@ router.patch('/:id', wrap(async (req, res) => {
   if (body.parent_id !== undefined) update.parent_id = body.parent_id;
   if (body.color !== undefined) update.color = body.color;
   if (body.position !== undefined) update.position = body.position;
+  if (body.permissions !== undefined) update.permissions = body.permissions;
+  if (body.assigned_cities !== undefined) update.assigned_cities = body.assigned_cities;
 
   const { data, error } = await supabaseAdmin
     .from('org_roles')
