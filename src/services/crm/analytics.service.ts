@@ -120,58 +120,71 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   };
 }
 
-export async function pipelineValue(org_id: string, pipeline_id?: string) {
-  let q = supabaseAdmin.from('crm_mv_pipeline_value')
-    .select('stage_name, total_amount, deal_count, stage_id, pipeline_id')
-    .eq('org_id', org_id);
+export async function pipelineValue(org_id: string, pipeline_id?: string, client_id: string | null = null) {
+  // Live query — the MV (crm_mv_pipeline_value) doesn't track client_id, so it
+  // cannot be filtered per client. Aggregate from crm_deals directly.
+  let q = supabaseAdmin.from('crm_deals')
+    .select('amount, pipeline_id, crm_deal_stages!inner(name, stage_type, position)')
+    .eq('org_id', org_id)
+    .is('deleted_at', null)
+    .eq('crm_deal_stages.stage_type', 'open');
   if (pipeline_id) q = q.eq('pipeline_id', pipeline_id);
+  q = withClient(q, client_id);
   const { data } = await q;
-  // Collapse rows that share a stage_name (the MV groups by stage+owner)
-  const map = new Map<string, { value: number; count: number }>();
-  for (const r of (data ?? []) as Array<{ stage_name: string; total_amount: number; deal_count: number }>) {
-    const e = map.get(r.stage_name) ?? { value: 0, count: 0 };
-    e.value += Number(r.total_amount ?? 0);
-    e.count += Number(r.deal_count ?? 0);
-    map.set(r.stage_name, e);
+  const map = new Map<string, { stage: string; value: number; count: number; position: number }>();
+  for (const d of (data ?? []) as unknown as Array<{ amount: number; crm_deal_stages: { name: string; position: number } }>) {
+    const s = d.crm_deal_stages.name;
+    const e = map.get(s) ?? { stage: s, value: 0, count: 0, position: d.crm_deal_stages.position ?? 0 };
+    e.value += Number(d.amount ?? 0);
+    e.count += 1;
+    map.set(s, e);
   }
-  return Array.from(map.entries()).map(([stage, v]) => ({ stage, value: v.value, count: v.count }));
+  return Array.from(map.values()).sort((a, b) => a.position - b.position).map(({ stage, value, count }) => ({ stage, value, count }));
 }
 
-export async function funnel(org_id: string, days = 30, range?: DateRange) {
-  let since: string;
-  if (range?.from) since = range.from.slice(0, 10);
-  else since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-  let q = supabaseAdmin.from('crm_mv_funnel_daily').select('new_leads, qualified_leads, converted_leads, unqualified_leads').eq('org_id', org_id).gte('day', since);
-  if (range?.to) q = q.lte('day', range.to.slice(0, 10));
+export async function funnel(org_id: string, days = 30, range?: DateRange, client_id: string | null = null) {
+  // Live query — the MV (crm_mv_funnel_daily) doesn't track client_id.
+  // Aggregate from crm_leads grouped by status within the window.
+  const fromIso = range?.from ?? new Date(Date.now() - days * 86400000).toISOString();
+  const toIso = range?.to ?? new Date().toISOString();
+  let q = supabaseAdmin.from('crm_leads').select('status')
+    .eq('org_id', org_id).is('deleted_at', null)
+    .gte('created_at', fromIso).lte('created_at', toIso);
+  q = withClient(q, client_id);
   const { data } = await q;
-  const totals = { new: 0, qualified: 0, converted: 0, unqualified: 0 };
-  for (const r of (data ?? []) as Array<{ new_leads: number; qualified_leads: number; converted_leads: number; unqualified_leads: number }>) {
-    totals.new += Number(r.new_leads ?? 0);
-    totals.qualified += Number(r.qualified_leads ?? 0);
-    totals.converted += Number(r.converted_leads ?? 0);
-    totals.unqualified += Number(r.unqualified_leads ?? 0);
+  let n_new = 0, n_qual = 0, n_conv = 0;
+  for (const r of (data ?? []) as Array<{ status: string }>) {
+    n_new += 1;
+    if (r.status === 'qualified' || r.status === 'converted') n_qual += 1;
+    if (r.status === 'converted') n_conv += 1;
   }
   return [
-    { stage: 'New', count: totals.new, value: 0 },
-    { stage: 'Qualified', count: totals.qualified, value: 0 },
-    { stage: 'Converted', count: totals.converted, value: 0 },
+    { stage: 'New', count: n_new, value: 0 },
+    { stage: 'Qualified', count: n_qual, value: 0 },
+    { stage: 'Converted', count: n_conv, value: 0 },
   ];
 }
 
 export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', range?: DateRange, client_id: string | null = null) {
   if (by === 'source') {
-    const { data } = await supabaseAdmin.from('crm_mv_lead_source_roi').select('source_name, lead_count, converted_count').eq('org_id', org_id);
-    return (data ?? []).map((r: any) => {
-      const won = Number(r.converted_count ?? 0);
-      const total = Number(r.lead_count ?? 0);
-      const lost = Math.max(0, total - won);
-      return {
-        bucket: r.source_name ?? 'Unspecified',
-        won,
-        lost,
-        rate: won + lost > 0 ? won / (won + lost) : 0,
-      };
-    });
+    // Live query — the MV (crm_mv_lead_source_roi) doesn't track client_id.
+    let lq = supabaseAdmin.from('crm_leads')
+      .select('status, source_id, crm_lead_sources(name)')
+      .eq('org_id', org_id).is('deleted_at', null);
+    lq = withClient(lq, client_id);
+    const { data } = await lq;
+    const map = new Map<string, { won: number; total: number }>();
+    for (const r of (data ?? []) as unknown as Array<{ status: string; crm_lead_sources?: { name?: string } | null }>) {
+      const name = r.crm_lead_sources?.name ?? 'Unspecified';
+      const e = map.get(name) ?? { won: 0, total: 0 };
+      e.total += 1;
+      if (r.status === 'converted') e.won += 1;
+      map.set(name, e);
+    }
+    return Array.from(map.entries()).map(([bucket, v]) => ({
+      bucket, won: v.won, lost: Math.max(0, v.total - v.won),
+      rate: v.total > 0 ? v.won / v.total : 0,
+    }));
   }
   let q = supabaseAdmin.from('crm_deals')
     .select('amount, owner_id, stage_id, created_at, crm_deal_stages!inner(name, stage_type)')
@@ -312,28 +325,43 @@ export async function activityHeatmap(org_id: string, client_id: string | null =
   return result;
 }
 
-export async function leadSourceRoi(org_id: string) {
-  const { data } = await supabaseAdmin
-    .from('crm_mv_lead_source_roi')
-    .select('*')
-    .eq('org_id', org_id);
-
-  // Transform raw MV columns to the canonical SourceROIRow shape the frontend expects.
-  return (data ?? []).map((r: any) => {
-    const revenue = Number(r.revenue_won ?? 0);
-    const cost = Number(r.total_cost ?? 0);
-    const leads = Number(r.lead_count ?? 0);
-    const deals = Number(r.converted_count ?? 0);
-    const roi = cost > 0 ? (revenue - cost) / cost : (revenue > 0 ? 1 : 0);
-    return {
-      source: r.source_name ?? 'Unspecified',
-      leads,
-      deals,
-      revenue,
-      cost,
-      roi,
-    };
-  });
+export async function leadSourceRoi(org_id: string, client_id: string | null = null) {
+  // Live query — the MV (crm_mv_lead_source_roi) doesn't track client_id.
+  // Pull leads + their source name + cost-per-lead and any converted-deal amount.
+  let lq = supabaseAdmin.from('crm_leads')
+    .select('status, converted_deal_id, crm_lead_sources(name, cost_per_lead)')
+    .eq('org_id', org_id).is('deleted_at', null);
+  lq = withClient(lq, client_id);
+  const { data: leads } = await lq;
+  const dealIds = (leads ?? [])
+    .map((l: any) => l.converted_deal_id)
+    .filter((id: string | null) => !!id) as string[];
+  let dealsById = new Map<string, number>();
+  if (dealIds.length) {
+    const { data: deals } = await supabaseAdmin.from('crm_deals')
+      .select('id, amount, crm_deal_stages!inner(stage_type)')
+      .in('id', dealIds).eq('crm_deal_stages.stage_type', 'won');
+    for (const d of (deals ?? []) as unknown as Array<{ id: string; amount: number }>) {
+      dealsById.set(d.id, Number(d.amount ?? 0));
+    }
+  }
+  const map = new Map<string, { source: string; leads: number; deals: number; revenue: number; cost: number }>();
+  for (const l of (leads ?? []) as unknown as Array<{ status: string; converted_deal_id: string | null; crm_lead_sources?: { name?: string; cost_per_lead?: number } | null }>) {
+    const name = l.crm_lead_sources?.name ?? 'Unspecified';
+    const cpl = Number(l.crm_lead_sources?.cost_per_lead ?? 0);
+    const e = map.get(name) ?? { source: name, leads: 0, deals: 0, revenue: 0, cost: 0 };
+    e.leads += 1;
+    e.cost += cpl;
+    if (l.converted_deal_id && dealsById.has(l.converted_deal_id)) {
+      e.deals += 1;
+      e.revenue += dealsById.get(l.converted_deal_id)!;
+    }
+    map.set(name, e);
+  }
+  return Array.from(map.values()).map((e) => ({
+    ...e,
+    roi: e.cost > 0 ? (e.revenue - e.cost) / e.cost : (e.revenue > 0 ? 1 : 0),
+  }));
 }
 
 export async function leadScoreDistribution(org_id: string, range?: DateRange, client_id: string | null = null) {
@@ -360,8 +388,8 @@ export async function dashboardComplete(
 ) {
   const [summary, funnelData, pipelineValueData, winRateData, forecastData, scoreDist] = await Promise.all([
     dashboardSummary(org_id, range, client_id),
-    funnel(org_id, 30, range),
-    pipelineValue(org_id),
+    funnel(org_id, 30, range, client_id),
+    pipelineValue(org_id, undefined, client_id),
     winRate(org_id, 'rep', range, client_id),
     forecast(org_id, 'quarter', range, client_id),
     leadScoreDistribution(org_id, range, client_id),
