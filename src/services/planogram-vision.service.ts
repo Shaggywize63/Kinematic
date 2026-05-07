@@ -125,7 +125,7 @@ Rules:
 
 export class PlanogramVisionService {
   private static defaultModel(): string {
-    return process.env.PLANOGRAM_VISION_MODEL || 'claude-sonnet-4-5-20250929';
+    return process.env.PLANOGRAM_VISION_MODEL || 'claude-sonnet-4-6';
   }
 
   static async recognizeShelf(args: RecognizeArgs): Promise<ShelfRecognition> {
@@ -173,6 +173,9 @@ export class PlanogramVisionService {
     try {
       const start = text.indexOf('{');
       const end = text.lastIndexOf('}');
+      if (start < 0 || end <= start) {
+        throw new Error('No JSON object found in vision response');
+      }
       parsed = JSON.parse(text.substring(start, end + 1));
     } catch (e: any) {
       logger.warn(`[PlanogramVision] Failed to parse JSON: ${e.message}`);
@@ -249,6 +252,9 @@ export class PlanogramVisionService {
     try {
       const start = text.indexOf('{');
       const end = text.lastIndexOf('}');
+      if (start < 0 || end <= start) {
+        throw new Error('No JSON object found in planogram-parse response');
+      }
       parsed = JSON.parse(text.substring(start, end + 1));
     } catch (e: any) {
       logger.warn(`[PlanogramVision] Failed to parse planogram JSON: ${e.message}`);

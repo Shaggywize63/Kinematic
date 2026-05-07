@@ -16,6 +16,7 @@
 
 import type { Request, Response, NextFunction, ErrorRequestHandler } from 'express';
 import type { CorsOptions } from 'cors';
+import { ZodError } from 'zod';
 import { rateLimit, type Options as RateLimitOptions } from 'express-rate-limit';
 
 // Normalised IP key. ipv6 truncated to /64 to avoid per-address skew.
@@ -145,6 +146,23 @@ const isDev = () => process.env.NODE_ENV !== 'production';
 const SAFE_CODES = new Set(['BAD_REQUEST', 'UNAUTHORIZED', 'FORBIDDEN', 'NOT_FOUND', 'CONFLICT', 'PAYLOAD_TOO_LARGE', 'TOO_MANY_REQUESTS']);
 
 export const sanitiseError: ErrorRequestHandler = (err, req, res, _next) => {
+  // Zod validation failures must surface as 400, not 500. Without this, every
+  // malformed-body request looks like a server crash to the client (e.g. iOS
+  // captures hitting /api/v1/planograms/captures with an empty image_url).
+  if (err instanceof ZodError) {
+    const id = (req as any).id || res.getHeader('X-Request-Id') || '-';
+    if (!res.headersSent) {
+      res.status(400).json({
+        success: false,
+        error: 'Invalid request body',
+        code: 'BAD_REQUEST',
+        details: err.errors.map((e) => ({ path: e.path.join('.'), message: e.message })),
+        request_id: id,
+      });
+    }
+    return;
+  }
+
   const status = Number(err.statusCode || err.status || 500);
   const id = (req as any).id || res.getHeader('X-Request-Id') || '-';
 
