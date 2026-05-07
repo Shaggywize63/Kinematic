@@ -24,9 +24,12 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
       role: 'super_admin',
       is_active: true,
       permissions: [
-        'dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory', 
-        'form_builder', 'reports', 'broadcast', 'broadcasts', 'grievances', 
-        'wms', 'warehouse', 'clients', 'management', 'settings', 'skus', 'assets'
+        'dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory',
+        'form_builder', 'reports', 'broadcast', 'broadcasts', 'grievances',
+        'wms', 'warehouse', 'clients', 'management', 'settings', 'skus', 'assets',
+        'crm', 'distribution', 'planograms', 'route_plans', 'visit_logs',
+        'campaigns', 'leaderboard', 'notifications', 'sos', 'candidates',
+        'learning', 'manpower', 'work_activity', 'audit', 'integrations'
       ],
       assigned_cities: []
     } as any;
