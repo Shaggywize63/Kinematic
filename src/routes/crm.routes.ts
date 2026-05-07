@@ -679,35 +679,38 @@ ai.post('/tools/execute', wrap(async (req, res) => {
   res.json(result);
 }));
 ai.post('/chat', wrap(async (req, res) => {
+  // Shape matches the dashboard chatbot (`KinematicAI` in layout.tsx) which
+  // sends `{messages, system, context}` and reads `data.text` / `data.cards`
+  // from the response. Keep them aligned.
   const body = parse(z.object({
-    message: z.string().min(1),
-    history: z.array(z.object({ role: z.enum(['user','assistant']), content: z.string() })).optional(),
+    messages: z.array(z.object({ role: z.enum(['user','assistant']), content: z.string() })).min(1),
+    system: z.string().optional(),
     context: z.object({
+      module: z.string().optional(),
       route: z.string().optional(),
-      entity: z.object({ type: z.string().optional(), id: z.string().optional() }).optional(),
+      entity: z.object({ type: z.string().optional(), id: z.string().optional() }).nullable().optional(),
+      org_id: z.string().nullable().optional(),
     }).optional(),
   }), req.body);
 
   const tools = kiniTools.toAnthropicTools();
-  const systemPrompt = `You are KINI, the Kinematic CRM AI assistant. You help sales reps close deals.
+  const crmSuffix = `\n\nYou are KINI, the Kinematic CRM AI assistant. You help sales reps close deals.
 You have CRM tools available. Use them to fetch real data — never invent leads, deals, or numbers.
 When relevant, return cards via tool results so the UI can render them.
 Current route: ${body.context?.route ?? 'unknown'}.
 Current entity: ${JSON.stringify(body.context?.entity ?? {})}.`;
+  const systemPrompt = `${body.system ?? ''}${crmSuffix}`;
 
   const out = await chatWithTools({
     org_id: orgId(req),
     system: systemPrompt,
     tools,
-    messages: [
-      ...(body.history ?? []).map(m => ({ role: m.role, content: m.content as unknown })),
-      { role: 'user' as const, content: body.message as unknown },
-    ],
+    messages: body.messages.map(m => ({ role: m.role, content: m.content as unknown })),
     onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), name, args as Record<string, unknown>),
     max_tokens: 1500,
   });
 
-  res.json(out);
+  res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls } });
 }));
 router.use('/ai', ai);
 
