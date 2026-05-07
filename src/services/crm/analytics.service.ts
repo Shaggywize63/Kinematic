@@ -9,6 +9,7 @@ import { supabaseAdmin } from '../../lib/supabase';
 import type { DashboardSummary } from '../../types/crm.types';
 
 export interface DateRange { from?: string; to?: string }
+export type AnalyticsUnit = 'inr' | 'weight';
 
 function gradeFor(score: number): 'A' | 'B' | 'C' | 'D' {
   if (score >= 80) return 'A';
@@ -28,17 +29,44 @@ function withClient<T>(q: T, client_id: string | null): T {
   return qb;
 }
 
+// When the dashboard toggle is on weight mode, every "value" produced by the
+// analytics service comes from line items × product weight instead of `amount`.
+// Selector returns the line-item join only for weight mode so the rupee path
+// stays as cheap as it was.
+const lineItemSelect = ', crm_deal_line_items(quantity, crm_products(weight_kg))';
+
+type LineItemRow = { quantity: number | null; crm_products?: { weight_kg?: number | null } | null };
+type DealWithLines = { amount?: number | null; crm_deal_line_items?: LineItemRow[] | null };
+
+function dealWeightKg(d: DealWithLines): number {
+  let w = 0;
+  for (const li of d.crm_deal_line_items ?? []) {
+    const wk = Number(li.crm_products?.weight_kg ?? 0);
+    const qty = Number(li.quantity ?? 0);
+    if (wk > 0 && qty > 0) w += qty * wk;
+  }
+  return w;
+}
+
+// Returns the per-deal value used by every aggregation: kg in weight mode,
+// rupees in inr mode. Centralised so a deal without line items consistently
+// contributes 0 in weight mode (instead of falsely counting its rupee amount).
+function dealValue(d: DealWithLines, unit: AnalyticsUnit): number {
+  return unit === 'weight' ? dealWeightKg(d) : Number(d.amount ?? 0);
+}
+
 function defaultWindow(range?: DateRange) {
   const fromIso = range?.from ?? new Date(Date.now() - 30 * 86400000).toISOString();
   const toIso = range?.to ?? new Date().toISOString();
   return { fromIso, toIso };
 }
 
-export async function dashboardSummary(org_id: string, range?: DateRange, client_id: string | null = null): Promise<DashboardSummary> {
+export async function dashboardSummary(org_id: string, range?: DateRange, client_id: string | null = null, unit: AnalyticsUnit = 'inr'): Promise<DashboardSummary> {
   const { fromIso, toIso } = defaultWindow(range);
   const fromDate = fromIso.slice(0, 10);
   const toDate = toIso.slice(0, 10);
   const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+  const lines = unit === 'weight' ? lineItemSelect : '';
 
   const [
     { count: totalLeads },
@@ -56,33 +84,35 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     // any per-client dashboard.
     withClient(
       supabaseAdmin.from('crm_deals')
-        .select('amount, owner_id, crm_deal_stages!inner(name, stage_type)')
+        .select(`amount, owner_id, crm_deal_stages!inner(name, stage_type)${lines}`)
         .eq('org_id', org_id).is('deleted_at', null)
         .eq('crm_deal_stages.stage_type', 'open'),
       client_id,
     ),
-    withClient(supabaseAdmin.from('crm_deals').select('amount, owner_id, crm_deal_stages!inner(stage_type)').eq('org_id', org_id).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id),
+    withClient(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id),
     withClient(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), client_id),
   ]);
 
-  // Aggregate live open-pipeline rows. Each row is one deal.
+  // Aggregate live open-pipeline rows. Each row is one deal. In weight mode
+  // the "value" carried in every aggregation is kg derived from line items
+  // instead of rupees.
   let open_deal_value = 0;
   let open_deals = 0;
   const stageMap = new Map<string, { count: number; value: number }>();
   const ownerMap = new Map<string, { count: number; value: number }>();
-  for (const r of (pipelineRows ?? []) as unknown as Array<{ amount: number; owner_id?: string | null; crm_deal_stages: { name: string } }>) {
-    const amt = Number(r.amount ?? 0);
-    open_deal_value += amt;
+  for (const r of (pipelineRows ?? []) as unknown as Array<DealWithLines & { owner_id?: string | null; crm_deal_stages: { name: string } }>) {
+    const v = dealValue(r, unit);
+    open_deal_value += v;
     open_deals += 1;
     const stageName = r.crm_deal_stages?.name ?? 'Unknown';
     const s = stageMap.get(stageName) ?? { count: 0, value: 0 };
     s.count += 1;
-    s.value += amt;
+    s.value += v;
     stageMap.set(stageName, s);
     const ownerKey = r.owner_id ?? 'unassigned';
     const o = ownerMap.get(ownerKey) ?? { count: 0, value: 0 };
     o.count += 1;
-    o.value += amt;
+    o.value += v;
     ownerMap.set(ownerKey, o);
   }
   const by_stage = Array.from(stageMap.entries()).map(([stage, v]) => ({ stage, count: v.count, value: v.value }));
@@ -90,9 +120,9 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
 
   // Won / lost in window
   let won_revenue = 0, wonCount = 0, lostCount = 0;
-  for (const r of (closedInWindow ?? []) as unknown as Array<{ amount: number; crm_deal_stages: { stage_type: string } | null }>) {
+  for (const r of (closedInWindow ?? []) as unknown as Array<DealWithLines & { crm_deal_stages: { stage_type: string } | null }>) {
     const t = r.crm_deal_stages?.stage_type;
-    if (t === 'won') { won_revenue += Number(r.amount); wonCount++; }
+    if (t === 'won') { won_revenue += dealValue(r, unit); wonCount++; }
     if (t === 'lost') { lostCount++; }
   }
   const win_rate_30d = wonCount + lostCount > 0 ? wonCount / (wonCount + lostCount) : 0;
@@ -132,11 +162,12 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   };
 }
 
-export async function pipelineValue(org_id: string, pipeline_id?: string, client_id: string | null = null) {
+export async function pipelineValue(org_id: string, pipeline_id?: string, client_id: string | null = null, unit: AnalyticsUnit = 'inr') {
   // Live query — the MV (crm_mv_pipeline_value) doesn't track client_id, so it
   // cannot be filtered per client. Aggregate from crm_deals directly.
+  const lines = unit === 'weight' ? lineItemSelect : '';
   let q = supabaseAdmin.from('crm_deals')
-    .select('amount, pipeline_id, crm_deal_stages!inner(name, stage_type, position)')
+    .select(`amount, pipeline_id, crm_deal_stages!inner(name, stage_type, position)${lines}`)
     .eq('org_id', org_id)
     .is('deleted_at', null)
     .eq('crm_deal_stages.stage_type', 'open');
@@ -144,10 +175,10 @@ export async function pipelineValue(org_id: string, pipeline_id?: string, client
   q = withClient(q, client_id);
   const { data } = await q;
   const map = new Map<string, { stage: string; value: number; count: number; position: number }>();
-  for (const d of (data ?? []) as unknown as Array<{ amount: number; crm_deal_stages: { name: string; position: number } }>) {
+  for (const d of (data ?? []) as unknown as Array<DealWithLines & { crm_deal_stages: { name: string; position: number } }>) {
     const s = d.crm_deal_stages.name;
     const e = map.get(s) ?? { stage: s, value: 0, count: 0, position: d.crm_deal_stages.position ?? 0 };
-    e.value += Number(d.amount ?? 0);
+    e.value += dealValue(d, unit);
     e.count += 1;
     map.set(s, e);
   }
@@ -242,7 +273,7 @@ export async function salesCycle(org_id: string, range?: DateRange, client_id: s
     .map(([month, days]) => ({ month, avg_days: Math.round(days.reduce((a, b) => a + b, 0) / days.length) }));
 }
 
-export async function forecast(org_id: string, period: 'month' | 'quarter' = 'quarter', range?: DateRange, client_id: string | null = null) {
+export async function forecast(org_id: string, period: 'month' | 'quarter' = 'quarter', range?: DateRange, client_id: string | null = null, unit: AnalyticsUnit = 'inr') {
   let cutoff: string;
   let fromCutoff: string | null = null;
   if (range?.to) cutoff = range.to.slice(0, 10);
@@ -252,9 +283,11 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
   }
   if (range?.from) fromCutoff = range.from.slice(0, 10);
 
+  const lines = unit === 'weight' ? lineItemSelect : '';
+
   // Open pipeline expected to close in horizon (probability-weighted vs total)
   let openQ = supabaseAdmin.from('crm_deals')
-    .select('amount, probability, expected_close_date, crm_deal_stages!inner(probability, stage_type)')
+    .select(`amount, probability, expected_close_date, crm_deal_stages!inner(probability, stage_type)${lines}`)
     .eq('org_id', org_id).is('deleted_at', null)
     .eq('crm_deal_stages.stage_type', 'open')
     .lte('expected_close_date', cutoff).not('expected_close_date', 'is', null);
@@ -263,7 +296,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
 
   // Already-closed-won amounts in the same horizon (so the chart can plot a "closed" line)
   let wonQ = supabaseAdmin.from('crm_deals')
-    .select('amount, actual_close_date, crm_deal_stages!inner(stage_type)')
+    .select(`amount, actual_close_date, crm_deal_stages!inner(stage_type)${lines}`)
     .eq('org_id', org_id).is('deleted_at', null)
     .eq('crm_deal_stages.stage_type', 'won')
     .not('actual_close_date', 'is', null)
@@ -274,18 +307,19 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
   const [{ data: openData }, { data: wonData }] = await Promise.all([openQ, wonQ]);
 
   const buckets = new Map<string, { committed: number; pipeline: number; closed: number }>();
-  for (const d of (openData ?? []) as unknown as Array<{ amount: number; probability?: number; expected_close_date: string; crm_deal_stages: { probability: number } }>) {
+  for (const d of (openData ?? []) as unknown as Array<DealWithLines & { probability?: number; expected_close_date: string; crm_deal_stages: { probability: number } }>) {
     const month = d.expected_close_date.slice(0, 7);
     const p = d.probability ?? d.crm_deal_stages.probability ?? 50;
+    const v = dealValue(d, unit);
     const e = buckets.get(month) ?? { committed: 0, pipeline: 0, closed: 0 };
-    e.committed += Number(d.amount) * p / 100;
-    e.pipeline += Number(d.amount);
+    e.committed += v * p / 100;
+    e.pipeline += v;
     buckets.set(month, e);
   }
-  for (const d of (wonData ?? []) as unknown as Array<{ amount: number; actual_close_date: string }>) {
+  for (const d of (wonData ?? []) as unknown as Array<DealWithLines & { actual_close_date: string }>) {
     const month = d.actual_close_date.slice(0, 7);
     const e = buckets.get(month) ?? { committed: 0, pipeline: 0, closed: 0 };
-    e.closed += Number(d.amount);
+    e.closed += dealValue(d, unit);
     buckets.set(month, e);
   }
 
@@ -393,17 +427,23 @@ export async function leadScoreDistribution(org_id: string, range?: DateRange, c
 // One-shot dashboard query — replaces 6 frontend round-trips with one. Each
 // sub-query already runs against indexed tables / materialized views, so this
 // just collapses the network overhead into a single response.
+//
+// `unit` swaps every monetary aggregation (open pipeline, won revenue, avg
+// deal size, pipeline-by-stage, forecast) from rupees to kg derived from
+// line items × product weight. Counts, dates, win-rate, and lead-score
+// distribution stay the same.
 export async function dashboardComplete(
   org_id: string,
   range?: DateRange,
   client_id: string | null = null,
+  unit: AnalyticsUnit = 'inr',
 ) {
   const [summary, funnelData, pipelineValueData, winRateData, forecastData, scoreDist] = await Promise.all([
-    dashboardSummary(org_id, range, client_id),
+    dashboardSummary(org_id, range, client_id, unit),
     funnel(org_id, 30, range, client_id),
-    pipelineValue(org_id, undefined, client_id),
+    pipelineValue(org_id, undefined, client_id, unit),
     winRate(org_id, 'rep', range, client_id),
-    forecast(org_id, 'quarter', range, client_id),
+    forecast(org_id, 'quarter', range, client_id, unit),
     leadScoreDistribution(org_id, range, client_id),
   ]);
   return {
@@ -413,5 +453,6 @@ export async function dashboardComplete(
     winRate: winRateData,
     forecast: forecastData,
     leadScoreDistribution: scoreDist,
+    unit,
   };
 }
