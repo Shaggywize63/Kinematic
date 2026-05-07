@@ -10,6 +10,8 @@ import aiRouter from './routes/ai.routes';
 import { logger } from './lib/logger';
 import { notFoundHandler } from './middleware/errorHandler';
 import { requireAuth } from './middleware/auth';
+import { auditAll } from './middleware/auditAll';
+import auditLogRoutes from './routes/auditLog.routes';
 import {
   corsOrigin, helmetConfig, requestId, sanitiseError,
   prototypePoll, strictJson, perRouteLimit, loginLimiter,
@@ -122,6 +124,7 @@ app.use(express.json({ limit: '2mb', strict: true }));         // tighter cap (w
 app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 app.use(strictJson);                                            // mutating routes must send JSON
 app.use(prototypePoll);                                         // block __proto__ / constructor injection
+app.use(auditAll);                                              // log every state change after the response finishes
 
 // ── Health check ─────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
@@ -200,6 +203,9 @@ app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope, perR
 
 // ── CRM module ──────────────────────────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
+
+// ── Activity Log (super-admin only) ─────────────────────────────────
+app.use(`${V1}/audit-log`, requireAuth, auditLogRoutes);
 
 // ── 404 + error handlers ─────────────────────────────────────────────
 app.use(notFoundHandler);
