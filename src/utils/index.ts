@@ -2,6 +2,7 @@ import { Response, NextFunction, RequestHandler, Request } from 'express'
 export * from './asyncHandler';
 export * from './pagination';
 export * from './demoData';
+export * from './postgrest';
 
 export class AppError extends Error {
   constructor(public statusCode: number, public message: string, public code?: string) {

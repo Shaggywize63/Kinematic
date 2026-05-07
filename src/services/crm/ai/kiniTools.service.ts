@@ -3,6 +3,7 @@
  * via Anthropic tool use (with structured-prompt fallback).
  */
 import { supabaseAdmin } from '../../../lib/supabase';
+import { sanitisePostgrestSearch } from '../../../utils';
 import * as autoResponse from './autoResponse.service';
 import * as summarize from './summarize.service';
 
@@ -48,8 +49,11 @@ export const tools: KiniTool[] = [
       if (args.status) q = q.eq('status', String(args.status));
       if (args.score_gte) q = q.gte('score', Number(args.score_gte));
       if (args.q) {
-        const s = String(args.q);
-        q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
+        // Sanitise — see utils/postgrest.ts for the threat model. The model
+        // can also produce hostile filter syntax via tool-use input, not
+        // just direct user input.
+        const s = sanitisePostgrestSearch(args.q);
+        if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
       }
       const { data } = await q.order('score', { ascending: false }).limit(Math.min(Number(args.limit ?? 10), 50));
       return { card: { type: 'lead_list', data: { leads: data ?? [] } }, data };
