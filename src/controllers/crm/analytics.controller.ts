@@ -106,7 +106,8 @@ export const winRate = asyncHandler(async (req: AuthRequest, res: Response) => {
 export const salesCycle = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
   const { data, error } = await supabaseAdmin.from('crm_deal_history').select('from_stage_id,to_stage_id,created_at,deal_id')
-    .eq('org_id', org_id).order('created_at');
+    .eq('org_id', org_id).order('created_at', { ascending: false })
+    .limit(2000);
   if (error) return badRequest(res, error.message);
   // Return stage names with placeholder days
   return ok(res, []);
