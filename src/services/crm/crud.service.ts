@@ -4,7 +4,7 @@
  *  templates, rules, territories, campaigns, automations, custom-fields).
  */
 import { supabaseAdmin } from '../../lib/supabase';
-import { AppError } from '../../utils';
+import { AppError, sanitisePostgrestSearch } from '../../utils';
 
 export interface CrudOpts {
   table: string;
@@ -27,9 +27,12 @@ export async function list(table: string, org_id: string, query: Record<string, 
     q = q.eq(k, v as never);
   }
   if (query.q && opts.searchColumns?.length) {
-    const s = String(query.q).replace(/[%_]/g, '');
-    const orExpr = opts.searchColumns.map(c => `${c}.ilike.%${s}%`).join(',');
-    q = q.or(orExpr);
+    // Sanitise — see utils/postgrest.ts for the threat model.
+    const s = sanitisePostgrestSearch(query.q);
+    if (s) {
+      const orExpr = opts.searchColumns.map(c => `${c}.ilike.%${s}%`).join(',');
+      q = q.or(orExpr);
+    }
   }
   const dateCol = opts.dateRangeColumn ?? 'created_at';
   if (query.from) q = q.gte(dateCol, String(query.from));
@@ -67,9 +70,12 @@ export async function clientScopedList(
     q = q.eq(k, v as never);
   }
   if (query.q && opts.searchColumns?.length) {
-    const s = String(query.q).replace(/[%_]/g, '');
-    const orExpr = opts.searchColumns.map(c => `${c}.ilike.%${s}%`).join(',');
-    q = q.or(orExpr);
+    // Sanitise — see utils/postgrest.ts for the threat model.
+    const s = sanitisePostgrestSearch(query.q);
+    if (s) {
+      const orExpr = opts.searchColumns.map(c => `${c}.ilike.%${s}%`).join(',');
+      q = q.or(orExpr);
+    }
   }
   const dateCol = opts.dateRangeColumn ?? 'created_at';
   if (query.from) q = q.gte(dateCol, String(query.from));

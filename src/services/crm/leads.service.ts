@@ -2,7 +2,7 @@
  * Lead service: CRUD, dedup, scoring orchestration, conversion.
  */
 import { supabaseAdmin } from '../../lib/supabase';
-import { AppError } from '../../utils';
+import { AppError, sanitisePostgrestSearch } from '../../utils';
 import * as scoring from './ai/leadScoring.service';
 import * as dedup from './dedup.service';
 import * as assignment from './assignment.service';
@@ -75,8 +75,10 @@ export async function listLeads(org_id: string, filters: Record<string, unknown>
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
   if (filters.score_gte) q = q.gte('score', Number(filters.score_gte));
   if (filters.q) {
-    const s = String(filters.q).replace(/[%_]/g, '');
-    q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
+    // Sanitise user-supplied search before interpolating into the .or()
+    // filter. See utils/postgrest.ts for the threat model.
+    const s = sanitisePostgrestSearch(filters.q);
+    if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
   }
   // Date range filter (default column: created_at)
   if (filters.from) q = q.gte('created_at', String(filters.from));
