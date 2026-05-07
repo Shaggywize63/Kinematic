@@ -74,12 +74,15 @@ export const moveStage = asyncHandler(async (req: AuthRequest, res: Response) =>
   const { stage_id, reason } = req.body;
   if (!stage_id) return badRequest(res, 'stage_id is required');
 
-  const { data: deal } = await supabaseAdmin.from('crm_deals').select('stage_id,amount,probability')
-    .eq('id', req.params.id).eq('org_id', org_id).single();
+  // Both lookups are independent of each other — fetch in parallel.
+  const [dealRes, stageRes] = await Promise.all([
+    supabaseAdmin.from('crm_deals').select('stage_id,amount,probability')
+      .eq('id', req.params.id).eq('org_id', org_id).single(),
+    supabaseAdmin.from('crm_deal_stages').select('probability').eq('id', stage_id).single(),
+  ]);
+  const deal = dealRes.data;
+  const stage = stageRes.data;
   if (!deal) return notFound(res, 'Deal not found');
-
-  const { data: stage } = await supabaseAdmin.from('crm_deal_stages').select('probability')
-    .eq('id', stage_id).single();
 
   const { data, error } = await supabaseAdmin.from('crm_deals')
     .update({ stage_id, probability: stage?.probability ?? (deal as any).probability, updated_by: userId })
@@ -96,12 +99,15 @@ export const moveStage = asyncHandler(async (req: AuthRequest, res: Response) =>
 export const winDeal = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id, id: userId } = req.user!;
   const { reason, close_date } = req.body;
-  const { data: deal } = await supabaseAdmin.from('crm_deals').select('stage_id,amount,status')
-    .eq('id', req.params.id).eq('org_id', org_id).single();
+  const [dealRes, wonStageRes] = await Promise.all([
+    supabaseAdmin.from('crm_deals').select('stage_id,amount,status')
+      .eq('id', req.params.id).eq('org_id', org_id).single(),
+    supabaseAdmin.from('crm_deal_stages').select('id')
+      .eq('org_id', org_id).eq('stage_type', 'won').limit(1).single(),
+  ]);
+  const deal = dealRes.data;
+  const wonStage = wonStageRes.data;
   if (!deal) return notFound(res, 'Deal not found');
-
-  const { data: wonStage } = await supabaseAdmin.from('crm_deal_stages').select('id')
-    .eq('org_id', org_id).eq('stage_type', 'won').limit(1).single();
 
   const { data, error } = await supabaseAdmin.from('crm_deals').update({
     status: 'won', win_reason: reason,
@@ -120,12 +126,15 @@ export const winDeal = asyncHandler(async (req: AuthRequest, res: Response) => {
 export const loseDeal = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id, id: userId } = req.user!;
   const { reason, competitor } = req.body;
-  const { data: deal } = await supabaseAdmin.from('crm_deals').select('stage_id,amount,status')
-    .eq('id', req.params.id).eq('org_id', org_id).single();
+  const [dealRes, lostStageRes] = await Promise.all([
+    supabaseAdmin.from('crm_deals').select('stage_id,amount,status')
+      .eq('id', req.params.id).eq('org_id', org_id).single(),
+    supabaseAdmin.from('crm_deal_stages').select('id')
+      .eq('org_id', org_id).eq('stage_type', 'lost').limit(1).single(),
+  ]);
+  const deal = dealRes.data;
+  const lostStage = lostStageRes.data;
   if (!deal) return notFound(res, 'Deal not found');
-
-  const { data: lostStage } = await supabaseAdmin.from('crm_deal_stages').select('id')
-    .eq('org_id', org_id).eq('stage_type', 'lost').limit(1).single();
 
   const { data, error } = await supabaseAdmin.from('crm_deals').update({
     status: 'lost', lost_reason: reason ? `${reason}${competitor ? ` (${competitor})` : ''}` : undefined,
@@ -146,7 +155,8 @@ export const getDealHistory = asyncHandler(async (req: AuthRequest, res: Respons
   const { org_id } = req.user!;
   const { data, error } = await supabaseAdmin.from('crm_deal_history').select('*')
     .eq('org_id', org_id).eq('deal_id', req.params.id)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(100);
   if (error) return badRequest(res, error.message);
   return ok(res, data);
 });
@@ -155,7 +165,8 @@ export const getDealActivities = asyncHandler(async (req: AuthRequest, res: Resp
   const { org_id } = req.user!;
   const { data, error } = await supabaseAdmin.from('crm_activities').select('*')
     .eq('org_id', org_id).eq('deal_id', req.params.id).is('deleted_at', null)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(200);
   if (error) return badRequest(res, error.message);
   return ok(res, data);
 });
@@ -173,7 +184,8 @@ export const getDealNotes = asyncHandler(async (req: AuthRequest, res: Response)
   const { org_id } = req.user!;
   const { data, error } = await supabaseAdmin.from('crm_notes').select('*')
     .eq('org_id', org_id).eq('deal_id', req.params.id)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(100);
   if (error) return badRequest(res, error.message);
   return ok(res, data);
 });

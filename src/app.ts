@@ -119,7 +119,7 @@ app.use(morgan('combined', {
 }));
 
 // ── Body parsing & misc ───────────────────────────────────────────────
-app.use(compression());
+app.use(compression({ threshold: 1024 }));   // skip gzip on payloads <1KB — saves CPU on small JSON
 app.use(express.json({ limit: '2mb', strict: true }));         // tighter cap (was 10mb); strict rejects scalars
 app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 app.use(strictJson);                                            // mutating routes must send JSON
