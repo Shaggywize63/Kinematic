@@ -300,6 +300,7 @@ export const stateSchema = z.object({
 export const citySchema = z.object({
   state_id: uuid,
   name: z.string().min(1).max(120),
+  district: z.string().max(120).optional().nullable(),
   is_active: z.boolean().optional(),
 });
 
