@@ -625,14 +625,17 @@ router.use('/import', imp);
 
 // ---------- ANALYTICS ------------------------------------------------
 const analytics = express.Router();
-analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req)))));
+// `unit=weight` swaps every rupee aggregation for kg derived from line items
+// × product weight. Anything else (or omitted) returns rupees as before.
+const unitFromReq = (req: Request): 'inr' | 'weight' => req.query.unit === 'weight' ? 'weight' : 'inr';
+analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req), unitFromReq(req)))));
 // Single round-trip dashboard payload (summary + funnel + pipelineValue + winRate + forecast + leadScoreDistribution)
-analytics.get('/dashboard-complete', wrap(async (req, res) => res.json(await analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req)))));
-analytics.get('/pipeline-value', wrap(async (req, res) => res.json(await analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined, clientId(req)))));
+analytics.get('/dashboard-complete', wrap(async (req, res) => res.json(await analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req), unitFromReq(req)))));
+analytics.get('/pipeline-value', wrap(async (req, res) => res.json(await analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined, clientId(req), unitFromReq(req)))));
 analytics.get('/funnel', wrap(async (req, res) => res.json(await analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req), clientId(req)))));
 analytics.get('/win-rate', wrap(async (req, res) => res.json(await analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req), clientId(req)))));
 analytics.get('/sales-cycle', wrap(async (req, res) => res.json(await analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req)))));
-analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req), clientId(req)))));
+analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req), clientId(req), unitFromReq(req)))));
 analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(await analyticsSvc.activityHeatmap(orgId(req), clientId(req)))));
 analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(await analyticsSvc.leadSourceRoi(orgId(req), clientId(req)))));
 analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req), clientId(req)))));
