@@ -674,7 +674,7 @@ ai.post('/summarize/deal/:id', wrap(async (req, res) => res.json({ text: await s
 ai.get('/tools', (_req, res) => res.json(kiniTools.toAnthropicTools()));
 ai.post('/tools/execute', wrap(async (req, res) => {
   const body = parse(z.object({ name: z.string(), args: z.record(z.unknown()) }), req.body);
-  const result = await kiniTools.executeTool(orgId(req), body.name, body.args);
+  const result = await kiniTools.executeTool(orgId(req), clientId(req), body.name, body.args);
   if (!result) throw new AppError(404, `Tool ${body.name} not registered`, 'UNKNOWN_TOOL');
   res.json(result);
 }));
@@ -694,11 +694,13 @@ ai.post('/chat', wrap(async (req, res) => {
   }), req.body);
 
   const tools = kiniTools.toAnthropicTools();
+  const cid = clientId(req);
   const crmSuffix = `\n\nYou are KINI, the Kinematic CRM AI assistant. You help sales reps close deals.
 You have CRM tools available. Use them to fetch real data — never invent leads, deals, or numbers.
 When relevant, return cards via tool results so the UI can render them.
 Current route: ${body.context?.route ?? 'unknown'}.
-Current entity: ${JSON.stringify(body.context?.entity ?? {})}.`;
+Current entity: ${JSON.stringify(body.context?.entity ?? {})}.
+Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-filtered to this scope by the backend — do not try to bypass it or reference rows from other clients.`;
   const systemPrompt = `${body.system ?? ''}${crmSuffix}`;
 
   const out = await chatWithTools({
@@ -706,7 +708,7 @@ Current entity: ${JSON.stringify(body.context?.entity ?? {})}.`;
     system: systemPrompt,
     tools,
     messages: body.messages.map(m => ({ role: m.role, content: m.content as unknown })),
-    onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), name, args as Record<string, unknown>),
+    onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>),
     max_tokens: 1500,
   });
 
