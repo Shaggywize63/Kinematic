@@ -13,6 +13,7 @@ import { requireModule } from '../middleware/rbac';
 import { AppError } from '../utils';
 import { supabaseAdmin } from '../lib/supabase';
 
+import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
 import * as leadsSvc from '../services/crm/leads.service';
@@ -119,6 +120,11 @@ router.use((_req, res, next) => {
   };
   next();
 });
+
+// Demo bypass: when org_id=demo-org-999, short-circuit GETs to canned fixtures
+// and writes to no-op success. Mounted AFTER the success-envelope wrapper so
+// fixture payloads come out the same shape the frontend expects.
+router.use(demoCrmMiddleware);
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 

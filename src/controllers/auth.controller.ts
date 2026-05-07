@@ -27,7 +27,12 @@ export const login = asyncHandler<Request>(async (req, res) => {
   let { email, password, fcm_token, device_id } = body.data;
   
   // --- DEMO LOGIN BYPASS ---
-  if (email.trim() === 'demo@kinematic.com' && password === 'kinematic-demo-2024') {
+  // Both passwords route to the canned fixtures path. org_id=demo-org-999
+  // makes every controller return its pre-built mock payload via isDemo(user).
+  if (
+    email.trim() === 'demo@kinematic.com' &&
+    (password === 'kinematic-demo-2024' || password === 'Demo@1234')
+  ) {
     logger.info('Restoring Demo Admin access via bypass');
     return ok(res, {
       access_token: 'demo-token-jwt-placeholder',
@@ -39,9 +44,16 @@ export const login = asyncHandler<Request>(async (req, res) => {
         client_id: null,
         name: 'Demo Admin',
         email: 'demo@kinematic.com',
-        role: 'admin',
+        role: 'super_admin',
         is_active: true,
-        permissions: ['dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory', 'form_builder']
+        permissions: [
+          'dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory',
+          'form_builder', 'reports', 'broadcast', 'broadcasts', 'grievances',
+          'wms', 'warehouse', 'clients', 'management', 'settings', 'skus', 'assets',
+          'crm', 'distribution', 'planograms', 'route_plans', 'visit_logs',
+          'campaigns', 'leaderboard', 'notifications', 'sos', 'candidates',
+          'learning', 'manpower', 'work_activity', 'audit', 'integrations'
+        ]
       },
     });
   }
