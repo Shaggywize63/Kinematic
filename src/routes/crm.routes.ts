@@ -712,16 +712,34 @@ Current entity: ${JSON.stringify(body.context?.entity ?? {})}.
 Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-filtered to this scope by the backend — do not try to bypass it or reference rows from other clients.`;
   const systemPrompt = `${body.system ?? ''}${crmSuffix}`;
 
-  const out = await chatWithTools({
-    org_id: orgId(req),
-    system: systemPrompt,
-    tools,
-    messages: body.messages.map(m => ({ role: m.role, content: m.content as unknown })),
-    onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>),
-    max_tokens: 1500,
-  });
-
-  res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls } });
+  try {
+    const out = await chatWithTools({
+      org_id: orgId(req),
+      system: systemPrompt,
+      tools,
+      messages: body.messages.map(m => ({ role: m.role, content: m.content as unknown })),
+      onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>),
+      max_tokens: 1500,
+    });
+    res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls } });
+  } catch (e: unknown) {
+    // If the env is missing the Anthropic key, surface a useful 200 message
+    // instead of a generic 500. The iOS / dashboard chat UIs both expect
+    // {success, data:{text, cards}} and will render the explanation inline.
+    const code = (e as { code?: string })?.code;
+    if (code === 'CONFIG_ERROR') {
+      res.json({
+        success: true,
+        data: {
+          text: 'KINI is offline because the backend has no Anthropic API key configured. Ask an admin to set ANTHROPIC_API_KEY on the Kinematic deployment.',
+          cards: [],
+          tool_calls: [],
+        },
+      });
+      return;
+    }
+    throw e;
+  }
 }));
 router.use('/ai', ai);
 
