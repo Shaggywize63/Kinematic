@@ -29,29 +29,28 @@ function withClient<T>(q: T, client_id: string | null): T {
   return qb;
 }
 
-// When the dashboard toggle is on weight mode, every "value" produced by the
-// analytics service comes from line items × product weight instead of `amount`.
-// Selector returns the line-item join only for weight mode so the rupee path
-// stays as cheap as it was.
-const lineItemSelect = ', crm_deal_line_items(quantity, crm_products(weight_kg))';
+// Weight mode uses crm_v_deal_weight, a SQL view that pre-aggregates
+// SUM(quantity × product.weight_kg) per deal. Old path streamed every line
+// item over the wire and summed in Node — quadratic with line-item count.
+// New path is a tiny LEFT JOIN that returns ONE numeric per deal.
+//
+// The PostgREST relation name is the view itself; we alias it to a stable
+// key (`weight`) so callers can read `r.weight?.[0]?.total_kg`.
+const weightJoin = ', weight:crm_v_deal_weight(total_kg)';
 
-type LineItemRow = { quantity: number | null; crm_products?: { weight_kg?: number | null } | null };
-type DealWithLines = { amount?: number | null; crm_deal_line_items?: LineItemRow[] | null };
+type WeightRow = { total_kg?: number | string | null };
+type DealWithWeight = { amount?: number | null; weight?: WeightRow[] | WeightRow | null };
 
-function dealWeightKg(d: DealWithLines): number {
-  let w = 0;
-  for (const li of d.crm_deal_line_items ?? []) {
-    const wk = Number(li.crm_products?.weight_kg ?? 0);
-    const qty = Number(li.quantity ?? 0);
-    if (wk > 0 && qty > 0) w += qty * wk;
-  }
-  return w;
+function dealWeightKg(d: DealWithWeight): number {
+  const w = d.weight;
+  const row: WeightRow | undefined = Array.isArray(w) ? w[0] : (w ?? undefined);
+  return Number(row?.total_kg ?? 0);
 }
 
 // Returns the per-deal value used by every aggregation: kg in weight mode,
 // rupees in inr mode. Centralised so a deal without line items consistently
 // contributes 0 in weight mode (instead of falsely counting its rupee amount).
-function dealValue(d: DealWithLines, unit: AnalyticsUnit): number {
+function dealValue(d: DealWithWeight, unit: AnalyticsUnit): number {
   return unit === 'weight' ? dealWeightKg(d) : Number(d.amount ?? 0);
 }
 
@@ -66,7 +65,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   const fromDate = fromIso.slice(0, 10);
   const toDate = toIso.slice(0, 10);
   const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString();
-  const lines = unit === 'weight' ? lineItemSelect : '';
+  const lines = unit === 'weight' ? weightJoin : '';
 
   const [
     { count: totalLeads },
@@ -100,7 +99,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   let open_deals = 0;
   const stageMap = new Map<string, { count: number; value: number }>();
   const ownerMap = new Map<string, { count: number; value: number }>();
-  for (const r of (pipelineRows ?? []) as unknown as Array<DealWithLines & { owner_id?: string | null; crm_deal_stages: { name: string } }>) {
+  for (const r of (pipelineRows ?? []) as unknown as Array<DealWithWeight & { owner_id?: string | null; crm_deal_stages: { name: string } }>) {
     const v = dealValue(r, unit);
     open_deal_value += v;
     open_deals += 1;
@@ -120,7 +119,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
 
   // Won / lost in window
   let won_revenue = 0, wonCount = 0, lostCount = 0;
-  for (const r of (closedInWindow ?? []) as unknown as Array<DealWithLines & { crm_deal_stages: { stage_type: string } | null }>) {
+  for (const r of (closedInWindow ?? []) as unknown as Array<DealWithWeight & { crm_deal_stages: { stage_type: string } | null }>) {
     const t = r.crm_deal_stages?.stage_type;
     if (t === 'won') { won_revenue += dealValue(r, unit); wonCount++; }
     if (t === 'lost') { lostCount++; }
@@ -165,7 +164,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
 export async function pipelineValue(org_id: string, pipeline_id?: string, client_id: string | null = null, unit: AnalyticsUnit = 'inr') {
   // Live query — the MV (crm_mv_pipeline_value) doesn't track client_id, so it
   // cannot be filtered per client. Aggregate from crm_deals directly.
-  const lines = unit === 'weight' ? lineItemSelect : '';
+  const lines = unit === 'weight' ? weightJoin : '';
   let q = supabaseAdmin.from('crm_deals')
     .select(`amount, pipeline_id, crm_deal_stages!inner(name, stage_type, position)${lines}`)
     .eq('org_id', org_id)
@@ -175,7 +174,7 @@ export async function pipelineValue(org_id: string, pipeline_id?: string, client
   q = withClient(q, client_id);
   const { data } = await q;
   const map = new Map<string, { stage: string; value: number; count: number; position: number }>();
-  for (const d of (data ?? []) as unknown as Array<DealWithLines & { crm_deal_stages: { name: string; position: number } }>) {
+  for (const d of (data ?? []) as unknown as Array<DealWithWeight & { crm_deal_stages: { name: string; position: number } }>) {
     const s = d.crm_deal_stages.name;
     const e = map.get(s) ?? { stage: s, value: 0, count: 0, position: d.crm_deal_stages.position ?? 0 };
     e.value += dealValue(d, unit);
@@ -283,7 +282,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
   }
   if (range?.from) fromCutoff = range.from.slice(0, 10);
 
-  const lines = unit === 'weight' ? lineItemSelect : '';
+  const lines = unit === 'weight' ? weightJoin : '';
 
   // Open pipeline expected to close in horizon (probability-weighted vs total)
   let openQ = supabaseAdmin.from('crm_deals')
@@ -307,7 +306,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
   const [{ data: openData }, { data: wonData }] = await Promise.all([openQ, wonQ]);
 
   const buckets = new Map<string, { committed: number; pipeline: number; closed: number }>();
-  for (const d of (openData ?? []) as unknown as Array<DealWithLines & { probability?: number; expected_close_date: string; crm_deal_stages: { probability: number } }>) {
+  for (const d of (openData ?? []) as unknown as Array<DealWithWeight & { probability?: number; expected_close_date: string; crm_deal_stages: { probability: number } }>) {
     const month = d.expected_close_date.slice(0, 7);
     const p = d.probability ?? d.crm_deal_stages.probability ?? 50;
     const v = dealValue(d, unit);
@@ -316,7 +315,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
     e.pipeline += v;
     buckets.set(month, e);
   }
-  for (const d of (wonData ?? []) as unknown as Array<DealWithLines & { actual_close_date: string }>) {
+  for (const d of (wonData ?? []) as unknown as Array<DealWithWeight & { actual_close_date: string }>) {
     const month = d.actual_close_date.slice(0, 7);
     const e = buckets.get(month) ?? { committed: 0, pipeline: 0, closed: 0 };
     e.closed += dealValue(d, unit);

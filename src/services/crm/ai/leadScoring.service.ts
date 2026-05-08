@@ -3,6 +3,7 @@
  * Heuristic runs synchronously; LLM rerank runs in Edge Function.
  */
 import { supabaseAdmin } from '../../../lib/supabase';
+import { createTtlCache } from '../../../utils/ttlCache';
 import { complete as aiComplete } from './aiClient';
 import type { Lead, ScoreBreakdown } from '../../../types/crm.types';
 
@@ -12,25 +13,38 @@ export interface Icp {
   titles?: string[];
 }
 
+// Cache ICP per (org_id, client_id) for 5 minutes. ICP changes via the
+// settings UI which calls invalidateIcpCache below; otherwise we'd be
+// hammering crm_settings on every lead create / rescore.
+const icpCache = createTtlCache<Icp>({ defaultTtlMs: 5 * 60_000, maxSize: 500 });
+
+export function invalidateIcpCache(org_id: string, client_id: string | null = null) {
+  icpCache.delete(`${org_id}:${client_id ?? 'org'}`);
+  // Also drop the org-level fallback because client-scoped lookups try it next.
+  if (client_id) icpCache.delete(`${org_id}:org`);
+}
+
 export async function getIcp(org_id: string, client_id: string | null = null): Promise<Icp> {
-  // Multi-tenant: prefer client-specific settings if present, fall back to org-level.
-  if (client_id) {
+  return icpCache.remember(`${org_id}:${client_id ?? 'org'}`, async () => {
+    // Multi-tenant: prefer client-specific settings if present, fall back to org-level.
+    if (client_id) {
+      const { data } = await supabaseAdmin
+        .from('crm_settings')
+        .select('config')
+        .eq('org_id', org_id)
+        .eq('client_id', client_id)
+        .maybeSingle();
+      const icp = ((data?.config as Record<string, unknown>)?.icp as Icp) ?? null;
+      if (icp) return icp;
+    }
     const { data } = await supabaseAdmin
       .from('crm_settings')
       .select('config')
       .eq('org_id', org_id)
-      .eq('client_id', client_id)
+      .is('client_id', null)
       .maybeSingle();
-    const icp = ((data?.config as Record<string, unknown>)?.icp as Icp) ?? null;
-    if (icp) return icp;
-  }
-  const { data } = await supabaseAdmin
-    .from('crm_settings')
-    .select('config')
-    .eq('org_id', org_id)
-    .is('client_id', null)
-    .maybeSingle();
-  return ((data?.config as Record<string, unknown>)?.icp as Icp) ?? {};
+    return ((data?.config as Record<string, unknown>)?.icp as Icp) ?? {};
+  });
 }
 
 // B2B leans on title seniority, company match, and ICP industry signals.
