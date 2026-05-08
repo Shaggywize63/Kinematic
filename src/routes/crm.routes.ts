@@ -572,9 +572,15 @@ settings.patch('/', wrap(async (req, res) => {
   // Update if exists, else insert
   if (existing?.id) {
     const { data } = await supabaseAdmin.from('crm_settings').update(update).eq('id', existing.id).select('*').single();
+    // Settings just changed — drop the cached ICP for this scope so the next
+    // lead create / rescore picks up the new config immediately.
+    const { invalidateIcpCache } = await import('../services/crm/ai/leadScoring.service');
+    invalidateIcpCache(orgId(req), cid);
     res.json(data);
   } else {
     const { data } = await supabaseAdmin.from('crm_settings').insert(update).select('*').single();
+    const { invalidateIcpCache } = await import('../services/crm/ai/leadScoring.service');
+    invalidateIcpCache(orgId(req), cid);
     res.json(data);
   }
 }));
@@ -638,17 +644,47 @@ const analytics = express.Router();
 // `unit=weight` swaps every rupee aggregation for kg derived from line items
 // × product weight. Anything else (or omitted) returns rupees as before.
 const unitFromReq = (req: Request): 'inr' | 'weight' => req.query.unit === 'weight' ? 'weight' : 'inr';
-analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(await analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req), unitFromReq(req)))));
-// Single round-trip dashboard payload (summary + funnel + pipelineValue + winRate + forecast + leadScoreDistribution)
-analytics.get('/dashboard-complete', wrap(async (req, res) => res.json(await analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req), unitFromReq(req)))));
-analytics.get('/pipeline-value', wrap(async (req, res) => res.json(await analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined, clientId(req), unitFromReq(req)))));
-analytics.get('/funnel', wrap(async (req, res) => res.json(await analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req), clientId(req)))));
-analytics.get('/win-rate', wrap(async (req, res) => res.json(await analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req), clientId(req)))));
-analytics.get('/sales-cycle', wrap(async (req, res) => res.json(await analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req)))));
-analytics.get('/forecast', wrap(async (req, res) => res.json(await analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req), clientId(req), unitFromReq(req)))));
-analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(await analyticsSvc.activityHeatmap(orgId(req), clientId(req)))));
-analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(await analyticsSvc.leadSourceRoi(orgId(req), clientId(req)))));
-analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(await analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req), clientId(req)))));
+
+// Cache analytics for 60s. Upstash Redis if configured (multi-instance safe);
+// otherwise an in-process LRU. Bypassed automatically for the demo path
+// because demoCrmMiddleware short-circuits these routes with fixtures.
+const ANALYTICS_TTL = 60;
+const cacheKey = (req: Request, name: string) => {
+  const r = dateRange(req);
+  return `crm:an:${name}:${orgId(req)}:${clientId(req) ?? 'org'}:${unitFromReq(req)}:${r.from ?? ''}:${r.to ?? ''}:${req.query.pipeline_id ?? ''}:${req.query.by ?? ''}:${req.query.period ?? ''}:${req.query.days ?? ''}`;
+};
+const { cached: cachedAnalytics } = require('../utils/analyticsCache') as typeof import('../utils/analyticsCache');
+
+analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'dashboard-summary'), ANALYTICS_TTL,
+    () => analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req), unitFromReq(req))))));
+analytics.get('/dashboard-complete', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'dashboard-complete'), ANALYTICS_TTL,
+    () => analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req), unitFromReq(req))))));
+analytics.get('/pipeline-value', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'pipeline-value'), ANALYTICS_TTL,
+    () => analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined, clientId(req), unitFromReq(req))))));
+analytics.get('/funnel', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'funnel'), ANALYTICS_TTL,
+    () => analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req), clientId(req))))));
+analytics.get('/win-rate', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'win-rate'), ANALYTICS_TTL,
+    () => analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req), clientId(req))))));
+analytics.get('/sales-cycle', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'sales-cycle'), ANALYTICS_TTL,
+    () => analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req))))));
+analytics.get('/forecast', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'forecast'), ANALYTICS_TTL,
+    () => analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req), clientId(req), unitFromReq(req))))));
+analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'activity-heatmap'), ANALYTICS_TTL,
+    () => analyticsSvc.activityHeatmap(orgId(req), clientId(req))))));
+analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'lead-source-roi'), ANALYTICS_TTL,
+    () => analyticsSvc.leadSourceRoi(orgId(req), clientId(req))))));
+analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'lead-score-distribution'), ANALYTICS_TTL,
+    () => analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req), clientId(req))))));
 // Geo breakdown for dashboard filtering
 analytics.get('/by-state', wrap(async (req, res) => {
   const { data, error } = await supabaseAdmin

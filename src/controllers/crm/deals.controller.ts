@@ -7,7 +7,7 @@ export const listDeals = asyncHandler(async (req: AuthRequest, res: Response) =>
   const { org_id } = req.user!;
   const { status, pipeline_id, stage_id, owner_id, limit = '100', page = '1' } = req.query as Record<string, string>;
   let q = supabaseAdmin.from('crm_deals')
-    .select('*, stage:crm_deal_stages(id,name,stage_type,position,color,probability), account:crm_accounts(id,name)', { count: 'exact' })
+    .select('id,name,amount,currency,probability,win_probability_ai,owner_id,account_id,pipeline_id,stage_id,status,expected_close_date,actual_close_date,close_date,created_at,updated_at,stage:crm_deal_stages(id,name,stage_type,position,color,probability),account:crm_accounts(id,name)', { count: 'exact' })
     .eq('org_id', org_id).is('deleted_at', null);
   if (status) q = q.eq('status', status);
   if (pipeline_id) q = q.eq('pipeline_id', pipeline_id);
@@ -35,15 +35,21 @@ export const createDeal = asyncHandler(async (req: AuthRequest, res: Response) =
   }
 
   const { data, error } = await supabaseAdmin.from('crm_deals').insert(body)
-    .select('*, stage:crm_deal_stages(id,name,stage_type,position,color,probability), account:crm_accounts(id,name)').single();
+    .select('id,name,amount,currency,probability,win_probability_ai,owner_id,account_id,pipeline_id,stage_id,status,expected_close_date,actual_close_date,close_date,created_at,updated_at,stage:crm_deal_stages(id,name,stage_type,position,color,probability),account:crm_accounts(id,name)').single();
   if (error) return badRequest(res, error.message);
   return created(res, data, 'Deal created');
 });
 
 export const getDeal = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
+  // Tightened projection: only fields the deal-detail UI actually reads.
+  // Was pulling stage(*) and account(*) which dragged ~50 columns each.
   const { data, error } = await supabaseAdmin.from('crm_deals')
-    .select('*, stage:crm_deal_stages(*), pipeline:crm_pipelines(id,name), account:crm_accounts(*), contact:crm_contacts(id,first_name,last_name,email,phone)')
+    .select(`*,
+      stage:crm_deal_stages(id,name,stage_type,position,color,probability),
+      pipeline:crm_pipelines(id,name),
+      account:crm_accounts(id,name,domain,industry),
+      contact:crm_contacts(id,first_name,last_name,email,phone)`)
     .eq('id', req.params.id).eq('org_id', org_id).is('deleted_at', null).single();
   if (error || !data) return notFound(res, 'Deal not found');
   return ok(res, data);
