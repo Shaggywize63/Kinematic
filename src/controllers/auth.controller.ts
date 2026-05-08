@@ -5,7 +5,7 @@ import { AuthRequest } from '../types';
 import { ok, created, badRequest, unauthorized, serverError, isDemo } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
-import { DEMO_ORG_ID } from '../utils/demoData';
+import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
 
 const loginSchema = z.object({
   // Accept either email or mobile number (or mobile@kinematic.app constructed by app)
@@ -39,7 +39,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
       refresh_token: 'demo-refresh-token-placeholder',
       expires_at: Math.floor(Date.now() / 1000) + 3600,
       user: {
-        id: 'demo-user-id',
+        id: DEMO_USER_ID,
         org_id: DEMO_ORG_ID,
         client_id: null,
         name: 'Demo Admin',

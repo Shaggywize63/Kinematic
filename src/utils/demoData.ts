@@ -1,7 +1,12 @@
 import { isoDate } from './index';
 
-export const DEMO_ORG_ID = 'demo-org-999';
-export const DEMO_USER_ID = 'demo-user-id';
+// UUID-shaped sentinels so backend queries that filter `WHERE org_id = $X`
+// against UUID columns don't throw 'invalid input syntax for type uuid' on
+// endpoints that lack an explicit isDemo() short-circuit. The values won't
+// match any real row, so unhandled endpoints return empty data instead of
+// 500-ing the demo page.
+export const DEMO_ORG_ID = '00000000-0000-0000-0000-000000000999';
+export const DEMO_USER_ID = '00000000-0000-0000-0000-000000000998';
 
 export const isDemo = (user?: { org_id?: string }) => user?.org_id === DEMO_ORG_ID;
 

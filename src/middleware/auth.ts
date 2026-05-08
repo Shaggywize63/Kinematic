@@ -2,7 +2,7 @@ import { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest, UserRole } from '../types';
-import { DEMO_ORG_ID, isDemo } from '../utils/demoData';
+import { DEMO_ORG_ID, DEMO_USER_ID, isDemo } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
 import { logger } from '../lib/logger';
 
@@ -96,7 +96,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // --- DEMO TOKEN BYPASS ---
   if (token === 'demo-token-jwt-placeholder') {
     req.user = {
-      id: 'demo-user-id',
+      id: DEMO_USER_ID,
       org_id: DEMO_ORG_ID,
       client_id: null,
       name: 'Demo Admin',
