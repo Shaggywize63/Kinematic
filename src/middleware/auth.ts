@@ -1,5 +1,5 @@
 import { Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
+import { jwtVerify, createRemoteJWKSet } from 'jose';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest, UserRole } from '../types';
 import { DEMO_ORG_ID, DEMO_USER_ID, isDemo } from '../utils/demoData';
@@ -50,31 +50,52 @@ export function invalidateAuthCache(predicate?: (u: AuthRequest['user']) => bool
   }
 }
 
+// Token verification — three paths in order of preference:
+//   1. Asymmetric (RS256/ES256) via JWKS — for projects on Supabase's modern
+//      Signing Keys. Set SUPABASE_JWKS_URL to the .well-known/jwks.json URL
+//      (typically https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json).
+//      jose caches the JWKS and refreshes on key rotation.
+//   2. Symmetric HS256 via legacy shared secret — for projects still using
+//      the old JWT secret. Set SUPABASE_JWT_SECRET.
+//   3. Network fallback to supabaseAdmin.auth.getUser — if both env vars are
+//      missing OR local verify rejects (wrong key/alg/expired). Slower but
+//      keeps auth working through misconfiguration.
+const SUPABASE_JWKS_URL   = process.env.SUPABASE_JWKS_URL || '';
 const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || '';
+const JWKS = SUPABASE_JWKS_URL
+  ? createRemoteJWKSet(new URL(SUPABASE_JWKS_URL), { cooldownDuration: 30_000 })
+  : null;
+const HS256_KEY = SUPABASE_JWT_SECRET ? new TextEncoder().encode(SUPABASE_JWT_SECRET) : null;
 
-/** Verify the access token. Prefer local HS256 verify against the Supabase JWT
- *  secret (no network); fall back to the gotrue round-trip if local verify
- *  throws OR the secret isn't configured. Defensive fallback prevents a
- *  misconfigured SUPABASE_JWT_SECRET from 401-ing every request. */
-let warnedLocalVerify = false;
+let warnedJwks = false;
+let warnedHs256 = false;
+
 async function verifyToken(token: string): Promise<{ sub: string; exp?: number } | null> {
-  if (SUPABASE_JWT_SECRET) {
+  // 1. JWKS / asymmetric path
+  if (JWKS) {
     try {
-      const decoded = jwt.verify(token, SUPABASE_JWT_SECRET) as jwt.JwtPayload;
-      if (decoded?.sub) return { sub: decoded.sub as string, exp: decoded.exp };
-      // No `sub` in payload — treat as invalid, no point falling back.
-      return null;
+      const { payload } = await jwtVerify(token, JWKS);
+      if (payload.sub) return { sub: payload.sub, exp: payload.exp };
     } catch (e: any) {
-      // Local verify failed (wrong secret, JWT shape mismatch, etc.). Don't
-      // fail the request — fall through to gotrue so users keep working while
-      // the operator fixes the env var. Log once per process.
-      if (!warnedLocalVerify) {
-        warnedLocalVerify = true;
-        logger.warn(`[Auth] Local JWT verify failed (${e.message}); falling back to gotrue. Check SUPABASE_JWT_SECRET.`);
+      if (!warnedJwks) {
+        warnedJwks = true;
+        logger.warn(`[Auth] JWKS verify failed (${e.code || e.message}); falling back. Check SUPABASE_JWKS_URL.`);
       }
     }
   }
-  // Network fallback (slower).
+  // 2. Legacy HS256 secret
+  if (HS256_KEY) {
+    try {
+      const { payload } = await jwtVerify(token, HS256_KEY);
+      if (payload.sub) return { sub: payload.sub, exp: payload.exp };
+    } catch (e: any) {
+      if (!warnedHs256) {
+        warnedHs256 = true;
+        logger.warn(`[Auth] HS256 verify failed (${e.code || e.message}); falling back to gotrue.`);
+      }
+    }
+  }
+  // 3. Network fallback (slow but always correct)
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data?.user) return null;
