@@ -143,13 +143,17 @@ function userId(req: Request): string | undefined {
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
 // Multi-tenant: client_id scopes CRM data within an org.
-// - Client-level users (JWT has client_id) are pinned to that client; the header is ignored.
-// - Org-level admins (no JWT client_id) may pass X-Client-Id (a UUID) so the dashboard's
-//   global client picker can scope their CRM view/configuration to a specific client.
+// - super_admin: NEVER scoped. Sees every client's data + org-level rows
+//   regardless of what's in the X-Client-Id header. The picker on the dashboard
+//   is informational only for super-admins.
+// - Client-level users (JWT has client_id): pinned to that client; the header is ignored.
+// - Other org-level admins (no JWT client_id): may pass X-Client-Id (a UUID) so
+//   the global picker can scope their CRM view/configuration to a specific client.
 // - When no client is in scope, behaviour falls back to org-level (NULL client_id).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function clientId(req: Request): string | null {
-  const r = req as Request & { user?: { client_id?: string | null } };
+  const r = req as Request & { user?: { client_id?: string | null; role?: string | null } };
+  if (r.user?.role?.toLowerCase() === 'super_admin') return null;
   if (r.user?.client_id) return r.user.client_id;
   const headerVal = (req.headers['x-client-id'] as string | undefined)?.trim();
   if (headerVal && UUID_RE.test(headerVal)) return headerVal;
