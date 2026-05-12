@@ -111,7 +111,9 @@ export interface Lead {
   converted_deal_id?: string | null;
   country?: string | null;
   city?: string | null;
+  state?: string | null;
   industry?: string | null;
+  is_b2c?: boolean | null;
   notes?: string | null;
   tags: string[];
   custom_fields: Record<string, unknown>;
