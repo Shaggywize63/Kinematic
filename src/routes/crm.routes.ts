@@ -28,6 +28,8 @@ import * as winSvc from '../services/crm/ai/winProbability.service';
 import * as autoRespSvc from '../services/crm/ai/autoResponse.service';
 import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
+import * as locationsSvc from '../services/crm/locations.service';
+import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 import { stampOwnerNames, stampOwnerName } from '../services/crm/owners.helper';
 
@@ -528,6 +530,21 @@ attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softD
 attach('/product-categories', 'crm_product_categories', v.productCategorySchema, { defaultSort: { column: 'sort_order', ascending: true }, clientScoped: true });
 attach('/products', 'crm_products', v.productSchema, { searchColumns: ['name','sku','description'], clientScoped: true });
 attach('/whatsapp-templates', 'crm_whatsapp_templates', v.whatsappTemplateSchema, { softDelete: false, clientScoped: true });
+// Translate a template into 1+ Indian languages via Claude. Body:
+//   { languages: ['hi','bn','or','as'] }
+// Response: { translations: { hi: {body_text,...}, bn: {...} } }
+router.post('/whatsapp-templates/:id/translate', wrap(async (req, res) => {
+  const langs = Array.isArray(req.body?.languages) ? req.body.languages.filter((l: unknown) => typeof l === 'string') : [];
+  if (!langs.length) return res.status(400).json({ success: false, error: 'languages array required' });
+  const supported = new Set(whatsappTranslate.SUPPORTED_LANGUAGES);
+  const invalid = langs.filter((l: string) => !supported.has(l));
+  if (invalid.length) return res.status(400).json({ success: false, error: `Unsupported languages: ${invalid.join(', ')}` });
+  const translations = await whatsappTranslate.translateTemplate(orgId(req), req.params.id, langs);
+  res.json({ translations });
+}));
+router.get('/whatsapp-templates-supported-languages', wrap(async (_req, res) => {
+  res.json({ languages: whatsappTranslate.SUPPORTED_LANGUAGES });
+}));
 
 // ---------- SETTINGS -------------------------------------------------
 // Multi-tenant: settings scoped by (org_id, client_id). If user has a client_id
@@ -590,6 +607,35 @@ settings.post('/seed-defaults', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 router.use('/settings', settings);
+
+// ---------- LOCATIONS (state / city / district / block) -------------
+// Reference data scoped to (org, client). Lead filters cascade against it.
+const locations = express.Router();
+
+locations.get('/', wrap(async (req, res) => {
+  const { state, city, district } = req.query as Record<string, string | undefined>;
+  res.json(await locationsSvc.listLocations(orgId(req), clientId(req), { state, city, district }));
+}));
+locations.get('/options', wrap(async (req, res) => {
+  res.json(await locationsSvc.locationOptions(orgId(req), clientId(req)));
+}));
+locations.post('/', wrap(async (req, res) => {
+  const body = req.body as { state?: string; city?: string; district?: string; block?: string };
+  if (!body.state || !body.city) return res.status(400).json({ success: false, error: 'state and city are required' });
+  const row = await locationsSvc.createLocation(orgId(req), clientId(req), userId(req), {
+    state: body.state, city: body.city, district: body.district, block: body.block,
+  });
+  res.status(201).json(row);
+}));
+locations.post('/bulk-import', wrap(async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  res.json(await locationsSvc.bulkImport(orgId(req), clientId(req), userId(req), rows));
+}));
+locations.delete('/:id', wrap(async (req, res) => {
+  await locationsSvc.deleteLocation(orgId(req), req.params.id);
+  res.status(204).end();
+}));
+router.use('/locations', locations);
 
 // ---------- EMAILS ---------------------------------------------------
 const emails = express.Router();

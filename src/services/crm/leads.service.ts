@@ -74,8 +74,14 @@ export async function listLeads(org_id: string, filters: Record<string, unknown>
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
   if (filters.score_gte) q = q.gte('score', Number(filters.score_gte));
-  if (filters.city) q = q.ilike('city', `%${String(filters.city)}%`);
-  if (filters.state) q = q.ilike('state', `%${String(filters.state)}%`);
+  // Location hierarchy filters (state → city → district → block). Each level
+  // is optional; backend applies whichever the picker has selected. Values
+  // come from the crm_client_locations reference table, so exact match is
+  // correct — partial ilike would let "Mumb" leak into "Mumbai".
+  if (filters.state)    q = q.eq('state',    String(filters.state));
+  if (filters.city)     q = q.eq('city',     String(filters.city));
+  if (filters.district) q = q.eq('district', String(filters.district));
+  if (filters.block)    q = q.eq('block',    String(filters.block));
   if (filters.q) {
     // Sanitise user-supplied search before interpolating into the .or()
     // filter. See utils/postgrest.ts for the threat model.
