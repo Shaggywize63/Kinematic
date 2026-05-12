@@ -3,10 +3,11 @@
  * languages via Claude. Results are merged into the template's `translations`
  * JSONB column so the dashboard can pick the right copy per recipient.
  *
- * Supported targets: Hindi (hi), Bengali (bn), Odia (or), Assamese (as),
- * Tamil (ta), Telugu (te), Kannada (kn), Marathi (mr), Gujarati (gu),
- * Punjabi (pa). English (en) is treated as the source and lives in the
- * template's top-level columns.
+ * Supported targets (trimmed for Tata Tiscon footprint):
+ *   Hindi (hi), Odia (or), Bengali (bn), Assamese (as).
+ * English (en) is treated as the source and lives in the template's
+ * top-level columns. To re-enable more languages later, uncomment in
+ * LANG_NAMES below and add the code to the frontend SUPPORTED_LANGS.
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import { complete } from './ai/aiClient';
@@ -14,15 +15,15 @@ import { AppError } from '../../utils';
 
 const LANG_NAMES: Record<string, string> = {
   hi: 'Hindi (Devanagari script)',
-  bn: 'Bengali',
   or: 'Odia (Oriya)',
+  bn: 'Bengali',
   as: 'Assamese',
-  ta: 'Tamil',
-  te: 'Telugu',
-  kn: 'Kannada',
-  mr: 'Marathi',
-  gu: 'Gujarati',
-  pa: 'Punjabi (Gurmukhi script)',
+  // ta: 'Tamil',
+  // te: 'Telugu',
+  // kn: 'Kannada',
+  // mr: 'Marathi',
+  // gu: 'Gujarati',
+  // pa: 'Punjabi (Gurmukhi script)',
 };
 
 export interface TranslatedTemplatePart {
