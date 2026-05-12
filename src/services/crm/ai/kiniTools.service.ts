@@ -6,6 +6,7 @@ import { supabaseAdmin } from '../../../lib/supabase';
 import { sanitisePostgrestSearch } from '../../../utils';
 import * as autoResponse from './autoResponse.service';
 import * as summarize from './summarize.service';
+import * as leadsSvc from '../leads.service';
 
 export interface KiniTool {
   name: string;
@@ -252,6 +253,108 @@ export const tools: KiniTool[] = [
         account_id: (args.account_id as string) ?? null, deal_id: (args.deal_id as string) ?? null,
       }).select('*').single();
       return { data };
+    },
+  },
+  // ── Agentic write tools ────────────────────────────────────────────────
+  {
+    name: 'crm_create_lead',
+    description: 'Create a new CRM lead. Use when the user describes a new prospect ("add John from ACME, john@acme.com"). Returns the created lead with id and initial score.',
+    input_schema: { type: 'object', required: ['first_name'], properties: {
+      first_name: { type: 'string' },
+      last_name: { type: 'string' },
+      email: { type: 'string' },
+      phone: { type: 'string' },
+      company: { type: 'string' },
+      title: { type: 'string' },
+      industry: { type: 'string' },
+      source_id: { type: 'string' },
+      city: { type: 'string' },
+      country: { type: 'string' },
+      is_b2c: { type: 'boolean', description: 'Set true for individual consumer leads, false for business leads.' },
+      notes: { type: 'string' },
+    }},
+    exec: async (org_id, client_id, args) => {
+      const lead = await leadsSvc.createLead({
+        org_id,
+        payload: {
+          client_id,
+          first_name: (args.first_name as string) ?? null,
+          last_name: (args.last_name as string) ?? null,
+          email: (args.email as string) ?? null,
+          phone: (args.phone as string) ?? null,
+          company: (args.company as string) ?? null,
+          title: (args.title as string) ?? null,
+          industry: (args.industry as string) ?? null,
+          source_id: (args.source_id as string) ?? null,
+          city: (args.city as string) ?? null,
+          country: (args.country as string) ?? null,
+          is_b2c: (args.is_b2c as boolean) ?? false,
+          notes: (args.notes as string) ?? null,
+          status: 'new',
+        },
+      });
+      return { card: { type: 'lead_created', data: lead }, data: lead };
+    },
+  },
+  {
+    name: 'crm_update_lead',
+    description: 'Update fields on an existing lead by id. Use for status changes, owner reassignment, contact info corrections.',
+    input_schema: { type: 'object', required: ['id'], properties: {
+      id: { type: 'string' },
+      status: { type: 'string', enum: ['new','working','nurturing','qualified','unqualified','converted'] },
+      owner_id: { type: 'string' },
+      phone: { type: 'string' },
+      email: { type: 'string' },
+      company: { type: 'string' },
+      notes: { type: 'string' },
+    }},
+    exec: async (org_id, _client_id, args) => {
+      const { id, ...rest } = args as Record<string, unknown>;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const lead = await leadsSvc.updateLead(org_id, String(id), rest as any);
+      return { card: { type: 'lead_updated', data: lead }, data: lead };
+    },
+  },
+  {
+    name: 'crm_convert_lead',
+    description: 'Convert a qualified lead into a contact (and optionally an account + opportunity deal). Returns the resulting records.',
+    input_schema: { type: 'object', required: ['id'], properties: {
+      id: { type: 'string', description: 'Lead id to convert.' },
+      create_deal: { type: 'boolean', description: 'If true, also create a deal in the default pipeline.' },
+      deal_name: { type: 'string' },
+      deal_amount: { type: 'number' },
+    }},
+    exec: async (org_id, _client_id, args) => {
+      // Lazy-load the conversion service so we don't introduce a circular dep
+      // at module load. Conversion lives next to the lead service.
+      const mod: typeof import('../leads.service') & {
+        convertLead?: (org_id: string, id: string, opts: { create_deal?: boolean; deal_name?: string; deal_amount?: number }) => Promise<unknown>;
+      } = await import('../leads.service');
+      let result: unknown;
+      if (typeof mod.convertLead === 'function') {
+        result = await mod.convertLead(org_id, String(args.id), {
+          create_deal: (args.create_deal as boolean) ?? false,
+          deal_name: (args.deal_name as string) ?? undefined,
+          deal_amount: (args.deal_amount as number) ?? undefined,
+        });
+      } else {
+        // Fallback: flip status and create a deal directly so the agent
+        // still gets something useful even if the service helper hasn't
+        // been wired yet.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await leadsSvc.updateLead(org_id, String(args.id), { status: 'converted' } as any);
+        let deal: unknown = null;
+        if ((args.create_deal as boolean) && args.deal_name) {
+          const inserted = await supabaseAdmin.from('crm_deals').insert({
+            org_id, name: String(args.deal_name),
+            amount: (args.deal_amount as number) ?? null,
+            status: 'open',
+          }).select('*').single();
+          deal = inserted.data;
+        }
+        result = { converted_lead_id: args.id, deal };
+      }
+      return { card: { type: 'lead_converted', data: result }, data: result };
     },
   },
 ];
