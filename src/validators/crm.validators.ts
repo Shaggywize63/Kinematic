@@ -151,6 +151,9 @@ export const activitySchema = z.object({
   owner_id: optionalUuid,
   assigned_to: optionalUuid,
   metadata: z.record(z.unknown()).optional(),
+  // Single image attached to the activity (e.g. site-visit photo). Front-end
+  // uploads via the existing /api/v1/upload pipeline and posts the URL here.
+  image_url: z.string().url().max(2048).optional().nullable(),
 });
 
 export const taskSchema = z.object({
@@ -358,6 +361,15 @@ export const whatsappTemplateSchema = z.object({
   footer_text: z.string().max(300).optional().nullable(),
   variables: z.array(z.string()).optional(),
   provider_template_id: z.string().max(160).optional().nullable(),
+  // Optional media header — image / video / document URL fetched by WhatsApp.
+  header_media_type: z.enum(['image','video','document']).optional().nullable(),
+  header_media_url:  z.string().url().max(2048).optional().nullable(),
+  // Per-language overrides: { hi: { body_text, header_text?, footer_text? }, bn: {...}, ... }
+  translations: z.record(z.object({
+    body_text:   z.string().max(2000).optional(),
+    header_text: z.string().max(300).optional(),
+    footer_text: z.string().max(300).optional(),
+  })).optional(),
 });
 
 export const sendWhatsappSchema = z.object({
