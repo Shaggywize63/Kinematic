@@ -357,6 +357,61 @@ export const tools: KiniTool[] = [
       return { card: { type: 'lead_converted', data: result }, data: result };
     },
   },
+  {
+    name: 'crm_create_deal',
+    description:
+      'Create a new deal/opportunity in the default pipeline. Use when the user says "add deal", "create opportunity", etc. Account and contact are optional — look them up first if the user names them, but a deal can be saved without either.',
+    input_schema: { type: 'object', required: ['name'], properties: {
+      name:                { type: 'string', description: 'Short deal title shown on the kanban card.' },
+      account_id:          { type: 'string' },
+      primary_contact_id:  { type: 'string' },
+      lead_id:             { type: 'string' },
+      amount:              { type: 'number', description: 'Deal value in INR. Defaults to 0 if not given.' },
+      currency:            { type: 'string', description: 'ISO currency code, defaults to INR.' },
+      expected_close_date: { type: 'string', description: 'YYYY-MM-DD' },
+      stage_slug:          { type: 'string', description: 'Stage name from the pipeline — e.g. "qualification", "proposal". Defaults to the first open stage.' },
+      next_step:           { type: 'string' },
+    }},
+    exec: async (org_id, client_id, args) => {
+      // Resolve pipeline + opening stage for the org. If the agent passed
+      // a stage_slug we try to honour it; otherwise we drop into the first
+      // open stage by position.
+      const { data: pipeline } = await supabaseAdmin.from('crm_pipelines').select('id')
+        .eq('org_id', org_id).eq('is_default', true).limit(1).maybeSingle();
+      if (!pipeline) {
+        return { data: { error: 'No default pipeline configured for this org. Create one in Settings → Pipelines first.' } };
+      }
+      const stagesQ = supabaseAdmin.from('crm_deal_stages').select('id, name, stage_type, position')
+        .eq('org_id', org_id).eq('pipeline_id', pipeline.id).order('position');
+      const { data: stages } = await stagesQ;
+      const openStages = (stages ?? []).filter(s => s.stage_type === 'open');
+      const requestedSlug = args.stage_slug ? String(args.stage_slug).toLowerCase() : null;
+      const stage = (requestedSlug ? openStages.find(s => s.name.toLowerCase().includes(requestedSlug)) : null)
+        ?? openStages[0]
+        ?? (stages ?? [])[0];
+      if (!stage) {
+        return { data: { error: 'No deal stages configured. Create stages in Settings → Pipelines first.' } };
+      }
+
+      const insertRow = {
+        org_id, client_id,
+        pipeline_id: pipeline.id,
+        stage_id: stage.id,
+        name: String(args.name ?? '').trim() || 'Untitled deal',
+        account_id:         (args.account_id as string)         ?? null,
+        primary_contact_id: (args.primary_contact_id as string) ?? null,
+        lead_id:            (args.lead_id as string)            ?? null,
+        amount:             Number(args.amount ?? 0),
+        currency:           String(args.currency ?? 'INR').toUpperCase(),
+        expected_close_date: (args.expected_close_date as string) ?? null,
+        next_step:          (args.next_step as string) ?? null,
+        status: 'open',
+      };
+      const { data: deal, error } = await supabaseAdmin.from('crm_deals').insert(insertRow).select('*').single();
+      if (error) return { data: { error: error.message } };
+      return { card: { type: 'deal_created', data: deal }, data: deal };
+    },
+  },
 ];
 
 /** Returns the Anthropic tool-use schema array. */
