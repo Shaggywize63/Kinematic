@@ -64,16 +64,27 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   return data as Lead;
 }
 
-export async function listLeads(org_id: string, filters: Record<string, unknown> = {}, client_id: string | null = null) {
+export async function listLeads(
+  org_id: string,
+  filters: Record<string, unknown> = {},
+  client_id: string | null = null,
+  options: { strictClient?: boolean } = {},
+) {
   let q = supabaseAdmin.from('crm_leads').select('*')
     .eq('org_id', org_id).is('deleted_at', null);
-  // When scoped to a client, surface both:
-  //   - rows already stamped with that client_id, and
-  //   - org-level rows with NULL client_id (legacy data, or org-level
-  //     defaults that should appear under every picker selection).
-  // Without the NULL branch, picker-selected views look empty even
-  // though the org has data — that was the symptom the user reported.
-  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  // Client scoping:
+  //  - strictClient = true  -> only the caller's exact client_id
+  //    (used for JWT-pinned client-level users; prevents legacy
+  //    NULL-stamped leads from leaking across tenants).
+  //  - strictClient = false -> rows already stamped with that
+  //    client_id PLUS legacy NULL rows (used when an org-level
+  //    admin picks a client from the global header picker, so they
+  //    can administer the legacy data).
+  if (client_id) {
+    q = options.strictClient
+      ? q.eq('client_id', client_id)
+      : q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  }
   if (filters.status) q = q.eq('status', String(filters.status));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
