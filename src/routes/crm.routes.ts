@@ -331,9 +331,9 @@ pipelines.get('/', wrap(async (req, res) => {
     .select('*, stages:crm_deal_stages(*)')
     .eq('org_id', orgId(req))
     .is('deleted_at', null);
-  // Hard isolation: client picker scopes the list to that client only;
-  // org admin (no client picked) sees all pipelines across the org.
-  if (cid) q = q.eq('client_id', cid);
+  // Surface org-level (NULL client_id) pipelines + the picker's
+  // pipelines so legacy data stays visible after migration.
+  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
   const { data, error } = await q.order('created_at', { ascending: true });
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Sort stages by position within each pipeline
@@ -355,8 +355,8 @@ pipelines.get('/:id', wrap(async (req, res) => {
     .select('*, stages:crm_deal_stages(*)')
     .eq('id', req.params.id).eq('org_id', orgId(req))
     .is('deleted_at', null);
-  // Hard isolation: client picker scopes to that client only.
-  if (cid) q = q.eq('client_id', cid);
+  // Allow access to org-level pipelines + the picker's own pipelines.
+  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
   const { data, error } = await q.single();
   if (error || !data) throw new AppError(404, 'Pipeline not found', 'NOT_FOUND');
   const sortedStages = Array.isArray(data.stages) ? [...data.stages].sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0)) : [];
@@ -393,8 +393,8 @@ activities.get('/calendar', wrap(async (req, res) => {
   const cid = clientId(req);
   let q = supabaseAdmin.from('crm_activities').select('*')
     .eq('org_id', orgId(req)).is('deleted_at', null).gte('due_at', from).lte('due_at', to);
-  // Hard isolation: client picker scopes to that client only.
-  if (cid) q = q.eq('client_id', cid);
+  // Org-level (NULL) activities stay visible alongside picker selection.
+  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
   const { data } = await q.order('due_at', { ascending: true });
   res.json(await stampOwnerNames(data ?? []));
 }));
@@ -496,8 +496,10 @@ function attach(
       const cid = clientId(req);
       let q = supabaseAdmin.from(table).select('*').eq('org_id', orgId(req));
       if (opts.softDelete !== false) q = q.is('deleted_at', null);
-      // Hard isolation: client picker scopes to that client only.
-      if (cid) q = q.eq('client_id', cid);
+      // Surface org-level rows (NULL client_id) alongside the picker's
+      // rows. Hard-equality filtering was hiding every legacy NULL row
+      // when an admin chose a specific client.
+      if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
       const { data, error } = await q.order(opts.defaultSort?.column ?? 'created_at', { ascending: opts.defaultSort?.ascending ?? false });
       if (error) throw new AppError(500, error.message, 'DB_ERROR');
       return res.json(data ?? []);
