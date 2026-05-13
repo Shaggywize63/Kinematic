@@ -134,7 +134,10 @@ export const winSchema = z.object({ actual_close_date: isoDate, amount: z.number
 export const loseSchema = z.object({ actual_close_date: isoDate, lost_reason: z.string().max(500).optional() });
 
 export const activitySchema = z.object({
-  type: z.enum(['call','meeting','email','note','task','sms','whatsapp']),
+  // Accept any short slug — built-ins (call/meeting/email/note/task/sms/whatsapp)
+  // are still defaults, but clients can add custom types via Settings →
+  // Activity Types. Shape enforced so the DB stays clean.
+  type: z.string().min(1).max(40).regex(/^[a-z0-9][a-z0-9_-]*$/i, 'lowercase letters, digits, _, - only'),
   subject: z.string().max(200).optional().nullable(),
   body: z.string().optional().nullable(),
   description: z.string().optional().nullable(),

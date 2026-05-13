@@ -637,6 +637,78 @@ locations.delete('/:id', wrap(async (req, res) => {
 }));
 router.use('/locations', locations);
 
+// ---------- ACTIVITY TYPES (per-client catalog) ---------------------
+// 7 built-ins (call/meeting/email/note/task/sms/whatsapp) are accepted
+// without a row; custom types live in crm_activity_types and surface in
+// the activity-create dropdown.
+const activityTypes = express.Router();
+
+const BUILTIN_TYPES = [
+  { slug: 'call',     name: 'Call',     icon: '📞' },
+  { slug: 'meeting',  name: 'Meeting',  icon: '📅' },
+  { slug: 'task',     name: 'Task',     icon: '✅' },
+  { slug: 'note',     name: 'Note',     icon: '📝' },
+  { slug: 'email',    name: 'Email',    icon: '✉️' },
+  { slug: 'sms',      name: 'SMS',      icon: '💬' },
+  { slug: 'whatsapp', name: 'WhatsApp', icon: '💚' },
+];
+
+activityTypes.get('/', wrap(async (req, res) => {
+  const cid = clientId(req);
+  let q = supabaseAdmin.from('crm_activity_types').select('*').eq('org_id', orgId(req)).eq('is_active', true);
+  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+  const { data, error } = await q.order('position').order('name');
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  // Merge built-ins so the dropdown always has the seven defaults; custom
+  // rows override them by slug.
+  const customSlugs = new Set((data ?? []).map(r => r.slug));
+  const builtins = BUILTIN_TYPES.filter(b => !customSlugs.has(b.slug)).map(b => ({
+    id: `builtin:${b.slug}`, org_id: orgId(req), client_id: null,
+    slug: b.slug, name: b.name, icon: b.icon, color: null, position: -1,
+    is_active: true, is_system: true,
+  }));
+  res.json([...builtins, ...(data ?? [])]);
+}));
+
+activityTypes.post('/', wrap(async (req, res) => {
+  const body = req.body as { slug?: string; name?: string; icon?: string; color?: string; position?: number };
+  const slug = (body.slug || '').trim().toLowerCase();
+  const name = (body.name || '').trim();
+  if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(slug)) {
+    return res.status(400).json({ success: false, error: 'slug: lowercase letters, digits, _, - only' });
+  }
+  if (!name) return res.status(400).json({ success: false, error: 'name is required' });
+  const { data, error } = await supabaseAdmin.from('crm_activity_types').insert({
+    org_id: orgId(req), client_id: clientId(req), slug, name,
+    icon: body.icon || null, color: body.color || null,
+    position: body.position ?? 0, created_by: userId(req),
+  }).select('*').single();
+  if (error) throw new AppError(error.code === '23505' ? 409 : 500, error.message, 'DB_ERROR');
+  res.status(201).json(data);
+}));
+
+activityTypes.patch('/:id', wrap(async (req, res) => {
+  const body = req.body as { name?: string; icon?: string; color?: string; position?: number; is_active?: boolean };
+  const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (body.name      !== undefined) update.name      = body.name.trim();
+  if (body.icon      !== undefined) update.icon      = body.icon;
+  if (body.color     !== undefined) update.color     = body.color;
+  if (body.position  !== undefined) update.position  = body.position;
+  if (body.is_active !== undefined) update.is_active = body.is_active;
+  const { data, error } = await supabaseAdmin.from('crm_activity_types')
+    .update(update).eq('org_id', orgId(req)).eq('id', req.params.id).select('*').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json(data);
+}));
+
+activityTypes.delete('/:id', wrap(async (req, res) => {
+  const { error } = await supabaseAdmin.from('crm_activity_types')
+    .delete().eq('org_id', orgId(req)).eq('id', req.params.id);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.status(204).end();
+}));
+router.use('/activity-types', activityTypes);
+
 // ---------- EMAILS ---------------------------------------------------
 const emails = express.Router();
 emails.post('/send', wrap(async (req, res) => {
