@@ -5,12 +5,22 @@ import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import type { Deal } from '../../types/crm.types';
 
-export async function listDeals(org_id: string, filters: Record<string, unknown> = {}, client_id: string | null = null) {
+export async function listDeals(
+  org_id: string,
+  filters: Record<string, unknown> = {},
+  client_id: string | null = null,
+  options: { strictClient?: boolean } = {},
+) {
   let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)')
     .eq('org_id', org_id).is('deleted_at', null);
-  // Hard isolation: stamped deals are visible only to that client; org admin
-  // (no client picked) sees everything.
-  if (client_id) q = q.eq('client_id', client_id);
+  // Same scoping rule as leads: JWT-pinned client users get strict
+  // isolation; admin pickers (header-supplied) also surface legacy
+  // NULL-stamped deals so they can administer them.
+  if (client_id) {
+    q = options.strictClient
+      ? q.eq('client_id', client_id)
+      : q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  }
   if (filters.pipeline_id) q = q.eq('pipeline_id', String(filters.pipeline_id));
   if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
