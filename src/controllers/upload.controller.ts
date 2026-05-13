@@ -9,6 +9,13 @@ const BUCKET_MAP: Record<string, string> = {
   selfie: process.env.BUCKET_SELFIES || 'kinematic-selfies',
   form_photo: process.env.BUCKET_FORM_PHOTOS || 'form-responses',
   photo: process.env.BUCKET_FORM_PHOTOS || 'form-responses',
+  // iOS uploads form-field images to /upload/activity_form (the type
+  // string KinematicRepository passes when posting from a form). The
+  // type was missing from BUCKET_MAP, so every upload returned a 400
+  // "Invalid upload type", uploadImage returned nil, and no photo URL
+  // was sent in the submission — explaining why captured images never
+  // showed up in the dashboard Submission Details modal.
+  activity_form: process.env.BUCKET_FORM_PHOTOS || 'form-responses',
   signature: process.env.BUCKET_FORM_PHOTOS || 'form-responses',
   file: process.env.BUCKET_FORM_PHOTOS || 'form-responses',
   material: process.env.BUCKET_MATERIALS || 'kinematic-materials',
