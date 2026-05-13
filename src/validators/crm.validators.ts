@@ -234,8 +234,8 @@ export const emailTemplateSchema = z.object({
   subject: z.string().min(1).max(300),
   body_html: z.string().min(1),
   body_text: z.string().optional().nullable(),
-  variables: z.array(z.string()).optional(),
-  category: z.string().max(80).default('general'),
+  variables: z.array(z.string()).optional().nullable(),
+  category: z.string().max(80).default('general').nullable(),
   is_active: z.boolean().optional(),
 });
 
@@ -277,7 +277,17 @@ export const importPreviewSchema = z.object({
 });
 export const importCommitSchema = z.object({ job_id: uuid });
 
-export const draftReplySchema = z.object({
+// Frontend posts `{ thread, goal, tone, lead_id?, deal_id? }`; backend service
+// reads `{ incoming_message, intent }`. Accept both names via preprocess so
+// callers don't 400 when they use the older field names.
+export const draftReplySchema = z.preprocess((raw) => {
+  if (raw && typeof raw === 'object') {
+    const r = raw as Record<string, unknown>;
+    if (r.intent === undefined && typeof r.goal === 'string') r.intent = r.goal;
+    if (r.incoming_message === undefined && typeof r.thread === 'string') r.incoming_message = r.thread;
+  }
+  return raw;
+}, z.object({
   lead_id: optionalUuid,
   deal_id: optionalUuid,
   contact_id: optionalUuid,
@@ -285,7 +295,7 @@ export const draftReplySchema = z.object({
   intent: z.string().min(1),
   tone: z.enum(['friendly','formal','concise']).default('friendly'),
   template_hint: z.string().optional(),
-});
+}));
 
 export const summarizeSchema = z.object({});
 
@@ -362,7 +372,10 @@ export const whatsappTemplateSchema = z.object({
   header_text: z.string().max(300).optional().nullable(),
   body_text: z.string().min(1).max(2000),
   footer_text: z.string().max(300).optional().nullable(),
-  variables: z.array(z.string()).optional(),
+  // Frontend sends `null` to clear these fields — accept that explicitly.
+  // Was rejecting saves because z.array(...).optional() doesn't allow null,
+  // and the dashboard's TemplateEditModal sends `variables: form.variables || null`.
+  variables: z.array(z.string()).optional().nullable(),
   provider_template_id: z.string().max(160).optional().nullable(),
   // Optional media header — image / video / document URL fetched by WhatsApp.
   header_media_type: z.enum(['image','video','document']).optional().nullable(),
@@ -372,7 +385,7 @@ export const whatsappTemplateSchema = z.object({
     body_text:   z.string().max(2000).optional(),
     header_text: z.string().max(300).optional(),
     footer_text: z.string().max(300).optional(),
-  })).optional(),
+  })).optional().nullable(),
 });
 
 export const sendWhatsappSchema = z.object({
