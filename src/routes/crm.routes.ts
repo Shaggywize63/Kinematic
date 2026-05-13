@@ -154,14 +154,37 @@ function userId(req: Request): string | undefined {
 //   the global picker can scope their CRM view/configuration to a specific client.
 // - When no client is in scope, behaviour falls back to org-level (NULL client_id).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function clientId(req: Request): string | null {
+
+/**
+ * Resolve the client scope for the current request.
+ *
+ * Returns:
+ *   - `{ id: <uuid>, strict: true }`  — caller's JWT pins them to a
+ *     specific client (a "client-level" user like Hemanth). Lists
+ *     MUST be hard-isolated to that client_id, otherwise legacy
+ *     NULL-stamped rows leak across tenants. This is the data-leak
+ *     fix: previously Hemanth's mobile login was seeing Nikhil's
+ *     leads because the OR-with-NULL filter surfaced every legacy
+ *     row to every client user.
+ *   - `{ id: <uuid>, strict: false }` — caller is an org-level admin
+ *     who selected a client from the global picker (header). They
+ *     should still see legacy NULL rows alongside the selected
+ *     client's rows so they can administer them — hence
+ *     non-strict (OR with NULL).
+ *   - `{ id: null, strict: false }` — org-level admin with no
+ *     picker (or super_admin). No client filter applied.
+ */
+function clientScope(req: Request): { id: string | null; strict: boolean } {
   const r = req as Request & { user?: { client_id?: string | null; role?: string | null } };
-  if (r.user?.role?.toLowerCase() === 'super_admin') return null;
-  if (r.user?.client_id) return r.user.client_id;
+  if (r.user?.role?.toLowerCase() === 'super_admin') return { id: null, strict: false };
+  if (r.user?.client_id) return { id: r.user.client_id, strict: true };
   const headerVal = (req.headers['x-client-id'] as string | undefined)?.trim();
-  if (headerVal && UUID_RE.test(headerVal)) return headerVal;
-  return null;
+  if (headerVal && UUID_RE.test(headerVal)) return { id: headerVal, strict: false };
+  return { id: null, strict: false };
 }
+
+/** Back-compat: most callers only need the id, not the source. */
+function clientId(req: Request): string | null { return clientScope(req).id; }
 function dateRange(req: Request): { from?: string; to?: string } {
   const from = req.query.from ? String(req.query.from) : undefined;
   const to = req.query.to ? String(req.query.to) : undefined;
@@ -180,7 +203,10 @@ function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> 
 
 // ---------- LEADS ----------------------------------------------------
 const leads = express.Router();
-leads.get('/', wrap(async (req, res) => res.json(await stampOwnerNames(await leadsSvc.listLeads(orgId(req), req.query, clientId(req))))));
+leads.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  return res.json(await stampOwnerNames(await leadsSvc.listLeads(orgId(req), req.query, scope.id, { strictClient: scope.strict })));
+}));
 leads.post('/', wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
   // Stamp client_id from request scope (JWT or X-Client-Id header) unless the body explicitly set it.
@@ -210,9 +236,12 @@ router.use('/leads', leads);
 // ---------- CONTACTS -------------------------------------------------
 const contacts = express.Router();
 const contactOpts = { searchColumns: ['first_name','last_name','email','phone'] };
-contacts.get('/', wrap(async (req, res) => res.json(
-  await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), clientId(req), req.query, contactOpts))
-)));
+contacts.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  return res.json(
+    await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict }))
+  );
+}));
 contacts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
@@ -237,7 +266,7 @@ router.use('/contacts', contacts);
 // ---------- ACCOUNTS -------------------------------------------------
 const accounts = express.Router();
 accounts.get('/', wrap(async (req, res) => res.json(
-  await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), clientId(req), req.query, { searchColumns: ['name','domain','industry'] }))
+  await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), clientScope(req).id, req.query, { searchColumns: ['name','domain','industry'], strictClient: clientScope(req).strict }))
 )));
 accounts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
@@ -266,7 +295,10 @@ router.use('/accounts', accounts);
 
 // ---------- DEALS ----------------------------------------------------
 const deals = express.Router();
-deals.get('/', wrap(async (req, res) => res.json(await stampOwnerNames(await dealsSvc.listDeals(orgId(req), req.query, clientId(req))))));
+deals.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  return res.json(await stampOwnerNames(await dealsSvc.listDeals(orgId(req), req.query, scope.id, { strictClient: scope.strict })));
+}));
 deals.post('/', wrap(async (req, res) => {
   const parsed = parse(v.dealSchema, req.body);
   const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
@@ -325,15 +357,20 @@ router.use('/line-items', lineItems);
 // pipelines plus the active client's pipelines. Stages inherit scope via FK.
 const pipelines = express.Router();
 pipelines.get('/', wrap(async (req, res) => {
-  const cid = clientId(req);
+  const scope = clientScope(req);
   let q = supabaseAdmin
     .from('crm_pipelines')
     .select('*, stages:crm_deal_stages(*)')
     .eq('org_id', orgId(req))
     .is('deleted_at', null);
-  // Surface org-level (NULL client_id) pipelines + the picker's
-  // pipelines so legacy data stays visible after migration.
-  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+  // JWT-pinned client users see only their pipelines; admin picker
+  // also surfaces org-level (NULL) pipelines so they can manage legacy
+  // data.
+  if (scope.id) {
+    q = scope.strict
+      ? q.eq('client_id', scope.id)
+      : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+  }
   const { data, error } = await q.order('created_at', { ascending: true });
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Sort stages by position within each pipeline
@@ -349,14 +386,17 @@ pipelines.post('/', wrap(async (req, res) => {
   res.status(201).json(await crud.create('crm_pipelines', orgId(req), payload, userId(req)));
 }));
 pipelines.get('/:id', wrap(async (req, res) => {
-  const cid = clientId(req);
+  const scope = clientScope(req);
   let q = supabaseAdmin
     .from('crm_pipelines')
     .select('*, stages:crm_deal_stages(*)')
     .eq('id', req.params.id).eq('org_id', orgId(req))
     .is('deleted_at', null);
-  // Allow access to org-level pipelines + the picker's own pipelines.
-  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+  if (scope.id) {
+    q = scope.strict
+      ? q.eq('client_id', scope.id)
+      : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+  }
   const { data, error } = await q.single();
   if (error || !data) throw new AppError(404, 'Pipeline not found', 'NOT_FOUND');
   const sortedStages = Array.isArray(data.stages) ? [...data.stages].sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0)) : [];
@@ -390,16 +430,19 @@ const activities = express.Router();
 activities.get('/calendar', wrap(async (req, res) => {
   const from = String(req.query.from ?? new Date(Date.now() - 7 * 86400000).toISOString());
   const to = String(req.query.to ?? new Date(Date.now() + 30 * 86400000).toISOString());
-  const cid = clientId(req);
+  const scope = clientScope(req);
   let q = supabaseAdmin.from('crm_activities').select('*')
     .eq('org_id', orgId(req)).is('deleted_at', null).gte('due_at', from).lte('due_at', to);
-  // Org-level (NULL) activities stay visible alongside picker selection.
-  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+  if (scope.id) {
+    q = scope.strict
+      ? q.eq('client_id', scope.id)
+      : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+  }
   const { data } = await q.order('due_at', { ascending: true });
   res.json(await stampOwnerNames(data ?? []));
 }));
 activities.get('/', wrap(async (req, res) => res.json(
-  await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientId(req), req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at' }))
+  await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientScope(req).id, req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: clientScope(req).strict }))
 )));
 activities.post('/', wrap(async (req, res) => {
   const parsed = parse(v.activitySchema, req.body);
@@ -414,7 +457,7 @@ router.use('/activities', activities);
 
 const notes = express.Router();
 notes.get('/', wrap(async (req, res) => res.json(
-  await crud.clientScopedList('crm_notes', orgId(req), clientId(req), req.query, { softDelete: false })
+  await crud.clientScopedList('crm_notes', orgId(req), clientScope(req).id, req.query, { softDelete: false, strictClient: clientScope(req).strict })
 )));
 notes.post('/', wrap(async (req, res) => {
   const parsed = parse(v.noteSchema, req.body);
@@ -428,7 +471,7 @@ router.use('/notes', notes);
 
 const tasks = express.Router();
 tasks.get('/', wrap(async (req, res) => res.json(
-  await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientId(req), { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at' }))
+  await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientScope(req).id, { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at', strictClient: clientScope(req).strict }))
 )));
 tasks.post('/', wrap(async (req, res) => {
   const parsed = parse(v.taskSchema, req.body);
@@ -493,13 +536,16 @@ function attach(
   const r = express.Router();
   r.get('/', wrap(async (req, res) => {
     if (opts.clientScoped) {
-      const cid = clientId(req);
+      const scope = clientScope(req);
       let q = supabaseAdmin.from(table).select('*').eq('org_id', orgId(req));
       if (opts.softDelete !== false) q = q.is('deleted_at', null);
-      // Surface org-level rows (NULL client_id) alongside the picker's
-      // rows. Hard-equality filtering was hiding every legacy NULL row
-      // when an admin chose a specific client.
-      if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+      // JWT-pinned client users get strict isolation; admin pickers
+      // also see NULL-stamped org-level rows.
+      if (scope.id) {
+        q = scope.strict
+          ? q.eq('client_id', scope.id)
+          : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+      }
       const { data, error } = await q.order(opts.defaultSort?.column ?? 'created_at', { ascending: opts.defaultSort?.ascending ?? false });
       if (error) throw new AppError(500, error.message, 'DB_ERROR');
       return res.json(data ?? []);
