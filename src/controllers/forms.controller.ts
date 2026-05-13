@@ -139,17 +139,27 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   }).select().single();
   if (subErr) return badRequest(res, subErr.message);
   const respRows = (responses || []).map((r: any) => {
-    // Mobile app sends 'field_id' and 'value' or 'photo'
+    // Mobile app sends 'field_id' and either 'value' (text/number/bool
+    // typed answers) or 'photo' (comma-joined image URLs). Previously
+    // the controller collapsed both into a single `val` and stored the
+    // photo URL in `value_text`, leaving the dedicated `photo_url`
+    // column empty — which is why the dashboard's modal rendered text
+    // for image fields and didn't show the captured images. Split them
+    // out so image fields land in `photo_url` where the FE looks.
     const fieldId = r.field_id || r.question_id;
-    const val = r.value || r.response || r.photo || "";
-    
+    const photoVal: string | null = (typeof r.photo === 'string' && r.photo.length > 0) ? r.photo : null;
+    const rawVal: unknown = r.value ?? r.response ?? null;
+    const textVal = typeof rawVal === 'string' ? rawVal
+      : (rawVal == null ? "" : JSON.stringify(rawVal));
+
     return {
       submission_id: sub.id,
       field_id: fieldId, // DB column is 'field_id'
       field_key: fieldId, // Satisfy NOT NULL constraint
-      value_text: typeof val === 'string' ? val : JSON.stringify(val),
-      value_number: typeof val === 'number' ? val : null,
-      value_bool: typeof val === 'boolean' ? val : null,
+      value_text: textVal,
+      value_number: typeof rawVal === 'number' ? rawVal : null,
+      value_bool: typeof rawVal === 'boolean' ? rawVal : null,
+      photo_url: photoVal,
       gps: r.gps || null
     };
   });
