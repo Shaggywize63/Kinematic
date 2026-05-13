@@ -412,6 +412,83 @@ export const tools: KiniTool[] = [
       return { card: { type: 'deal_created', data: deal }, data: deal };
     },
   },
+  {
+    name: 'crm_create_contact',
+    description:
+      'Create a new contact (a person — usually attached to a B2B account). Use when the user gives a name + phone/email and says "save", "add contact", or names someone new during a conversation. account_id is optional; pass it if the contact belongs to a known account.',
+    input_schema: { type: 'object', properties: {
+      first_name:  { type: 'string' },
+      last_name:   { type: 'string' },
+      email:       { type: 'string' },
+      phone:       { type: 'string' },
+      mobile:      { type: 'string' },
+      title:       { type: 'string', description: 'Job title / designation.' },
+      department:  { type: 'string' },
+      account_id:  { type: 'string' },
+      city:        { type: 'string' },
+      state:       { type: 'string' },
+    }},
+    exec: async (org_id, client_id, args) => {
+      const payload = {
+        org_id, client_id,
+        first_name: (args.first_name as string) || null,
+        last_name:  (args.last_name  as string) || null,
+        email:      (args.email      as string) || null,
+        phone:      (args.phone      as string) || null,
+        mobile:     (args.mobile     as string) || null,
+        title:      (args.title      as string) || null,
+        department: (args.department as string) || null,
+        account_id: (args.account_id as string) || null,
+        city:       (args.city       as string) || null,
+        state:      (args.state      as string) || null,
+      };
+      if (!payload.first_name && !payload.last_name && !payload.email && !payload.phone) {
+        return { data: { error: 'At least one of first_name, last_name, email, or phone is required.' } };
+      }
+      const { data, error } = await supabaseAdmin.from('crm_contacts').insert(payload).select('*').single();
+      if (error) return { data: { error: error.message } };
+      return { card: { type: 'contact_created', data }, data };
+    },
+  },
+  {
+    name: 'crm_create_account',
+    description:
+      'Create a new account (a company in B2B mode). Use when the user names a company that doesn\'t exist yet — e.g. "add account Acme Steel". Most fields are optional but at minimum a name is required.',
+    input_schema: { type: 'object', required: ['name'], properties: {
+      name:           { type: 'string' },
+      domain:         { type: 'string', description: 'e.g. acmesteel.com' },
+      industry:       { type: 'string' },
+      annual_revenue: { type: 'number' },
+      phone:          { type: 'string' },
+      website:        { type: 'string' },
+      territory_id:   { type: 'string' },
+    }},
+    exec: async (org_id, client_id, args) => {
+      const name = String(args.name ?? '').trim();
+      if (!name) return { data: { error: 'name is required' } };
+      const payload = {
+        org_id, client_id, name,
+        domain:         (args.domain   as string) || null,
+        industry:       (args.industry as string) || null,
+        annual_revenue: typeof args.annual_revenue === 'number' ? args.annual_revenue : null,
+        phone:          (args.phone    as string) || null,
+        website:        (args.website  as string) || null,
+        territory_id:   (args.territory_id as string) || null,
+      };
+      const { data, error } = await supabaseAdmin.from('crm_accounts').insert(payload).select('*').single();
+      if (error) {
+        // Most likely a duplicate-domain unique-index hit. Try to surface the
+        // existing record so the agent can link to it instead of giving up.
+        if (error.code === '23505' && payload.domain) {
+          const { data: existing } = await supabaseAdmin.from('crm_accounts').select('*')
+            .eq('org_id', org_id).eq('domain', payload.domain).is('deleted_at', null).maybeSingle();
+          if (existing) return { card: { type: 'account_existing', data: existing }, data: existing };
+        }
+        return { data: { error: error.message } };
+      }
+      return { card: { type: 'account_created', data }, data };
+    },
+  },
 ];
 
 /** Returns the Anthropic tool-use schema array. */

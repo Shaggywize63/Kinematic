@@ -30,6 +30,7 @@ import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
+import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 import { stampOwnerNames, stampOwnerName } from '../services/crm/owners.helper';
 
@@ -845,10 +846,15 @@ ai.post('/tools/execute', wrap(async (req, res) => {
   if (!result) throw new AppError(404, `Tool ${body.name} not registered`, 'UNKNOWN_TOOL');
   res.json(result);
 }));
+ai.get('/usage', wrap(async (req, res) => {
+  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
+  res.json(await kiniQuota.getUsage({ id: u?.id, org_id: u?.org_id, role: u?.role }));
+}));
+
 ai.post('/chat', wrap(async (req, res) => {
-  // Shape matches the dashboard chatbot (`KinematicAI` in layout.tsx) which
-  // sends `{messages, system, context}` and reads `data.text` / `data.cards`
-  // from the response. Keep them aligned.
+  // Shape matches the dashboard chatbot (`KinematicAI`) which sends
+  // `{messages, system, context}` and reads `data.text` / `data.cards` /
+  // `data.usage` from the response. Keep them aligned.
   const body = parse(z.object({
     messages: z.array(z.object({ role: z.enum(['user','assistant']), content: z.string() })).min(1),
     system: z.string().optional(),
@@ -860,14 +866,29 @@ ai.post('/chat', wrap(async (req, res) => {
     }).optional(),
   }), req.body);
 
+  // Gate FIRST — never spend Claude tokens for a user who's at cap.
+  const reqUser = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
+  const actor = { id: reqUser?.id, org_id: reqUser?.org_id, role: reqUser?.role };
+  const gate = await kiniQuota.checkQuota(actor);
+  if (!gate.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`,
+      data: { usage: { used: gate.used, cap: gate.cap, remaining: 0, month: gate.month, exempt: gate.exempt, limit_reached: true } },
+    });
+  }
+
   const tools = kiniTools.toAnthropicTools();
   const cid = clientId(req);
+  // Multi-language: detect the user's language from the latest message and
+  // mirror it. Claude is good at this natively — we just nudge it.
+  const multiLangSuffix = `\n\nLanguage policy: Detect the language of the user's most recent message. If it's Hindi (Devanagari), Bengali, Odia, Assamese, or another Indian language, reply in the same language and script. Otherwise reply in English. Keep tool call arguments in English (slugs, IDs, JSON values must stay machine-readable).`;
   const crmSuffix = `\n\nYou are KINI, the Kinematic CRM AI assistant. You help sales reps close deals.
 You have CRM tools available. Use them to fetch real data — never invent leads, deals, or numbers.
 When relevant, return cards via tool results so the UI can render them.
 Current route: ${body.context?.route ?? 'unknown'}.
 Current entity: ${JSON.stringify(body.context?.entity ?? {})}.
-Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-filtered to this scope by the backend — do not try to bypass it or reference rows from other clients.`;
+Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-filtered to this scope by the backend — do not try to bypass it or reference rows from other clients.${multiLangSuffix}`;
   const systemPrompt = `${body.system ?? ''}${crmSuffix}`;
 
   try {
@@ -879,7 +900,12 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
       onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>),
       max_tokens: 1500,
     });
-    res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls } });
+    // Best-effort token attribution — Anthropic returns usage on each turn;
+    // chatWithTools may surface it on out.usage. Default to 0 if absent.
+    const tokenUsage = (out as { usage?: { input?: number; output?: number } }).usage;
+    void kiniQuota.recordQuery(actor, tokenUsage);
+    const after = await kiniQuota.getUsage(actor);
+    res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls, usage: after } });
   } catch (e: unknown) {
     // If the env is missing the Anthropic key, surface a useful 200 message
     // instead of a generic 500. The iOS / dashboard chat UIs both expect
