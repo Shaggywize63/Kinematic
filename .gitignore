@@ -4,3 +4,4 @@ logs/
 .env
 package-lock.json
 check_users.ts
+.next/

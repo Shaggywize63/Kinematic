@@ -125,8 +125,14 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     ? Math.round((new Date(check_out_at).getTime() - new Date(check_in_at).getTime()) / 60000)
     : null;
 
+  // Stamp the submitter's client_id so the per-client picker on the
+  // dashboard scopes correctly. Org-level admins (no JWT client_id) fall
+  // back to NULL which keeps the row visible to every picker selection.
+  const submitterClientId = (user as { client_id?: string | null }).client_id ?? null;
+
   const { data: sub, error: subErr } = await supabaseAdmin.from('form_submissions').insert({
-    user_id: user.id, org_id: user.org_id, template_id, activity_id, outlet_id, outlet_name, 
+    user_id: user.id, org_id: user.org_id, client_id: submitterClientId,
+    template_id, activity_id, outlet_id, outlet_name,
     latitude, longitude, submitted_at: new Date().toISOString(),
     check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address,
     duration_minutes: durationMinutes
@@ -195,10 +201,18 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-  
-  // Rule: If Sagar/SuperAdmin, DEFAULT to Global unless a specific client UUID is selected
+
+  // Rule: If Sagar/SuperAdmin, DEFAULT to Global unless a specific client
+  // UUID is selected. `isGlobal` here means "no org-level scope" (super
+  // admins can see everything across orgs); `pickedClientId` is the
+  // (optional) per-client sub-tenant filter that applies regardless of
+  // role. Previously these were collapsed into a single `effectiveOrgId`
+  // and filtered on `form_submissions.org_id` — which broke for any
+  // caller selecting a specific client UUID because that UUID is NOT
+  // the row's org_id (org_id is the parent organisation; client_id is
+  // the sub-tenant). Net result: empty results in Work Activities.
   const isGlobal = isGlobalVal || isSagar || isSuper || (!client_id || !isUUID(client_id as string));
-  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
+  const pickedClientId = (client_id && isUUID(client_id as string) && !isGlobalVal) ? (client_id as string) : null;
 
   const istDateFrom = parseAppDate(date_from as string);
   const istDateTo = date_to ? parseAppDate(date_to as string) : istDateFrom;
@@ -226,7 +240,15 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
      select1 += `, form_responses(*, builder_questions(*))`;
   }
   let q1 = supabaseAdmin.from('form_submissions').select(select1, { count: 'exact' });
-  if (!isGlobal) q1 = q1.eq('org_id', effectiveOrgId);
+  // Non-global callers (org-scoped admins / supervisors) only see rows in
+  // their own org. Super admins / Sagar skip this.
+  if (!isGlobal) q1 = q1.eq('org_id', user.org_id);
+  // Client picker narrows to a specific sub-tenant, but still surfaces
+  // rows with NULL client_id (org-level submissions that predate the
+  // client_id stamping, or were submitted by org-level reps). Without
+  // this, the picker-selected view appears empty even though data
+  // exists — that was the symptom the user just reported.
+  if (pickedClientId) q1 = q1.or(`client_id.is.null,client_id.eq.${pickedClientId}`);
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
 
   // --- ABSOLUTE FILTER ENFORCEMENT LAYER ---
@@ -252,7 +274,10 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   `;
   // Builder forms usually store responses in JSON, skip extra join unless needed
   let q2 = supabaseAdmin.from('builder_submissions').select(select2, { count: 'exact' });
-  if (!isGlobal) q2 = q2.eq('org_id', effectiveOrgId);
+  if (!isGlobal) q2 = q2.eq('org_id', user.org_id);
+  // builder_submissions doesn't carry a client_id column yet; org-level
+  // builder rows are visible to every picker selection by default. If
+  // and when a client_id column is added, mirror the q1 OR-filter here.
   q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
 
   // --- ABSOLUTE FILTER ENFORCEMENT LAYER (BUILDER) ---
