@@ -58,16 +58,21 @@ export async function clientScopedList(
   org_id: string,
   client_id: string | null,
   query: Record<string, unknown> = {},
-  opts: Partial<CrudOpts> = {},
+  opts: Partial<CrudOpts> & { strictClient?: boolean } = {},
 ) {
   let q = supabaseAdmin.from(table).select('*').eq('org_id', org_id);
   if (opts.softDelete !== false) q = q.is('deleted_at', null);
-  // The doc comment above already specifies the intended behaviour:
-  //   client_id provided -> `client_id IS NULL OR client_id = X`
-  // The implementation had drifted to strict equality, which hid every
-  // legacy NULL-stamped row whenever a picker was selected. Restore the
-  // OR-filter so org-level defaults stay visible.
-  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  // Two scoping modes (see clientScope() in crm.routes for the source
+  // distinction):
+  //   strict       -> only client_id = X    (JWT-pinned client users;
+  //                                          prevents NULL leaks)
+  //   non-strict   -> client_id IS NULL OR  (org-admin picker; still
+  //                   client_id = X          surfaces legacy defaults)
+  if (client_id) {
+    q = opts.strictClient
+      ? q.eq('client_id', client_id)
+      : q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  }
   for (const [k, v] of Object.entries(query)) {
     if (RESERVED.includes(k) || k === 'client_id' || v === undefined || v === null || v === '') continue;
     q = q.eq(k, v as never);
