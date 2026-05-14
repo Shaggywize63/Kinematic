@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
+import { clearEntitlementCache } from '../lib/entitlements';
 
 /**
  * GET /api/v1/clients
@@ -22,17 +23,21 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
     return;
   }
 
-  // Fetch module access for each client
+  // Fetch module entitlements for each client (excludes universal modules,
+  // which are always-on via the v_client_enabled_modules view).
   const clientIds = (data || []).map(c => c.id);
   const { data: accessData } = await supabaseAdmin
-    .from('client_module_access')
-    .select('*')
-    .in('client_id', clientIds);
+    .from('client_modules')
+    .select('client_id, module_id, enabled, expires_at')
+    .in('client_id', clientIds)
+    .eq('enabled', true);
 
+  const now = Date.now();
   const results = (data || []).map(client => ({
     ...client,
     modules: (accessData || [])
-      .filter(a => a.client_id === client.id)
+      .filter(a => a.client_id === client.id
+        && (!a.expires_at || new Date(a.expires_at).getTime() > now))
       .map(a => a.module_id)
   }));
 
@@ -112,9 +117,15 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
   if (modules && Array.isArray(modules) && modules.length > 0) {
     const accessPayload = modules.map(m => ({
       client_id: client.id,
-      module_id: m
+      module_id: m,
+      enabled: true,
+      source: 'manual',
+      granted_by: user.id,
     }));
-    await supabaseAdmin.from('client_module_access').insert(accessPayload);
+    await supabaseAdmin
+      .from('client_modules')
+      .upsert(accessPayload, { onConflict: 'client_id,module_id' });
+    clearEntitlementCache(client.id);
 
     // Sync to user_module_permissions if we have an authId (administrator account)
     const { data: adminUser } = await supabaseAdmin
@@ -200,17 +211,24 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     const validIds = new Set((validModules || []).map(m => m.id));
     const filteredModules = modules.filter(m => validIds.has(m));
 
-    // We'll do this as a single sequence of delete and insert
-    await supabaseAdmin.from('client_module_access').delete().eq('client_id', id);
+    // Replace the whole client_modules set for this client.
+    await supabaseAdmin.from('client_modules').delete().eq('client_id', id);
     if (filteredModules.length > 0) {
-      const accessPayload = filteredModules.map(m => ({ client_id: id, module_id: m }));
+      const accessPayload = filteredModules.map(m => ({
+        client_id: id,
+        module_id: m,
+        enabled: true,
+        source: 'manual',
+        granted_by: user.id,
+      }));
       console.log(`[DEBUG] Syncing ${accessPayload.length} modules for client ${id}:`, JSON.stringify(filteredModules));
-      const { error: accessErr } = await supabaseAdmin.from('client_module_access').insert(accessPayload);
+      const { error: accessErr } = await supabaseAdmin.from('client_modules').insert(accessPayload);
       if (accessErr) {
-        badRequest(res, `Failed to save organizational module access: ${accessErr.message}`);
+        badRequest(res, `Failed to save client entitlements: ${accessErr.message}`);
         return;
       }
     }
+    clearEntitlementCache(id);
 
     // 4. Sync User-Level Permissions for ALL Client Administrators/Users
     const { data: clientUsers } = await supabaseAdmin
@@ -260,4 +278,91 @@ export const deleteClient = asyncHandler(async (req: AuthRequest, res: Response)
   }
 
   ok(res, { deleted: true });
+});
+
+/**
+ * GET /api/v1/clients/:id/modules
+ * Returns the effective enabled modules for a client (universal + client-grant + org-grant).
+ */
+export const getClientModules = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+
+  const { data, error } = await supabaseAdmin
+    .from('v_client_enabled_modules')
+    .select('module_id, package, is_universal, sort_order, source')
+    .eq('client_id', id)
+    .order('package')
+    .order('sort_order');
+
+  if (error) { badRequest(res, error.message); return; }
+
+  const enabled_modules = (data || []).map(r => r.module_id);
+  const enabled_packages = Array.from(new Set((data || []).map(r => r.package).filter(Boolean) as string[]));
+  ok(res, { client_id: id, enabled_modules, enabled_packages, rows: data });
+});
+
+/**
+ * POST /api/v1/clients/:id/packages
+ * Body: { packages: ['field_force','crm', ...], replace?: boolean }
+ * Grants every module in the listed packages to a client. If replace=true,
+ * removes any existing manual/inferred grants for OTHER packages first.
+ */
+export const grantClientPackages = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  const { packages, replace } = req.body as { packages?: string[]; replace?: boolean };
+
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+  if (!Array.isArray(packages) || packages.length === 0) {
+    badRequest(res, 'packages[] is required');
+    return;
+  }
+
+  const allowed = new Set(['field_force', 'distribution', 'crm', 'business', 'system', 'people', 'audit']);
+  const filtered = packages.filter(p => allowed.has(p));
+  if (filtered.length === 0) { badRequest(res, 'No valid packages provided'); return; }
+
+  const { data: modulesInPkg, error: modErr } = await supabaseAdmin
+    .from('modules')
+    .select('id, package, is_universal')
+    .in('package', filtered);
+  if (modErr) { badRequest(res, modErr.message); return; }
+
+  // Universal modules don't need a row; they're auto-enabled. Filter them out.
+  const grantable = (modulesInPkg || []).filter(m => !m.is_universal);
+
+  if (replace) {
+    // Remove every non-universal grant outside the requested packages
+    const keepIds = new Set(grantable.map(m => m.id));
+    const { data: existing } = await supabaseAdmin
+      .from('client_modules')
+      .select('module_id')
+      .eq('client_id', id);
+    const toRemove = (existing || []).filter(r => !keepIds.has(r.module_id)).map(r => r.module_id);
+    if (toRemove.length > 0) {
+      await supabaseAdmin
+        .from('client_modules')
+        .delete()
+        .eq('client_id', id)
+        .in('module_id', toRemove);
+    }
+  }
+
+  if (grantable.length > 0) {
+    const payload = grantable.map(m => ({
+      client_id: id,
+      module_id: m.id,
+      enabled: true,
+      source: 'package_grant',
+      granted_by: user.id,
+    }));
+    const { error: upErr } = await supabaseAdmin
+      .from('client_modules')
+      .upsert(payload, { onConflict: 'client_id,module_id' });
+    if (upErr) { badRequest(res, upErr.message); return; }
+  }
+
+  clearEntitlementCache(id);
+  ok(res, { client_id: id, granted_packages: filtered, granted_modules: grantable.length });
 });
