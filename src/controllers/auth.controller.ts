@@ -6,6 +6,7 @@ import { ok, created, badRequest, unauthorized, serverError, isDemo } from '../u
 import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
+import { resolveEntitlements } from '../lib/entitlements';
 
 const loginSchema = z.object({
   // Accept either email or mobile number (or mobile@kinematic.app constructed by app)
@@ -158,6 +159,13 @@ export const login = asyncHandler<Request>(async (req, res) => {
   const permissions = permsData?.map(p => p.module_id) || [];
   console.log(`[DEBUG] Login successful for ${email}. Permissions: ${permissions.length}`);
 
+  // Resolve module entitlements (per-client SKU + universal modules).
+  const entitlements = await resolveEntitlements({
+    role: userProfile.role,
+    clientId: userProfile.client_id,
+    orgId: userProfile.org_id,
+  });
+
   // Update FCM token and device ID if provided
   if (fcm_token || device_id) {
     await supabaseAdmin
@@ -172,7 +180,9 @@ export const login = asyncHandler<Request>(async (req, res) => {
     expires_at: session.session.expires_at,
     user: {
       ...userProfile,
-      permissions
+      permissions,
+      enabled_modules: entitlements.enabled_modules,
+      enabled_packages: entitlements.enabled_packages,
     },
   });
 });
@@ -237,9 +247,17 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
 
   const permissions = permsData?.map(p => p.module_id) || [];
 
+  const entitlements = await resolveEntitlements({
+    role: (data as any)?.role,
+    clientId: (data as any)?.client_id,
+    orgId: (data as any)?.org_id,
+  });
+
   const result = {
     ...data,
-    permissions
+    permissions,
+    enabled_modules: entitlements.enabled_modules,
+    enabled_packages: entitlements.enabled_packages,
   };
   return ok(res, result);
 });
