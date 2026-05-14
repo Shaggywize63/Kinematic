@@ -6,6 +6,7 @@ import { ok, created, badRequest, unauthorized, serverError, isDemo } from '../u
 import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
+import { getEntitlementsForClient } from '../services/entitlements.service';
 
 const loginSchema = z.object({
   // Accept either email or mobile number (or mobile@kinematic.app constructed by app)
@@ -166,13 +167,16 @@ export const login = asyncHandler<Request>(async (req, res) => {
       .eq('id', userProfile.id);
   }
 
+  const entitlements = await getEntitlementsForClient(userProfile.client_id);
+
   return ok(res, {
     access_token: session.session.access_token,
     refresh_token: session.session.refresh_token,
     expires_at: session.session.expires_at,
     user: {
       ...userProfile,
-      permissions
+      permissions,
+      ...entitlements,
     },
   });
 });
@@ -236,10 +240,12 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('user_id', req.user.id);
 
   const permissions = permsData?.map(p => p.module_id) || [];
+  const entitlements = await getEntitlementsForClient(data.client_id);
 
   const result = {
     ...data,
-    permissions
+    permissions,
+    ...entitlements,
   };
   return ok(res, result);
 });
