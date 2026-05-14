@@ -877,9 +877,13 @@ const ai = express.Router();
 // capped user never spends Anthropic tokens; we record AFTER success so
 // only billable usage counts. Read-only meta endpoints (/tools, /usage)
 // are exempt — they don't call Claude.
-async function gateAi(req: Request, res: Response): Promise<{ proceed: true; actor: { id?: string; org_id?: string; role?: string } } | { proceed: false }> {
-  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
-  const actor = { id: u?.id, org_id: u?.org_id, role: u?.role };
+async function gateAi(req: Request, res: Response): Promise<{ proceed: true; actor: { id?: string; org_id?: string; role?: string; client_id?: string | null } } | { proceed: false }> {
+  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
+  // client_id from JWT (client-pinned user) takes precedence; otherwise
+  // honour the admin picker via X-Client-Id so per-client cap overrides
+  // apply whenever an admin is acting under a client context.
+  const scope = clientScope(req);
+  const actor = { id: u?.id, org_id: u?.org_id, role: u?.role, client_id: u?.client_id ?? scope.id ?? null };
   const gate = await kiniQuota.checkQuota(actor);
   if (!gate.allowed) {
     const code = gate.reason ?? 'USER_KINI_LIMIT_REACHED';
@@ -960,8 +964,9 @@ ai.post('/tools/execute', wrap(async (req, res) => {
   res.json(result);
 }));
 ai.get('/usage', wrap(async (req, res) => {
-  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
-  res.json(await kiniQuota.getUsage({ id: u?.id, org_id: u?.org_id, role: u?.role }));
+  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
+  const scope = clientScope(req);
+  res.json(await kiniQuota.getUsage({ id: u?.id, org_id: u?.org_id, role: u?.role, client_id: u?.client_id ?? scope.id ?? null }));
 }));
 
 // Org-wide credits snapshot for the current month. Powers the "used/cap"
@@ -986,8 +991,9 @@ ai.post('/chat', wrap(async (req, res) => {
   }), req.body);
 
   // Gate FIRST — never spend Claude tokens for a user who's at cap.
-  const reqUser = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
-  const actor = { id: reqUser?.id, org_id: reqUser?.org_id, role: reqUser?.role };
+  const reqUser = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
+  const scope = clientScope(req);
+  const actor = { id: reqUser?.id, org_id: reqUser?.org_id, role: reqUser?.role, client_id: reqUser?.client_id ?? scope.id ?? null };
   const platform = platformOf(req);
   const gate = await kiniQuota.checkQuota(actor);
   if (!gate.allowed) {
