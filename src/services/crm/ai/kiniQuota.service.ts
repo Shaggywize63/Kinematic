@@ -70,17 +70,22 @@ function isExempt(actor: UsageActor): boolean {
   return (actor.role || '').toLowerCase() === 'super_admin';
 }
 
-/** Fetch the org-wide cap. Uses org_settings override if present. */
+/** Fetch the org-wide cap. Uses org_settings override if present.
+ *  org_settings is a generic key-value store (`org_id, key, value jsonb`),
+ *  so we read the row keyed `kini_monthly_query_limit` and parse the jsonb
+ *  value as an int. Falls back to the env default when no override exists. */
 async function orgCap(orgId?: string): Promise<number> {
   if (!orgId) return monthlyCap();
   try {
     const { data } = await supabaseAdmin
       .from('org_settings')
-      .select('kini_monthly_query_limit')
+      .select('value')
       .eq('org_id', orgId)
+      .eq('key', 'kini_monthly_query_limit')
       .maybeSingle();
-    const v = data?.kini_monthly_query_limit;
-    if (typeof v === 'number' && v > 0) return Math.floor(v);
+    const raw = data?.value;
+    const v = typeof raw === 'number' ? raw : (typeof raw === 'string' ? Number(raw) : null);
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.floor(v);
   } catch (e: any) {
     logger.warn(`[kiniQuota] orgCap lookup failed: ${e.message}`);
   }
