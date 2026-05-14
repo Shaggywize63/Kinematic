@@ -5,6 +5,7 @@ import { AuthRequest, UserRole } from '../types';
 import { DEMO_ORG_ID, DEMO_USER_ID, isDemo } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
 import { logger } from '../lib/logger';
+import { resolveEntitlements } from '../lib/entitlements';
 
 // In-memory profile cache. Keyed by token (so a refreshed token re-validates).
 // TTL is min(5 min, JWT exp). Eliminates 3 sequential round-trips per request:
@@ -132,7 +133,10 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
         'campaigns', 'leaderboard', 'notifications', 'sos', 'candidates',
         'learning', 'manpower', 'work_activity', 'audit', 'integrations'
       ],
-      assigned_cities: []
+      assigned_cities: [],
+      // Demo super_admin sees every module/package (resolveEntitlements bypasses).
+      enabled_modules: [],
+      enabled_packages: []
     } as any;
     req.accessToken = token;
     return next();
@@ -170,10 +174,18 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
   if (profile.role) profile.role = profile.role.toLowerCase();
 
+  const entitlements = await resolveEntitlements({
+    role: profile.role,
+    clientId: profile.client_id,
+    orgId: profile.org_id,
+  });
+
   const user = {
     ...profile,
     permissions: permsRes.data?.map(p => p.module_id) || [],
     assigned_cities: citiesRes.data?.map(c => c.city_id) || [],
+    enabled_modules: entitlements.enabled_modules,
+    enabled_packages: entitlements.enabled_packages,
   } as AuthRequest['user'];
 
   cacheSet(token, user, verified.exp);
@@ -205,12 +217,21 @@ export function requireAdminOrAbove(req: AuthRequest, res: Response, next: NextF
 
 export function requireModule(moduleName: string) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) return unauthorized(res);
     const role = req.user.role?.toLowerCase();
     const permissions = req.user.permissions || [];
-    
+    const entitlements = req.user.enabled_modules || [];
+
     if (role === 'super_admin') return next();
+    // Entitlement gate: client must have purchased/been-granted the module.
+    if (entitlements.length > 0 && !entitlements.includes(moduleName)) {
+      return forbidden(res, `Module not enabled for your account: ${moduleName}`);
+    }
+    // Per-user RBAC inside a client: legacy permissions array still respected.
     if (permissions.includes(moduleName)) return next();
-    
+    // If no per-user permissions exist (admin/main_admin defaults), entitlement is sufficient.
+    if (entitlements.includes(moduleName)) return next();
+
     return forbidden(res, `Unauthorized: Missing ${moduleName} module`);
   };
 }

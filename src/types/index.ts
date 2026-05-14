@@ -13,8 +13,10 @@ export interface AuthUser {
   fcm_token?: string;
   is_active: boolean;
   client_id?: string;             // client enterprise ID
-  permissions?: string[];       // module identifiers like 'orders', 'users', etc.
+  permissions?: string[];       // legacy per-user grants from user_module_permissions
   assigned_cities?: string[];    // IDs of assigned cities
+  enabled_modules?: string[];   // module IDs enabled for this user's client (entitlement)
+  enabled_packages?: string[];  // package SKUs enabled for this user's client
 }
 
 export type AuthRequest = Request & {
