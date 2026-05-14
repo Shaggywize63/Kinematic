@@ -12,18 +12,24 @@ export function requireModule(moduleName: string) {
     if (!req.user) return unauthorized(res);
     if (isDemo(req.user)) return next();
 
-    const { role, permissions } = req.user;
+    const { role, permissions, enabled_modules } = req.user;
 
-    // Only super_admin has full access pass. 
-    // Client admins ('admin' role) should still be restricted by assigned permissions.
-    if (role === 'super_admin') {
-      return next();
+    // super_admin bypasses both the entitlement gate and per-user RBAC.
+    if (role === 'super_admin') return next();
+
+    // Entitlement gate (per-client SKU). When a client has any entitlements
+    // resolved, the module must be in the enabled set; otherwise the SKU was
+    // not purchased/granted.
+    const entitlements = enabled_modules || [];
+    if (entitlements.length > 0 && !entitlements.includes(moduleName)) {
+      return forbidden(res, `Module not enabled for your account: ${moduleName}`);
     }
 
-    // Sub-Admin and City Manager must have the module in their permissions
-    if (permissions && permissions.includes(moduleName)) {
-      return next();
-    }
+    // Per-user RBAC inside a client: legacy permissions array still respected.
+    // If a client-admin role with no per-user permissions reaches here, the
+    // entitlement membership above is sufficient.
+    if (permissions && permissions.includes(moduleName)) return next();
+    if (entitlements.includes(moduleName)) return next();
 
     return forbidden(res, `Access denied: You do not have permission to access the ${moduleName} module.`);
   };

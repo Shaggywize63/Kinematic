@@ -5,9 +5,11 @@ import * as clientCtrl from '../controllers/client.controller';
 const router = Router();
 
 // Only Admins or Super Admins can manage clients
-router.get('/',      requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClients);
-router.post('/',     requireAuth, requireRole('admin', 'super_admin'), clientCtrl.createClient);
-router.patch('/:id', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.updateClient);
-router.delete('/:id',requireAuth, requireRole('admin', 'super_admin'), clientCtrl.deleteClient);
+router.get('/',                 requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClients);
+router.post('/',                requireAuth, requireRole('admin', 'super_admin'), clientCtrl.createClient);
+router.patch('/:id',            requireAuth, requireRole('admin', 'super_admin'), clientCtrl.updateClient);
+router.delete('/:id',           requireAuth, requireRole('admin', 'super_admin'), clientCtrl.deleteClient);
+router.get('/:id/modules',      requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientModules);
+router.post('/:id/packages',    requireAuth, requireRole('admin', 'super_admin'), clientCtrl.grantClientPackages);
 
 export default router;
