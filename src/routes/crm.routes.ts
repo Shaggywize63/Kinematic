@@ -146,40 +146,33 @@ function userId(req: Request): string | undefined {
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
 // Multi-tenant: client_id scopes CRM data within an org.
-// - super_admin: NEVER scoped. Sees every client's data + org-level rows
-//   regardless of what's in the X-Client-Id header. The picker on the dashboard
-//   is informational only for super-admins.
 // - Client-level users (JWT has client_id): pinned to that client; the header is ignored.
-// - Other org-level admins (no JWT client_id): may pass X-Client-Id (a UUID) so
-//   the global picker can scope their CRM view/configuration to a specific client.
-// - When no client is in scope, behaviour falls back to org-level (NULL client_id).
+//   Hard-isolated (strict) so legacy NULL rows can't leak.
+// - Org-level admins (no JWT client_id) AND super_admin: may pass X-Client-Id via
+//   the global picker. When a picker UUID is present we scope STRICTLY to that
+//   client so the filter actually filters. When no picker is set, super_admin
+//   sees everything (no filter); other admins fall back to org-level NULL scope.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Resolve the client scope for the current request.
  *
  * Returns:
- *   - `{ id: <uuid>, strict: true }`  — caller's JWT pins them to a
- *     specific client (a "client-level" user like Hemanth). Lists
- *     MUST be hard-isolated to that client_id, otherwise legacy
- *     NULL-stamped rows leak across tenants. This is the data-leak
- *     fix: previously Hemanth's mobile login was seeing Nikhil's
- *     leads because the OR-with-NULL filter surfaced every legacy
- *     row to every client user.
- *   - `{ id: <uuid>, strict: false }` — caller is an org-level admin
- *     who selected a client from the global picker (header). They
- *     should still see legacy NULL rows alongside the selected
- *     client's rows so they can administer them — hence
- *     non-strict (OR with NULL).
- *   - `{ id: null, strict: false }` — org-level admin with no
- *     picker (or super_admin). No client filter applied.
+ *   - `{ id: <uuid>, strict: true }`  — either (a) caller's JWT pins them
+ *     to a specific client (a "client-level" user) or (b) an org-level
+ *     admin / super_admin has chosen a client from the global picker.
+ *     In both cases lists are hard-isolated to that client_id so the
+ *     filter actually filters and legacy NULL-stamped rows don't leak.
+ *   - `{ id: null, strict: false }` — org-level admin with no picker,
+ *     or super_admin with no picker. No client filter applied.
  */
 function clientScope(req: Request): { id: string | null; strict: boolean } {
   const r = req as Request & { user?: { client_id?: string | null; role?: string | null } };
-  if (r.user?.role?.toLowerCase() === 'super_admin') return { id: null, strict: false };
+  // JWT-pinned client user wins regardless of header.
   if (r.user?.client_id) return { id: r.user.client_id, strict: true };
+  // Otherwise honour the picker header for any caller (incl. super_admin).
   const headerVal = (req.headers['x-client-id'] as string | undefined)?.trim();
-  if (headerVal && UUID_RE.test(headerVal)) return { id: headerVal, strict: false };
+  if (headerVal && UUID_RE.test(headerVal)) return { id: headerVal, strict: true };
   return { id: null, strict: false };
 }
 
