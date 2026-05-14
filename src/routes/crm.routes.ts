@@ -866,33 +866,25 @@ router.use('/analytics', analytics);
 // ---------- AI -------------------------------------------------------
 const ai = express.Router();
 
-// Quota gate for every AI endpoint. We check BEFORE the heavy call so a
-// capped user never spends Anthropic tokens; we record AFTER success so
-// only billable usage counts. Read-only meta endpoints (/tools, /usage)
-// are exempt — they don't call Claude.
-async function gateAi(req: Request, res: Response): Promise<{ proceed: true; actor: { id?: string; org_id?: string; role?: string } } | { proceed: false }> {
-  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
-  const actor = { id: u?.id, org_id: u?.org_id, role: u?.role };
-  const gate = await kiniQuota.checkQuota(actor);
-  if (!gate.allowed) {
-    res.status(429).json({
-      success: false,
-      error: `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`,
-      data: { usage: { used: gate.used, cap: gate.cap, remaining: 0, month: gate.month, exempt: gate.exempt, limit_reached: true } },
-    });
-    return { proceed: false };
-  }
-  return { proceed: true, actor };
-}
+// The 20-query monthly cap (kini_usage.query_count) is for the
+// conversational chatbot only — that's the open-ended Claude call that
+// can rack up Anthropic spend per-conversation. Per-feature inference
+// endpoints (score, draft-reply, next-best-action, win-prob, summarize)
+// are NOT metered: they're bounded, single-shot calls the user expects
+// to use freely while working a lead. The gate lives inline in
+// /chat below.
 
+// The per-feature AI endpoints below (score-lead, draft-reply,
+// next-best-action, win-probability, summarize-{account,deal}) used to
+// share the monthly KINI quota with the chatbot. That meant clicking
+// "Refresh" on a Next-Best-Action card or running an AI lead score
+// burned one of the 20 monthly chat queries — which surprised users
+// who hadn't opened the chat at all. The 20-query cap is for the
+// conversational chatbot only; per-feature inference is unmetered.
 ai.post('/score-lead/:id', wrap(async (req, res) => {
-  const g = await gateAi(req, res); if (!g.proceed) return;
-  const out = await leadsSvc.rescoreLead(orgId(req), req.params.id);
-  void kiniQuota.recordQuery(g.actor);
-  res.json(out);
+  res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id));
 }));
 ai.post('/draft-reply', wrap(async (req, res) => {
-  const g = await gateAi(req, res); if (!g.proceed) return;
   const body = parse(v.draftReplySchema, req.body);
   const out = await autoRespSvc.draftReply({
     ...body,
@@ -901,32 +893,19 @@ ai.post('/draft-reply', wrap(async (req, res) => {
     org_id: orgId(req),
     user_id: userId(req),
   });
-  void kiniQuota.recordQuery(g.actor);
   res.json(out);
 }));
 ai.post('/next-best-action/:dealId', wrap(async (req, res) => {
-  const g = await gateAi(req, res); if (!g.proceed) return;
-  const out = await nbaSvc.compute(orgId(req), req.params.dealId, true);
-  void kiniQuota.recordQuery(g.actor);
-  res.json(out);
+  res.json(await nbaSvc.compute(orgId(req), req.params.dealId, true));
 }));
 ai.post('/win-probability/:dealId', wrap(async (req, res) => {
-  const g = await gateAi(req, res); if (!g.proceed) return;
-  const out = await winSvc.compute(orgId(req), req.params.dealId);
-  void kiniQuota.recordQuery(g.actor);
-  res.json(out);
+  res.json(await winSvc.compute(orgId(req), req.params.dealId));
 }));
 ai.post('/summarize/account/:id', wrap(async (req, res) => {
-  const g = await gateAi(req, res); if (!g.proceed) return;
-  const text = await summarizeSvc.summarizeAccount(orgId(req), req.params.id);
-  void kiniQuota.recordQuery(g.actor);
-  res.json({ text });
+  res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), req.params.id) });
 }));
 ai.post('/summarize/deal/:id', wrap(async (req, res) => {
-  const g = await gateAi(req, res); if (!g.proceed) return;
-  const text = await summarizeSvc.summarizeDeal(orgId(req), req.params.id);
-  void kiniQuota.recordQuery(g.actor);
-  res.json({ text });
+  res.json({ text: await summarizeSvc.summarizeDeal(orgId(req), req.params.id) });
 }));
 ai.get('/tools', (_req, res) => res.json(kiniTools.toAnthropicTools()));
 ai.post('/tools/execute', wrap(async (req, res) => {
