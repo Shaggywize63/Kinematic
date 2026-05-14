@@ -3,6 +3,7 @@ import { supabaseAdmin as supabase } from '../lib/supabase';
 import { ok, created, badRequest, notFound, isUUID, parseAppDate, dbToday, getISTSearchRange, todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { isDemo, getMockRoutePlans, getMockMyRoutePlan } from '../utils/demoData';
+import { getClientScope, isSuperAdmin } from '../lib/tenancy';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
@@ -10,20 +11,16 @@ const userId = (req: Request) => (req as any).user.id as string;
 export const getRoutePlans = asyncHandler(async (req, res) => {
   const user = (req as any).user;
   if (isDemo(user)) return ok(res, getMockRoutePlans(todayDate()));
-  const { client_id, date } = req.query;
-  
-  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-  
-  const isGlobal = isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) );
-  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
-  
+  const { date } = req.query;
+  const scope = getClientScope(req);
+
   const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
-  
+
   let q = supabase.from('v_route_plan_daily').select('*');
-  if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
+  // super_admin transcends org isolation; scoped by client picker only (or sees all when none).
+  if (!isSuperAdmin(req)) q = q.eq('org_id', orgId(req));
+  if (scope.id) q = q.eq('client_id', scope.id);
   q = q.eq('plan_date', istDate);
     
   const { data: plans, error } = await q.order('fe_name', { ascending: true });
@@ -99,16 +96,20 @@ export const getMyRoutePlan = asyncHandler(async (req, res) => {
 export const createRoutePlan = asyncHandler(async (req, res) => {
   const org = orgId(req);
   const by = userId(req);
-  const { user_id, plan_date, outlets, activity_ids, activity_id } = req.body;
+  const scope = getClientScope(req);
+  const { user_id, plan_date, outlets, activity_ids, activity_id, client_id } = req.body;
   const acts = activity_ids || (activity_id ? [activity_id] : []);
   if (!user_id || !plan_date || !acts.length || !outlets?.length) return badRequest(res, 'Missing required fields');
-  
+  // Stamp client_id from the active scope (header picker or JWT) so super-admin
+  // creates land on the correct tenant. Body override wins for explicit cases.
+  const stampedClientId = (client_id && isUUID(String(client_id))) ? String(client_id) : scope.id;
+
   const pDate = parseAppDate(plan_date);
   const createdPlans = [];
   for (const aid of acts) {
     await supabase.from('route_plans').delete().eq('user_id', user_id).eq('plan_date', pDate).eq('activity_id', aid);
     const { data: p, error } = await supabase.from('route_plans').insert({
-      org_id: org, user_id, plan_date: pDate, activity_id: aid, created_by: by, total_outlets: outlets.length, status: 'pending'
+      org_id: org, client_id: stampedClientId, user_id, plan_date: pDate, activity_id: aid, created_by: by, total_outlets: outlets.length, status: 'pending'
     }).select().single();
     if (error) continue;
     const rows = (outlets || []).map((o: any, i: number) => ({
@@ -152,19 +153,14 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
       completed_plans: 0
     });
   }
-  const { client_id, date } = req.query;
-  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-  
-  const isGlobal = isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) );
-  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
-
+  const { date } = req.query;
+  const scope = getClientScope(req);
   const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
-  
+
   let q = supabase.from('route_plans').select('*');
-  if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
+  if (!isSuperAdmin(req)) q = q.eq('org_id', orgId(req));
+  if (scope.id) q = q.eq('client_id', scope.id);
   q = q.eq('plan_date', istDate);
 
   let { data, error } = await q;
@@ -178,7 +174,7 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
     visited_outlets: rows.reduce((s, r: any) => s + (r.visited_outlets || 0), 0),
     pending_plans: rows.filter((r: any) => r.status === 'pending').length,
     completed_plans: rows.filter((r: any) => r.status === 'completed').length,
-    debug: { raw_total: rawTotal, isGlobal, effectiveOrgId, start, end }
+    debug: { raw_total: rawTotal, scope, start, end }
   });
 });
 
