@@ -6,8 +6,9 @@ import { complete as aiComplete } from './aiClient';
 import type { NextBestAction } from '../../../types/crm.types';
 
 const SYSTEM_PROMPT = `You are a sales coach. Given a deal's current state, recent activity, days in stage, and win probability, recommend ONE next action.
+NEVER suggest "email" — Kinematic's customers prefer phone / WhatsApp / in-person.
 Output JSON only:
-{"action":"call"|"email"|"meeting"|"send_proposal"|"nurture"|"disqualify",
+{"action":"call"|"meeting"|"send_proposal"|"nurture"|"disqualify",
  "priority":"high"|"med"|"low",
  "reason": str (<=200 chars),
  "suggested_template_id": str|null,
@@ -51,8 +52,12 @@ export async function compute(org_id: string, deal_id: string, force = false): P
       max_tokens: 250,
     });
     const parsed = JSON.parse(extractJson(response));
+    // Defensive: if the model still slips and returns "email" (despite the
+    // prompt telling it not to), coerce it to "call" — clients don't email
+    // customers, the email action wouldn't be actionable.
+    const action = parsed.action === 'email' ? 'call' : parsed.action;
     nba = {
-      action: parsed.action, priority: parsed.priority, reason: String(parsed.reason ?? '').slice(0, 200),
+      action, priority: parsed.priority, reason: String(parsed.reason ?? '').slice(0, 200),
       suggested_template_id: parsed.suggested_template_id ?? null,
       suggested_when: parsed.suggested_when ?? 'this_week',
     };
@@ -75,7 +80,7 @@ function fallback(deal: Record<string, unknown>, stage: Record<string, unknown> 
   if (recent.length === 0) {
     return { action: 'call', priority: 'high', reason: 'No recent activity. Reach out now.', suggested_template_id: null, suggested_when: 'today' };
   }
-  return { action: 'email', priority: 'med', reason: 'Maintain momentum with a follow-up.', suggested_template_id: null, suggested_when: 'this_week' };
+  return { action: 'call', priority: 'med', reason: 'Maintain momentum with a follow-up.', suggested_template_id: null, suggested_when: 'this_week' };
 }
 
 function extractJson(s: string): string {

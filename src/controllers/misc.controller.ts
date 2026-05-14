@@ -215,10 +215,12 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   }
 
   if (isUUID(user.client_id)) {
-    const cid = user.client_id;
-    query = isPrivileged 
-      ? query.or(`client_id.eq.${cid},client_id.is.null`)
-      : query.eq('client_id', cid);
+    // Client-scoped users (including privileged admins of a client) only
+    // see their own client's users. Platform-level admins (client_id=null)
+    // were previously leaking in via an OR clause — they showed up as
+    // assignable in every client's CRM, which doesn't match how CRM
+    // ownership actually works.
+    query = query.eq('client_id', user.client_id);
   } else if (isUUID(client_id as string)) {
     query = query.eq('client_id', client_id as string);
   }
