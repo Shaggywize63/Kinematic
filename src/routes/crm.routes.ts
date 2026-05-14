@@ -882,20 +882,37 @@ async function gateAi(req: Request, res: Response): Promise<{ proceed: true; act
   const actor = { id: u?.id, org_id: u?.org_id, role: u?.role };
   const gate = await kiniQuota.checkQuota(actor);
   if (!gate.allowed) {
+    const code = gate.reason ?? 'USER_KINI_LIMIT_REACHED';
+    const msg = code === 'ORG_KINI_LIMIT_REACHED'
+      ? `Your organization has reached its monthly AI limit (${gate.org_cap ?? gate.cap} queries). Resets on the 1st.`
+      : `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`;
     res.status(429).json({
       success: false,
-      error: `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`,
-      data: { usage: { used: gate.used, cap: gate.cap, remaining: 0, month: gate.month, exempt: gate.exempt, limit_reached: true } },
+      error: { code, message: msg },
+      data: {
+        usage: {
+          used: gate.used, cap: gate.cap, remaining: 0,
+          month: gate.month, exempt: gate.exempt, limit_reached: true,
+          reason: code,
+          org_used: gate.org_used, org_cap: gate.org_cap,
+        },
+      },
     });
     return { proceed: false };
   }
   return { proceed: true, actor };
 }
 
+/** Mobile clients send X-Kinematic-Platform: ios|android; web omits it. */
+function platformOf(req: Request): 'web' | 'ios' | 'android' {
+  const raw = (req.headers['x-kinematic-platform'] as string | undefined ?? '').toLowerCase().trim();
+  return (raw === 'ios' || raw === 'android') ? raw : 'web';
+}
+
 ai.post('/score-lead/:id', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const out = await leadsSvc.rescoreLead(orgId(req), req.params.id);
-  void kiniQuota.recordQuery(g.actor);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
 }));
 ai.post('/draft-reply', wrap(async (req, res) => {
@@ -908,31 +925,31 @@ ai.post('/draft-reply', wrap(async (req, res) => {
     org_id: orgId(req),
     user_id: userId(req),
   });
-  void kiniQuota.recordQuery(g.actor);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
 }));
 ai.post('/next-best-action/:dealId', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const out = await nbaSvc.compute(orgId(req), req.params.dealId, true);
-  void kiniQuota.recordQuery(g.actor);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
 }));
 ai.post('/win-probability/:dealId', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const out = await winSvc.compute(orgId(req), req.params.dealId);
-  void kiniQuota.recordQuery(g.actor);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
 }));
 ai.post('/summarize/account/:id', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const text = await summarizeSvc.summarizeAccount(orgId(req), req.params.id);
-  void kiniQuota.recordQuery(g.actor);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json({ text });
 }));
 ai.post('/summarize/deal/:id', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const text = await summarizeSvc.summarizeDeal(orgId(req), req.params.id);
-  void kiniQuota.recordQuery(g.actor);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json({ text });
 }));
 ai.get('/tools', (_req, res) => res.json(kiniTools.toAnthropicTools()));
@@ -945,6 +962,12 @@ ai.post('/tools/execute', wrap(async (req, res) => {
 ai.get('/usage', wrap(async (req, res) => {
   const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
   res.json(await kiniQuota.getUsage({ id: u?.id, org_id: u?.org_id, role: u?.role }));
+}));
+
+// Org-wide credits snapshot for the current month. Powers the "used/cap"
+// pill on every platform and the per-platform breakdown tooltip.
+ai.get('/credits', wrap(async (req, res) => {
+  res.json(await kiniQuota.getCredits(orgId(req), kiniQuota.currentMonth()));
 }));
 
 ai.post('/chat', wrap(async (req, res) => {
@@ -965,12 +988,24 @@ ai.post('/chat', wrap(async (req, res) => {
   // Gate FIRST — never spend Claude tokens for a user who's at cap.
   const reqUser = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
   const actor = { id: reqUser?.id, org_id: reqUser?.org_id, role: reqUser?.role };
+  const platform = platformOf(req);
   const gate = await kiniQuota.checkQuota(actor);
   if (!gate.allowed) {
+    const code = gate.reason ?? 'USER_KINI_LIMIT_REACHED';
+    const msg = code === 'ORG_KINI_LIMIT_REACHED'
+      ? `Your organization has reached its monthly AI limit (${gate.org_cap ?? gate.cap} queries). Resets on the 1st.`
+      : `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`;
     return res.status(429).json({
       success: false,
-      error: `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`,
-      data: { usage: { used: gate.used, cap: gate.cap, remaining: 0, month: gate.month, exempt: gate.exempt, limit_reached: true } },
+      error: { code, message: msg },
+      data: {
+        usage: {
+          used: gate.used, cap: gate.cap, remaining: 0,
+          month: gate.month, exempt: gate.exempt, limit_reached: true,
+          reason: code,
+          org_used: gate.org_used, org_cap: gate.org_cap,
+        },
+      },
     });
   }
 
@@ -999,7 +1034,7 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
     // Best-effort token attribution — Anthropic returns usage on each turn;
     // chatWithTools may surface it on out.usage. Default to 0 if absent.
     const tokenUsage = (out as { usage?: { input?: number; output?: number } }).usage;
-    void kiniQuota.recordQuery(actor, tokenUsage);
+    void kiniQuota.recordQuery(actor, tokenUsage, platform);
     const after = await kiniQuota.getUsage(actor);
     res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls, usage: after } });
   } catch (e: unknown) {
