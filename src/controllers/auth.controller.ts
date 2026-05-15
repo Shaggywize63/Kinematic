@@ -53,7 +53,8 @@ export const login = asyncHandler<Request>(async (req, res) => {
           'wms', 'warehouse', 'clients', 'management', 'settings', 'skus', 'assets',
           'crm', 'distribution', 'planograms', 'route_plans', 'visit_logs',
           'campaigns', 'leaderboard', 'notifications', 'sos', 'candidates',
-          'learning', 'manpower', 'work_activity', 'audit', 'integrations'
+          'learning', 'manpower', 'work_activity', 'audit', 'integrations',
+          'hr'
         ]
       },
     });
