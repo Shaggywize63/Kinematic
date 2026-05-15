@@ -16,6 +16,7 @@ import {
   corsOrigin, helmetConfig, requestId, sanitiseError,
   prototypePoll, strictJson, perRouteLimit, loginLimiter,
 } from './middleware/security';
+import { demoExtensionsMiddleware } from './utils/demoExtensions';
 
 // Routes
 import authRoutes         from './routes/auth.routes';
@@ -140,6 +141,23 @@ app.get('/health', (_req, res) => {
 const V1 = '/api/v1';
 
 import { requireModule, enforceCityScope } from './middleware/rbac';
+
+// ── Demo intercept for non-CRM modules ────────────────────────────────
+// Mounted before the protected route handlers so demo-org requests get
+// canned fixtures from demoExtensionsMiddleware instead of hitting empty
+// database queries. /auth/* is excluded (those routes can't require auth —
+// they're what *issues* tokens). CRM has its own demoCrmMiddleware on the
+// CRM router; this middleware skips /crm/* paths internally so requests
+// fall through to it.
+//
+// Performance note: requireAuth's profile cache makes the second invocation
+// (from the per-route mounts below) a single map lookup, so the overhead
+// here is negligible on the hot path.
+app.use(V1, (req, res, next) => {
+  const p = req.path;
+  if (p === '/auth' || p.startsWith('/auth/')) return next();
+  return requireAuth(req as any, res, next);
+}, demoExtensionsMiddleware);
 
 // Public/Auth routes (loginLimiter already applied at /auth/login above)
 app.use(`${V1}/auth`,          perRouteLimit({ windowMs: 60_000, max: 30 }), authRoutes);
