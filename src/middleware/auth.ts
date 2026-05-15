@@ -37,6 +37,7 @@ const DEMO_PERMISSIONS = [
   'crm', 'distribution', 'planograms', 'route_plans', 'visit_logs',
   'campaigns', 'leaderboard', 'notifications', 'sos', 'candidates',
   'learning', 'manpower', 'work_activity', 'audit', 'integrations',
+  'hr',
 ];
 
 function cacheGet(token: string): AuthRequest['user'] | null {
