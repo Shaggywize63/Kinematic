@@ -365,6 +365,12 @@ export const getMockRoutePlans = (today: string) => [
     completion_pct: 40,
     zone_name: 'Bangalore North',
     city_name: 'Bangalore',
+    vehicle_type: '2w_petrol',
+    emission_factor_kg_per_km: 0.072,
+    total_distance_km: 18.4,
+    actual_distance_km: 8.2,
+    co2_kg_planned: 1.32,
+    co2_kg_actual: 0.59,
     outlets: [
       { id: 'o1', store_id: 'st1', store_name: 'Reliance Fresh - Koramangala', visit_order: 1, status: 'completed', store_address: '123 Koramangala', target_type: 'general', visited_at: `${today}T10:00:00Z`, checkin_at: `${today}T10:00:00Z`, checkout_at: `${today}T10:30:00Z`, planned_duration_min: 30, actual_duration_min: 30, activities: [{ name: 'FMCG Sales', status: 'completed' }] },
       { id: 'o2', store_id: 'st2', store_name: 'Big Bazaar - Indiranagar', visit_order: 2, status: 'completed', store_address: '456 Indiranagar', target_type: 'merchandising', visited_at: `${today}T11:15:00Z`, checkin_at: `${today}T11:15:00Z`, checkout_at: `${today}T11:50:00Z`, planned_duration_min: 30, actual_duration_min: 35, activities: [{ name: 'Merchandising', status: 'completed' }] },
