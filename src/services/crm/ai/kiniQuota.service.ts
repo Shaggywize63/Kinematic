@@ -6,6 +6,15 @@
  * ~$0.014 / query (60% Sonnet, 40% Haiku), 20 queries / user / month leaves
  * a healthy buffer for over-runs. Override with KINI_MONTHLY_QUERY_CAP.
  *
+ * Shared-credit model (post-migration_kini_credits.sql):
+ *   - kini_usage now has (user_id, org_id, month, platform) uniqueness so a
+ *     single user on both web and iOS produces two rows that sum.
+ *   - The cap applies ORG-WIDE: we sum every row in (org_id, month) and
+ *     compare to org_settings.kini_monthly_query_limit (or the env default).
+ *     Org-cap exceeded → 429 ORG_KINI_LIMIT_REACHED.
+ *   - Per-user-per-platform stays as a secondary gate against the env
+ *     default. User-cap exceeded → 429 USER_KINI_LIMIT_REACHED.
+ *
  * Exemptions: super_admin and the demo placeholder user (org_id =
  * DEMO_ORG_ID) bypass the gate entirely so internal demos + admins never
  * see the limit screen.
@@ -26,6 +35,21 @@ export function currentMonth(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+/** Last day of the given YYYY-MM, ISO date (YYYY-MM-DD). */
+export function periodEnd(month: string): string {
+  const [y, m] = month.split('-').map(Number);
+  // Day 0 of the next month = last day of the requested month.
+  const d = new Date(Date.UTC(y, m, 0));
+  return d.toISOString().slice(0, 10);
+}
+
+export type Platform = 'web' | 'ios' | 'android';
+const PLATFORMS: Platform[] = ['web', 'ios', 'android'];
+function normalizePlatform(p?: string | null): Platform {
+  const v = (p ?? '').toLowerCase().trim();
+  return (PLATFORMS as string[]).includes(v) ? (v as Platform) : 'web';
+}
+
 export interface UsageView {
   used: number;
   cap: number;
@@ -37,6 +61,7 @@ export interface UsageView {
 export interface UsageActor {
   id?: string;
   org_id?: string;
+  client_id?: string | null;
   role?: string | null;
 }
 
@@ -46,74 +71,177 @@ function isExempt(actor: UsageActor): boolean {
   return (actor.role || '').toLowerCase() === 'super_admin';
 }
 
+/** Read a numeric setting from org_settings. Tries client-scoped first
+ *  (when clientId is supplied), then org-level (client_id IS NULL).
+ *  Returns null if neither exists or the value isn't a positive number. */
+async function readNumericSetting(
+  orgId: string,
+  clientId: string | null | undefined,
+  key: string,
+): Promise<number | null> {
+  const parse = (raw: unknown): number | null => {
+    const v = typeof raw === 'number' ? raw : (typeof raw === 'string' ? Number(raw) : null);
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : null;
+  };
+  try {
+    if (clientId) {
+      const { data } = await supabaseAdmin
+        .from('org_settings')
+        .select('value')
+        .eq('org_id', orgId)
+        .eq('client_id', clientId)
+        .eq('key', key)
+        .maybeSingle();
+      const v = parse(data?.value);
+      if (v !== null) return v;
+    }
+    const { data } = await supabaseAdmin
+      .from('org_settings')
+      .select('value')
+      .eq('org_id', orgId)
+      .is('client_id', null)
+      .eq('key', key)
+      .maybeSingle();
+    return parse(data?.value);
+  } catch (e: any) {
+    logger.warn(`[kiniQuota] readNumericSetting(${key}) failed: ${e.message}`);
+    return null;
+  }
+}
+
+/** Org-wide cap (summed across all users + platforms). */
+async function orgCap(orgId?: string): Promise<number> {
+  if (!orgId) return monthlyCap();
+  const v = await readNumericSetting(orgId, null, 'kini_monthly_query_limit');
+  return v ?? monthlyCap();
+}
+
+/** Per-user cap. Client-scoped override (e.g. Tata Tiscon = 20) takes
+ *  precedence; falls back to org-level override, then env default. */
+async function userCap(orgId?: string, clientId?: string | null): Promise<number> {
+  if (!orgId) return monthlyCap();
+  const v = await readNumericSetting(orgId, clientId ?? null, 'kini_user_monthly_query_limit');
+  return v ?? monthlyCap();
+}
+
 /** Read the current usage without incrementing. UI uses this. */
 export async function getUsage(actor: UsageActor): Promise<UsageView> {
-  const cap = monthlyCap();
+  const cap = await userCap(actor.org_id, actor.client_id);
   const month = currentMonth();
   const exempt = isExempt(actor);
   if (exempt || !actor.id) {
     return { used: 0, cap, remaining: cap, month, exempt };
   }
+  // Sum across platforms so the per-user view reflects every device.
   const { data } = await supabaseAdmin.from('kini_usage')
-    .select('query_count').eq('user_id', actor.id).eq('month', month).maybeSingle();
-  const used = data?.query_count ?? 0;
+    .select('query_count').eq('user_id', actor.id).eq('month', month);
+  const used = (data ?? []).reduce((a: number, r: any) => a + (r?.query_count ?? 0), 0);
   return { used, cap, remaining: Math.max(0, cap - used), month, exempt: false };
 }
 
+export type QuotaReason = 'ORG_KINI_LIMIT_REACHED' | 'USER_KINI_LIMIT_REACHED';
+
 export interface QuotaCheck {
   allowed: boolean;
-  used: number;
-  cap: number;
+  used: number;          // user's monthly total (across platforms)
+  cap: number;           // user-level cap (env default)
   remaining: number;
   month: string;
   exempt: boolean;
+  org_used?: number;     // org-wide monthly total
+  org_cap?: number;
+  reason?: QuotaReason;
 }
 
-/** Gate the request. Returns allowed=false when the user is at/over cap. */
+/** Gate the request. Returns allowed=false when org or user is at/over cap. */
 export async function checkQuota(actor: UsageActor): Promise<QuotaCheck> {
-  const view = await getUsage(actor);
+  const month = currentMonth();
+  // Per-user cap may be overridden per-client (e.g. all Tata Tiscon users
+  // are capped at 20) via org_settings (client_id, key='kini_user_monthly_query_limit').
+  const userLimit = await userCap(actor.org_id, actor.client_id);
+  const exempt = isExempt(actor);
+  if (exempt || !actor.id) {
+    return {
+      allowed: true,
+      used: 0, cap: userLimit, remaining: userLimit, month, exempt,
+    };
+  }
+
+  // Org-wide aggregation (covers every user × platform row for the month).
+  const orgLimit = await orgCap(actor.org_id);
+  let orgUsed = 0;
+  if (actor.org_id) {
+    const { data } = await supabaseAdmin.from('kini_usage')
+      .select('query_count').eq('org_id', actor.org_id).eq('month', month);
+    orgUsed = (data ?? []).reduce((a: number, r: any) => a + (r?.query_count ?? 0), 0);
+  }
+  if (orgUsed >= orgLimit) {
+    return {
+      allowed: false,
+      used: 0, cap: userLimit, remaining: 0, month, exempt: false,
+      org_used: orgUsed, org_cap: orgLimit,
+      reason: 'ORG_KINI_LIMIT_REACHED',
+    };
+  }
+
+  // Per-user secondary gate.
+  const { data: userRows } = await supabaseAdmin.from('kini_usage')
+    .select('query_count').eq('user_id', actor.id).eq('month', month);
+  const userUsed = (userRows ?? []).reduce((a: number, r: any) => a + (r?.query_count ?? 0), 0);
+  if (userUsed >= userLimit) {
+    return {
+      allowed: false,
+      used: userUsed, cap: userLimit, remaining: 0, month, exempt: false,
+      org_used: orgUsed, org_cap: orgLimit,
+      reason: 'USER_KINI_LIMIT_REACHED',
+    };
+  }
+
   return {
-    allowed: view.exempt || view.used < view.cap,
-    used: view.used,
-    cap: view.cap,
-    remaining: view.remaining,
-    month: view.month,
-    exempt: view.exempt,
+    allowed: true,
+    used: userUsed, cap: userLimit, remaining: Math.max(0, userLimit - userUsed), month, exempt: false,
+    org_used: orgUsed, org_cap: orgLimit,
   };
 }
 
 /**
- * Increment the user's counter. Best-effort: never throws — a failed
- * counter increment must not block the conversation that just succeeded.
+ * Increment the user's counter for the given platform. Best-effort: never
+ * throws — a failed counter increment must not block the conversation that
+ * just succeeded.
  *
- * Uses UPSERT-with-increment: insert at 1 on first call of the month,
- * bump on subsequent calls via the unique-index conflict path.
+ * Uses UPSERT-with-increment: insert at 1 on first call of the
+ * (user, org, month, platform) tuple; on conflict, bump.
  */
-export async function recordQuery(actor: UsageActor, tokens?: { input?: number; output?: number }): Promise<void> {
+export async function recordQuery(
+  actor: UsageActor,
+  tokens?: { input?: number; output?: number },
+  platform: Platform | string = 'web',
+): Promise<void> {
   if (isExempt(actor) || !actor.id || !actor.org_id) return;
   const month = currentMonth();
+  const plat = normalizePlatform(platform);
   const inputTok  = tokens?.input  ?? 0;
   const outputTok = tokens?.output ?? 0;
   try {
-    // We can't do an atomic increment via supabase-js without an RPC, so
-    // read-modify-write inside a single PostgREST call via the on-conflict
-    // path: try insert at 1, fall back to update if the unique index hits.
+    // Try insert; on (user_id, org_id, month, platform) conflict, increment.
     const insertRes = await supabaseAdmin.from('kini_usage').insert({
-      user_id: actor.id, org_id: actor.org_id, month,
-      query_count: 1, input_tokens: inputTok, output_tokens: outputTok,
+      user_id: actor.id, org_id: actor.org_id, month, platform: plat,
+      query_count: 1, request_count: 1,
+      input_tokens: inputTok, output_tokens: outputTok,
       last_query_at: new Date().toISOString(),
     }).select('id').maybeSingle();
     if (!insertRes.error) return;
-    // Conflict → existing row, increment
     if (insertRes.error.code === '23505') {
       const { data: cur } = await supabaseAdmin.from('kini_usage')
-        .select('id, query_count, input_tokens, output_tokens')
-        .eq('user_id', actor.id).eq('month', month).maybeSingle();
+        .select('id, query_count, request_count, input_tokens, output_tokens')
+        .eq('user_id', actor.id).eq('org_id', actor.org_id)
+        .eq('month', month).eq('platform', plat).maybeSingle();
       if (cur) {
         await supabaseAdmin.from('kini_usage').update({
-          query_count:  (cur.query_count  ?? 0) + 1,
-          input_tokens: (cur.input_tokens ?? 0) + inputTok,
-          output_tokens:(cur.output_tokens?? 0) + outputTok,
+          query_count:   (cur.query_count   ?? 0) + 1,
+          request_count: (cur.request_count ?? 0) + 1,
+          input_tokens:  (cur.input_tokens  ?? 0) + inputTok,
+          output_tokens: (cur.output_tokens ?? 0) + outputTok,
           last_query_at: new Date().toISOString(),
           updated_at:    new Date().toISOString(),
         }).eq('id', cur.id);
@@ -122,4 +250,41 @@ export async function recordQuery(actor: UsageActor, tokens?: { input?: number; 
   } catch (e: any) {
     logger.warn(`[kiniQuota] recordQuery failed: ${e.message}`);
   }
+}
+
+export interface CreditsView {
+  used: number;
+  limit: number;
+  period_end: string;
+  platform_breakdown: Record<Platform, number>;
+}
+
+/**
+ * Org-wide credits snapshot for the given month. UI pills + mobile clients
+ * consume this. `used` is the sum of query_count for the org in `month`;
+ * `limit` comes from org_settings (else env default).
+ */
+export async function getCredits(orgId: string, month: string = currentMonth()): Promise<CreditsView> {
+  const limit = await orgCap(orgId);
+  const breakdown: Record<Platform, number> = { web: 0, ios: 0, android: 0 };
+  let used = 0;
+  if (orgId) {
+    const { data } = await supabaseAdmin
+      .from('kini_usage')
+      .select('platform, query_count')
+      .eq('org_id', orgId)
+      .eq('month', month);
+    for (const row of (data ?? []) as Array<{ platform: string; query_count: number | null }>) {
+      const plat = normalizePlatform(row.platform);
+      const n = row.query_count ?? 0;
+      breakdown[plat] += n;
+      used += n;
+    }
+  }
+  return {
+    used,
+    limit,
+    period_end: periodEnd(month),
+    platform_breakdown: breakdown,
+  };
 }
