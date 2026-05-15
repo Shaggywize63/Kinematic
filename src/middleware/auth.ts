@@ -20,20 +20,16 @@ const AUTH_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUTH_CACHE_MAX = 5000; // soft cap; FIFO drop on overflow
 const authCache = new Map<string, CachedAuth>();
 
-// Real Supabase accounts that should be treated as the demo user. When the
-// caller signs in with one of these emails the rest of the code (demoCrm,
-// demoExtensions, isDemo()) treats them exactly like the placeholder-token
-// demo user — they get the canned fixtures across every module. Useful for
-// sales / sandbox tours that need a stable login but full demo data.
-const DEMO_EMAIL_ALLOWLIST = new Set([
-  'demo@kinematicapp.com',
-  'demo@kinematic.com',
-  'demo@kinematic.app',
-]);
+// Single demo account. When the caller signs in as this email, requireAuth
+// promotes the user object to the same shape the placeholder-token bypass
+// produces (super_admin role + DEMO_ORG_ID + full module permissions) so the
+// downstream demo middleware (demoCrm, demoExtensions, isDemo) treats them
+// as the demo user across every module.
+const DEMO_EMAIL = 'demo@kinematic.com';
 
-// Permissions/role payload applied to any user the auth layer elevates to
-// the demo account. Kept identical to the placeholder-token branch below so
-// the two paths produce equivalent req.user objects.
+// Permissions/role payload applied to the demo account. Kept identical to
+// the placeholder-token branch below so the two paths produce equivalent
+// req.user objects.
 const DEMO_PERMISSIONS = [
   'dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory',
   'form_builder', 'reports', 'broadcast', 'broadcasts', 'grievances',
@@ -145,7 +141,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
       org_id: DEMO_ORG_ID,
       client_id: null,
       name: 'Demo Admin',
-      email: 'demo@kinematic.com',
+      email: DEMO_EMAIL,
       role: 'super_admin',
       is_active: true,
       permissions: DEMO_PERMISSIONS,
@@ -191,13 +187,14 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (profile.role) profile.role = profile.role.toLowerCase();
 
   // --- DEMO EMAIL ELEVATION ---
-  // If the caller signed in as one of the demo emails, promote the user
-  // object to the same shape the placeholder-token bypass produces above.
-  // Downstream isDemo() checks and the demo middleware (demoCrm, demoExtensions)
-  // then serve the canned fixtures across every module — even though the
-  // underlying Supabase row has a real org_id.
+  // The dashboard already short-circuits demo@kinematic.com on the client and
+  // never hits the network — but a few endpoints (live-tracking, admin form
+  // submissions) bypass the client mock and call us directly. When they do,
+  // we still need isDemo() to be true so the demo middleware serves fixtures
+  // instead of querying the empty demo-org rows. Promote to the same payload
+  // the placeholder-token bypass produces above.
   const callerEmail = (verified.email || profile.email || '').toLowerCase();
-  const isDemoEmail = callerEmail && DEMO_EMAIL_ALLOWLIST.has(callerEmail);
+  const isDemoEmail = callerEmail === DEMO_EMAIL;
   if (isDemoEmail) {
     profile.org_id = DEMO_ORG_ID;
     profile.role = 'super_admin';
