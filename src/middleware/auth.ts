@@ -20,6 +20,29 @@ const AUTH_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUTH_CACHE_MAX = 5000; // soft cap; FIFO drop on overflow
 const authCache = new Map<string, CachedAuth>();
 
+// Real Supabase accounts that should be treated as the demo user. When the
+// caller signs in with one of these emails the rest of the code (demoCrm,
+// demoExtensions, isDemo()) treats them exactly like the placeholder-token
+// demo user — they get the canned fixtures across every module. Useful for
+// sales / sandbox tours that need a stable login but full demo data.
+const DEMO_EMAIL_ALLOWLIST = new Set([
+  'demo@kinematicapp.com',
+  'demo@kinematic.com',
+  'demo@kinematic.app',
+]);
+
+// Permissions/role payload applied to any user the auth layer elevates to
+// the demo account. Kept identical to the placeholder-token branch below so
+// the two paths produce equivalent req.user objects.
+const DEMO_PERMISSIONS = [
+  'dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory',
+  'form_builder', 'reports', 'broadcast', 'broadcasts', 'grievances',
+  'wms', 'warehouse', 'clients', 'management', 'settings', 'skus', 'assets',
+  'crm', 'distribution', 'planograms', 'route_plans', 'visit_logs',
+  'campaigns', 'leaderboard', 'notifications', 'sos', 'candidates',
+  'learning', 'manpower', 'work_activity', 'audit', 'integrations',
+];
+
 function cacheGet(token: string): AuthRequest['user'] | null {
   const hit = authCache.get(token);
   if (!hit) return null;
@@ -71,12 +94,12 @@ const HS256_KEY = SUPABASE_JWT_SECRET ? new TextEncoder().encode(SUPABASE_JWT_SE
 let warnedJwks = false;
 let warnedHs256 = false;
 
-async function verifyToken(token: string): Promise<{ sub: string; exp?: number } | null> {
+async function verifyToken(token: string): Promise<{ sub: string; exp?: number; email?: string } | null> {
   // 1. JWKS / asymmetric path
   if (JWKS) {
     try {
       const { payload } = await jwtVerify(token, JWKS);
-      if (payload.sub) return { sub: payload.sub, exp: payload.exp };
+      if (payload.sub) return { sub: payload.sub, exp: payload.exp, email: (payload as any).email };
     } catch (e: any) {
       if (!warnedJwks) {
         warnedJwks = true;
@@ -88,7 +111,7 @@ async function verifyToken(token: string): Promise<{ sub: string; exp?: number }
   if (HS256_KEY) {
     try {
       const { payload } = await jwtVerify(token, HS256_KEY);
-      if (payload.sub) return { sub: payload.sub, exp: payload.exp };
+      if (payload.sub) return { sub: payload.sub, exp: payload.exp, email: (payload as any).email };
     } catch (e: any) {
       if (!warnedHs256) {
         warnedHs256 = true;
@@ -100,7 +123,7 @@ async function verifyToken(token: string): Promise<{ sub: string; exp?: number }
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data?.user) return null;
-    return { sub: data.user.id };
+    return { sub: data.user.id, email: data.user.email ?? undefined };
   } catch (e: any) {
     logger.error(`[Auth] supabase.auth.getUser exception: ${e.message}`);
     return null;
@@ -125,14 +148,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
       email: 'demo@kinematic.com',
       role: 'super_admin',
       is_active: true,
-      permissions: [
-        'dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory',
-        'form_builder', 'reports', 'broadcast', 'broadcasts', 'grievances',
-        'wms', 'warehouse', 'clients', 'management', 'settings', 'skus', 'assets',
-        'crm', 'distribution', 'planograms', 'route_plans', 'visit_logs',
-        'campaigns', 'leaderboard', 'notifications', 'sos', 'candidates',
-        'learning', 'manpower', 'work_activity', 'audit', 'integrations'
-      ],
+      permissions: DEMO_PERMISSIONS,
       assigned_cities: [],
       // Demo super_admin sees every module/package (resolveEntitlements bypasses).
       enabled_modules: [],
@@ -157,7 +173,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const [profileRes, permsRes, citiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
-      .select('id, org_id, client_id, name, mobile, role, zone_id, supervisor_id, fcm_token, is_active')
+      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active')
       .eq('id', verified.sub)
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', verified.sub),
@@ -174,6 +190,20 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
   if (profile.role) profile.role = profile.role.toLowerCase();
 
+  // --- DEMO EMAIL ELEVATION ---
+  // If the caller signed in as one of the demo emails, promote the user
+  // object to the same shape the placeholder-token bypass produces above.
+  // Downstream isDemo() checks and the demo middleware (demoCrm, demoExtensions)
+  // then serve the canned fixtures across every module — even though the
+  // underlying Supabase row has a real org_id.
+  const callerEmail = (verified.email || profile.email || '').toLowerCase();
+  const isDemoEmail = callerEmail && DEMO_EMAIL_ALLOWLIST.has(callerEmail);
+  if (isDemoEmail) {
+    profile.org_id = DEMO_ORG_ID;
+    profile.role = 'super_admin';
+    logger.info(`[Auth] Demo email elevation applied for ${callerEmail} (sub=${verified.sub})`);
+  }
+
   const entitlements = await resolveEntitlements({
     role: profile.role,
     clientId: profile.client_id,
@@ -182,7 +212,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
   const user = {
     ...profile,
-    permissions: permsRes.data?.map(p => p.module_id) || [],
+    permissions: isDemoEmail ? DEMO_PERMISSIONS : (permsRes.data?.map(p => p.module_id) || []),
     assigned_cities: citiesRes.data?.map(c => c.city_id) || [],
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
