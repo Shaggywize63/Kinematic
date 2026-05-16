@@ -40,8 +40,6 @@ import { stampOwnerNames, stampOwnerName } from '../services/crm/owners.helper';
 const router: Router = express.Router();
 
 // ----- PUBLIC ROUTES (registered before requireAuth) -----
-// Email tracking + WhatsApp webhook accept signed/tokened requests; the
-// shared secret in the URL path or body IS the auth.
 router.get('/emails/track/open/:token', async (req, res) => {
   await emailsSvc.recordOpen(req.params.token).catch(() => {});
   res.set('Content-Type', 'image/gif');
@@ -52,7 +50,6 @@ router.get('/emails/track/click/:token', async (req, res) => {
   res.redirect(302, String(req.query.u ?? '/'));
 });
 
-// Meta WhatsApp Business webhook verification (challenge handshake).
 router.get('/webhooks/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -105,17 +102,13 @@ router.post('/webhooks/whatsapp', express.json({ limit: '2mb' }), async (req, re
       }
     }
   } catch {
-    // Best-effort; never fail the webhook so Meta doesn't retry.
+    /* never fail the webhook */
   }
   res.sendStatus(200);
 });
 
-// ----- AUTHENTICATED ROUTES BELOW -----
 router.use(requireAuth, requireModule('crm'));
 
-// Wrap every res.json payload in {success, data} so the dashboard's
-// Wrapped<T> typings match runtime. Pass-through if the body already has
-// a `success` field (error handler emits {success:false,...}).
 router.use((_req, res, next) => {
   const originalJson = res.json.bind(res);
   res.json = (body: unknown) => {
@@ -127,14 +120,10 @@ router.use((_req, res, next) => {
   next();
 });
 
-// Demo bypass: when org_id=demo-org-999, short-circuit GETs to canned fixtures
-// and writes to no-op success. Mounted AFTER the success-envelope wrapper so
-// fixture payloads come out the same shape the frontend expects.
 router.use(demoCrmMiddleware);
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-// ---------- helpers --------------------------------------------------
 const wrap = (fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) =>
   (req: Request, res: Response, next: NextFunction) => fn(req, res, next).catch(next);
 
@@ -148,7 +137,6 @@ function userId(req: Request): string | undefined {
   const r = req as Request & { user?: { id?: string; user_id?: string }; auth?: { user_id?: string } };
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
-// Multi-tenant: client_id scopes CRM data within an org.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function clientScope(req: Request): { id: string | null; strict: boolean } {
@@ -195,6 +183,8 @@ leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(
 leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
 leads.post('/:id/convert', wrap(async (req, res) =>
   res.json(await leadsSvc.convertLead(orgId(req), req.params.id, parse(v.leadConvertSchema, req.body), userId(req)))));
+leads.post('/:id/reopen', wrap(async (req, res) =>
+  res.json(await stampOwnerName(await leadsSvc.reopenLead(orgId(req), req.params.id, parse(v.leadReopenSchema, req.body), userId(req))))));
 leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc.listScoreHistory(orgId(req), req.params.id))));
 leads.get('/:id/activities', wrap(async (req, res) => res.json(
   await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })
@@ -206,30 +196,14 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
 }));
-// Mark a lead as won (status=converted, lifecycle_stage=customer).
+// Mark a lead as won (status=converted + lifecycle_stage=customer + won_reason).
+// Distinct from /convert which spawns Account+Contact+Deal — this is the
+// lightweight "rep flagged the win" path used by mobile + dashboard.
 leads.post('/:id/won', wrap(async (req, res) => {
   const body = parse(z.object({ reason: z.string().max(500).optional() }), req.body ?? {});
   res.json(await stampOwnerName(
     await leadsSvc.markLeadAsWon(orgId(req), req.params.id, body.reason ?? null, userId(req)),
   ));
-}));
-// Reopen a previously-disqualified lead.
-leads.post('/:id/reopen', wrap(async (req, res) => {
-  const body = parse(z.object({ reason: z.string().max(500).optional() }), req.body ?? {});
-  const reopened = await leadsSvc.updateLead(
-    orgId(req),
-    req.params.id,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    { status: 'new', lost_reason: null, disqualified_at: null } as any,
-    userId(req),
-  );
-  if (body.reason) {
-    await supabaseAdmin.from('crm_lead_history').insert({
-      lead_id: req.params.id, org_id: orgId(req), field: 'reopened',
-      old_value: null, new_value: { reason: body.reason }, changed_by: userId(req) ?? null,
-    });
-  }
-  res.json(await stampOwnerName(reopened));
 }));
 router.use('/leads', leads);
 
@@ -513,7 +487,6 @@ cities.patch('/:id', wrap(async (req, res) =>
 cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
 router.use('/cities', cities);
 
-// ---------- SOURCES + RULES + TERRITORIES + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES + PRODUCTS
 function attach(
   path: string,
   table: string,
@@ -574,7 +547,6 @@ router.get('/whatsapp-templates-supported-languages', wrap(async (_req, res) => 
   res.json({ languages: whatsappTranslate.SUPPORTED_LANGUAGES });
 }));
 
-// ---------- SETTINGS -------------------------------------------------
 const settings = express.Router();
 settings.get('/', wrap(async (req, res) => {
   const cid = clientId(req);
@@ -628,7 +600,6 @@ settings.post('/seed-defaults', wrap(async (req, res) => {
 }));
 router.use('/settings', settings);
 
-// ---------- LOCATIONS (state / city / district / block) -------------
 const locations = express.Router();
 locations.get('/', wrap(async (req, res) => {
   const { state, city, district } = req.query as Record<string, string | undefined>;
@@ -655,7 +626,6 @@ locations.delete('/:id', wrap(async (req, res) => {
 }));
 router.use('/locations', locations);
 
-// ---------- ACTIVITY TYPES (per-client catalog) ---------------------
 const activityTypes = express.Router();
 const BUILTIN_TYPES = [
   { slug: 'call',     name: 'Call',     icon: '📞' },
@@ -717,7 +687,6 @@ activityTypes.delete('/:id', wrap(async (req, res) => {
 }));
 router.use('/activity-types', activityTypes);
 
-// ---------- EMAILS ---------------------------------------------------
 const emails = express.Router();
 emails.post('/send', wrap(async (req, res) => {
   const body = parse(v.sendEmailSchema, req.body);
@@ -733,7 +702,6 @@ emails.post('/send', wrap(async (req, res) => {
 emails.get('/', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), req.query))));
 router.use('/emails', emails);
 
-// ---------- WHATSAPP ------------------------------------------------
 const whatsapp = express.Router();
 whatsapp.post('/send', wrap(async (req, res) => {
   const body = parse(v.sendWhatsappSchema, req.body);
@@ -747,7 +715,6 @@ whatsapp.post('/send', wrap(async (req, res) => {
 whatsapp.get('/logs', wrap(async (req, res) => res.json(await whatsappSvc.listLogs(orgId(req), req.query))));
 router.use('/whatsapp', whatsapp);
 
-// ---------- IMPORT ---------------------------------------------------
 const imp = express.Router();
 imp.post('/upload', upload.single('file'), wrap(async (req, res) => {
   if (!req.file) throw new AppError(400, 'No file uploaded', 'NO_FILE');
@@ -870,8 +837,6 @@ analytics.get('/leads-at-risk', wrap(async (req, res) => res.json(
 router.use('/analytics', analytics);
 
 // ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
-// Pattern: stateless on the client — every save replaces the full config
-// jsonb under (user_id, org_id, page).
 const layouts = express.Router();
 layouts.get('/:page', wrap(async (req, res) => {
   const page = req.params.page as 'analytics' | 'overview';
@@ -892,8 +857,6 @@ layouts.put('/:page', wrap(async (req, res) => {
   const config = req.body as dashboardLayoutSvc.DashboardConfig;
   res.json(await dashboardLayoutSvc.saveLayout(uid, orgId(req), clientId(req), page, config));
 }));
-// Append a single widget to the user's CRM Overview layout — used by the
-// "Add to dashboard" button on each analytics tile.
 layouts.post('/overview/pin', wrap(async (req, res) => {
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
@@ -914,7 +877,6 @@ layouts.delete('/:page/widgets/:widget_id', wrap(async (req, res) => {
 }));
 router.use('/dashboard-layouts', layouts);
 
-// ---------- LEADERBOARD ---------------------------------------------
 router.get('/leaderboard', wrap(async (req, res) => {
   const metric = (req.query.metric === 'revenue' ? 'revenue' : 'count') as leaderboardSvc.LeaderboardMetric;
   const period = ((['mtd', 'qtd', 'ytd', 'custom'] as const).find(p => p === req.query.period) ?? 'mtd') as leaderboardSvc.LeaderboardPeriod;
@@ -932,7 +894,6 @@ router.get('/leaderboard', wrap(async (req, res) => {
   res.json(result);
 }));
 
-// ---------- AI -------------------------------------------------------
 const ai = express.Router();
 
 async function gateAi(req: Request, res: Response): Promise<{ proceed: true; actor: { id?: string; org_id?: string; role?: string; client_id?: string | null } } | { proceed: false }> {
