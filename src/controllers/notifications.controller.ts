@@ -63,6 +63,78 @@ export const updateFcmToken = asyncHandler(async (req: AuthRequest, res: Respons
   return ok(res, null, 'FCM token updated');
 });
 
+// POST /api/v1/notifications/device-token
+//
+// Upsert a device push token for the authenticated user. Supports both
+// FCM (Android + Firebase-backed iOS) and raw APNs tokens. The
+// device_tokens table uses (user_id, platform) as the conflict key so
+// each user × device-class pair has exactly one current token row.
+//
+// Falls back gracefully if the device_tokens table doesn't exist yet:
+// in that case it updates the fcm_token column on the users row
+// (same behaviour as the legacy PATCH /fcm-token endpoint).
+export const registerDeviceToken = asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (isDemo(req.user)) return ok(res, null, 'Device token registered (Demo)');
+
+  const bodySchema = z.object({
+    platform: z.enum(['ios', 'android']),
+    fcm_token: z.string().min(10).optional(),
+    apns_token: z.string().min(10).optional(),
+  }).refine((b) => Boolean(b.fcm_token || b.apns_token), {
+    message: 'At least one of fcm_token or apns_token is required',
+    path: ['fcm_token'],
+  });
+
+  const parsed = bodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return badRequest(res, parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; '));
+  }
+
+  const { platform, fcm_token, apns_token } = parsed.data;
+  const user = req.user!;
+
+  // Primary path: upsert into device_tokens table.
+  const { error: upsertErr } = await supabaseAdmin
+    .from('device_tokens')
+    .upsert({
+      user_id: user.id,
+      org_id: user.org_id,
+      platform,
+      fcm_token: fcm_token ?? null,
+      apns_token: apns_token ?? null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,platform' });
+
+  if (upsertErr) {
+    // Table might not exist yet — fall back to the legacy users.fcm_token
+    // column so the endpoint stays functional during incremental rollouts.
+    const code = (upsertErr as any).code as string | undefined;
+    const msg = (upsertErr.message ?? '').toLowerCase();
+    const tableOrColumnMissing =
+      code === '42P01' || // relation does not exist
+      code === '42703' || // column does not exist
+      msg.includes('device_tokens');
+
+    if (tableOrColumnMissing && fcm_token) {
+      const { error: fallbackErr } = await supabaseAdmin
+        .from('users')
+        .update({ fcm_token, fcm_platform: platform })
+        .eq('id', user.id);
+      if (fallbackErr) {
+        // Even the fallback failed — log and surface the original error.
+        logger.error(`[device-token] Both device_tokens upsert and users fallback failed: ${fallbackErr.message}`);
+        return badRequest(res, upsertErr.message);
+      }
+      logger.warn('[device-token] device_tokens table missing — token stored in users.fcm_token (fallback)');
+      return ok(res, { stored_in: 'users' }, 'Device token registered (fallback)');
+    }
+
+    return badRequest(res, upsertErr.message);
+  }
+
+  return ok(res, { stored_in: 'device_tokens' }, 'Device token registered');
+});
+
 // GET /api/v1/notifications
 export const getNotifications = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
