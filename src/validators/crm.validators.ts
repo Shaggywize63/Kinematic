@@ -12,6 +12,33 @@ const contactMethod = z.enum(['email','phone','whatsapp','sms']).optional().null
 const gender = z.enum(['male','female','other','prefer_not_to_say']).optional().nullable();
 const loyaltyTier = z.enum(['bronze','silver','gold','platinum','vip']).optional().nullable();
 
+// HubSpot-style funnel position. Orthogonal to `status` — a lead can be
+// `status='working' lifecycle_stage='mql'` (in active outreach + marketing-
+// qualified) or `status='qualified' lifecycle_stage='sql'` (in active
+// outreach + sales-qualified). Service auto-bumps to 'customer' on convert.
+const lifecycleStage = z.enum([
+  'subscriber',  // joined newsletter / form fill, not yet a lead
+  'lead',        // default — captured but unqualified
+  'mql',         // marketing-qualified (engaged with content, fits ICP)
+  'sql',         // sales-qualified (sales has accepted, is actively working)
+  'customer',    // converted — auto-set by convertLead()
+  'evangelist',  // repeat buyer / NPS promoter
+]);
+
+// Campaign-attribution fields. Standard Google Analytics UTM params + the
+// two adjacent context fields (referrer_url, landing_page) every modern
+// lead-source-ROI report wants. Optional everywhere — only filled when the
+// inbound vector (web form, ad click, email link) carries them.
+const utmFields = {
+  utm_source:   z.string().max(200).optional().nullable(),
+  utm_medium:   z.string().max(200).optional().nullable(),
+  utm_campaign: z.string().max(200).optional().nullable(),
+  utm_term:     z.string().max(200).optional().nullable(),
+  utm_content:  z.string().max(200).optional().nullable(),
+  referrer_url: z.string().max(2048).optional().nullable(),
+  landing_page: z.string().max(2048).optional().nullable(),
+};
+
 // B2C fields shared by leads + contacts
 const b2cBase = {
   is_b2c: z.boolean().optional(),
@@ -42,11 +69,15 @@ export const leadCreateSchema = z.object({
   title: z.string().max(120).optional().nullable(),
   source_id: optionalUuid,
   status: z.enum(['new','working','nurturing','qualified','unqualified']).optional(),
+  // Funnel position. Defaults to 'lead' server-side via the DB column default
+  // so the client doesn't have to set it explicitly on most inbound paths.
+  lifecycle_stage: lifecycleStage.optional(),
   owner_id: optionalUuid,
   industry: z.string().max(120).optional().nullable(),
   notes: z.string().optional().nullable(),
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
+  ...utmFields,
   ...b2cBase,
 });
 
