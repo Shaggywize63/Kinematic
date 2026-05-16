@@ -7,6 +7,7 @@ import * as scoring from './ai/leadScoring.service';
 import * as dedup from './dedup.service';
 import * as assignment from './assignment.service';
 import { triggerEdgeFunction } from './edge.client';
+import * as automations from './automations.service';
 import type { Lead, LeadStatus } from '../../types/crm.types';
 
 export interface CreateLeadInput {
@@ -79,6 +80,14 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   });
 
   triggerEdgeFunction('crm-rescore-lead', { lead_id: data.id, org_id }).catch(() => {});
+
+  // Fire any automations subscribed to lead_created. Non-blocking — a
+  // misconfigured automation can't 500 the create call. See
+  // automations.service.ts for the trigger/action model.
+  automations.fireForTrigger('lead_created', {
+    org_id, user_id, entity: 'lead', entity_id: data.id,
+    data: { lead: data, client_id: data.client_id },
+  }).catch(() => {});
 
   return data as Lead;
 }
@@ -234,6 +243,21 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     }
   }
 
+  // Automation hooks — fire after audit rows so any automation that
+  // reads the history sees the new state. Non-blocking.
+  if (before.status !== data.status) {
+    automations.fireForTrigger('lead_status_changed', {
+      org_id, user_id, entity: 'lead', entity_id: id,
+      data: { lead: data, before, after: data, old_status: before.status, new_status: data.status, client_id: data.client_id },
+    }).catch(() => {});
+    if (enteringDisqualified) {
+      automations.fireForTrigger('lead_disqualified', {
+        org_id, user_id, entity: 'lead', entity_id: id,
+        data: { lead: data, lost_reason: (data as Record<string, unknown>).lost_reason ?? null, client_id: data.client_id },
+      }).catch(() => {});
+    }
+  }
+
   // Audit lifecycle_stage transitions separately from status. Same
   // history table, different `field` so funnel-conversion reports
   // (MQL→SQL→customer) can be built without intermixing workflow noise.
@@ -244,6 +268,10 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
       lead_id: id, org_id, field: 'lifecycle_stage',
       old_value: beforeStage, new_value: afterStage, changed_by: user_id ?? null,
     });
+    automations.fireForTrigger('lead_lifecycle_stage_changed', {
+      org_id, user_id, entity: 'lead', entity_id: id,
+      data: { lead: data, old_stage: beforeStage, new_stage: afterStage, client_id: data.client_id },
+    }).catch(() => {});
   }
 
   if (before.owner_id !== data.owner_id) {
@@ -251,6 +279,10 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
       lead_id: id, org_id, field: 'owner_id',
       old_value: before.owner_id, new_value: data.owner_id, changed_by: user_id ?? null,
     });
+    automations.fireForTrigger('lead_owner_changed', {
+      org_id, user_id, entity: 'lead', entity_id: id,
+      data: { lead: data, old_owner_id: before.owner_id, new_owner_id: data.owner_id, client_id: data.client_id },
+    }).catch(() => {});
   }
 
   const profileChanged = ['title','company','industry','country','source_id'].some(k =>
@@ -371,6 +403,13 @@ export async function convertLead(org_id: string, id: string, opts: {
     stage_changed_at: nowIso,
     updated_by: user_id ?? null,
   }).eq('org_id', org_id).eq('id', id);
+
+  // Automation hook — typical use-cases: send welcome email, create
+  // onboarding tasks, notify CS team, push to billing system.
+  automations.fireForTrigger('lead_converted', {
+    org_id, user_id, entity: 'lead', entity_id: id,
+    data: { lead, account_id, contact_id, deal_id, client_id: lead.client_id },
+  }).catch(() => {});
 
   return { lead_id: id, account_id, contact_id, deal_id };
 }
