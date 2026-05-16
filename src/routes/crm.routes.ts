@@ -20,6 +20,7 @@ import * as leadsSvc from '../services/crm/leads.service';
 import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
 import * as analyticsSvc from '../services/crm/analytics.service';
+import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
 import * as whatsappSvc from '../services/crm/whatsapp.service';
 import * as productsSvc from '../services/crm/products.service';
@@ -869,6 +870,29 @@ analytics.get('/by-state', wrap(async (req, res) => {
   res.json(Object.entries(counts).map(([state, count]) => ({ state, count })).sort((a, b) => b.count - a.count));
 }));
 router.use('/analytics', analytics);
+
+// ---------- LEADERBOARD ---------------------------------------------
+// Ranks reps by closed-won deal count or revenue over MTD/QTD/YTD/custom.
+// Lives outside /analytics because its response shape, period semantics,
+// and primary-metric toggle are distinct from the dashboard charts. Same
+// auth + clientScope wrapping (strict for JWT-pinned users; OR-with-NULL
+// for admin pickers) as listDeals — see clientScope() above.
+router.get('/leaderboard', wrap(async (req, res) => {
+  const metric = (req.query.metric === 'revenue' ? 'revenue' : 'count') as leaderboardSvc.LeaderboardMetric;
+  const period = ((['mtd', 'qtd', 'ytd', 'custom'] as const).find(p => p === req.query.period) ?? 'mtd') as leaderboardSvc.LeaderboardPeriod;
+  const from = req.query.from ? String(req.query.from) : undefined;
+  const to = req.query.to ? String(req.query.to) : undefined;
+  if (period === 'custom' && (!from || !to)) {
+    throw new AppError(400, "period='custom' requires both from and to (YYYY-MM-DD)", 'VALIDATION');
+  }
+  const scope = clientScope(req);
+  const result = await leaderboardSvc.leaderboard(
+    orgId(req),
+    { metric, period, from, to },
+    { client_id: scope.id, strict: scope.strict },
+  );
+  res.json(result);
+}));
 
 // ---------- AI -------------------------------------------------------
 const ai = express.Router();
