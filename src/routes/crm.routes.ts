@@ -20,6 +20,8 @@ import * as leadsSvc from '../services/crm/leads.service';
 import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
 import * as analyticsSvc from '../services/crm/analytics.service';
+import * as analyticsExt from '../services/crm/analytics-extended.service';
+import * as dashboardLayoutSvc from '../services/crm/dashboardLayout.service';
 import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
 import * as whatsappSvc from '../services/crm/whatsapp.service';
@@ -147,34 +149,8 @@ function userId(req: Request): string | undefined {
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
 // Multi-tenant: client_id scopes CRM data within an org.
-// - super_admin: NEVER scoped. Sees every client's data + org-level rows
-//   regardless of what's in the X-Client-Id header. The picker on the dashboard
-//   is informational only for super-admins.
-// - Client-level users (JWT has client_id): pinned to that client; the header is ignored.
-// - Other org-level admins (no JWT client_id): may pass X-Client-Id (a UUID) so
-//   the global picker can scope their CRM view/configuration to a specific client.
-// - When no client is in scope, behaviour falls back to org-level (NULL client_id).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/**
- * Resolve the client scope for the current request.
- *
- * Returns:
- *   - `{ id: <uuid>, strict: true }`  — caller's JWT pins them to a
- *     specific client (a "client-level" user like Hemanth). Lists
- *     MUST be hard-isolated to that client_id, otherwise legacy
- *     NULL-stamped rows leak across tenants. This is the data-leak
- *     fix: previously Hemanth's mobile login was seeing Nikhil's
- *     leads because the OR-with-NULL filter surfaced every legacy
- *     row to every client user.
- *   - `{ id: <uuid>, strict: false }` — caller is an org-level admin
- *     who selected a client from the global picker (header). They
- *     should still see legacy NULL rows alongside the selected
- *     client's rows so they can administer them — hence
- *     non-strict (OR with NULL).
- *   - `{ id: null, strict: false }` — org-level admin with no
- *     picker (or super_admin). No client filter applied.
- */
 function clientScope(req: Request): { id: string | null; strict: boolean } {
   const r = req as Request & { user?: { client_id?: string | null; role?: string | null } };
   if (r.user?.role?.toLowerCase() === 'super_admin') return { id: null, strict: false };
@@ -184,7 +160,6 @@ function clientScope(req: Request): { id: string | null; strict: boolean } {
   return { id: null, strict: false };
 }
 
-/** Back-compat: most callers only need the id, not the source. */
 function clientId(req: Request): string | null { return clientScope(req).id; }
 function dateRange(req: Request): { from?: string; to?: string } {
   const from = req.query.from ? String(req.query.from) : undefined;
@@ -210,7 +185,6 @@ leads.get('/', wrap(async (req, res) => {
 }));
 leads.post('/', wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
-  // Stamp client_id from request scope (JWT or X-Client-Id header) unless the body explicitly set it.
   const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
   res.status(201).json(await stampOwnerName(await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload })));
 }));
@@ -232,18 +206,14 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
 }));
-// Mark a lead as won (status=converted, lifecycle_stage=customer). Distinct
-// from /convert which spawns Account+Contact+Deal; this is the lightweight
-// "the rep just wants to flag the win" path used by the lead detail screen.
+// Mark a lead as won (status=converted, lifecycle_stage=customer).
 leads.post('/:id/won', wrap(async (req, res) => {
   const body = parse(z.object({ reason: z.string().max(500).optional() }), req.body ?? {});
   res.json(await stampOwnerName(
     await leadsSvc.markLeadAsWon(orgId(req), req.params.id, body.reason ?? null, userId(req)),
   ));
 }));
-// Reopen a previously-disqualified lead — flip status back to 'new' and
-// clear lost_reason / disqualified_at. Used by the apps' "Reopen Lead"
-// button on the lifecycle banner.
+// Reopen a previously-disqualified lead.
 leads.post('/:id/reopen', wrap(async (req, res) => {
   const body = parse(z.object({ reason: z.string().max(500).optional() }), req.body ?? {});
   const reopened = await leadsSvc.updateLead(
@@ -253,7 +223,6 @@ leads.post('/:id/reopen', wrap(async (req, res) => {
     { status: 'new', lost_reason: null, disqualified_at: null } as any,
     userId(req),
   );
-  // Audit row carrying the optional reason — searchable in lead_history.
   if (body.reason) {
     await supabaseAdmin.from('crm_lead_history').insert({
       lead_id: req.params.id, org_id: orgId(req), field: 'reopened',
@@ -367,13 +336,11 @@ deals.get('/:id/contacts', wrap(async (req, res) => {
 deals.get('/:id/notes', wrap(async (req, res) => res.json(
   await crud.list('crm_notes', orgId(req), { entity_type: 'deal', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
-// Deal line items (nested under the deal).
 deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc.listLineItems(orgId(req), req.params.id))));
 deals.post('/:id/line-items', wrap(async (req, res) =>
   res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req)))));
 router.use('/deals', deals);
 
-// Top-level line item update/delete (id is unique enough).
 const lineItems = express.Router();
 lineItems.patch('/:id', wrap(async (req, res) =>
   res.json(await productsSvc.updateLineItem(orgId(req), req.params.id, parse(v.lineItemSchema.partial(), req.body), userId(req)))));
@@ -384,8 +351,6 @@ lineItems.delete('/:id', wrap(async (req, res) => {
 router.use('/line-items', lineItems);
 
 // ---------- PIPELINES + STAGES --------------------------------------
-// Multi-tenant: pipelines are client-scoped. LIST returns org-level (NULL client_id)
-// pipelines plus the active client's pipelines. Stages inherit scope via FK.
 const pipelines = express.Router();
 pipelines.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
@@ -394,9 +359,6 @@ pipelines.get('/', wrap(async (req, res) => {
     .select('*, stages:crm_deal_stages(*)')
     .eq('org_id', orgId(req))
     .is('deleted_at', null);
-  // JWT-pinned client users see only their pipelines; admin picker
-  // also surfaces org-level (NULL) pipelines so they can manage legacy
-  // data.
   if (scope.id) {
     q = scope.strict
       ? q.eq('client_id', scope.id)
@@ -404,7 +366,6 @@ pipelines.get('/', wrap(async (req, res) => {
   }
   const { data, error } = await q.order('created_at', { ascending: true });
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  // Sort stages by position within each pipeline
   const sorted = (data || []).map((p: any) => ({
     ...p,
     stages: Array.isArray(p.stages) ? [...p.stages].sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0)) : [],
@@ -553,11 +514,6 @@ cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_citi
 router.use('/cities', cities);
 
 // ---------- SOURCES + RULES + TERRITORIES + AUTOMATIONS + CUSTOM FIELDS + TEMPLATES + PRODUCTS
-//
-// `clientScoped: true` opts in to multi-tenant per-client behaviour:
-//   - LIST returns rows where (client_id IS NULL) OR (client_id = user.client_id)
-//     so org-level defaults are visible to client users alongside their own.
-//   - CREATE stamps client_id from the JWT (or NULL for org-level admins).
 function attach(
   path: string,
   table: string,
@@ -570,8 +526,6 @@ function attach(
       const scope = clientScope(req);
       let q = supabaseAdmin.from(table).select('*').eq('org_id', orgId(req));
       if (opts.softDelete !== false) q = q.is('deleted_at', null);
-      // JWT-pinned client users get strict isolation; admin pickers
-      // also see NULL-stamped org-level rows.
       if (scope.id) {
         q = scope.strict
           ? q.eq('client_id', scope.id)
@@ -598,21 +552,15 @@ function attach(
   }));
   router.use(path, r);
 }
-// All CRM config tables are now client-scoped: org-level rows (NULL client_id) act as
-// defaults visible to every client; client-stamped rows are visible only to that client.
 attach('/lead-sources', 'crm_lead_sources', v.leadSourceSchema, { softDelete: false, clientScoped: true });
 attach('/assignment-rules', 'crm_lead_assignment_rules', v.assignmentRuleSchema, { softDelete: false, clientScoped: true });
 attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false, clientScoped: true });
 attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false, clientScoped: true });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
 attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false, clientScoped: true });
-// Phase 2
 attach('/product-categories', 'crm_product_categories', v.productCategorySchema, { defaultSort: { column: 'sort_order', ascending: true }, clientScoped: true });
 attach('/products', 'crm_products', v.productSchema, { searchColumns: ['name','sku','description'], clientScoped: true });
 attach('/whatsapp-templates', 'crm_whatsapp_templates', v.whatsappTemplateSchema, { softDelete: false, clientScoped: true });
-// Translate a template into 1+ Indian languages via Claude. Body:
-//   { languages: ['hi','bn','or','as'] }
-// Response: { translations: { hi: {body_text,...}, bn: {...} } }
 router.post('/whatsapp-templates/:id/translate', wrap(async (req, res) => {
   const langs = Array.isArray(req.body?.languages) ? req.body.languages.filter((l: unknown) => typeof l === 'string') : [];
   if (!langs.length) return res.status(400).json({ success: false, error: 'languages array required' });
@@ -627,10 +575,6 @@ router.get('/whatsapp-templates-supported-languages', wrap(async (_req, res) => 
 }));
 
 // ---------- SETTINGS -------------------------------------------------
-// Multi-tenant: settings scoped by (org_id, client_id). If user has a client_id
-// and no client-level row exists, fall back to org-level (NULL client_id) row
-// so org defaults still apply. PATCH writes to the user's scope (their client
-// or org-level depending on JWT).
 const settings = express.Router();
 settings.get('/', wrap(async (req, res) => {
   const cid = clientId(req);
@@ -648,7 +592,6 @@ settings.get('/', wrap(async (req, res) => {
 settings.patch('/', wrap(async (req, res) => {
   const body = parse(v.settingsUpdateSchema, req.body);
   const cid = clientId(req);
-  // Read existing row in scope to merge config (so we don't blow away unrelated keys)
   let existing: any = null;
   if (cid) {
     const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).eq('client_id', cid).maybeSingle();
@@ -666,11 +609,8 @@ settings.patch('/', wrap(async (req, res) => {
     config: mergedConfig,
   };
   if (body.business_type !== undefined) update.business_type = body.business_type;
-  // Update if exists, else insert
   if (existing?.id) {
     const { data } = await supabaseAdmin.from('crm_settings').update(update).eq('id', existing.id).select('*').single();
-    // Settings just changed — drop the cached ICP for this scope so the next
-    // lead create / rescore picks up the new config immediately.
     const { invalidateIcpCache } = await import('../services/crm/ai/leadScoring.service');
     invalidateIcpCache(orgId(req), cid);
     res.json(data);
@@ -689,9 +629,7 @@ settings.post('/seed-defaults', wrap(async (req, res) => {
 router.use('/settings', settings);
 
 // ---------- LOCATIONS (state / city / district / block) -------------
-// Reference data scoped to (org, client). Lead filters cascade against it.
 const locations = express.Router();
-
 locations.get('/', wrap(async (req, res) => {
   const { state, city, district } = req.query as Record<string, string | undefined>;
   res.json(await locationsSvc.listLocations(orgId(req), clientId(req), { state, city, district }));
@@ -718,11 +656,7 @@ locations.delete('/:id', wrap(async (req, res) => {
 router.use('/locations', locations);
 
 // ---------- ACTIVITY TYPES (per-client catalog) ---------------------
-// 7 built-ins (call/meeting/email/note/task/sms/whatsapp) are accepted
-// without a row; custom types live in crm_activity_types and surface in
-// the activity-create dropdown.
 const activityTypes = express.Router();
-
 const BUILTIN_TYPES = [
   { slug: 'call',     name: 'Call',     icon: '📞' },
   { slug: 'meeting',  name: 'Meeting',  icon: '📅' },
@@ -732,15 +666,12 @@ const BUILTIN_TYPES = [
   { slug: 'sms',      name: 'SMS',      icon: '💬' },
   { slug: 'whatsapp', name: 'WhatsApp', icon: '💚' },
 ];
-
 activityTypes.get('/', wrap(async (req, res) => {
   const cid = clientId(req);
   let q = supabaseAdmin.from('crm_activity_types').select('*').eq('org_id', orgId(req)).eq('is_active', true);
   if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
   const { data, error } = await q.order('position').order('name');
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  // Merge built-ins so the dropdown always has the seven defaults; custom
-  // rows override them by slug.
   const customSlugs = new Set((data ?? []).map(r => r.slug));
   const builtins = BUILTIN_TYPES.filter(b => !customSlugs.has(b.slug)).map(b => ({
     id: `builtin:${b.slug}`, org_id: orgId(req), client_id: null,
@@ -749,7 +680,6 @@ activityTypes.get('/', wrap(async (req, res) => {
   }));
   res.json([...builtins, ...(data ?? [])]);
 }));
-
 activityTypes.post('/', wrap(async (req, res) => {
   const body = req.body as { slug?: string; name?: string; icon?: string; color?: string; position?: number };
   const slug = (body.slug || '').trim().toLowerCase();
@@ -766,7 +696,6 @@ activityTypes.post('/', wrap(async (req, res) => {
   if (error) throw new AppError(error.code === '23505' ? 409 : 500, error.message, 'DB_ERROR');
   res.status(201).json(data);
 }));
-
 activityTypes.patch('/:id', wrap(async (req, res) => {
   const body = req.body as { name?: string; icon?: string; color?: string; position?: number; is_active?: boolean };
   const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -780,7 +709,6 @@ activityTypes.patch('/:id', wrap(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   res.json(data);
 }));
-
 activityTypes.delete('/:id', wrap(async (req, res) => {
   const { error } = await supabaseAdmin.from('crm_activity_types')
     .delete().eq('org_id', orgId(req)).eq('id', req.params.id);
@@ -839,13 +767,7 @@ router.use('/import', imp);
 
 // ---------- ANALYTICS ------------------------------------------------
 const analytics = express.Router();
-// `unit=weight` swaps every rupee aggregation for kg derived from line items
-// × product weight. Anything else (or omitted) returns rupees as before.
 const unitFromReq = (req: Request): 'inr' | 'weight' => req.query.unit === 'weight' ? 'weight' : 'inr';
-
-// Cache analytics for 60s. Upstash Redis if configured (multi-instance safe);
-// otherwise an in-process LRU. Bypassed automatically for the demo path
-// because demoCrmMiddleware short-circuits these routes with fixtures.
 const ANALYTICS_TTL = 60;
 const cacheKey = (req: Request, name: string) => {
   const r = dateRange(req);
@@ -883,7 +805,6 @@ analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(
 analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lead-score-distribution'), ANALYTICS_TTL,
     () => analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req), clientId(req))))));
-// Geo breakdown for dashboard filtering
 analytics.get('/by-state', wrap(async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from('crm_contacts')
@@ -899,14 +820,101 @@ analytics.get('/by-state', wrap(async (req, res) => {
   }
   res.json(Object.entries(counts).map(([state, count]) => ({ state, count })).sort((a, b) => b.count - a.count));
 }));
+
+// ── Extended analytics (15 widgets for the customisable Lead Analytics page) ──
+analytics.get('/lead-velocity', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'lead-velocity'), ANALYTICS_TTL,
+    () => analyticsExt.leadVelocity(orgId(req), clientId(req), Number(req.query.months ?? 6))))));
+analytics.get('/time-to-first-touch', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'time-to-first-touch'), ANALYTICS_TTL,
+    () => analyticsExt.timeToFirstTouch(orgId(req), clientId(req), dateRange(req), Number(req.query.sla_minutes ?? 60))))));
+analytics.get('/stuck-leads', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'stuck-leads'), ANALYTICS_TTL,
+    () => analyticsExt.stuckLeads(orgId(req), clientId(req))))));
+analytics.get('/lost-reasons', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'lost-reasons'), ANALYTICS_TTL,
+    () => analyticsExt.lostReasons(orgId(req), clientId(req), dateRange(req))))));
+analytics.get('/won-reasons', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'won-reasons'), ANALYTICS_TTL,
+    () => analyticsExt.wonReasons(orgId(req), clientId(req), dateRange(req))))));
+analytics.get('/disqualification-reasons', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'disqualification-reasons'), ANALYTICS_TTL,
+    () => analyticsExt.disqualificationReasons(orgId(req), clientId(req), dateRange(req))))));
+analytics.get('/stage-conversion', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'stage-conversion'), ANALYTICS_TTL,
+    () => analyticsExt.stageConversion(orgId(req), req.query.pipeline_id as string | undefined, clientId(req))))));
+analytics.get('/lead-aging', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'lead-aging'), ANALYTICS_TTL,
+    () => analyticsExt.leadAging(orgId(req), clientId(req))))));
+analytics.get('/cohort-conversion', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'cohort-conversion'), ANALYTICS_TTL,
+    () => analyticsExt.cohortConversion(orgId(req), clientId(req), Number(req.query.months ?? 6))))));
+analytics.get('/engagement-comparison', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'engagement-comparison'), ANALYTICS_TTL,
+    () => analyticsExt.engagementComparison(orgId(req), clientId(req), dateRange(req))))));
+analytics.get('/days-since-touch', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'days-since-touch'), ANALYTICS_TTL,
+    () => analyticsExt.daysSinceTouch(orgId(req), clientId(req))))));
+analytics.get('/score-band-conversion', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'score-band-conversion'), ANALYTICS_TTL,
+    () => analyticsExt.scoreBandConversion(orgId(req), clientId(req), dateRange(req))))));
+analytics.get('/territory-conversion', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'territory-conversion'), ANALYTICS_TTL,
+    () => analyticsExt.territoryConversion(orgId(req), clientId(req), dateRange(req))))));
+analytics.get('/touchpoints-to-response', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'touchpoints-to-response'), ANALYTICS_TTL,
+    () => analyticsExt.touchpointsToResponse(orgId(req), clientId(req), dateRange(req))))));
+analytics.get('/leads-at-risk', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'leads-at-risk'), ANALYTICS_TTL,
+    () => analyticsExt.leadsAtRisk(orgId(req), clientId(req), Number(req.query.score ?? 60), Number(req.query.idle_days ?? 14))))));
 router.use('/analytics', analytics);
 
+// ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
+// Pattern: stateless on the client — every save replaces the full config
+// jsonb under (user_id, org_id, page).
+const layouts = express.Router();
+layouts.get('/:page', wrap(async (req, res) => {
+  const page = req.params.page as 'analytics' | 'overview';
+  if (!['analytics', 'overview'].includes(page)) {
+    throw new AppError(400, "page must be 'analytics' or 'overview'", 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  res.json(await dashboardLayoutSvc.getLayout(uid, orgId(req), page));
+}));
+layouts.put('/:page', wrap(async (req, res) => {
+  const page = req.params.page as 'analytics' | 'overview';
+  if (!['analytics', 'overview'].includes(page)) {
+    throw new AppError(400, "page must be 'analytics' or 'overview'", 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  const config = req.body as dashboardLayoutSvc.DashboardConfig;
+  res.json(await dashboardLayoutSvc.saveLayout(uid, orgId(req), clientId(req), page, config));
+}));
+// Append a single widget to the user's CRM Overview layout — used by the
+// "Add to dashboard" button on each analytics tile.
+layouts.post('/overview/pin', wrap(async (req, res) => {
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  const widget = req.body as dashboardLayoutSvc.WidgetInstance;
+  if (!widget?.id || !widget?.widget_type) {
+    throw new AppError(400, 'widget.id and widget.widget_type are required', 'VALIDATION');
+  }
+  res.json(await dashboardLayoutSvc.pinWidgetToOverview(uid, orgId(req), clientId(req), widget));
+}));
+layouts.delete('/:page/widgets/:widget_id', wrap(async (req, res) => {
+  const page = req.params.page as 'analytics' | 'overview';
+  if (!['analytics', 'overview'].includes(page)) {
+    throw new AppError(400, "page must be 'analytics' or 'overview'", 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  res.json(await dashboardLayoutSvc.removeWidget(uid, orgId(req), clientId(req), page, req.params.widget_id));
+}));
+router.use('/dashboard-layouts', layouts);
+
 // ---------- LEADERBOARD ---------------------------------------------
-// Ranks reps by closed-won deal count or revenue over MTD/QTD/YTD/custom.
-// Lives outside /analytics because its response shape, period semantics,
-// and primary-metric toggle are distinct from the dashboard charts. Same
-// auth + clientScope wrapping (strict for JWT-pinned users; OR-with-NULL
-// for admin pickers) as listDeals — see clientScope() above.
 router.get('/leaderboard', wrap(async (req, res) => {
   const metric = (req.query.metric === 'revenue' ? 'revenue' : 'count') as leaderboardSvc.LeaderboardMetric;
   const period = ((['mtd', 'qtd', 'ytd', 'custom'] as const).find(p => p === req.query.period) ?? 'mtd') as leaderboardSvc.LeaderboardPeriod;
@@ -927,15 +935,8 @@ router.get('/leaderboard', wrap(async (req, res) => {
 // ---------- AI -------------------------------------------------------
 const ai = express.Router();
 
-// Quota gate for every AI endpoint. We check BEFORE the heavy call so a
-// capped user never spends Anthropic tokens; we record AFTER success so
-// only billable usage counts. Read-only meta endpoints (/tools, /usage)
-// are exempt — they don't call Claude.
 async function gateAi(req: Request, res: Response): Promise<{ proceed: true; actor: { id?: string; org_id?: string; role?: string; client_id?: string | null } } | { proceed: false }> {
   const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
-  // client_id from JWT (client-pinned user) takes precedence; otherwise
-  // honour the admin picker via X-Client-Id so per-client cap overrides
-  // apply whenever an admin is acting under a client context.
   const scope = clientScope(req);
   const actor = { id: u?.id, org_id: u?.org_id, role: u?.role, client_id: u?.client_id ?? scope.id ?? null };
   const gate = await kiniQuota.checkQuota(actor);
@@ -961,7 +962,6 @@ async function gateAi(req: Request, res: Response): Promise<{ proceed: true; act
   return { proceed: true, actor };
 }
 
-/** Mobile clients send X-Kinematic-Platform: ios|android; web omits it. */
 function platformOf(req: Request): 'web' | 'ios' | 'android' {
   const raw = (req.headers['x-kinematic-platform'] as string | undefined ?? '').toLowerCase().trim();
   return (raw === 'ios' || raw === 'android') ? raw : 'web';
@@ -1023,16 +1023,11 @@ ai.get('/usage', wrap(async (req, res) => {
   res.json(await kiniQuota.getUsage({ id: u?.id, org_id: u?.org_id, role: u?.role, client_id: u?.client_id ?? scope.id ?? null }));
 }));
 
-// Org-wide credits snapshot for the current month. Powers the "used/cap"
-// pill on every platform and the per-platform breakdown tooltip.
 ai.get('/credits', wrap(async (req, res) => {
   res.json(await kiniQuota.getCredits(orgId(req), kiniQuota.currentMonth()));
 }));
 
 ai.post('/chat', wrap(async (req, res) => {
-  // Shape matches the dashboard chatbot (`KinematicAI`) which sends
-  // `{messages, system, context}` and reads `data.text` / `data.cards` /
-  // `data.usage` from the response. Keep them aligned.
   const body = parse(z.object({
     messages: z.array(z.object({ role: z.enum(['user','assistant']), content: z.string() })).min(1),
     system: z.string().optional(),
@@ -1044,7 +1039,6 @@ ai.post('/chat', wrap(async (req, res) => {
     }).optional(),
   }), req.body);
 
-  // Gate FIRST — never spend Claude tokens for a user who's at cap.
   const reqUser = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
   const scope = clientScope(req);
   const actor = { id: reqUser?.id, org_id: reqUser?.org_id, role: reqUser?.role, client_id: reqUser?.client_id ?? scope.id ?? null };
@@ -1071,8 +1065,6 @@ ai.post('/chat', wrap(async (req, res) => {
 
   const tools = kiniTools.toAnthropicTools();
   const cid = clientId(req);
-  // Multi-language: detect the user's language from the latest message and
-  // mirror it. Claude is good at this natively — we just nudge it.
   const multiLangSuffix = `\n\nLanguage policy: Detect the language of the user's most recent message. If it's Hindi (Devanagari), Bengali, Odia, Assamese, or another Indian language, reply in the same language and script. Otherwise reply in English. Keep tool call arguments in English (slugs, IDs, JSON values must stay machine-readable).`;
   const crmSuffix = `\n\nYou are KINI, the Kinematic CRM AI assistant. You help sales reps close deals.
 You have CRM tools available. Use them to fetch real data — never invent leads, deals, or numbers.
@@ -1091,16 +1083,11 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
       onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>),
       max_tokens: 1500,
     });
-    // Best-effort token attribution — Anthropic returns usage on each turn;
-    // chatWithTools may surface it on out.usage. Default to 0 if absent.
     const tokenUsage = (out as { usage?: { input?: number; output?: number } }).usage;
     void kiniQuota.recordQuery(actor, tokenUsage, platform);
     const after = await kiniQuota.getUsage(actor);
     res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls, usage: after } });
   } catch (e: unknown) {
-    // If the env is missing the Anthropic key, surface a useful 200 message
-    // instead of a generic 500. The iOS / dashboard chat UIs both expect
-    // {success, data:{text, cards}} and will render the explanation inline.
     const code = (e as { code?: string })?.code;
     if (code === 'CONFIG_ERROR') {
       res.json({
