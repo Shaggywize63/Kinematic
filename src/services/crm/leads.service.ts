@@ -93,8 +93,7 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   triggerEdgeFunction('crm-rescore-lead', { lead_id: data.id, org_id }).catch(() => {});
 
   // Fire any automations subscribed to lead_created. Non-blocking — a
-  // misconfigured automation can't 500 the create call. See
-  // automations.service.ts for the trigger/action model.
+  // misconfigured automation can't 500 the create call.
   automations.fireForTrigger('lead_created', {
     org_id, user_id, entity: 'lead', entity_id: data.id,
     data: { lead: data, client_id: data.client_id },
@@ -111,14 +110,6 @@ export async function listLeads(
 ) {
   let q = supabaseAdmin.from('crm_leads').select('*')
     .eq('org_id', org_id).is('deleted_at', null);
-  // Client scoping:
-  //  - strictClient = true  -> only the caller's exact client_id
-  //    (used for JWT-pinned client-level users; prevents legacy
-  //    NULL-stamped leads from leaking across tenants).
-  //  - strictClient = false -> rows already stamped with that
-  //    client_id PLUS legacy NULL rows (used when an org-level
-  //    admin picks a client from the global header picker, so they
-  //    can administer the legacy data).
   if (client_id) {
     q = options.strictClient
       ? q.eq('client_id', client_id)
@@ -129,24 +120,16 @@ export async function listLeads(
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
   if (filters.score_gte) q = q.gte('score', Number(filters.score_gte));
-  // UTM filters — used by source-ROI reports and saved searches.
   if (filters.utm_source)   q = q.eq('utm_source',   String(filters.utm_source));
   if (filters.utm_campaign) q = q.eq('utm_campaign', String(filters.utm_campaign));
-  // Location hierarchy filters (state → city → district → block). Each level
-  // is optional; backend applies whichever the picker has selected. Values
-  // come from the crm_client_locations reference table, so exact match is
-  // correct — partial ilike would let "Mumb" leak into "Mumbai".
   if (filters.state)    q = q.eq('state',    String(filters.state));
   if (filters.city)     q = q.eq('city',     String(filters.city));
   if (filters.district) q = q.eq('district', String(filters.district));
   if (filters.block)    q = q.eq('block',    String(filters.block));
   if (filters.q) {
-    // Sanitise user-supplied search before interpolating into the .or()
-    // filter. See utils/postgrest.ts for the threat model.
     const s = sanitisePostgrestSearch(filters.q);
     if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
   }
-  // Date range filter (default column: created_at)
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
   const limit = Math.min(Number(filters.limit ?? 50), 200);
@@ -197,10 +180,6 @@ export async function getLead(org_id: string, id: string) {
 export async function updateLead(org_id: string, id: string, payload: Partial<Lead>, user_id?: string) {
   const before = await getLead(org_id, id);
 
-  // If the caller is transitioning the lead into a disqualified state for
-  // the first time, stamp disqualified_at server-side. We don't trust the
-  // client to set it (and we don't want to overwrite a previous stamp if
-  // the lead bounces between unqualified ↔ working).
   const DISQUALIFIED_STATES: LeadStatus[] = ['unqualified', 'lost'];
   const nowIso = new Date().toISOString();
   const enteringDisqualified =
@@ -217,11 +196,6 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     update.disqualified_at = nowIso;
   }
 
-  // Stamp stage_changed_at on every status flip. Powers the SLA aging
-  // dashboard + the listStuckLeads() query. Note: this fires on ALL
-  // status transitions including into terminal states, so e.g. converted
-  // leads have their stage_changed_at = their conversion moment — useful
-  // for "time-to-convert" analytics.
   if (payload.status !== undefined && payload.status !== before.status) {
     update.stage_changed_at = nowIso;
   }
@@ -236,11 +210,6 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
       old_value: before.status, new_value: data.status, changed_by: user_id ?? null,
     });
 
-    // When the transition is into a disqualified state, also write a
-    // dedicated 'disqualified' row carrying the lost_reason so reports
-    // keyed on disqualification have a single canonical event to join
-    // against (rather than scraping the status-change row + lost_reason
-    // column separately).
     if (enteringDisqualified) {
       const reason =
         (payload as Record<string, unknown>).lost_reason
@@ -254,8 +223,6 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     }
   }
 
-  // Automation hooks — fire after audit rows so any automation that
-  // reads the history sees the new state. Non-blocking.
   if (before.status !== data.status) {
     automations.fireForTrigger('lead_status_changed', {
       org_id, user_id, entity: 'lead', entity_id: id,
@@ -269,9 +236,6 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     }
   }
 
-  // Audit lifecycle_stage transitions separately from status. Same
-  // history table, different `field` so funnel-conversion reports
-  // (MQL→SQL→customer) can be built without intermixing workflow noise.
   const beforeStage = (before as Record<string, unknown>).lifecycle_stage;
   const afterStage  = (data   as Record<string, unknown>).lifecycle_stage;
   if (beforeStage !== afterStage) {
@@ -324,12 +288,90 @@ export async function rescoreLead(org_id: string, id: string) {
   return { score, breakdown };
 }
 
+/**
+ * Mark a lead as won (status=converted, lifecycle_stage=customer) without
+ * spawning Account+Contact+Deal records.
+ *
+ * Distinct from convertLead() which is the "full conversion" path that
+ * creates downstream entities. markLeadAsWon() is the lightweight close-
+ * the-loop path used by mobile + dashboard lead detail screens when the
+ * rep just wants to flag the win + capture an optional reason. Reports
+ * key on (status='converted' AND won_reason IS NOT NULL) to distinguish
+ * "marked won" from "fully converted".
+ *
+ * Stamps won_reason / won_at on the lead row, writes a crm_lead_history
+ * audit record, and fires the 'lead_converted' automation trigger so
+ * downstream workflows (Slack alerts, follow-up tasks) still react.
+ *
+ * Graceful fallback: if the deployment hasn't run the won_reason / won_at
+ * migration yet, retries with just status + lifecycle_stage and stashes
+ * the reason into notes — so the action still succeeds on older DBs.
+ */
+export async function markLeadAsWon(
+  org_id: string,
+  id: string,
+  reason?: string | null,
+  user_id?: string,
+): Promise<Lead> {
+  const before = await getLead(org_id, id);
+
+  const nowIso = new Date().toISOString();
+  const coreUpdate: Record<string, unknown> = {
+    status: 'converted',
+    lifecycle_stage: 'customer',
+    stage_changed_at: nowIso,
+    updated_by: user_id ?? null,
+    updated_at: nowIso,
+  };
+  const richUpdate = { ...coreUpdate, won_reason: reason ?? null, won_at: nowIso };
+
+  let data: Lead;
+  const richResult = await supabaseAdmin.from('crm_leads')
+    .update(richUpdate).eq('org_id', org_id).eq('id', id).select('*').single();
+
+  if (richResult.error) {
+    const code = (richResult.error as Record<string, unknown>).code as string | undefined;
+    const msg  = (richResult.error.message ?? '').toLowerCase();
+    const isMissingColumn =
+      code === '42703' ||
+      (msg.includes('column') && (msg.includes('won_reason') || msg.includes('won_at')));
+
+    if (isMissingColumn) {
+      // Older deployment without won_reason/won_at — stash reason into notes.
+      const fallback: Record<string, unknown> = { ...coreUpdate };
+      if (reason) fallback.notes = `Won reason: ${reason}`;
+      const fallbackResult = await supabaseAdmin.from('crm_leads')
+        .update(fallback).eq('org_id', org_id).eq('id', id).select('*').single();
+      if (fallbackResult.error) throw new AppError(500, fallbackResult.error.message, 'DB_ERROR');
+      data = fallbackResult.data as Lead;
+    } else {
+      throw new AppError(500, richResult.error.message, 'DB_ERROR');
+    }
+  } else {
+    data = richResult.data as Lead;
+  }
+
+  if (before.status !== 'converted') {
+    await supabaseAdmin.from('crm_lead_history').insert({
+      lead_id: id,
+      org_id,
+      field: 'status',
+      old_value: before.status,
+      new_value: 'converted',
+      changed_by: user_id ?? null,
+    });
+  }
+
+  automations.fireForTrigger('lead_converted', {
+    org_id, user_id, entity: 'lead', entity_id: id,
+    data: { lead: data, won_reason: reason ?? null, client_id: (data as Record<string, unknown>).client_id },
+  }).catch(() => {});
+
+  return data;
+}
+
 export async function convertLead(org_id: string, id: string, opts: {
   create_deal?: boolean; deal_name?: string; deal_amount?: number;
-  // Optional weight-based deal sizing — when both `deal_volume_kg` and
-  // `deal_product_id` are passed, the deal amount is computed from the
-  // product's price + weight_kg (volume / weight × price). Anything passed
-  // in `deal_amount` wins if also present.
   deal_volume_kg?: number; deal_product_id?: string;
   pipeline_id?: string; stage_id?: string;
 }, user_id?: string) {
@@ -376,8 +418,6 @@ export async function convertLead(org_id: string, id: string, opts: {
     const pipeline_id = opts.pipeline_id || await getDefaultPipelineId(org_id);
     const stage_id = opts.stage_id || await getFirstOpenStageId(pipeline_id);
 
-    // Resolve deal amount. Explicit deal_amount wins; otherwise derive from
-    // (volume × product.price / product.weight_kg) when those are passed.
     let amount = opts.deal_amount ?? 0;
     if ((amount == null || amount === 0) && opts.deal_volume_kg && opts.deal_product_id) {
       const { data: product } = await supabaseAdmin.from('crm_products')
@@ -399,11 +439,6 @@ export async function convertLead(org_id: string, id: string, opts: {
     deal_id = deal.id;
   }
 
-  // Flip is_converted alongside status='converted' + the converted_* FKs.
-  // The boolean is what downstream funnel reports filter on (status is
-  // mutable from the UI; is_converted is the canonical lifecycle flag).
-  // Also bump lifecycle_stage → 'customer' so the HubSpot-style funnel
-  // (lead → MQL → SQL → customer) is consistent with the workflow status.
   const nowIso = new Date().toISOString();
   await supabaseAdmin.from('crm_leads').update({
     status: 'converted',
@@ -415,8 +450,6 @@ export async function convertLead(org_id: string, id: string, opts: {
     updated_by: user_id ?? null,
   }).eq('org_id', org_id).eq('id', id);
 
-  // Automation hook — typical use-cases: send welcome email, create
-  // onboarding tasks, notify CS team, push to billing system.
   automations.fireForTrigger('lead_converted', {
     org_id, user_id, entity: 'lead', entity_id: id,
     data: { lead, account_id, contact_id, deal_id, client_id: lead.client_id },
@@ -430,18 +463,6 @@ export async function convertLead(org_id: string, id: string, opts: {
  * converted. Flips the row back to 'working' and clears every
  * lifecycle-terminal field (lost_reason, disqualified_at, converted_*
  * FKs, is_converted, converted_at).
- *
- * Important: this does NOT delete the previously-converted deal /
- * contact / account records. The reopen just *disconnects* the lead
- * from them so the rep can re-work the lead — the user might convert
- * it again later to a new or existing deal. Leaving the downstream
- * entities intact also preserves any activity history / pipeline
- * movement that happened after the original conversion.
- *
- * The reopen event is captured as a single `crm_lead_history` row with
- * `field='reopened'`, `old_value` snapshotting the previous terminal
- * state (status, converted FKs, lost_reason, disqualified_at) and
- * `new_value={reason}` so reports can attribute the action.
  */
 export async function reopenLead(
   org_id: string,
@@ -451,9 +472,6 @@ export async function reopenLead(
 ) {
   const before = await getLead(org_id, id);
 
-  // Cheap guard — re-opening an already-active lead is almost certainly
-  // a stale UI / double-click. Refuse so the audit log doesn't fill with
-  // no-op reopen events.
   if (before.status === 'working' || before.status === 'new') {
     throw new AppError(400, 'Lead is not disqualified or converted', 'LEAD_NOT_DISQUALIFIED');
   }
@@ -472,10 +490,6 @@ export async function reopenLead(
   };
 
   const nowIso = new Date().toISOString();
-  // Roll lifecycle_stage back to 'sql' on re-open from a converted state
-  // (the rep was treating this as a customer; now they're working it
-  // again — SQL is the highest pre-customer stage). For disqualified
-  // re-opens, leave the stage as it was — they didn't graduate forward.
   const wasCustomer = b.lifecycle_stage === 'customer';
   const update: Record<string, unknown> = {
     status: 'working',
@@ -530,11 +544,6 @@ export async function listScoreHistory(org_id: string, lead_id: string) {
 export async function bulkAssign(org_id: string, lead_ids: string[], owner_id: string, user_id?: string) {
   if (lead_ids.length === 0) return { updated: 0 };
 
-  // Fetch previous owners so the audit rows can record from→to. One round
-  // trip is acceptable cost for audit completeness — without this,
-  // bulk-reassign was the only owner-change path that bypassed the
-  // crm_lead_history audit table (single-record updateLead() already
-  // writes one).
   const { data: before, error: beforeErr } = await supabaseAdmin.from('crm_leads')
     .select('id, owner_id').eq('org_id', org_id).in('id', lead_ids);
   if (beforeErr) throw new AppError(500, beforeErr.message, 'DB_ERROR');
@@ -546,8 +555,6 @@ export async function bulkAssign(org_id: string, lead_ids: string[], owner_id: s
     .update({ owner_id, updated_by: user_id ?? null }).eq('org_id', org_id).in('id', lead_ids);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
-  // Skip rows where the owner didn't actually change (e.g. caller passed
-  // the same owner_id), to keep the audit log signal-to-noise high.
   const historyRows = lead_ids
     .filter((lead_id) => prevByLead.get(lead_id) !== owner_id)
     .map((lead_id) => ({
