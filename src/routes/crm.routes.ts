@@ -221,6 +221,14 @@ leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(
 leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
 leads.post('/:id/convert', wrap(async (req, res) =>
   res.json(await leadsSvc.convertLead(orgId(req), req.params.id, parse(v.leadConvertSchema, req.body), userId(req)))));
+// Reopen / unconvert: flips a disqualified or converted lead back to
+// 'working' and clears the terminal-state fields (lost_reason,
+// disqualified_at, converted_* FKs). Does NOT delete any downstream
+// deal/contact/account created during the original conversion — just
+// disconnects the lead so it can be re-worked. See reopenLead() for
+// the audit-row shape (field='reopened', old_value=prev terminal state).
+leads.post('/:id/reopen', wrap(async (req, res) =>
+  res.json(await stampOwnerName(await leadsSvc.reopenLead(orgId(req), req.params.id, parse(v.leadReopenSchema, req.body), userId(req))))));
 leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc.listScoreHistory(orgId(req), req.params.id))));
 leads.get('/:id/activities', wrap(async (req, res) => res.json(
   await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...req.query }, { defaultSort: { column: 'completed_at', ascending: false } })

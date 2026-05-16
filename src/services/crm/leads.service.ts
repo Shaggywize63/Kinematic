@@ -296,6 +296,79 @@ export async function convertLead(org_id: string, id: string, opts: {
   return { lead_id: id, account_id, contact_id, deal_id };
 }
 
+/**
+ * Reopen a lead that was previously disqualified (lost/unqualified) or
+ * converted. Flips the row back to 'working' and clears every
+ * lifecycle-terminal field (lost_reason, disqualified_at, converted_*
+ * FKs, is_converted, converted_at).
+ *
+ * Important: this does NOT delete the previously-converted deal /
+ * contact / account records. The reopen just *disconnects* the lead
+ * from them so the rep can re-work the lead — the user might convert
+ * it again later to a new or existing deal. Leaving the downstream
+ * entities intact also preserves any activity history / pipeline
+ * movement that happened after the original conversion.
+ *
+ * The reopen event is captured as a single `crm_lead_history` row with
+ * `field='reopened'`, `old_value` snapshotting the previous terminal
+ * state (status, converted FKs, lost_reason, disqualified_at) and
+ * `new_value={reason}` so reports can attribute the action.
+ */
+export async function reopenLead(
+  org_id: string,
+  id: string,
+  body: { reason?: string },
+  user_id?: string,
+) {
+  const before = await getLead(org_id, id);
+
+  // Cheap guard — re-opening an already-active lead is almost certainly
+  // a stale UI / double-click. Refuse so the audit log doesn't fill with
+  // no-op reopen events.
+  if (before.status === 'working' || before.status === 'new') {
+    throw new AppError(400, 'Lead is not disqualified or converted', 'LEAD_NOT_DISQUALIFIED');
+  }
+
+  const b = before as Record<string, unknown>;
+  const previousState = {
+    status: before.status,
+    is_converted: b.is_converted ?? null,
+    converted_account_id: b.converted_account_id ?? null,
+    converted_contact_id: b.converted_contact_id ?? null,
+    converted_deal_id: b.converted_deal_id ?? null,
+    converted_at: b.converted_at ?? null,
+    lost_reason: b.lost_reason ?? null,
+    disqualified_at: b.disqualified_at ?? null,
+  };
+
+  const nowIso = new Date().toISOString();
+  const update: Record<string, unknown> = {
+    status: 'working',
+    is_converted: false,
+    converted_at: null,
+    converted_account_id: null,
+    converted_contact_id: null,
+    converted_deal_id: null,
+    lost_reason: null,
+    disqualified_at: null,
+    updated_by: user_id ?? null,
+    updated_at: nowIso,
+  };
+
+  const { data, error } = await supabaseAdmin.from('crm_leads')
+    .update(update).eq('org_id', org_id).eq('id', id).select('*').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  await supabaseAdmin.from('crm_lead_history').insert({
+    lead_id: id, org_id, field: 'reopened',
+    old_value: previousState,
+    new_value: { reason: body.reason ?? null },
+    changed_by: user_id ?? null,
+  });
+
+  return data as Lead;
+}
+
 async function getDefaultPipelineId(org_id: string): Promise<string> {
   const { data } = await supabaseAdmin.from('crm_pipelines').select('id')
     .eq('org_id', org_id).eq('is_default', true).maybeSingle();
