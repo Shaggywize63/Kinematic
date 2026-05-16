@@ -301,12 +301,13 @@ export const tools: KiniTool[] = [
     description: 'Update fields on an existing lead by id. Use for status changes, owner reassignment, contact info corrections.',
     input_schema: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' },
-      status: { type: 'string', enum: ['new','working','nurturing','qualified','unqualified','converted'] },
+      status: { type: 'string', enum: ['new','working','nurturing','qualified','unqualified','converted','lost'] },
       owner_id: { type: 'string' },
       phone: { type: 'string' },
       email: { type: 'string' },
       company: { type: 'string' },
       notes: { type: 'string' },
+      lost_reason: { type: 'string', description: 'Reason text shown alongside an unqualified/lost transition.' },
     }},
     exec: async (org_id, _client_id, args) => {
       const { id, ...rest } = args as Record<string, unknown>;
@@ -338,11 +339,12 @@ export const tools: KiniTool[] = [
           deal_amount: (args.deal_amount as number) ?? undefined,
         });
       } else {
-        // Fallback: flip status and create a deal directly so the agent
-        // still gets something useful even if the service helper hasn't
-        // been wired yet.
+        // Fallback: flip status + is_converted so downstream funnel reports
+        // see the conversion even if the service helper hasn't been wired
+        // yet. is_converted is the canonical lifecycle flag — leaving it
+        // false here was the original bug.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await leadsSvc.updateLead(org_id, String(args.id), { status: 'converted' } as any);
+        await leadsSvc.updateLead(org_id, String(args.id), { status: 'converted', is_converted: true } as any);
         let deal: unknown = null;
         if ((args.create_deal as boolean) && args.deal_name) {
           const inserted = await supabaseAdmin.from('crm_deals').insert({
