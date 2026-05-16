@@ -318,8 +318,39 @@ export async function listScoreHistory(org_id: string, lead_id: string) {
 }
 
 export async function bulkAssign(org_id: string, lead_ids: string[], owner_id: string, user_id?: string) {
+  if (lead_ids.length === 0) return { updated: 0 };
+
+  // Fetch previous owners so the audit rows can record from→to. One round
+  // trip is acceptable cost for audit completeness — without this,
+  // bulk-reassign was the only owner-change path that bypassed the
+  // crm_lead_history audit table (single-record updateLead() already
+  // writes one).
+  const { data: before, error: beforeErr } = await supabaseAdmin.from('crm_leads')
+    .select('id, owner_id').eq('org_id', org_id).in('id', lead_ids);
+  if (beforeErr) throw new AppError(500, beforeErr.message, 'DB_ERROR');
+  const prevByLead = new Map<string, string | null>(
+    (before ?? []).map((r) => [r.id as string, (r.owner_id as string | null) ?? null]),
+  );
+
   const { error } = await supabaseAdmin.from('crm_leads')
     .update({ owner_id, updated_by: user_id ?? null }).eq('org_id', org_id).in('id', lead_ids);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  // Skip rows where the owner didn't actually change (e.g. caller passed
+  // the same owner_id), to keep the audit log signal-to-noise high.
+  const historyRows = lead_ids
+    .filter((lead_id) => prevByLead.get(lead_id) !== owner_id)
+    .map((lead_id) => ({
+      lead_id,
+      org_id,
+      field: 'owner_id',
+      old_value: prevByLead.get(lead_id) ?? null,
+      new_value: owner_id,
+      changed_by: user_id ?? null,
+    }));
+  if (historyRows.length > 0) {
+    await supabaseAdmin.from('crm_lead_history').insert(historyRows);
+  }
+
   return { updated: lead_ids.length };
 }
