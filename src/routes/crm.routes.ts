@@ -146,33 +146,40 @@ function userId(req: Request): string | undefined {
   return r.user?.id ?? r.user?.user_id ?? r.auth?.user_id;
 }
 // Multi-tenant: client_id scopes CRM data within an org.
+// - super_admin: NEVER scoped. Sees every client's data + org-level rows
+//   regardless of what's in the X-Client-Id header. The picker on the dashboard
+//   is informational only for super-admins.
 // - Client-level users (JWT has client_id): pinned to that client; the header is ignored.
-//   Hard-isolated (strict) so legacy NULL rows can't leak.
-// - Org-level admins (no JWT client_id) AND super_admin: may pass X-Client-Id via
-//   the global picker. When a picker UUID is present we scope STRICTLY to that
-//   client so the filter actually filters. When no picker is set, super_admin
-//   sees everything (no filter); other admins fall back to org-level NULL scope.
+// - Other org-level admins (no JWT client_id): may pass X-Client-Id (a UUID) so
+//   the global picker can scope their CRM view/configuration to a specific client.
+// - When no client is in scope, behaviour falls back to org-level (NULL client_id).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Resolve the client scope for the current request.
  *
  * Returns:
- *   - `{ id: <uuid>, strict: true }`  — either (a) caller's JWT pins them
- *     to a specific client (a "client-level" user) or (b) an org-level
- *     admin / super_admin has chosen a client from the global picker.
- *     In both cases lists are hard-isolated to that client_id so the
- *     filter actually filters and legacy NULL-stamped rows don't leak.
- *   - `{ id: null, strict: false }` — org-level admin with no picker,
- *     or super_admin with no picker. No client filter applied.
+ *   - `{ id: <uuid>, strict: true }`  — caller's JWT pins them to a
+ *     specific client (a "client-level" user like Hemanth). Lists
+ *     MUST be hard-isolated to that client_id, otherwise legacy
+ *     NULL-stamped rows leak across tenants. This is the data-leak
+ *     fix: previously Hemanth's mobile login was seeing Nikhil's
+ *     leads because the OR-with-NULL filter surfaced every legacy
+ *     row to every client user.
+ *   - `{ id: <uuid>, strict: false }` — caller is an org-level admin
+ *     who selected a client from the global picker (header). They
+ *     should still see legacy NULL rows alongside the selected
+ *     client's rows so they can administer them — hence
+ *     non-strict (OR with NULL).
+ *   - `{ id: null, strict: false }` — org-level admin with no
+ *     picker (or super_admin). No client filter applied.
  */
 function clientScope(req: Request): { id: string | null; strict: boolean } {
   const r = req as Request & { user?: { client_id?: string | null; role?: string | null } };
-  // JWT-pinned client user wins regardless of header.
+  if (r.user?.role?.toLowerCase() === 'super_admin') return { id: null, strict: false };
   if (r.user?.client_id) return { id: r.user.client_id, strict: true };
-  // Otherwise honour the picker header for any caller (incl. super_admin).
   const headerVal = (req.headers['x-client-id'] as string | undefined)?.trim();
-  if (headerVal && UUID_RE.test(headerVal)) return { id: headerVal, strict: true };
+  if (headerVal && UUID_RE.test(headerVal)) return { id: headerVal, strict: false };
   return { id: null, strict: false };
 }
 
@@ -866,25 +873,54 @@ router.use('/analytics', analytics);
 // ---------- AI -------------------------------------------------------
 const ai = express.Router();
 
-// The 20-query monthly cap (kini_usage.query_count) is for the
-// conversational chatbot only — that's the open-ended Claude call that
-// can rack up Anthropic spend per-conversation. Per-feature inference
-// endpoints (score, draft-reply, next-best-action, win-prob, summarize)
-// are NOT metered: they're bounded, single-shot calls the user expects
-// to use freely while working a lead. The gate lives inline in
-// /chat below.
+// Quota gate for every AI endpoint. We check BEFORE the heavy call so a
+// capped user never spends Anthropic tokens; we record AFTER success so
+// only billable usage counts. Read-only meta endpoints (/tools, /usage)
+// are exempt — they don't call Claude.
+async function gateAi(req: Request, res: Response): Promise<{ proceed: true; actor: { id?: string; org_id?: string; role?: string; client_id?: string | null } } | { proceed: false }> {
+  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
+  // client_id from JWT (client-pinned user) takes precedence; otherwise
+  // honour the admin picker via X-Client-Id so per-client cap overrides
+  // apply whenever an admin is acting under a client context.
+  const scope = clientScope(req);
+  const actor = { id: u?.id, org_id: u?.org_id, role: u?.role, client_id: u?.client_id ?? scope.id ?? null };
+  const gate = await kiniQuota.checkQuota(actor);
+  if (!gate.allowed) {
+    const code = gate.reason ?? 'USER_KINI_LIMIT_REACHED';
+    const msg = code === 'ORG_KINI_LIMIT_REACHED'
+      ? `Your organization has reached its monthly AI limit (${gate.org_cap ?? gate.cap} queries). Resets on the 1st.`
+      : `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`;
+    res.status(429).json({
+      success: false,
+      error: { code, message: msg },
+      data: {
+        usage: {
+          used: gate.used, cap: gate.cap, remaining: 0,
+          month: gate.month, exempt: gate.exempt, limit_reached: true,
+          reason: code,
+          org_used: gate.org_used, org_cap: gate.org_cap,
+        },
+      },
+    });
+    return { proceed: false };
+  }
+  return { proceed: true, actor };
+}
 
-// The per-feature AI endpoints below (score-lead, draft-reply,
-// next-best-action, win-probability, summarize-{account,deal}) used to
-// share the monthly KINI quota with the chatbot. That meant clicking
-// "Refresh" on a Next-Best-Action card or running an AI lead score
-// burned one of the 20 monthly chat queries — which surprised users
-// who hadn't opened the chat at all. The 20-query cap is for the
-// conversational chatbot only; per-feature inference is unmetered.
+/** Mobile clients send X-Kinematic-Platform: ios|android; web omits it. */
+function platformOf(req: Request): 'web' | 'ios' | 'android' {
+  const raw = (req.headers['x-kinematic-platform'] as string | undefined ?? '').toLowerCase().trim();
+  return (raw === 'ios' || raw === 'android') ? raw : 'web';
+}
+
 ai.post('/score-lead/:id', wrap(async (req, res) => {
-  res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id));
+  const g = await gateAi(req, res); if (!g.proceed) return;
+  const out = await leadsSvc.rescoreLead(orgId(req), req.params.id);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
+  res.json(out);
 }));
 ai.post('/draft-reply', wrap(async (req, res) => {
+  const g = await gateAi(req, res); if (!g.proceed) return;
   const body = parse(v.draftReplySchema, req.body);
   const out = await autoRespSvc.draftReply({
     ...body,
@@ -893,19 +929,32 @@ ai.post('/draft-reply', wrap(async (req, res) => {
     org_id: orgId(req),
     user_id: userId(req),
   });
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
 }));
 ai.post('/next-best-action/:dealId', wrap(async (req, res) => {
-  res.json(await nbaSvc.compute(orgId(req), req.params.dealId, true));
+  const g = await gateAi(req, res); if (!g.proceed) return;
+  const out = await nbaSvc.compute(orgId(req), req.params.dealId, true);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
+  res.json(out);
 }));
 ai.post('/win-probability/:dealId', wrap(async (req, res) => {
-  res.json(await winSvc.compute(orgId(req), req.params.dealId));
+  const g = await gateAi(req, res); if (!g.proceed) return;
+  const out = await winSvc.compute(orgId(req), req.params.dealId);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
+  res.json(out);
 }));
 ai.post('/summarize/account/:id', wrap(async (req, res) => {
-  res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), req.params.id) });
+  const g = await gateAi(req, res); if (!g.proceed) return;
+  const text = await summarizeSvc.summarizeAccount(orgId(req), req.params.id);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
+  res.json({ text });
 }));
 ai.post('/summarize/deal/:id', wrap(async (req, res) => {
-  res.json({ text: await summarizeSvc.summarizeDeal(orgId(req), req.params.id) });
+  const g = await gateAi(req, res); if (!g.proceed) return;
+  const text = await summarizeSvc.summarizeDeal(orgId(req), req.params.id);
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
+  res.json({ text });
 }));
 ai.get('/tools', (_req, res) => res.json(kiniTools.toAnthropicTools()));
 ai.post('/tools/execute', wrap(async (req, res) => {
@@ -915,8 +964,15 @@ ai.post('/tools/execute', wrap(async (req, res) => {
   res.json(result);
 }));
 ai.get('/usage', wrap(async (req, res) => {
-  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
-  res.json(await kiniQuota.getUsage({ id: u?.id, org_id: u?.org_id, role: u?.role }));
+  const u = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
+  const scope = clientScope(req);
+  res.json(await kiniQuota.getUsage({ id: u?.id, org_id: u?.org_id, role: u?.role, client_id: u?.client_id ?? scope.id ?? null }));
+}));
+
+// Org-wide credits snapshot for the current month. Powers the "used/cap"
+// pill on every platform and the per-platform breakdown tooltip.
+ai.get('/credits', wrap(async (req, res) => {
+  res.json(await kiniQuota.getCredits(orgId(req), kiniQuota.currentMonth()));
 }));
 
 ai.post('/chat', wrap(async (req, res) => {
@@ -935,14 +991,27 @@ ai.post('/chat', wrap(async (req, res) => {
   }), req.body);
 
   // Gate FIRST — never spend Claude tokens for a user who's at cap.
-  const reqUser = (req as Request & { user?: { id?: string; org_id?: string; role?: string } }).user;
-  const actor = { id: reqUser?.id, org_id: reqUser?.org_id, role: reqUser?.role };
+  const reqUser = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
+  const scope = clientScope(req);
+  const actor = { id: reqUser?.id, org_id: reqUser?.org_id, role: reqUser?.role, client_id: reqUser?.client_id ?? scope.id ?? null };
+  const platform = platformOf(req);
   const gate = await kiniQuota.checkQuota(actor);
   if (!gate.allowed) {
+    const code = gate.reason ?? 'USER_KINI_LIMIT_REACHED';
+    const msg = code === 'ORG_KINI_LIMIT_REACHED'
+      ? `Your organization has reached its monthly AI limit (${gate.org_cap ?? gate.cap} queries). Resets on the 1st.`
+      : `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`;
     return res.status(429).json({
       success: false,
-      error: `Monthly AI limit reached (${gate.cap} queries). Resets on the 1st.`,
-      data: { usage: { used: gate.used, cap: gate.cap, remaining: 0, month: gate.month, exempt: gate.exempt, limit_reached: true } },
+      error: { code, message: msg },
+      data: {
+        usage: {
+          used: gate.used, cap: gate.cap, remaining: 0,
+          month: gate.month, exempt: gate.exempt, limit_reached: true,
+          reason: code,
+          org_used: gate.org_used, org_cap: gate.org_cap,
+        },
+      },
     });
   }
 
@@ -971,7 +1040,7 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
     // Best-effort token attribution — Anthropic returns usage on each turn;
     // chatWithTools may surface it on out.usage. Default to 0 if absent.
     const tokenUsage = (out as { usage?: { input?: number; output?: number } }).usage;
-    void kiniQuota.recordQuery(actor, tokenUsage);
+    void kiniQuota.recordQuery(actor, tokenUsage, platform);
     const after = await kiniQuota.getUsage(actor);
     res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls, usage: after } });
   } catch (e: unknown) {
