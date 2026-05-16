@@ -232,6 +232,36 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
 }));
+// Mark a lead as won (status=converted, lifecycle_stage=customer). Distinct
+// from /convert which spawns Account+Contact+Deal; this is the lightweight
+// "the rep just wants to flag the win" path used by the lead detail screen.
+leads.post('/:id/won', wrap(async (req, res) => {
+  const body = parse(z.object({ reason: z.string().max(500).optional() }), req.body ?? {});
+  res.json(await stampOwnerName(
+    await leadsSvc.markLeadAsWon(orgId(req), req.params.id, body.reason ?? null, userId(req)),
+  ));
+}));
+// Reopen a previously-disqualified lead — flip status back to 'new' and
+// clear lost_reason / disqualified_at. Used by the apps' "Reopen Lead"
+// button on the lifecycle banner.
+leads.post('/:id/reopen', wrap(async (req, res) => {
+  const body = parse(z.object({ reason: z.string().max(500).optional() }), req.body ?? {});
+  const reopened = await leadsSvc.updateLead(
+    orgId(req),
+    req.params.id,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    { status: 'new', lost_reason: null, disqualified_at: null } as any,
+    userId(req),
+  );
+  // Audit row carrying the optional reason — searchable in lead_history.
+  if (body.reason) {
+    await supabaseAdmin.from('crm_lead_history').insert({
+      lead_id: req.params.id, org_id: orgId(req), field: 'reopened',
+      old_value: null, new_value: { reason: body.reason }, changed_by: userId(req) ?? null,
+    });
+  }
+  res.json(await stampOwnerName(reopened));
+}));
 router.use('/leads', leads);
 
 // ---------- CONTACTS -------------------------------------------------
