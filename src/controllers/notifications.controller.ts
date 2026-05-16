@@ -11,12 +11,55 @@ import { logger } from '../lib/logger';
 const fcmSchema = z.object({ fcm_token: z.string().min(10) });
 
 // PATCH /api/v1/notifications/fcm-token
+//
+// Body shape (both platforms):
+//   { token: string, platform?: "ios" | "android" }
+//
+// Android has historically POSTed { token } (no platform). The iOS app
+// includes platform: "ios" so that we can later route iOS tokens through
+// the apns config block in messaging.send(...). We persist the platform
+// into a fcm_platform column when one exists; if the column is missing
+// (older schema) we silently fall back to a token-only update so the
+// existing Android flow keeps working unchanged.
 export const updateFcmToken = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (isDemo(req.user)) return ok(res, null, 'FCM token updated (Demo)');
-  const { token } = req.body;
+  const { token, platform } = req.body as { token?: string; platform?: string };
   if (!token) return badRequest(res, 'token is required');
-  const { error } = await supabaseAdmin.from('users').update({ fcm_token: token }).eq('id', req.user!.id);
-  if (error) return badRequest(res, error.message);
+
+  // Validate platform if provided. Default Android to preserve historical
+  // behaviour where Android clients send no platform field.
+  const normalised: 'ios' | 'android' =
+    platform === 'ios' ? 'ios' : 'android';
+
+  // Attempt the richer update first.
+  const { error: richErr } = await supabaseAdmin
+    .from('users')
+    .update({ fcm_token: token, fcm_platform: normalised })
+    .eq('id', req.user!.id);
+
+  if (richErr) {
+    // PostgREST returns 42703 ("column does not exist") when the
+    // fcm_platform column has not been migrated yet. Retry with just
+    // the token so we never block clients on schema drift.
+    const code = (richErr as any).code || '';
+    const msg = (richErr.message || '').toLowerCase();
+    const missingColumn =
+      code === '42703' ||
+      msg.includes('column') && msg.includes('fcm_platform');
+
+    if (missingColumn) {
+      const { error: fallbackErr } = await supabaseAdmin
+        .from('users')
+        .update({ fcm_token: token })
+        .eq('id', req.user!.id);
+      if (fallbackErr) return badRequest(res, fallbackErr.message);
+      logger.warn(`FCM token saved without platform field — add a "fcm_platform" column to users to track ${normalised} vs android.`);
+      return ok(res, null, 'FCM token updated (platform column missing — token-only update)');
+    }
+
+    return badRequest(res, richErr.message);
+  }
+
   return ok(res, null, 'FCM token updated');
 });
 
@@ -138,6 +181,14 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
   if (send_push) {
     const tokens = targetUsers.map(u => u.fcm_token).filter(t => t && t.length > 10);
     if (tokens.length > 0) {
+      // Cross-platform multicast. The notification + data payload is the
+      // same on iOS and Android; PushNotificationService on iOS parses the
+      // data dict (type / lead_id / deal_id / task_id) and routes the
+      // SwiftUI nav stack identically to the Android intent handler.
+      //
+      // Per-platform overrides (apns: { ... }, android: { ... }) can be
+      // added here once we start tracking which tokens are iOS — see
+      // fcm_platform column wired into updateFcmToken above.
       const message = {
         notification: { title, body: content },
         tokens: tokens as string[],
