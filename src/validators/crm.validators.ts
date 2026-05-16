@@ -57,6 +57,16 @@ export const leadUpdateSchema = leadCreateSchema.partial().extend({
   // schema accepts it from clients but typical callers omit it).
   lost_reason: z.string().max(500).optional().nullable(),
   disqualified_at: isoDate,
+  // Won fields — accepted here so Android/iOS apps that use PATCH /leads/:id
+  // to record a won reason or move lifecycle stage work without a separate
+  // endpoint. The POST /leads/:id/won endpoint is the preferred path for
+  // explicit win transitions; PATCH is the compat path.
+  won_reason: z.string().max(500).optional().nullable(),
+  lifecycle_stage: z.enum(['lead','prospect','qualified','customer','churned']).optional().nullable(),
+});
+
+export const leadWonSchema = z.object({
+  reason: z.string().max(500).optional().nullable(),
 });
 
 export const leadConvertSchema = z.object({
@@ -268,7 +278,7 @@ export const automationSchema = z.object({
 
 export const customFieldSchema = z.object({
   entity_type: z.enum(['lead','contact','account','deal']),
-  field_key: z.string().min(1).max(80).regex(/^[a-z][a-z0-9_]*$/),
+  field_key: z.string().min(1).max(80).regex(/^[a-z][a-z0-9_]*/),
   label: z.string().min(1).max(120),
   field_type: z.enum(['text','number','boolean','date','datetime','select','multiselect','url','email']),
   options: z.array(z.string()).optional().nullable(),

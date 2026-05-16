@@ -207,6 +207,92 @@ export async function rescoreLead(org_id: string, id: string) {
   return { score, breakdown };
 }
 
+/**
+ * Mark a lead as won (status=converted, lifecycle_stage=customer).
+ *
+ * This is the explicit "won" action — distinct from convertLead() which
+ * creates an Account + Contact + Deal. markLeadAsWon() is a lightweight
+ * status transition for pipelines where the deal was tracked externally
+ * or the rep just wants to flag the lead without full conversion.
+ *
+ * Stamps won_reason and won_at on the lead row, writes a crm_lead_history
+ * audit record, and fires the 'lead_converted' automation trigger so
+ * downstream workflows (e.g. Slack alerts, follow-up tasks) can react.
+ */
+export async function markLeadAsWon(
+  org_id: string,
+  id: string,
+  reason?: string | null,
+  user_id?: string,
+): Promise<Lead> {
+  const before = await getLead(org_id, id);
+
+  const nowIso = new Date().toISOString();
+
+  // Build the update. won_reason and won_at were added via migration
+  // add_lead_won_fields. We catch column-missing errors (42703) and
+  // retry without them so old deployments don't break mid-migration.
+  const coreUpdate: Record<string, unknown> = {
+    status: 'converted',
+    lifecycle_stage: 'customer',
+    updated_by: user_id ?? null,
+    updated_at: nowIso,
+  };
+
+  const richUpdate = { ...coreUpdate, won_reason: reason ?? null, won_at: nowIso };
+
+  let data: Lead;
+  const richResult = await supabaseAdmin.from('crm_leads')
+    .update(richUpdate).eq('org_id', org_id).eq('id', id).select('*').single();
+
+  if (richResult.error) {
+    const code = (richResult.error as Record<string, unknown>).code as string | undefined;
+    const msg  = (richResult.error.message ?? '').toLowerCase();
+    const isMissingColumn =
+      code === '42703' ||
+      (msg.includes('column') && (msg.includes('won_reason') || msg.includes('won_at') || msg.includes('lifecycle_stage')));
+
+    if (isMissingColumn) {
+      // Graceful degradation: migration hasn't run yet on this deployment.
+      // Fall back to core fields only and store the reason in notes.
+      const fallback: Record<string, unknown> = { ...coreUpdate };
+      if (reason) fallback.notes = `Won reason: ${reason}`;
+      const fallbackResult = await supabaseAdmin.from('crm_leads')
+        .update(fallback).eq('org_id', org_id).eq('id', id).select('*').single();
+      if (fallbackResult.error) throw new AppError(500, fallbackResult.error.message, 'DB_ERROR');
+      data = fallbackResult.data as Lead;
+    } else {
+      throw new AppError(500, richResult.error.message, 'DB_ERROR');
+    }
+  } else {
+    data = richResult.data as Lead;
+  }
+
+  // Audit history: always write the status transition.
+  if (before.status !== 'converted') {
+    await supabaseAdmin.from('crm_lead_history').insert({
+      lead_id: id,
+      org_id,
+      field: 'status',
+      old_value: before.status,
+      new_value: 'converted',
+      changed_by: user_id ?? null,
+    });
+  }
+
+  // Fire the lead_converted automation trigger. Best-effort — never block
+  // the API response if the automation engine is unavailable.
+  triggerEdgeFunction('crm-automation-trigger', {
+    trigger: 'lead_converted',
+    org_id,
+    lead_id: id,
+    user_id: user_id ?? null,
+    won_reason: reason ?? null,
+  }).catch(() => {});
+
+  return data;
+}
+
 export async function convertLead(org_id: string, id: string, opts: {
   create_deal?: boolean; deal_name?: string; deal_amount?: number;
   // Optional weight-based deal sizing — when both `deal_volume_kg` and
