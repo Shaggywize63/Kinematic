@@ -295,12 +295,50 @@ export const sendEmailSchema = z.object({
   deal_id: optionalUuid,
 });
 
+// Triggers fired by the event-driven engine in automations.service.ts.
+// Time-based triggers (e.g. 'lead_stuck_7_days') will be added when the
+// cron worker lands.
+const automationTriggerType = z.enum([
+  'lead_created',
+  'lead_status_changed',
+  'lead_lifecycle_stage_changed',
+  'lead_owner_changed',
+  'lead_disqualified',
+  'lead_converted',
+  'deal_created',
+  'deal_stage_changed',
+  'deal_won',
+  'deal_lost',
+]);
+
+const automationActionType = z.enum([
+  'create_task',
+  'create_activity',
+  'update_lead',
+  'send_notification',
+]);
+
+const automationCondition = z.object({
+  // Dotted path into the trigger's context data, e.g. 'lead.score' or
+  // 'after.status'. See automations.service.ts AutomationContext.
+  field: z.string().min(1),
+  op: z.enum(['=','==','!=','>','>=','<','<=','in','contains','exists']),
+  value: z.unknown(),
+});
+
 export const automationSchema = z.object({
   name: z.string().min(1).max(200),
-  trigger_type: z.string().min(1),
-  trigger_config: z.record(z.unknown()).default({}),
-  conditions: z.array(z.record(z.unknown())).default([]),
-  actions: z.array(z.record(z.unknown())).default([]),
+  client_id: optionalUuid,
+  trigger_type: automationTriggerType,
+  // Conditions live inside trigger_config to keep the DB schema flat
+  // (one action per row, no separate conditions table). The engine
+  // reads trigger_config.conditions; everything else under trigger_config
+  // is passed through for forward-compat (e.g. future time-based windows).
+  trigger_config: z.object({
+    conditions: z.array(automationCondition).default([]),
+  }).passthrough().default({ conditions: [] }),
+  action_type: automationActionType,
+  action_config: z.record(z.unknown()).default({}),
   is_active: z.boolean().optional(),
 });
 
