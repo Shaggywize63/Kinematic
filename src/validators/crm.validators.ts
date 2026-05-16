@@ -71,6 +71,13 @@ export const leadConvertSchema = z.object({
   stage_id: optionalUuid,
 });
 
+// Optional free-text reason supplied when a rep re-opens a previously
+// disqualified or converted lead. Kept short (≤500) so it fits in the
+// crm_lead_history.new_value jsonb without bloating the audit table.
+export const leadReopenSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+
 export const contactSchema = z.object({
   account_id: optionalUuid,
   first_name: z.string().max(120).optional().nullable(),
