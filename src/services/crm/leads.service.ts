@@ -18,10 +18,21 @@ export interface CreateLeadInput {
 }
 
 export async function createLead({ org_id, user_id, payload, skipDedup }: CreateLeadInput) {
-  if (!skipDedup && payload.email) {
-    const dup = await dedup.findLeadByEmail(org_id, payload.email);
-    if (dup) {
-      throw new AppError(409, `A lead with this email already exists (id=${dup.id})`, 'DUPLICATE_LEAD');
+  if (!skipDedup) {
+    if (payload.email) {
+      const dup = await dedup.findLeadByEmail(org_id, payload.email);
+      if (dup) {
+        throw new AppError(409, `A lead with this email already exists (id=${dup.id})`, 'DUPLICATE_LEAD');
+      }
+    }
+    if (payload.phone) {
+      // Phone dedup runs alongside email — for B2C inbound where the user
+      // forgets / reuses email, phone is the canonical identity. Helper
+      // normalises both sides to last-10-digits so format variants collide.
+      const dup = await dedup.findLeadByPhone(org_id, payload.phone);
+      if (dup) {
+        throw new AppError(409, `A lead with this phone already exists (id=${dup.id})`, 'DUPLICATE_LEAD');
+      }
     }
   }
 
