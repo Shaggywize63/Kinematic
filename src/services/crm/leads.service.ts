@@ -28,6 +28,8 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   // Use client-specific ICP if the lead has a client_id stamped, else fall back to org-level.
   const { score, breakdown } = scoring.computeHeuristic(payload, await scoring.getIcp(org_id, payload.client_id ?? null));
 
+  const p = payload as Record<string, unknown>;
+  const nowIso = new Date().toISOString();
   const insertRow = {
     org_id,
     client_id: payload.client_id ?? null,
@@ -39,16 +41,33 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
     title: payload.title ?? null,
     source_id: payload.source_id ?? null,
     status: (payload.status as LeadStatus) ?? 'new',
+    // Funnel position. Defaults to 'lead' at the DB level — only set
+    // explicitly when the caller wants to start somewhere else (e.g. an
+    // inbound subscriber form would set 'subscriber').
+    lifecycle_stage: (p.lifecycle_stage as string | undefined) ?? undefined,
     owner_id,
     score,
     score_breakdown: breakdown,
-    score_updated_at: new Date().toISOString(),
+    score_updated_at: nowIso,
+    // Baseline for SLA tracking. Every lead starts "now" so the stuck-leads
+    // query has a deterministic clock from creation. Bumped on every status
+    // flip in updateLead.
+    stage_changed_at: nowIso,
     country: payload.country ?? null,
     city: payload.city ?? null,
     industry: payload.industry ?? null,
     notes: payload.notes ?? null,
     tags: payload.tags ?? [],
     custom_fields: payload.custom_fields ?? {},
+    // Campaign attribution — optional, only populated for inbound vectors
+    // that actually carry UTM params (web form, ad click, email link).
+    utm_source:   (p.utm_source   as string | undefined) ?? null,
+    utm_medium:   (p.utm_medium   as string | undefined) ?? null,
+    utm_campaign: (p.utm_campaign as string | undefined) ?? null,
+    utm_term:     (p.utm_term     as string | undefined) ?? null,
+    utm_content:  (p.utm_content  as string | undefined) ?? null,
+    referrer_url: (p.referrer_url as string | undefined) ?? null,
+    landing_page: (p.landing_page as string | undefined) ?? null,
     created_by: user_id ?? null,
   };
 
@@ -86,9 +105,13 @@ export async function listLeads(
       : q.or(`client_id.is.null,client_id.eq.${client_id}`);
   }
   if (filters.status) q = q.eq('status', String(filters.status));
+  if (filters.lifecycle_stage) q = q.eq('lifecycle_stage', String(filters.lifecycle_stage));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
   if (filters.score_gte) q = q.gte('score', Number(filters.score_gte));
+  // UTM filters — used by source-ROI reports and saved searches.
+  if (filters.utm_source)   q = q.eq('utm_source',   String(filters.utm_source));
+  if (filters.utm_campaign) q = q.eq('utm_campaign', String(filters.utm_campaign));
   // Location hierarchy filters (state → city → district → block). Each level
   // is optional; backend applies whichever the picker has selected. Values
   // come from the crm_client_locations reference table, so exact match is
@@ -110,6 +133,35 @@ export async function listLeads(
   const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('score', { ascending: false }).order('created_at', { ascending: false })
        .range((page - 1) * limit, page * limit - 1);
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return (data ?? []) as Lead[];
+}
+
+/**
+ * "Stuck" leads — open leads whose stage hasn't moved in N days. Drives the
+ * SLA aging dashboard so reps can see what's stalling. Excludes terminal
+ * statuses (converted / lost / unqualified) because those are intentionally
+ * not moving.
+ */
+export async function listStuckLeads(
+  org_id: string,
+  days: number,
+  client_id: string | null = null,
+  options: { strictClient?: boolean } = {},
+) {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  let q = supabaseAdmin.from('crm_leads').select('*')
+    .eq('org_id', org_id)
+    .is('deleted_at', null)
+    .in('status', ['new', 'working', 'nurturing', 'qualified'])
+    .lt('stage_changed_at', cutoff);
+  if (client_id) {
+    q = options.strictClient
+      ? q.eq('client_id', client_id)
+      : q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  }
+  q = q.order('stage_changed_at', { ascending: true }).limit(200);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return (data ?? []) as Lead[];
@@ -145,6 +197,15 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     update.disqualified_at = nowIso;
   }
 
+  // Stamp stage_changed_at on every status flip. Powers the SLA aging
+  // dashboard + the listStuckLeads() query. Note: this fires on ALL
+  // status transitions including into terminal states, so e.g. converted
+  // leads have their stage_changed_at = their conversion moment — useful
+  // for "time-to-convert" analytics.
+  if (payload.status !== undefined && payload.status !== before.status) {
+    update.stage_changed_at = nowIso;
+  }
+
   const { data, error } = await supabaseAdmin.from('crm_leads')
     .update(update).eq('org_id', org_id).eq('id', id).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -172,6 +233,19 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
       });
     }
   }
+
+  // Audit lifecycle_stage transitions separately from status. Same
+  // history table, different `field` so funnel-conversion reports
+  // (MQL→SQL→customer) can be built without intermixing workflow noise.
+  const beforeStage = (before as Record<string, unknown>).lifecycle_stage;
+  const afterStage  = (data   as Record<string, unknown>).lifecycle_stage;
+  if (beforeStage !== afterStage) {
+    await supabaseAdmin.from('crm_lead_history').insert({
+      lead_id: id, org_id, field: 'lifecycle_stage',
+      old_value: beforeStage, new_value: afterStage, changed_by: user_id ?? null,
+    });
+  }
+
   if (before.owner_id !== data.owner_id) {
     await supabaseAdmin.from('crm_lead_history').insert({
       lead_id: id, org_id, field: 'owner_id',
@@ -285,11 +359,16 @@ export async function convertLead(org_id: string, id: string, opts: {
   // Flip is_converted alongside status='converted' + the converted_* FKs.
   // The boolean is what downstream funnel reports filter on (status is
   // mutable from the UI; is_converted is the canonical lifecycle flag).
+  // Also bump lifecycle_stage → 'customer' so the HubSpot-style funnel
+  // (lead → MQL → SQL → customer) is consistent with the workflow status.
+  const nowIso = new Date().toISOString();
   await supabaseAdmin.from('crm_leads').update({
     status: 'converted',
     is_converted: true,
-    converted_at: new Date().toISOString(),
+    lifecycle_stage: 'customer',
+    converted_at: nowIso,
     converted_account_id: account_id, converted_contact_id: contact_id, converted_deal_id: deal_id,
+    stage_changed_at: nowIso,
     updated_by: user_id ?? null,
   }).eq('org_id', org_id).eq('id', id);
 
@@ -333,6 +412,7 @@ export async function reopenLead(
   const previousState = {
     status: before.status,
     is_converted: b.is_converted ?? null,
+    lifecycle_stage: b.lifecycle_stage ?? null,
     converted_account_id: b.converted_account_id ?? null,
     converted_contact_id: b.converted_contact_id ?? null,
     converted_deal_id: b.converted_deal_id ?? null,
@@ -342,6 +422,11 @@ export async function reopenLead(
   };
 
   const nowIso = new Date().toISOString();
+  // Roll lifecycle_stage back to 'sql' on re-open from a converted state
+  // (the rep was treating this as a customer; now they're working it
+  // again — SQL is the highest pre-customer stage). For disqualified
+  // re-opens, leave the stage as it was — they didn't graduate forward.
+  const wasCustomer = b.lifecycle_stage === 'customer';
   const update: Record<string, unknown> = {
     status: 'working',
     is_converted: false,
@@ -351,9 +436,11 @@ export async function reopenLead(
     converted_deal_id: null,
     lost_reason: null,
     disqualified_at: null,
+    stage_changed_at: nowIso,
     updated_by: user_id ?? null,
     updated_at: nowIso,
   };
+  if (wasCustomer) update.lifecycle_stage = 'sql';
 
   const { data, error } = await supabaseAdmin.from('crm_leads')
     .update(update).eq('org_id', org_id).eq('id', id).select('*').single();
