@@ -124,7 +124,27 @@ export async function getLead(org_id: string, id: string) {
 
 export async function updateLead(org_id: string, id: string, payload: Partial<Lead>, user_id?: string) {
   const before = await getLead(org_id, id);
-  const update = { ...payload, updated_by: user_id ?? null, updated_at: new Date().toISOString() };
+
+  // If the caller is transitioning the lead into a disqualified state for
+  // the first time, stamp disqualified_at server-side. We don't trust the
+  // client to set it (and we don't want to overwrite a previous stamp if
+  // the lead bounces between unqualified ↔ working).
+  const DISQUALIFIED_STATES: LeadStatus[] = ['unqualified', 'lost'];
+  const nowIso = new Date().toISOString();
+  const enteringDisqualified =
+    payload.status !== undefined
+    && DISQUALIFIED_STATES.includes(payload.status as LeadStatus)
+    && !DISQUALIFIED_STATES.includes(before.status as LeadStatus);
+
+  const update: Record<string, unknown> = {
+    ...payload,
+    updated_by: user_id ?? null,
+    updated_at: nowIso,
+  };
+  if (enteringDisqualified && (before as Record<string, unknown>).disqualified_at == null) {
+    update.disqualified_at = nowIso;
+  }
+
   const { data, error } = await supabaseAdmin.from('crm_leads')
     .update(update).eq('org_id', org_id).eq('id', id).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -134,6 +154,23 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
       lead_id: id, org_id, field: 'status',
       old_value: before.status, new_value: data.status, changed_by: user_id ?? null,
     });
+
+    // When the transition is into a disqualified state, also write a
+    // dedicated 'disqualified' row carrying the lost_reason so reports
+    // keyed on disqualification have a single canonical event to join
+    // against (rather than scraping the status-change row + lost_reason
+    // column separately).
+    if (enteringDisqualified) {
+      const reason =
+        (payload as Record<string, unknown>).lost_reason
+        ?? (data as Record<string, unknown>).lost_reason
+        ?? null;
+      await supabaseAdmin.from('crm_lead_history').insert({
+        lead_id: id, org_id, field: 'disqualified',
+        old_value: before.status, new_value: { status: data.status, lost_reason: reason },
+        changed_by: user_id ?? null,
+      });
+    }
   }
   if (before.owner_id !== data.owner_id) {
     await supabaseAdmin.from('crm_lead_history').insert({
@@ -245,8 +282,13 @@ export async function convertLead(org_id: string, id: string, opts: {
     deal_id = deal.id;
   }
 
+  // Flip is_converted alongside status='converted' + the converted_* FKs.
+  // The boolean is what downstream funnel reports filter on (status is
+  // mutable from the UI; is_converted is the canonical lifecycle flag).
   await supabaseAdmin.from('crm_leads').update({
-    status: 'converted', converted_at: new Date().toISOString(),
+    status: 'converted',
+    is_converted: true,
+    converted_at: new Date().toISOString(),
     converted_account_id: account_id, converted_contact_id: contact_id, converted_deal_id: deal_id,
     updated_by: user_id ?? null,
   }).eq('org_id', org_id).eq('id', id);
