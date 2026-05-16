@@ -51,7 +51,12 @@ export const leadCreateSchema = z.object({
 });
 
 export const leadUpdateSchema = leadCreateSchema.partial().extend({
-  status: z.enum(['new','working','nurturing','qualified','unqualified','converted']).optional(),
+  status: z.enum(['new','working','nurturing','qualified','unqualified','converted','lost']).optional(),
+  // Reason captured when a rep moves a lead into 'unqualified' or 'lost'.
+  // Service auto-stamps disqualified_at on the first transition (so the
+  // schema accepts it from clients but typical callers omit it).
+  lost_reason: z.string().max(500).optional().nullable(),
+  disqualified_at: isoDate,
 });
 
 export const leadConvertSchema = z.object({
