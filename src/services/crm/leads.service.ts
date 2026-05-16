@@ -7,6 +7,7 @@ import * as scoring from './ai/leadScoring.service';
 import * as dedup from './dedup.service';
 import * as assignment from './assignment.service';
 import { triggerEdgeFunction } from './edge.client';
+import * as automations from './automations.service';
 import type { Lead, LeadStatus } from '../../types/crm.types';
 
 export interface CreateLeadInput {
@@ -17,10 +18,21 @@ export interface CreateLeadInput {
 }
 
 export async function createLead({ org_id, user_id, payload, skipDedup }: CreateLeadInput) {
-  if (!skipDedup && payload.email) {
-    const dup = await dedup.findLeadByEmail(org_id, payload.email);
-    if (dup) {
-      throw new AppError(409, `A lead with this email already exists (id=${dup.id})`, 'DUPLICATE_LEAD');
+  if (!skipDedup) {
+    if (payload.email) {
+      const dup = await dedup.findLeadByEmail(org_id, payload.email);
+      if (dup) {
+        throw new AppError(409, `A lead with this email already exists (id=${dup.id})`, 'DUPLICATE_LEAD');
+      }
+    }
+    if (payload.phone) {
+      // Phone dedup runs alongside email — for B2C inbound where the user
+      // forgets / reuses email, phone is the canonical identity. Helper
+      // normalises both sides to last-10-digits so format variants collide.
+      const dup = await dedup.findLeadByPhone(org_id, payload.phone);
+      if (dup) {
+        throw new AppError(409, `A lead with this phone already exists (id=${dup.id})`, 'DUPLICATE_LEAD');
+      }
     }
   }
 
@@ -28,6 +40,8 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   // Use client-specific ICP if the lead has a client_id stamped, else fall back to org-level.
   const { score, breakdown } = scoring.computeHeuristic(payload, await scoring.getIcp(org_id, payload.client_id ?? null));
 
+  const p = payload as Record<string, unknown>;
+  const nowIso = new Date().toISOString();
   const insertRow = {
     org_id,
     client_id: payload.client_id ?? null,
@@ -39,16 +53,25 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
     title: payload.title ?? null,
     source_id: payload.source_id ?? null,
     status: (payload.status as LeadStatus) ?? 'new',
+    lifecycle_stage: (p.lifecycle_stage as string | undefined) ?? undefined,
     owner_id,
     score,
     score_breakdown: breakdown,
-    score_updated_at: new Date().toISOString(),
+    score_updated_at: nowIso,
+    stage_changed_at: nowIso,
     country: payload.country ?? null,
     city: payload.city ?? null,
     industry: payload.industry ?? null,
     notes: payload.notes ?? null,
     tags: payload.tags ?? [],
     custom_fields: payload.custom_fields ?? {},
+    utm_source:   (p.utm_source   as string | undefined) ?? null,
+    utm_medium:   (p.utm_medium   as string | undefined) ?? null,
+    utm_campaign: (p.utm_campaign as string | undefined) ?? null,
+    utm_term:     (p.utm_term     as string | undefined) ?? null,
+    utm_content:  (p.utm_content  as string | undefined) ?? null,
+    referrer_url: (p.referrer_url as string | undefined) ?? null,
+    landing_page: (p.landing_page as string | undefined) ?? null,
     created_by: user_id ?? null,
   };
 
@@ -61,6 +84,11 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
 
   triggerEdgeFunction('crm-rescore-lead', { lead_id: data.id, org_id }).catch(() => {});
 
+  automations.fireForTrigger('lead_created', {
+    org_id, user_id, entity: 'lead', entity_id: data.id,
+    data: { lead: data, client_id: data.client_id },
+  }).catch(() => {});
+
   return data as Lead;
 }
 
@@ -72,44 +100,55 @@ export async function listLeads(
 ) {
   let q = supabaseAdmin.from('crm_leads').select('*')
     .eq('org_id', org_id).is('deleted_at', null);
-  // Client scoping:
-  //  - strictClient = true  -> only the caller's exact client_id
-  //    (used for JWT-pinned client-level users; prevents legacy
-  //    NULL-stamped leads from leaking across tenants).
-  //  - strictClient = false -> rows already stamped with that
-  //    client_id PLUS legacy NULL rows (used when an org-level
-  //    admin picks a client from the global header picker, so they
-  //    can administer the legacy data).
   if (client_id) {
     q = options.strictClient
       ? q.eq('client_id', client_id)
       : q.or(`client_id.is.null,client_id.eq.${client_id}`);
   }
   if (filters.status) q = q.eq('status', String(filters.status));
+  if (filters.lifecycle_stage) q = q.eq('lifecycle_stage', String(filters.lifecycle_stage));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
   if (filters.score_gte) q = q.gte('score', Number(filters.score_gte));
-  // Location hierarchy filters (state → city → district → block). Each level
-  // is optional; backend applies whichever the picker has selected. Values
-  // come from the crm_client_locations reference table, so exact match is
-  // correct — partial ilike would let "Mumb" leak into "Mumbai".
+  if (filters.utm_source)   q = q.eq('utm_source',   String(filters.utm_source));
+  if (filters.utm_campaign) q = q.eq('utm_campaign', String(filters.utm_campaign));
   if (filters.state)    q = q.eq('state',    String(filters.state));
   if (filters.city)     q = q.eq('city',     String(filters.city));
   if (filters.district) q = q.eq('district', String(filters.district));
   if (filters.block)    q = q.eq('block',    String(filters.block));
   if (filters.q) {
-    // Sanitise user-supplied search before interpolating into the .or()
-    // filter. See utils/postgrest.ts for the threat model.
     const s = sanitisePostgrestSearch(filters.q);
     if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
   }
-  // Date range filter (default column: created_at)
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('score', { ascending: false }).order('created_at', { ascending: false })
        .range((page - 1) * limit, page * limit - 1);
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return (data ?? []) as Lead[];
+}
+
+export async function listStuckLeads(
+  org_id: string,
+  days: number,
+  client_id: string | null = null,
+  options: { strictClient?: boolean } = {},
+) {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  let q = supabaseAdmin.from('crm_leads').select('*')
+    .eq('org_id', org_id)
+    .is('deleted_at', null)
+    .in('status', ['new', 'working', 'nurturing', 'qualified'])
+    .lt('stage_changed_at', cutoff);
+  if (client_id) {
+    q = options.strictClient
+      ? q.eq('client_id', client_id)
+      : q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  }
+  q = q.order('stage_changed_at', { ascending: true }).limit(200);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return (data ?? []) as Lead[];
@@ -125,10 +164,6 @@ export async function getLead(org_id: string, id: string) {
 export async function updateLead(org_id: string, id: string, payload: Partial<Lead>, user_id?: string) {
   const before = await getLead(org_id, id);
 
-  // If the caller is transitioning the lead into a disqualified state for
-  // the first time, stamp disqualified_at server-side. We don't trust the
-  // client to set it (and we don't want to overwrite a previous stamp if
-  // the lead bounces between unqualified ↔ working).
   const DISQUALIFIED_STATES: LeadStatus[] = ['unqualified', 'lost'];
   const nowIso = new Date().toISOString();
   const enteringDisqualified =
@@ -145,6 +180,10 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     update.disqualified_at = nowIso;
   }
 
+  if (payload.status !== undefined && payload.status !== before.status) {
+    update.stage_changed_at = nowIso;
+  }
+
   const { data, error } = await supabaseAdmin.from('crm_leads')
     .update(update).eq('org_id', org_id).eq('id', id).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -155,11 +194,6 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
       old_value: before.status, new_value: data.status, changed_by: user_id ?? null,
     });
 
-    // When the transition is into a disqualified state, also write a
-    // dedicated 'disqualified' row carrying the lost_reason so reports
-    // keyed on disqualification have a single canonical event to join
-    // against (rather than scraping the status-change row + lost_reason
-    // column separately).
     if (enteringDisqualified) {
       const reason =
         (payload as Record<string, unknown>).lost_reason
@@ -172,11 +206,42 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
       });
     }
   }
+
+  if (before.status !== data.status) {
+    automations.fireForTrigger('lead_status_changed', {
+      org_id, user_id, entity: 'lead', entity_id: id,
+      data: { lead: data, before, after: data, old_status: before.status, new_status: data.status, client_id: data.client_id },
+    }).catch(() => {});
+    if (enteringDisqualified) {
+      automations.fireForTrigger('lead_disqualified', {
+        org_id, user_id, entity: 'lead', entity_id: id,
+        data: { lead: data, lost_reason: (data as Record<string, unknown>).lost_reason ?? null, client_id: data.client_id },
+      }).catch(() => {});
+    }
+  }
+
+  const beforeStage = (before as Record<string, unknown>).lifecycle_stage;
+  const afterStage  = (data   as Record<string, unknown>).lifecycle_stage;
+  if (beforeStage !== afterStage) {
+    await supabaseAdmin.from('crm_lead_history').insert({
+      lead_id: id, org_id, field: 'lifecycle_stage',
+      old_value: beforeStage, new_value: afterStage, changed_by: user_id ?? null,
+    });
+    automations.fireForTrigger('lead_lifecycle_stage_changed', {
+      org_id, user_id, entity: 'lead', entity_id: id,
+      data: { lead: data, old_stage: beforeStage, new_stage: afterStage, client_id: data.client_id },
+    }).catch(() => {});
+  }
+
   if (before.owner_id !== data.owner_id) {
     await supabaseAdmin.from('crm_lead_history').insert({
       lead_id: id, org_id, field: 'owner_id',
       old_value: before.owner_id, new_value: data.owner_id, changed_by: user_id ?? null,
     });
+    automations.fireForTrigger('lead_owner_changed', {
+      org_id, user_id, entity: 'lead', entity_id: id,
+      data: { lead: data, old_owner_id: before.owner_id, new_owner_id: data.owner_id, client_id: data.client_id },
+    }).catch(() => {});
   }
 
   const profileChanged = ['title','company','industry','country','source_id'].some(k =>
@@ -208,16 +273,15 @@ export async function rescoreLead(org_id: string, id: string) {
 }
 
 /**
- * Mark a lead as won (status=converted, lifecycle_stage=customer).
+ * Mark a lead as won (status=converted, lifecycle_stage=customer) without
+ * spawning Account+Contact+Deal records.
  *
- * This is the explicit "won" action — distinct from convertLead() which
- * creates an Account + Contact + Deal. markLeadAsWon() is a lightweight
- * status transition for pipelines where the deal was tracked externally
- * or the rep just wants to flag the lead without full conversion.
- *
- * Stamps won_reason and won_at on the lead row, writes a crm_lead_history
- * audit record, and fires the 'lead_converted' automation trigger so
- * downstream workflows (e.g. Slack alerts, follow-up tasks) can react.
+ * Distinct from convertLead() which is the "full conversion" path that
+ * creates downstream entities. markLeadAsWon() is the lightweight close-
+ * the-loop path used by mobile + dashboard lead detail screens when the
+ * rep just wants to flag the win + capture an optional reason. Reports
+ * key on (status='converted' AND won_reason IS NOT NULL) to distinguish
+ * "marked won" from "fully converted".
  */
 export async function markLeadAsWon(
   org_id: string,
@@ -228,17 +292,13 @@ export async function markLeadAsWon(
   const before = await getLead(org_id, id);
 
   const nowIso = new Date().toISOString();
-
-  // Build the update. won_reason and won_at were added via migration
-  // add_lead_won_fields. We catch column-missing errors (42703) and
-  // retry without them so old deployments don't break mid-migration.
   const coreUpdate: Record<string, unknown> = {
     status: 'converted',
     lifecycle_stage: 'customer',
+    stage_changed_at: nowIso,
     updated_by: user_id ?? null,
     updated_at: nowIso,
   };
-
   const richUpdate = { ...coreUpdate, won_reason: reason ?? null, won_at: nowIso };
 
   let data: Lead;
@@ -250,11 +310,9 @@ export async function markLeadAsWon(
     const msg  = (richResult.error.message ?? '').toLowerCase();
     const isMissingColumn =
       code === '42703' ||
-      (msg.includes('column') && (msg.includes('won_reason') || msg.includes('won_at') || msg.includes('lifecycle_stage')));
+      (msg.includes('column') && (msg.includes('won_reason') || msg.includes('won_at')));
 
     if (isMissingColumn) {
-      // Graceful degradation: migration hasn't run yet on this deployment.
-      // Fall back to core fields only and store the reason in notes.
       const fallback: Record<string, unknown> = { ...coreUpdate };
       if (reason) fallback.notes = `Won reason: ${reason}`;
       const fallbackResult = await supabaseAdmin.from('crm_leads')
@@ -268,7 +326,6 @@ export async function markLeadAsWon(
     data = richResult.data as Lead;
   }
 
-  // Audit history: always write the status transition.
   if (before.status !== 'converted') {
     await supabaseAdmin.from('crm_lead_history').insert({
       lead_id: id,
@@ -280,14 +337,9 @@ export async function markLeadAsWon(
     });
   }
 
-  // Fire the lead_converted automation trigger. Best-effort — never block
-  // the API response if the automation engine is unavailable.
-  triggerEdgeFunction('crm-automation-trigger', {
-    trigger: 'lead_converted',
-    org_id,
-    lead_id: id,
-    user_id: user_id ?? null,
-    won_reason: reason ?? null,
+  automations.fireForTrigger('lead_converted', {
+    org_id, user_id, entity: 'lead', entity_id: id,
+    data: { lead: data, won_reason: reason ?? null, client_id: (data as Record<string, unknown>).client_id },
   }).catch(() => {});
 
   return data;
@@ -295,10 +347,6 @@ export async function markLeadAsWon(
 
 export async function convertLead(org_id: string, id: string, opts: {
   create_deal?: boolean; deal_name?: string; deal_amount?: number;
-  // Optional weight-based deal sizing — when both `deal_volume_kg` and
-  // `deal_product_id` are passed, the deal amount is computed from the
-  // product's price + weight_kg (volume / weight × price). Anything passed
-  // in `deal_amount` wins if also present.
   deal_volume_kg?: number; deal_product_id?: string;
   pipeline_id?: string; stage_id?: string;
 }, user_id?: string) {
@@ -345,8 +393,6 @@ export async function convertLead(org_id: string, id: string, opts: {
     const pipeline_id = opts.pipeline_id || await getDefaultPipelineId(org_id);
     const stage_id = opts.stage_id || await getFirstOpenStageId(pipeline_id);
 
-    // Resolve deal amount. Explicit deal_amount wins; otherwise derive from
-    // (volume × product.price / product.weight_kg) when those are passed.
     let amount = opts.deal_amount ?? 0;
     if ((amount == null || amount === 0) && opts.deal_volume_kg && opts.deal_product_id) {
       const { data: product } = await supabaseAdmin.from('crm_products')
@@ -368,18 +414,79 @@ export async function convertLead(org_id: string, id: string, opts: {
     deal_id = deal.id;
   }
 
-  // Flip is_converted alongside status='converted' + the converted_* FKs.
-  // The boolean is what downstream funnel reports filter on (status is
-  // mutable from the UI; is_converted is the canonical lifecycle flag).
+  const nowIso = new Date().toISOString();
   await supabaseAdmin.from('crm_leads').update({
     status: 'converted',
     is_converted: true,
-    converted_at: new Date().toISOString(),
+    lifecycle_stage: 'customer',
+    converted_at: nowIso,
     converted_account_id: account_id, converted_contact_id: contact_id, converted_deal_id: deal_id,
+    stage_changed_at: nowIso,
     updated_by: user_id ?? null,
   }).eq('org_id', org_id).eq('id', id);
 
+  automations.fireForTrigger('lead_converted', {
+    org_id, user_id, entity: 'lead', entity_id: id,
+    data: { lead, account_id, contact_id, deal_id, client_id: lead.client_id },
+  }).catch(() => {});
+
   return { lead_id: id, account_id, contact_id, deal_id };
+}
+
+export async function reopenLead(
+  org_id: string,
+  id: string,
+  body: { reason?: string },
+  user_id?: string,
+) {
+  const before = await getLead(org_id, id);
+
+  if (before.status === 'working' || before.status === 'new') {
+    throw new AppError(400, 'Lead is not disqualified or converted', 'LEAD_NOT_DISQUALIFIED');
+  }
+
+  const b = before as Record<string, unknown>;
+  const previousState = {
+    status: before.status,
+    is_converted: b.is_converted ?? null,
+    lifecycle_stage: b.lifecycle_stage ?? null,
+    converted_account_id: b.converted_account_id ?? null,
+    converted_contact_id: b.converted_contact_id ?? null,
+    converted_deal_id: b.converted_deal_id ?? null,
+    converted_at: b.converted_at ?? null,
+    lost_reason: b.lost_reason ?? null,
+    disqualified_at: b.disqualified_at ?? null,
+  };
+
+  const nowIso = new Date().toISOString();
+  const wasCustomer = b.lifecycle_stage === 'customer';
+  const update: Record<string, unknown> = {
+    status: 'working',
+    is_converted: false,
+    converted_at: null,
+    converted_account_id: null,
+    converted_contact_id: null,
+    converted_deal_id: null,
+    lost_reason: null,
+    disqualified_at: null,
+    stage_changed_at: nowIso,
+    updated_by: user_id ?? null,
+    updated_at: nowIso,
+  };
+  if (wasCustomer) update.lifecycle_stage = 'sql';
+
+  const { data, error } = await supabaseAdmin.from('crm_leads')
+    .update(update).eq('org_id', org_id).eq('id', id).select('*').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  await supabaseAdmin.from('crm_lead_history').insert({
+    lead_id: id, org_id, field: 'reopened',
+    old_value: previousState,
+    new_value: { reason: body.reason ?? null },
+    changed_by: user_id ?? null,
+  });
+
+  return data as Lead;
 }
 
 async function getDefaultPipelineId(org_id: string): Promise<string> {
@@ -406,11 +513,6 @@ export async function listScoreHistory(org_id: string, lead_id: string) {
 export async function bulkAssign(org_id: string, lead_ids: string[], owner_id: string, user_id?: string) {
   if (lead_ids.length === 0) return { updated: 0 };
 
-  // Fetch previous owners so the audit rows can record from→to. One round
-  // trip is acceptable cost for audit completeness — without this,
-  // bulk-reassign was the only owner-change path that bypassed the
-  // crm_lead_history audit table (single-record updateLead() already
-  // writes one).
   const { data: before, error: beforeErr } = await supabaseAdmin.from('crm_leads')
     .select('id, owner_id').eq('org_id', org_id).in('id', lead_ids);
   if (beforeErr) throw new AppError(500, beforeErr.message, 'DB_ERROR');
@@ -422,8 +524,6 @@ export async function bulkAssign(org_id: string, lead_ids: string[], owner_id: s
     .update({ owner_id, updated_by: user_id ?? null }).eq('org_id', org_id).in('id', lead_ids);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
-  // Skip rows where the owner didn't actually change (e.g. caller passed
-  // the same owner_id), to keep the audit log signal-to-noise high.
   const historyRows = lead_ids
     .filter((lead_id) => prevByLead.get(lead_id) !== owner_id)
     .map((lead_id) => ({
