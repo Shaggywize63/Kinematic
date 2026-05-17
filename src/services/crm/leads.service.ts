@@ -10,6 +10,12 @@ import { triggerEdgeFunction } from './edge.client';
 import * as automations from './automations.service';
 import type { Lead, LeadStatus } from '../../types/crm.types';
 
+// Helper: erase the structural-type-narrowing TS does on Lead so we can
+// reach optional/dynamic columns (lifecycle_stage, lost_reason, won_*) that
+// live on the DB row but aren't in the Lead interface. The "as unknown as"
+// dance is what TS demands for casts between non-overlapping shapes.
+const asRow = (x: unknown): Record<string, unknown> => x as Record<string, unknown>;
+
 export interface CreateLeadInput {
   org_id: string;
   user_id?: string;
@@ -40,7 +46,7 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   // Use client-specific ICP if the lead has a client_id stamped, else fall back to org-level.
   const { score, breakdown } = scoring.computeHeuristic(payload, await scoring.getIcp(org_id, payload.client_id ?? null));
 
-  const p = payload as Record<string, unknown>;
+  const p = asRow(payload);
   const nowIso = new Date().toISOString();
   const insertRow = {
     org_id,
@@ -192,7 +198,7 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     updated_by: user_id ?? null,
     updated_at: nowIso,
   };
-  if (enteringDisqualified && (before as Record<string, unknown>).disqualified_at == null) {
+  if (enteringDisqualified && asRow(before).disqualified_at == null) {
     update.disqualified_at = nowIso;
   }
 
@@ -212,8 +218,8 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
 
     if (enteringDisqualified) {
       const reason =
-        (payload as Record<string, unknown>).lost_reason
-        ?? (data as Record<string, unknown>).lost_reason
+        asRow(payload).lost_reason
+        ?? asRow(data).lost_reason
         ?? null;
       await supabaseAdmin.from('crm_lead_history').insert({
         lead_id: id, org_id, field: 'disqualified',
@@ -231,13 +237,13 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     if (enteringDisqualified) {
       automations.fireForTrigger('lead_disqualified', {
         org_id, user_id, entity: 'lead', entity_id: id,
-        data: { lead: data, lost_reason: (data as Record<string, unknown>).lost_reason ?? null, client_id: data.client_id },
+        data: { lead: data, lost_reason: asRow(data).lost_reason ?? null, client_id: data.client_id },
       }).catch(() => {});
     }
   }
 
-  const beforeStage = (before as Record<string, unknown>).lifecycle_stage;
-  const afterStage  = (data   as Record<string, unknown>).lifecycle_stage;
+  const beforeStage = asRow(before).lifecycle_stage;
+  const afterStage  = asRow(data).lifecycle_stage;
   if (beforeStage !== afterStage) {
     await supabaseAdmin.from('crm_lead_history').insert({
       lead_id: id, org_id, field: 'lifecycle_stage',
@@ -261,7 +267,7 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
   }
 
   const profileChanged = ['title','company','industry','country','source_id'].some(k =>
-    (payload as Record<string, unknown>)[k] !== undefined);
+    asRow(payload)[k] !== undefined);
   if (profileChanged) {
     triggerEdgeFunction('crm-rescore-lead', { lead_id: id, org_id }).catch(() => {});
   }
@@ -330,7 +336,7 @@ export async function markLeadAsWon(
     .update(richUpdate).eq('org_id', org_id).eq('id', id).select('*').single();
 
   if (richResult.error) {
-    const code = (richResult.error as Record<string, unknown>).code as string | undefined;
+    const code = asRow(richResult.error).code as string | undefined;
     const msg  = (richResult.error.message ?? '').toLowerCase();
     const isMissingColumn =
       code === '42703' ||
@@ -364,7 +370,7 @@ export async function markLeadAsWon(
 
   automations.fireForTrigger('lead_converted', {
     org_id, user_id, entity: 'lead', entity_id: id,
-    data: { lead: data, won_reason: reason ?? null, client_id: (data as Record<string, unknown>).client_id },
+    data: { lead: data, won_reason: reason ?? null, client_id: asRow(data).client_id },
   }).catch(() => {});
 
   return data;
@@ -476,7 +482,7 @@ export async function reopenLead(
     throw new AppError(400, 'Lead is not disqualified or converted', 'LEAD_NOT_DISQUALIFIED');
   }
 
-  const b = before as Record<string, unknown>;
+  const b = asRow(before);
   const previousState = {
     status: before.status,
     is_converted: b.is_converted ?? null,
