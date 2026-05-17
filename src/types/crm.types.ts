@@ -2,7 +2,7 @@
  * CRM module shared types.
  */
 
-export type LeadStatus = 'new' | 'working' | 'nurturing' | 'qualified' | 'unqualified' | 'converted';
+export type LeadStatus = 'new' | 'working' | 'nurturing' | 'qualified' | 'unqualified' | 'converted' | 'lost';
 export type StageType = 'open' | 'won' | 'lost';
 export type ActivityType = 'call' | 'meeting' | 'email' | 'note' | 'task' | 'sms';
 export type ActivityStatus = 'planned' | 'completed' | 'cancelled';
