@@ -28,6 +28,8 @@ import { storeCredentials } from '../../services/crm/integrations/credentialsVau
 import { findOrCreateLead, type NormalizedLead } from '../../services/crm/integrations/dedup.orchestrator';
 import { webFormProvider } from '../../services/crm/integrations/providers/webForm';
 import { genericWebhookProvider } from '../../services/crm/integrations/providers/genericWebhook';
+import { metaLeadAdsProvider } from '../../services/crm/integrations/providers/metaLeadAds';
+import { googleAdsProvider } from '../../services/crm/integrations/providers/googleAds';
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
 import { logger } from '../../lib/logger';
 
@@ -43,13 +45,13 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
 // authenticate via stored OAuth tokens, no shared secret needed.
 const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads'];
 
-/** Provider dispatch — Meta/Google/Zoho return a 200 "not implemented" from
- *  the webhook handler until their providers land. The integration row can
- *  still be created (so admins can plan their connections), but no leads
- *  will flow until the provider is wired here. */
+/** Provider dispatch — Zoho returns a 200 "not implemented" from
+ *  the webhook handler until its OAuth + pull-sync provider lands. */
 function getProvider(id: ProviderId) {
   if (id === 'web_form')        return webFormProvider;
   if (id === 'generic_webhook') return genericWebhookProvider;
+  if (id === 'meta_lead_ads')   return metaLeadAdsProvider;
+  if (id === 'google_ads')      return googleAdsProvider;
   return null;
 }
 
@@ -226,7 +228,7 @@ export const testIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, { ok: true, status: data.status });
 });
 
-// ── Public webhook handler ─────────────────────────────────────────────
+// ── Public webhook handler ──────────────────────────────────────────────
 
 async function logInboundEvent(
   integration_id: string,
@@ -349,4 +351,45 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
     // Still 200 — the error is recorded; we don't want retries.
     res.status(200).json({ ok: true });
   }
+});
+
+// ── Meta-style verify challenge (GET) ──────────────────────────────────────────
+// Meta App Dashboard → Webhooks subscription does a one-time GET to the
+// callback URL with hub.mode=subscribe + hub.verify_token + hub.challenge.
+// We must echo `challenge` back as the response body if the verify token
+// matches what the admin stored in integration.config.verify_token.
+// Only meta_lead_ads uses this today; other providers return 405.
+
+export const verifyChallenge = asyncHandler<Request>(async (req, res) => {
+  const providerSlug = req.params.provider;
+  const providerId = providerSlug.replace('-', '_') as ProviderId;
+  if (providerId !== 'meta_lead_ads') {
+    res.status(405).json({ ok: false, error: 'GET not supported for this provider' });
+    return;
+  }
+
+  const mode      = (req.query['hub.mode']         as string | undefined) ?? '';
+  const verifyTok = (req.query['hub.verify_token'] as string | undefined) ?? '';
+  const challenge = (req.query['hub.challenge']    as string | undefined) ?? '';
+
+  if (mode !== 'subscribe' || !challenge || !verifyTok) {
+    res.status(400).json({ ok: false, error: 'missing hub.mode/verify_token/challenge' });
+    return;
+  }
+
+  const { data: integration } = await supabaseAdmin.from('crm_lead_source_integrations')
+    .select('id, provider, config').eq('id', req.params.id).maybeSingle();
+  if (!integration || integration.provider !== providerId) {
+    res.status(404).json({ ok: false, error: 'integration not found' });
+    return;
+  }
+
+  const configured = (integration.config as Record<string, unknown> | null)?.verify_token;
+  if (typeof configured !== 'string' || configured !== verifyTok) {
+    res.status(403).json({ ok: false, error: 'verify_token mismatch' });
+    return;
+  }
+
+  // Meta wants the raw challenge string, NOT JSON.
+  res.status(200).type('text/plain').send(challenge);
 });

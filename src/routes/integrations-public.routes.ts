@@ -14,7 +14,7 @@
  */
 import { Router } from 'express';
 import { perRouteLimit } from '../middleware/security';
-import { inboundWebhook } from '../controllers/crm/integrations.controller';
+import { inboundWebhook, verifyChallenge } from '../controllers/crm/integrations.controller';
 
 const router = Router();
 
@@ -23,15 +23,16 @@ const router = Router();
 // while keeping abusive traffic capped.
 const webhookLimit = perRouteLimit({ windowMs: 60_000, max: 200 });
 
+// Meta-style subscription handshake (GET). Only meta-lead-ads uses this
+// today; other providers return 405 from the handler. Same path shape as
+// the POST so admins paste a single URL into the provider's webhook field.
+router.get('/:provider/:id', webhookLimit, verifyChallenge);
+
 // Generic shape: /webhook/:provider/:id?key=<webhook_secret>
 //   :provider is the URL-slug form (web-form, meta-lead-ads, google-ads,
-//             generic), translated to provider_id inside the controller.
+//             generic-webhook), translated to provider_id inside the
+//             controller.
 //   :id is the integration uuid.
 router.post('/:provider/:id', webhookLimit, inboundWebhook);
-
-// GET is reserved for verification challenges (Meta uses it on the
-// leadgen subscription; the WhatsApp pattern handles this for that
-// provider already). For v1 we wire only POST; the GET arrives with
-// Meta v2 and we'll plug a `verifyChallenge` provider hook in then.
 
 export default router;
