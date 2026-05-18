@@ -1,0 +1,17 @@
+{
+  "name": "kinematic-tally-connector",
+  "version": "0.1.0",
+  "description": "Bridge agent that runs alongside Tally Prime on the distributor's PC. Polls Kinematic for pending voucher jobs, posts them to local Tally via HTTP/XML, and reports back the resulting Tally voucher IDs.",
+  "main": "index.js",
+  "engines": { "node": ">=18.0.0" },
+  "scripts": {
+    "start": "node index.js",
+    "once":  "node index.js --once",
+    "version": "node -e \"console.log(require('./package.json').version)\""
+  },
+  "keywords": ["kinematic", "tally", "erp", "distribution", "voucher", "bridge"],
+  "author": "Kinematic",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {}
+}

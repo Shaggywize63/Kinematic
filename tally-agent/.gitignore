@@ -1,0 +1,4 @@
+# Don't commit the real config — it carries the agent secret in URLs.
+config.json
+node_modules/
+*.log
