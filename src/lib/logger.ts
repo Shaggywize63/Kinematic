@@ -22,7 +22,10 @@ const logFormat = printf(({ level, message, timestamp, stack }) => {
   return `${timestamp} [${level}]: ${stack || message}`;
 });
 
+// winston's default levels don't include `http`. Add the npm-style levels
+// (which include http) explicitly so logger.http() works at runtime.
 const w = winston.createLogger({
+  levels: winston.config.npm.levels,
   level: process.env.LOG_LEVEL || 'info',
   format: combine(
     errors({ stack: true }),
@@ -68,8 +71,11 @@ function fmt(a: unknown, b?: unknown): string {
 }
 
 export const logger = {
-  info:  (a: unknown, b?: unknown) => { w.info(fmt(a, b)); },
-  warn:  (a: unknown, b?: unknown) => { w.warn(fmt(a, b)); },
   error: (a: unknown, b?: unknown) => { w.error(fmt(a, b)); },
+  warn:  (a: unknown, b?: unknown) => { w.warn(fmt(a, b)); },
+  info:  (a: unknown, b?: unknown) => { w.info(fmt(a, b)); },
+  http:  (a: unknown, b?: unknown) => { w.http(fmt(a, b)); },
+  verbose: (a: unknown, b?: unknown) => { w.verbose(fmt(a, b)); },
   debug: (a: unknown, b?: unknown) => { w.debug(fmt(a, b)); },
+  silly: (a: unknown, b?: unknown) => { w.silly(fmt(a, b)); },
 };
