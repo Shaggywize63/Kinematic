@@ -35,7 +35,7 @@ const GRAPH_VERSION = 'v19.0';
 // Common Meta Lead Ad form-field names → our canonical NormalizedLead keys.
 // Meta normalises these to snake_case during form creation but admins can
 // (and do) override; we match on lowercased contains as a safety net.
-const FIELD_ALIASES: Record<string, (keyof NormalizedLead) | string> = {
+const FIELD_ALIASES: Record<string, keyof NormalizedLead | string> = {
   first_name: 'first_name',
   last_name:  'last_name',
   full_name:  'first_name', // split on space in the mapping below
@@ -96,6 +96,11 @@ function metaLeadToNormalized(
     utm_medium:   'paid_social',
     utm_campaign: lead.campaign_id ?? webhookValue.campaign_id ?? null,
   };
+  // Treat the NormalizedLead as a string-keyed bag for the duration of
+  // the loop — every value we assign is a string, and the alias table
+  // only points at string-typed lead fields. This avoids per-field
+  // ts-ignore directives.
+  const bag = out as unknown as Record<string, unknown>;
   const fields = lead.field_data ?? [];
   for (const f of fields) {
     const name = (f.name || '').toLowerCase().trim();
@@ -110,8 +115,7 @@ function metaLeadToNormalized(
       continue;
     }
     if (target) {
-      // @ts-expect-error — target is one of NormalizedLead's string fields
-      if (!out[target]) out[target] = value;
+      if (!bag[target]) bag[target] = value;
       continue;
     }
     // Anything we don't recognise becomes a custom field — the rep can see
