@@ -43,6 +43,8 @@ import activityMappingRoutes from './routes/activity-mapping.routes';
 import clientRoutes          from './routes/client.routes';
 import miscRoutes            from './routes/misc.routes';
 import planogramRoutes       from './routes/planogram.routes';
+import integrationsRoutes        from './routes/integrations.routes';
+import integrationsPublicRoutes  from './routes/integrations-public.routes';
 
 // Other management routes (available, now mounted)
 import activitiesRoutes   from './routes/activities.routes';
@@ -142,6 +144,14 @@ const V1 = '/api/v1';
 
 import { requireModule, enforceCityScope } from './middleware/rbac';
 
+// ── Public webhook ingestion (NO auth) ───────────────────────────────
+// Mounted BEFORE the auth-catch-all below so provider webhooks
+// (web-form, generic, Meta, Google Ads) can post without a JWT. Each
+// integration is identified by `:id` in the URL and verified via the
+// per-integration secret (URL key or HMAC, depending on provider).
+// Mirrors the WhatsApp webhook pattern at /crm/webhooks/whatsapp.
+app.use(`${V1}/integrations/webhook`, integrationsPublicRoutes);
+
 // ── Demo intercept for non-CRM modules ────────────────────────────────
 // Mounted before the protected route handlers so demo-org requests get
 // canned fixtures from demoExtensionsMiddleware instead of hitting empty
@@ -221,6 +231,11 @@ app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope, perR
 
 // ── CRM module ──────────────────────────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
+
+// ── Lead-source integrations (admin CRUD) ─────────────────────────────
+// Public webhook ingestion lives above the auth catch-all; this is the
+// authenticated admin surface for connect/list/edit/disconnect/events.
+app.use(`${V1}/integrations`, requireAuth, integrationsRoutes);
 
 // ── Activity Log (super-admin only) ─────────────────────────────────
 app.use(`${V1}/audit-log`, requireAuth, auditLogRoutes);
