@@ -27,6 +27,7 @@ import { asyncHandler, ok, created, badRequest, notFound } from '../../utils';
 import { storeCredentials } from '../../services/crm/integrations/credentialsVault';
 import { findOrCreateLead, type NormalizedLead } from '../../services/crm/integrations/dedup.orchestrator';
 import { webFormProvider } from '../../services/crm/integrations/providers/webForm';
+import { genericWebhookProvider } from '../../services/crm/integrations/providers/genericWebhook';
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
 import { logger } from '../../lib/logger';
 
@@ -42,10 +43,13 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
 // authenticate via stored OAuth tokens, no shared secret needed.
 const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads'];
 
-/** Provider dispatch — only web_form is implemented today; the rest
- *  return a 501 from the webhook handler until their providers land. */
+/** Provider dispatch — Meta/Google/Zoho return a 200 "not implemented" from
+ *  the webhook handler until their providers land. The integration row can
+ *  still be created (so admins can plan their connections), but no leads
+ *  will flow until the provider is wired here. */
 function getProvider(id: ProviderId) {
-  if (id === 'web_form') return webFormProvider;
+  if (id === 'web_form')        return webFormProvider;
+  if (id === 'generic_webhook') return genericWebhookProvider;
   return null;
 }
 
@@ -317,7 +321,7 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
 
   // 5. Normalise + dedup.
   try {
-    const normalised = provider.normalize(req.body, integration as IntegrationRow);
+    const normalised = await provider.normalize(req.body, integration as IntegrationRow);
     const batch = Array.isArray(normalised) ? normalised : [normalised];
 
     let merged = 0, created = 0;
