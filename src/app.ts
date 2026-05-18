@@ -47,6 +47,7 @@ import integrationsRoutes        from './routes/integrations.routes';
 import integrationsPublicRoutes  from './routes/integrations-public.routes';
 import distIntegrationsRoutes    from './routes/distribution/integrations.routes';
 import tallyAgentPublicRoutes    from './routes/tally-agent-public.routes';
+import orgSettingsRoutes         from './routes/org-settings.routes';
 import { startTallyEnqueuePoller } from './services/distribution/integrations/enqueue.poller';
 
 // Other management routes (available, now mounted)
@@ -118,13 +119,13 @@ const limiter = rateLimit({
 app.use('/api', limiter);
 app.use('/api/v1/auth/login', loginLimiter);                   // composite (IP + email) brute-force throttle
 
-// ── HTTP logging ─────────────────────────────────────────────────
+// ── HTTP logging ─────────────────────────────────────
 app.use(morgan('combined', {
   stream: { write: (msg) => logger.http(msg.trim()) },
   skip: (req) => req.path === '/health',
 }));
 
-// ── Body parsing & misc ───────────────────────────────────────────────
+// ── Body parsing & misc ──────────────────────────────────
 app.use(compression({ threshold: 1024 }));   // skip gzip on payloads <1KB — saves CPU on small JSON
 app.use(express.json({
   limit: '2mb',
@@ -141,7 +142,7 @@ app.use(strictJson);                                            // mutating rout
 app.use(prototypePoll);                                         // block __proto__ / constructor injection
 app.use(auditAll);                                              // log every state change after the response finishes
 
-// ── Health check ─────────────────────────────────────────────────
+// ── Health check ────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -151,12 +152,12 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// ── API routes ────────────────────────────────────────────────────
+// ── API routes ─────────────────────────────────────
 const V1 = '/api/v1';
 
 import { requireModule, enforceCityScope } from './middleware/rbac';
 
-// ── Public webhook ingestion (NO auth) ───────────────────────────────
+// ── Public webhook ingestion (NO auth) ───────────────────────
 // Mounted BEFORE the auth-catch-all below so provider webhooks
 // (web-form, generic, Meta, Google Ads) can post without a JWT. Each
 // integration is identified by `:id` in the URL and verified via the
@@ -164,7 +165,7 @@ import { requireModule, enforceCityScope } from './middleware/rbac';
 // Mirrors the WhatsApp webhook pattern at /crm/webhooks/whatsapp.
 app.use(`${V1}/integrations/webhook`, integrationsPublicRoutes);
 
-// ── Public Tally bridge-agent endpoints (NO auth) ─────────────────────
+// ── Public Tally bridge-agent endpoints (NO auth) ────────────────────
 // The Windows bridge agent running on the distributor's PC polls these
 // to fetch pending Tally jobs and report back results. Per-integration
 // agent_secret in `?key=` verifies identity (constant-time compared in
@@ -172,7 +173,7 @@ app.use(`${V1}/integrations/webhook`, integrationsPublicRoutes);
 // needs a JWT.
 app.use(`${V1}/integrations/tally`, tallyAgentPublicRoutes);
 
-// ── Demo intercept for non-CRM modules ────────────────────────────────
+// ── Demo intercept for non-CRM modules ──────────────────────────
 // Mounted before the protected route handlers so demo-org requests get
 // canned fixtures from demoExtensionsMiddleware instead of hitting empty
 // database queries. /auth/* is excluded (those routes can't require auth —
@@ -230,7 +231,10 @@ app.use(`${V1}/skus`,          requireAuth, requireModule('inventory'), skusRout
 app.use(`${V1}/stores`,        requireAuth, enforceCityScope, storesRoutes);
 app.use(`${V1}/warehouse`,     requireAuth, requireModule('inventory'), warehouseRoutes);
 
-// ── Distribution module ─────────────────────────────────────────────
+// ── Org-level admin settings (location-ping cadence today; more to come) ──
+app.use(`${V1}/org-settings`,  requireAuth, orgSettingsRoutes);
+
+// ── Distribution module ──────────────────────────────────
 app.use(`${V1}/distribution/brands`,         requireAuth, requireModule('distribution_brands'),       distBrandsRoutes);
 app.use(`${V1}/distribution/distributors`,   requireAuth, requireModule('distribution_distributors'), distDistributorsRoutes);
 app.use(`${V1}/distribution/price-lists`,    requireAuth, requireModule('distribution_pricing'),      distPriceListsRoutes);
@@ -254,22 +258,22 @@ app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope, perR
 // routes mounted above.
 app.use(`${V1}/distribution/integrations`,   requireAuth,                                             distIntegrationsRoutes);
 
-// ── CRM module ──────────────────────────────────────────────────────────
+// ── CRM module ───────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
 
-// ── Lead-source integrations (admin CRUD) ─────────────────────────────
+// ── Lead-source integrations (admin CRUD) ──────────────────────────
 // Public webhook ingestion lives above the auth catch-all; this is the
 // authenticated admin surface for connect/list/edit/disconnect/events.
 app.use(`${V1}/integrations`, requireAuth, integrationsRoutes);
 
-// ── Activity Log (super-admin only) ─────────────────────────────────
+// ── Activity Log (super-admin only) ────────────────────────────
 app.use(`${V1}/audit-log`, requireAuth, auditLogRoutes);
 
-// ── 404 + error handlers ─────────────────────────────────────────────
+// ── 404 + error handlers ──────────────────────────────────
 app.use(notFoundHandler);
 app.use(sanitiseError);                                         // no stacks/PII to client; log full detail server-side
 
-// ── Background workers ──────────────────────────────────────────────
+// ── Background workers ───────────────────────────────────
 // Start the Tally enqueue poller. Skipped in test runs by checking a
 // flag so unit tests don't kick off a 30s setInterval inside CI.
 if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TALLY_POLLER !== 'true') {
