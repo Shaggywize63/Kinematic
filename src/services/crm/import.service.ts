@@ -152,10 +152,16 @@ export async function previewJob(org_id: string, job_id: string, mapping: Record
  * findOrCreateLead → bucket as created or merged. Errors per row are
  * collected and returned without aborting the rest of the import.
  *
+ * `user_id` is positional-last + optional so existing call sites
+ * (crm.routes.ts:733 `commitJob(orgId(req), body.job_id)`) keep working
+ * without a route-file edit. When supplied, it stamps `created_by` on
+ * the auto-created lead source so audit logs attribute the first
+ * import correctly.
+ *
  * Returns the updated job row so the dashboard can display
- * job.summary.{total, created, merged, errors[]}.
+ * job.summary.{total, created, merged, error_count}.
  */
-export async function commitJob(org_id: string, user_id: string | null, job_id: string) {
+export async function commitJob(org_id: string, job_id: string, user_id: string | null = null) {
   const { data: job, error: loadErr } = await supabaseAdmin.from('crm_import_jobs').select('*')
     .eq('org_id', org_id).eq('id', job_id).single();
   if (loadErr || !job) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
