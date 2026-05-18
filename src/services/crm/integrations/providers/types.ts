@@ -36,8 +36,16 @@ export interface IntegrationProvider {
   /** Inbound providers — confirm the request came from the real source. */
   verifyWebhook?(req: Request, integration: IntegrationRow): Promise<boolean>;
 
-  /** Map a provider payload (or one row from a paged pull) to a NormalizedLead. */
-  normalize(raw: unknown, integration: IntegrationRow): NormalizedLead | NormalizedLead[];
+  /**
+   * Map a provider payload (or one row from a paged pull) to a
+   * NormalizedLead. May be sync OR async — Meta's normalize fetches the
+   * lead's actual field_data from the Graph API using the leadgen_id
+   * delivered in the webhook, so its implementation has to be async.
+   */
+  normalize(
+    raw: unknown,
+    integration: IntegrationRow,
+  ): NormalizedLead | NormalizedLead[] | Promise<NormalizedLead | NormalizedLead[]>;
 
   /** Pull providers only — fetch leads modified since `since`. */
   syncIncremental?(integration: IntegrationRow, since: Date | null): Promise<NormalizedLead[]>;
