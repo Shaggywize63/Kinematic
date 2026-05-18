@@ -45,6 +45,9 @@ import miscRoutes            from './routes/misc.routes';
 import planogramRoutes       from './routes/planogram.routes';
 import integrationsRoutes        from './routes/integrations.routes';
 import integrationsPublicRoutes  from './routes/integrations-public.routes';
+import distIntegrationsRoutes    from './routes/distribution/integrations.routes';
+import tallyAgentPublicRoutes    from './routes/tally-agent-public.routes';
+import { startTallyEnqueuePoller } from './services/distribution/integrations/enqueue.poller';
 
 // Other management routes (available, now mounted)
 import activitiesRoutes   from './routes/activities.routes';
@@ -161,6 +164,14 @@ import { requireModule, enforceCityScope } from './middleware/rbac';
 // Mirrors the WhatsApp webhook pattern at /crm/webhooks/whatsapp.
 app.use(`${V1}/integrations/webhook`, integrationsPublicRoutes);
 
+// ── Public Tally bridge-agent endpoints (NO auth) ─────────────────────
+// The Windows bridge agent running on the distributor's PC polls these
+// to fetch pending Tally jobs and report back results. Per-integration
+// agent_secret in `?key=` verifies identity (constant-time compared in
+// the controller). Mounted BEFORE the auth catch-all so the agent never
+// needs a JWT.
+app.use(`${V1}/integrations/tally`, tallyAgentPublicRoutes);
+
 // ── Demo intercept for non-CRM modules ────────────────────────────────
 // Mounted before the protected route handlers so demo-org requests get
 // canned fixtures from demoExtensionsMiddleware instead of hitting empty
@@ -238,6 +249,11 @@ app.use(`${V1}/organisations`,               requireAuth,                       
 app.use(`${V1}/distribution/uploads`,        requireAuth, perRouteLimit({ windowMs: 60_000, max: 60 }),  distUploadsRoutes);
 app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope, perRouteLimit({ windowMs: 60_000, max: 120 }), distSalesmanRoutes);
 
+// Distribution → accounting integrations (Tally + future). Authenticated
+// admin CRUD only; the bridge agent uses the public /integrations/tally
+// routes mounted above.
+app.use(`${V1}/distribution/integrations`,   requireAuth,                                             distIntegrationsRoutes);
+
 // ── CRM module ──────────────────────────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
 
@@ -252,5 +268,12 @@ app.use(`${V1}/audit-log`, requireAuth, auditLogRoutes);
 // ── 404 + error handlers ─────────────────────────────────────────────
 app.use(notFoundHandler);
 app.use(sanitiseError);                                         // no stacks/PII to client; log full detail server-side
+
+// ── Background workers ──────────────────────────────────────────────
+// Start the Tally enqueue poller. Skipped in test runs by checking a
+// flag so unit tests don't kick off a 30s setInterval inside CI.
+if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TALLY_POLLER !== 'true') {
+  startTallyEnqueuePoller();
+}
 
 export default app;
