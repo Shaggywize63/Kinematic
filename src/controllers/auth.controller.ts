@@ -20,6 +20,28 @@ const refreshSchema = z.object({
   refresh_token: z.string(),
 });
 
+// Default FE location-ping cadence in seconds. Used when org_settings has
+// no override row for the requesting user's org. 600s = 10 min, which
+// matches the LocationTrackingService default on Android.
+const DEFAULT_LOCATION_PING_INTERVAL_SECONDS = 600;
+
+async function getLocationPingIntervalSeconds(orgId: string | null | undefined): Promise<number> {
+  if (!orgId) return DEFAULT_LOCATION_PING_INTERVAL_SECONDS;
+  const { data } = await supabaseAdmin
+    .from('org_settings')
+    .select('value')
+    .eq('org_id', orgId)
+    .eq('key', 'location_ping_interval_seconds')
+    .maybeSingle();
+  // org_settings.value is a JSONB column; the seed stores it as a bare
+  // number (e.g. 600), but historically some keys have been stored as
+  // { value: 600 } objects. Accept both shapes.
+  const raw = (data as any)?.value;
+  if (typeof raw === 'number' && raw > 0) return raw;
+  if (raw && typeof raw === 'object' && typeof raw.value === 'number' && raw.value > 0) return raw.value;
+  return DEFAULT_LOCATION_PING_INTERVAL_SECONDS;
+}
+
 // POST /api/v1/auth/login
 export const login = asyncHandler<Request>(async (req, res) => {
   const body = loginSchema.safeParse(req.body);
@@ -175,6 +197,8 @@ export const login = asyncHandler<Request>(async (req, res) => {
       .eq('id', userProfile.id);
   }
 
+  const locationPingIntervalSeconds = await getLocationPingIntervalSeconds(userProfile.org_id);
+
   return ok(res, {
     access_token: session.session.access_token,
     refresh_token: session.session.refresh_token,
@@ -184,6 +208,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
       permissions,
       enabled_modules: entitlements.enabled_modules,
       enabled_packages: entitlements.enabled_packages,
+      location_ping_interval_seconds: locationPingIntervalSeconds,
     },
   });
 });
@@ -254,11 +279,14 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     orgId: (data as any)?.org_id,
   });
 
+  const locationPingIntervalSeconds = await getLocationPingIntervalSeconds((data as any)?.org_id);
+
   const result = {
     ...data,
     permissions,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
+    location_ping_interval_seconds: locationPingIntervalSeconds,
   };
   return ok(res, result);
 });
