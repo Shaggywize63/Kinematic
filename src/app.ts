@@ -123,7 +123,16 @@ app.use(morgan('combined', {
 
 // ── Body parsing & misc ───────────────────────────────────────────────
 app.use(compression({ threshold: 1024 }));   // skip gzip on payloads <1KB — saves CPU on small JSON
-app.use(express.json({ limit: '2mb', strict: true }));         // tighter cap (was 10mb); strict rejects scalars
+app.use(express.json({
+  limit: '2mb',
+  strict: true,
+  // Stash the raw request body on `req.rawBody` so webhook providers can
+  // verify HMAC signatures (e.g. Meta Lead Ads' X-Hub-Signature-256 is a
+  // sha256 of the literal POST bytes — re-stringifying parsed JSON would
+  // break the digest). Kept only for the request lifetime; max 2MB so
+  // memory impact is bounded by the parser's own limit.
+  verify: (req, _res, buf) => { (req as unknown as { rawBody?: Buffer }).rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 app.use(strictJson);                                            // mutating routes must send JSON
 app.use(prototypePoll);                                         // block __proto__ / constructor injection
