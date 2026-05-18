@@ -1,0 +1,8 @@
+{
+  "integration_id":        "<uuid from kinematic-tally-config.json>",
+  "agent_secret":          "<base64url string from kinematic-tally-config.json>",
+  "polling_endpoint":      "https://kinematic-production.up.railway.app/api/v1/integrations/tally/jobs/<integration_id>?key=<agent_secret>",
+  "report_endpoint":       "https://kinematic-production.up.railway.app/api/v1/integrations/tally/jobs/<integration_id>/result?key=<agent_secret>",
+  "tally_url":             "http://localhost:9000",
+  "poll_interval_seconds": 30
+}
