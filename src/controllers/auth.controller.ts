@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
 import { supabase, supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest, unauthorized, serverError, isDemo } from '../utils';
@@ -7,6 +8,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
 import { resolveEntitlements } from '../lib/entitlements';
+import { invalidateAuthCache } from '../middleware/auth';
 
 const loginSchema = z.object({
   // Accept either email or mobile number (or mobile@kinematic.app constructed by app)
@@ -14,6 +16,14 @@ const loginSchema = z.object({
   password: z.string().min(6),
   fcm_token: z.string().optional(),
   device_id: z.string().optional(),
+  // Mobile-only device metadata used for the single-device-login feature.
+  // The triple is stitched into a human-readable label stored on
+  // users.active_session_device so the kicked device sees a friendly
+  // "Your account was signed in on Realme 12 Pro" message.
+  device_model: z.string().optional(),
+  device_brand: z.string().optional(),
+  os_version: z.string().optional(),
+  platform: z.enum(['android', 'ios', 'web']).optional(),
 });
 
 const refreshSchema = z.object({
@@ -42,13 +52,33 @@ async function getLocationPingIntervalSeconds(orgId: string | null | undefined):
   return DEFAULT_LOCATION_PING_INTERVAL_SECONDS;
 }
 
+/**
+ * Build a human-readable device label for the kicked-device toast.
+ * Examples:
+ *   "Realme 12 Pro · Android 14"
+ *   "iPhone15,3 · iOS 17.4"
+ *   "Nokia 6.1"  (when os/brand missing)
+ */
+function buildDeviceLabel(opts: { model?: string; brand?: string; os?: string; platform?: string }): string {
+  const left = [opts.brand, opts.model].filter(Boolean).join(' ').trim();
+  const right = opts.os ? (opts.platform === 'ios' ? `iOS ${opts.os}` : `Android ${opts.os}`) : '';
+  if (left && right) return `${left} · ${right}`;
+  return left || right || 'mobile device';
+}
+
 // POST /api/v1/auth/login
 export const login = asyncHandler<Request>(async (req, res) => {
   const body = loginSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
-  let { email, password, fcm_token, device_id } = body.data;
-  
+  let { email, password, fcm_token, device_id, device_model, device_brand, os_version, platform } = body.data;
+
+  // Mobile platform is inferred from the explicit `platform` field OR the
+  // X-Kinematic-Platform header the mobile auth interceptor stamps.
+  const headerPlatform = String(req.headers['x-kinematic-platform'] || '').toLowerCase();
+  const effectivePlatform = platform || (headerPlatform === 'android' || headerPlatform === 'ios' ? headerPlatform : undefined);
+  const isMobileLogin = effectivePlatform === 'android' || effectivePlatform === 'ios';
+
   // --- DEMO LOGIN BYPASS ---
   // Both passwords route to the canned fixtures path. org_id=demo-org-999
   // makes every controller return its pre-built mock payload via isDemo(user).
@@ -61,6 +91,8 @@ export const login = asyncHandler<Request>(async (req, res) => {
       access_token: 'demo-token-jwt-placeholder',
       refresh_token: 'demo-refresh-token-placeholder',
       expires_at: Math.floor(Date.now() / 1000) + 3600,
+      // No session_id on demo — single-device enforcement skipped for the
+      // shared demo account (multiple people demo at once).
       user: {
         id: DEMO_USER_ID,
         org_id: DEMO_ORG_ID,
@@ -197,18 +229,58 @@ export const login = asyncHandler<Request>(async (req, res) => {
       .eq('id', userProfile.id);
   }
 
+  // ── Single-device session rotation (mobile only) ──────────────────
+  // Generates a fresh session UUID, overwrites users.active_session_id,
+  // and invalidates the in-memory auth cache so any previously-cached
+  // entry for the prior device gets re-validated on its next request
+  // (which will then hit the DEVICE_REPLACED branch in requireAuth).
+  //
+  // Web/dashboard logins skip this so admins can keep multi-browser
+  // sessions; only fresh-installed mobile clients send platform=android
+  // or platform=ios in the login body (or via X-Kinematic-Platform).
+  let issuedSessionId: string | null = null;
+  if (isMobileLogin) {
+    issuedSessionId = randomUUID();
+    const deviceLabel = buildDeviceLabel({
+      model:    device_model,
+      brand:    device_brand,
+      os:       os_version,
+      platform: effectivePlatform,
+    });
+    try {
+      await supabaseAdmin.rpc('rotate_user_session', {
+        p_user_id:        userProfile.id,
+        p_new_session_id: issuedSessionId,
+        p_device_label:   deviceLabel,
+      });
+      // Burn the cache so the OTHER (now-stale) device's cached profile
+      // entry can't ride the previous session_id through middleware.
+      invalidateAuthCache((u) => u?.id === userProfile.id);
+      logger.info(`[Auth] Rotated session for ${userProfile.id} → ${issuedSessionId} (${deviceLabel})`);
+    } catch (e: any) {
+      // Don't fail login if session rotation crashes — log and continue.
+      // The user is still authenticated; they just won't have single-device
+      // enforcement this session. Safer than locking everyone out on a DB
+      // hiccup.
+      logger.error(`[Auth] Session rotation failed for ${userProfile.id}: ${e?.message || e}`);
+      issuedSessionId = null;
+    }
+  }
+
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds(userProfile.org_id);
 
   return ok(res, {
     access_token: session.session.access_token,
     refresh_token: session.session.refresh_token,
     expires_at: session.session.expires_at,
+    session_id: issuedSessionId,
     user: {
       ...userProfile,
       permissions,
       enabled_modules: entitlements.enabled_modules,
       enabled_packages: entitlements.enabled_packages,
       location_ping_interval_seconds: locationPingIntervalSeconds,
+      active_session_id: issuedSessionId,
     },
   });
 });
@@ -239,9 +311,18 @@ export const logout = asyncHandler<AuthRequest>(async (req, res) => {
     const client = getUserClient(req.accessToken);
     await client.auth.signOut();
   }
-  // Clear FCM token on logout
+  // Clear FCM token + active session on logout. Clearing the session
+  // makes the next login from any device a "first login" — no kicked
+  // device, no DEVICE_REPLACED toast — which is the right UX when the
+  // user explicitly signed out themselves.
   if (req.user) {
     await supabaseAdmin.from('users').update({ fcm_token: null }).eq('id', req.user.id);
+    try {
+      await supabaseAdmin.rpc('clear_user_session', { p_user_id: req.user.id });
+      invalidateAuthCache((u) => u?.id === req.user!.id);
+    } catch (e: any) {
+      logger.warn(`[Auth] clear_user_session failed for ${req.user.id}: ${e?.message || e}`);
+    }
   }
   return ok(res, null, 'Logged out successfully');
 });
