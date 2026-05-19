@@ -144,8 +144,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function clientScope(req: Request): { id: string | null; strict: boolean } {
   const r = req as Request & { user?: { client_id?: string | null; role?: string | null } };
-  if (r.user?.role?.toLowerCase() === 'super_admin') return { id: null, strict: false };
+  // Client-pinned users (JWT carries client_id) — strict-scoped to their own
+  // client. The X-Client-Id header is ignored so they can't escape via it.
   if (r.user?.client_id) return { id: r.user.client_id, strict: true };
+  // Org-level admins (incl. super_admin) — honour the explicit X-Client-Id
+  // picker. When set, every read/write is hard-filtered to that client's rows
+  // (plus org-shared rows with client_id=null, e.g. default pipelines/sources).
+  // When unset, the admin sees the full org. Previously super_admin
+  // short-circuited past this entirely, so Sagar's global picker had no effect
+  // and new records were created with no client stamp.
   const headerVal = (req.headers['x-client-id'] as string | undefined)?.trim();
   if (headerVal && UUID_RE.test(headerVal)) return { id: headerVal, strict: false };
   return { id: null, strict: false };
