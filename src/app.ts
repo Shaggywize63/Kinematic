@@ -48,6 +48,7 @@ import integrationsPublicRoutes  from './routes/integrations-public.routes';
 import distIntegrationsRoutes    from './routes/distribution/integrations.routes';
 import tallyAgentPublicRoutes    from './routes/tally-agent-public.routes';
 import orgSettingsRoutes         from './routes/org-settings.routes';
+import cronRoutes                from './routes/cron.routes';
 import { startTallyEnqueuePoller } from './services/distribution/integrations/enqueue.poller';
 
 // Other management routes (available, now mounted)
@@ -172,6 +173,15 @@ app.use(`${V1}/integrations/webhook`, integrationsPublicRoutes);
 // the controller). Mounted BEFORE the auth catch-all so the agent never
 // needs a JWT.
 app.use(`${V1}/integrations/tally`, tallyAgentPublicRoutes);
+
+// ── Internal cron endpoints (NO user JWT) ───────────────────────
+// Invoked by pg_cron via a Supabase Edge Function. Each endpoint in
+// this router enforces its own shared-secret bearer check (see
+// requireEdgeSecret in cron.routes.ts) so unauthenticated callers get
+// a 401 immediately. Mounted BEFORE the auth catch-all so requests
+// don't get short-circuited by requireAuth (which would 401 on a
+// missing Supabase JWT).
+app.use(`${V1}/cron`, cronRoutes);
 
 // ── Demo intercept for non-CRM modules ──────────────────────────
 // Mounted before the protected route handlers so demo-org requests get
