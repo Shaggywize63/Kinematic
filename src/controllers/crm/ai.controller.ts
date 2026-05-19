@@ -3,6 +3,8 @@ import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, badRequest, notFound } from '../../utils';
 import { AIService } from '../../services/ai.service';
+import { chatWithTools } from '../../services/crm/ai/aiClient';
+import { toAnthropicTools, executeTool } from '../../services/crm/ai/kiniTools.service';
 
 function computeLeadScore(lead: Record<string, unknown>): { score: number; grade: string; breakdown: Record<string, number> } {
   const breakdown: Record<string, number> = {};
@@ -201,29 +203,58 @@ export const summarizeDeal = asyncHandler(async (req: AuthRequest, res: Response
   }
 });
 
+/**
+ * KINI chat endpoint — agentic. Wires Anthropic tool-use into the 17 CRM tools
+ * registered in kiniTools.service.ts so the model can search / create / update
+ * CRM records during a conversation instead of just answering with text.
+ *
+ * The mobile + dashboard clients already render the returned `cards` array
+ * (lead_list, deal_list, lead_created, etc.) — no client change required to
+ * see tool output as soon as this ships.
+ *
+ * Response shape:
+ *   { text: string, cards: ToolCard[], tool_calls: { name, args }[] }
+ */
 export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, client_id } = req.user!;
   const { messages, system, context } = req.body;
   if (!messages?.length) return badRequest(res, 'messages is required');
 
   const systemPrompt = [
     system || '',
-    'You are KINI, Kinematic\'s AI assistant for the CRM module.',
-    context?.module === 'crm' ? 'The user is working in the CRM. Help them with leads, deals, accounts, contacts, activities, and pipeline management.' : '',
+    "You are KINI, Kinematic's agentic CRM copilot.",
+    'You have tools to search, create, update, and convert CRM records (leads, deals, contacts, accounts, tasks, activities).',
+    'When the user describes an action ("add a lead", "log this call", "create a deal for Acme worth 2 lakh"), CALL the matching tool — do not just explain how to do it manually.',
+    'When the user asks for data ("top leads", "deals closing this week"), call the appropriate read tool.',
+    'After tools run, confirm what was done in 1-2 short sentences. The UI renders rich cards for tool results — do not repeat full record details in the text.',
+    'Default currency is INR (₹). Indian numbering: "2 lakh" = 200000, "1 crore" = 10000000.',
+    context?.module === 'crm' ? 'The user is in the CRM module.' : '',
   ].filter(Boolean).join(' ');
 
   try {
-    const text = await AIService.callKiniAI({
+    const result = await chatWithTools({
+      org_id,
       model: 'claude-sonnet-4-6',
-      max_tokens: 1000,
+      max_tokens: 1500,
+      max_turns: 6,
       system: systemPrompt,
+      tools: toAnthropicTools(),
       messages,
+      onToolCall: async (name, args) => {
+        const r = await executeTool(org_id, client_id ?? null, name, args as Record<string, unknown>);
+        return r ?? { data: { error: `Unknown tool: ${name}` } };
+      },
     });
-    return ok(res, { text, cards: [] });
+    return ok(res, {
+      text: result.reply,
+      cards: result.cards,
+      tool_calls: result.tool_calls.map((t) => ({ name: t.name, args: t.args })),
+    });
   } catch (e: any) {
     if (e.code === 'CONFIG_ERROR') {
-      return ok(res, { text: 'AI features require an Anthropic API key. Please set ANTHROPIC_API_KEY in your environment and restart the server.', cards: [] });
+      return ok(res, { text: 'AI features require ANTHROPIC_API_KEY to be set on the server.', cards: [], tool_calls: [] });
     }
-    return ok(res, { text: 'I encountered an error processing your request. Please try again.', cards: [] });
+    console.error('[kini.chat] error:', e?.message || e);
+    return ok(res, { text: 'I hit an error processing that — try again?', cards: [], tool_calls: [] });
   }
 });
