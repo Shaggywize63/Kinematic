@@ -384,6 +384,13 @@ export async function convertLead(org_id: string, id: string, opts: {
   const lead = await getLead(org_id, id);
   if (lead.status === 'converted') throw new AppError(400, 'Lead already converted', 'ALREADY_CONVERTED');
 
+  // Convert inherits the source lead's client_id onto every downstream
+  // record (account, contact, deal). Without this, the new rows land with
+  // client_id=null and the strict client scoping in crm.routes.ts hides
+  // them from the user who just created them — looked exactly like
+  // "convert did nothing" because they vanished from the filtered list.
+  const leadClientId = (lead.client_id ?? null) as string | null;
+
   let account_id: string | null = null;
   if (lead.company) {
     const domain = lead.email?.split('@')[1] || null;
@@ -393,7 +400,8 @@ export async function convertLead(org_id: string, id: string, opts: {
       account_id = existingAccount.id;
     } else {
       const { data: acc, error: accErr } = await supabaseAdmin.from('crm_accounts').insert({
-        org_id, name: lead.company, domain, industry: lead.industry, owner_id: lead.owner_id,
+        org_id, client_id: leadClientId,
+        name: lead.company, domain, industry: lead.industry, owner_id: lead.owner_id,
         created_by: user_id ?? null,
       }).select('id').single();
       if (accErr) throw new AppError(500, accErr.message, 'DB_ERROR');
@@ -409,7 +417,7 @@ export async function convertLead(org_id: string, id: string, opts: {
       contact_id = existingContact.id;
     } else {
       const { data: c, error: cErr } = await supabaseAdmin.from('crm_contacts').insert({
-        org_id, account_id,
+        org_id, client_id: leadClientId, account_id,
         first_name: lead.first_name, last_name: lead.last_name, email: lead.email,
         phone: lead.phone, title: lead.title, owner_id: lead.owner_id,
         created_by: user_id ?? null,
@@ -435,7 +443,7 @@ export async function convertLead(org_id: string, id: string, opts: {
     }
 
     const { data: deal, error: dErr } = await supabaseAdmin.from('crm_deals').insert({
-      org_id, pipeline_id, stage_id,
+      org_id, client_id: leadClientId, pipeline_id, stage_id,
       name: opts.deal_name || `${lead.company || lead.email || 'New deal'} — Opportunity`,
       account_id, primary_contact_id: contact_id, lead_id: id,
       amount, owner_id: lead.owner_id, source_id: lead.source_id,
