@@ -127,6 +127,50 @@ async function verifyToken(token: string): Promise<{ sub: string; exp?: number; 
   }
 }
 
+/**
+ * Single-device login enforcement (mobile only).
+ *
+ * Mobile clients identify themselves via the X-Kinematic-Platform header
+ * ("android" or "ios"). On a mobile request, if the user row has an
+ * active_session_id set, the request's X-Session-Id header must match.
+ * Mismatch → 401 with `code: 'DEVICE_REPLACED'`, telling the mobile to
+ * clear local credentials and force-logout.
+ *
+ * Returns true if the request should be REJECTED (handler will send 401).
+ * Returns false when the request is allowed to continue (no enforcement,
+ * or session matches).
+ *
+ * Three scenarios that fall through (no rejection):
+ *   - Non-mobile platform (web dashboard, server-to-server): not enforced.
+ *   - User has never logged in via the new build (active_session_id IS NULL).
+ *   - User has logged out (clear_user_session set active_session_id to NULL).
+ */
+function rejectIfStaleSession(req: AuthRequest, res: Response, user: AuthRequest['user']): boolean {
+  const platform = String(req.headers['x-kinematic-platform'] || '').toLowerCase();
+  if (platform !== 'android' && platform !== 'ios') return false;
+
+  const activeSessionId = (user as any)?.active_session_id as string | null | undefined;
+  if (!activeSessionId) return false;
+
+  const headerSessionId = String(req.headers['x-session-id'] || '').trim();
+  if (headerSessionId && headerSessionId === activeSessionId) return false;
+
+  // Mismatch — kick the device. Also nuke this user from the auth cache
+  // so the next request (from any device using the same cached entry)
+  // re-fetches a fresh profile instead of hitting the same stale row.
+  invalidateAuthCache((u) => u?.id === user?.id);
+
+  const deviceLabel = (user as any)?.active_session_device || 'another device';
+  res.status(401).json({
+    success: false,
+    error: 'DEVICE_REPLACED',
+    code: 'DEVICE_REPLACED',
+    message: `Your account was just signed in on ${deviceLabel}. This device has been signed out.`,
+    device: deviceLabel,
+  });
+  return true;
+}
+
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
@@ -158,6 +202,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // Hot path — cache hit avoids both JWT verification AND profile lookup.
   const cached = cacheGet(token);
   if (cached) {
+    if (rejectIfStaleSession(req, res, cached)) return;
     req.user = cached;
     req.accessToken = token;
     return next();
@@ -170,7 +215,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const [profileRes, permsRes, citiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
-      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active')
+      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, active_session_id, active_session_device')
       .eq('id', verified.sub)
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', verified.sub),
@@ -215,6 +260,13 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
   } as AuthRequest['user'];
+
+  // Session check happens AFTER we have the fresh profile (with the
+  // current active_session_id straight from the DB). Cached entries hit
+  // the same check above against the cached value — which is invalidated
+  // on every session rotation via invalidateAuthCache(), so cache hits
+  // can't ride a stale session_id past this gate.
+  if (rejectIfStaleSession(req, res, user)) return;
 
   cacheSet(token, user, verified.exp);
   req.user = user;
