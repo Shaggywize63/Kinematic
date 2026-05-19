@@ -17,6 +17,11 @@ export interface AuthUser {
   assigned_cities?: string[];    // IDs of assigned cities
   enabled_modules?: string[];   // module IDs enabled for this user's client (entitlement)
   enabled_packages?: string[];  // package SKUs enabled for this user's client
+  // Single-device login enforcement. Set by /auth/login on mobile platforms;
+  // middleware compares X-Session-Id header against this. NULL = legacy or
+  // dashboard session, enforcement is skipped.
+  active_session_id?: string;
+  active_session_device?: string;
 }
 
 export type AuthRequest = Request & {
