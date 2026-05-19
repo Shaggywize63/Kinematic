@@ -52,6 +52,22 @@ async function getLocationPingIntervalSeconds(orgId: string | null | undefined):
   return DEFAULT_LOCATION_PING_INTERVAL_SECONDS;
 }
 
+// Resolves the org's B2B/B2C mode so mobile + dashboard can hide irrelevant
+// input fields. Defaults to 'both' when no crm_settings row exists yet —
+// preserves today's "show everything" behaviour for orgs that haven't
+// configured the picker.
+type BusinessType = 'b2b' | 'b2c' | 'both';
+async function getCrmBusinessType(orgId: string | null | undefined): Promise<BusinessType> {
+  if (!orgId) return 'both';
+  const { data } = await supabaseAdmin
+    .from('crm_settings')
+    .select('business_type')
+    .eq('org_id', orgId)
+    .maybeSingle();
+  const v = (data as any)?.business_type;
+  return v === 'b2b' || v === 'b2c' || v === 'both' ? v : 'both';
+}
+
 /**
  * Build a human-readable device label for the kicked-device toast.
  * Examples:
@@ -101,6 +117,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
         email: 'demo@kinematic.com',
         role: 'super_admin',
         is_active: true,
+        business_type: 'both',
         permissions: [
           'dashboard', 'analytics', 'users', 'attendance', 'zones', 'inventory',
           'form_builder', 'reports', 'broadcast', 'broadcasts', 'grievances',
@@ -268,6 +285,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
   }
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds(userProfile.org_id);
+  const businessType = await getCrmBusinessType(userProfile.org_id);
 
   return ok(res, {
     access_token: session.session.access_token,
@@ -280,6 +298,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
       enabled_modules: entitlements.enabled_modules,
       enabled_packages: entitlements.enabled_packages,
       location_ping_interval_seconds: locationPingIntervalSeconds,
+      business_type: businessType,
       active_session_id: issuedSessionId,
     },
   });
@@ -361,6 +380,7 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
   });
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds((data as any)?.org_id);
+  const businessType = await getCrmBusinessType((data as any)?.org_id);
 
   const result = {
     ...data,
@@ -368,6 +388,7 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
     location_ping_interval_seconds: locationPingIntervalSeconds,
+    business_type: businessType,
   };
   return ok(res, result);
 });
