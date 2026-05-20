@@ -19,8 +19,22 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { DEMO_ORG_ID, isDemo, getMockCities, getMockStores, getMockActivities } from '../utils/demoData';
 
+interface CrudOpts {
+  /**
+   * When true, READ operations (list/getOne) return rows that are EITHER
+   * tenant-scoped (`client_id = picker`) OR org-shared reference data
+   * (`client_id IS NULL`). Writes still respect strict tenant scoping.
+   *
+   * Used for reference tables like `cities` where the 868 India-wide rows
+   * are seeded with `client_id=NULL` and every client should see them
+   * alongside any custom cities they add themselves. Default `false` —
+   * stores / skus / assets / activities stay strictly tenant-isolated.
+   */
+  sharedWithOwn?: boolean;
+}
+
 // ─── Helper: build a generic CRUD controller for a table ───
-export function buildCRUD(tableName: string, requiredFields: string[] = ['name']) {
+export function buildCRUD(tableName: string, requiredFields: string[] = ['name'], opts: CrudOpts = {}) {
 
   const list = asyncHandler<AuthRequest>(async (req, res) => {
     const user = req.user!;
@@ -41,16 +55,20 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     //   2. ?client_id=    — explicit query param override (e.g. server-to-server).
     //   3. X-Client-Id    — global client picker, auto-attached by dashboard api.ts.
     //   4. none           — platform admin with no picker → see all in org.
-    // Without #3, a super_admin selecting "Tata Tiscon" in the picker still
-    // saw cities/stores created under Kinematic (because only #1 and #2 were
-    // honoured), leaking test data across tenant boundaries.
+    //
+    // For tables flagged `sharedWithOwn` (e.g. `cities`), the filter also
+    // includes org-level reference rows (`client_id IS NULL`) so every
+    // client sees the India seed data + their own custom rows.
     const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
-    if (isUUID(user.client_id)) {
-      q = q.eq('client_id', user.client_id);
-    } else if (isUUID(req.query.client_id as string)) {
-      q = q.eq('client_id', req.query.client_id as string);
-    } else if (isUUID(headerClientId)) {
-      q = q.eq('client_id', headerClientId);
+    const targetCid: string | null = isUUID(user.client_id) ? (user.client_id as string)
+      : isUUID(req.query.client_id as string) ? (req.query.client_id as string)
+      : isUUID(headerClientId) ? (headerClientId as string)
+      : null;
+
+    if (targetCid) {
+      q = opts.sharedWithOwn
+        ? q.or(`client_id.is.null,client_id.eq.${targetCid}`)
+        : q.eq('client_id', targetCid);
     }
 
     const { data, error } = await q.order('created_at', { ascending: false });
@@ -72,12 +90,15 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       .from(tableName).select('*').eq('id', id).eq('org_id', user.org_id);
 
     const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
-    if (isUUID(user.client_id)) {
-      q = q.eq('client_id', user.client_id);
-    } else if (isUUID(req.query.client_id as string)) {
-      q = q.eq('client_id', req.query.client_id as string);
-    } else if (isUUID(headerClientId)) {
-      q = q.eq('client_id', headerClientId);
+    const targetCid: string | null = isUUID(user.client_id) ? (user.client_id as string)
+      : isUUID(req.query.client_id as string) ? (req.query.client_id as string)
+      : isUUID(headerClientId) ? (headerClientId as string)
+      : null;
+
+    if (targetCid) {
+      q = opts.sharedWithOwn
+        ? q.or(`client_id.is.null,client_id.eq.${targetCid}`)
+        : q.eq('client_id', targetCid);
     }
 
     const { data, error } = await q.single();
@@ -122,6 +143,9 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       .from(tableName).update({ ...rest, updated_at: new Date().toISOString() })
       .eq('id', id).eq('org_id', user.org_id);
 
+    // Writes stay STRICT — even for `sharedWithOwn` tables. A client can't
+    // edit the global rows (`client_id IS NULL`); only platform admins
+    // with no picker selected can modify those.
     const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
     if (isUUID(user.client_id)) {
       q = q.eq('client_id', user.client_id);
@@ -146,6 +170,8 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     let q = supabaseAdmin
       .from(tableName).delete().eq('id', id).eq('org_id', user.org_id);
 
+    // Same as update — deletes are strict so clients can't accidentally
+    // remove org-shared reference rows.
     const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
     if (isUUID(user.client_id)) {
       q = q.eq('client_id', user.client_id);
@@ -170,8 +196,12 @@ function getSelect(table: string): string {
 }
 
 // ── Export individual controllers ──
-export const citiesCtrl   = buildCRUD('cities',   ['name', 'state']);
-export const storesCtrl   = buildCRUD('stores',   ['name']);
-export const skusCtrl     = buildCRUD('skus',     ['sku_code', 'name']);
-export const assetsCtrl   = buildCRUD('assets',   ['name']);
+// `cities` is reference data (868 India rows seeded with client_id=NULL).
+// Every client sees the global set + their own additions; only platform
+// admins (no picker) can edit/delete the shared rows. Other resources
+// stay strictly tenant-isolated.
+export const citiesCtrl   = buildCRUD('cities',     ['name', 'state'], { sharedWithOwn: true });
+export const storesCtrl   = buildCRUD('stores',     ['name']);
+export const skusCtrl     = buildCRUD('skus',       ['sku_code', 'name']);
+export const assetsCtrl   = buildCRUD('assets',     ['name']);
 export const activitiesCtrl = buildCRUD('activities', ['name']);
