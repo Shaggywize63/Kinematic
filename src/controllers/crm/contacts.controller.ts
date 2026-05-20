@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound } from '../../utils';
+import { getEffectiveCityNames } from '../../middleware/rbac';
 
 export const listContacts = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
@@ -11,6 +12,13 @@ export const listContacts = asyncHandler(async (req: AuthRequest, res: Response)
     .eq('org_id', org_id).is('deleted_at', null);
   if (account_id) q = q.eq('account_id', account_id);
   if (owner_id) q = q.eq('owner_id', owner_id);
+  // City geo-tag enforcement (role ∩ user). Empty intersection → 0 rows;
+  // null → no restriction. Mirrors listLeads.
+  const effectiveCities = getEffectiveCityNames(req.user);
+  if (effectiveCities !== null) {
+    if (effectiveCities.length === 0) return ok(res, []);
+    q = q.in('city', effectiveCities);
+  }
   const lim = Math.min(500, parseInt(limit) || 100);
   const pg = Math.max(1, parseInt(page) || 1);
   q = q.range((pg - 1) * lim, pg * lim - 1).order('created_at', { ascending: false });

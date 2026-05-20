@@ -75,3 +75,36 @@ export function getCityFilter(req: AuthRequest) {
 
   return [];
 }
+
+/**
+ * Returns the effective city NAMES this user is allowed to see, for CRM
+ * record-geo-tag filtering (crm_leads.city, crm_contacts.city — both text).
+ *
+ *   null  → no restriction (super_admin, or neither role nor user defines
+ *           a scope). Caller should NOT filter at all.
+ *   []    → restriction active but no overlap (intentionally empty). Caller
+ *           SHOULD filter to zero rows.
+ *   [...] → restrict CRM reads to records whose city is in this list.
+ *
+ * Model: hierarchy role's `assigned_cities` is the upper cap; user-level
+ * `assigned_city_names` narrows further. Empty user-level means "inherit
+ * the role's full list". Empty role list means "no role-level cap" — the
+ * user list is the scope. Both empty → null (no restriction).
+ */
+export function getEffectiveCityNames(user: AuthRequest['user']): string[] | null {
+  if (!user) return null;
+  // Platform-tier users see everything regardless of city.
+  if (user.role === 'super_admin' || user.role === 'admin') return null;
+
+  const roleList = (user.role_assigned_cities || []).filter(Boolean);
+  const userList = (user.assigned_city_names || []).filter(Boolean);
+
+  if (roleList.length === 0 && userList.length === 0) return null;
+
+  if (userList.length === 0) return roleList.slice();          // user inherits role
+  if (roleList.length === 0) return userList.slice();          // no role cap
+
+  // Both defined → intersect, capping user to role.
+  const roleSet = new Set(roleList);
+  return userList.filter((c) => roleSet.has(c));
+}
