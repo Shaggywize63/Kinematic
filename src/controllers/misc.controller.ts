@@ -210,7 +210,11 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     parseInt(req.query.limit as string) || 100
   );
 
-  let query = supabaseAdmin.from('users').select('*', { count: 'exact' });
+  // Join the hierarchy role's name so the Team Members / Admins lists can
+  // show a real designation (Business Manager, Consumer Champion, etc.)
+  // instead of leaking internal preset roles. Stamped on each row as
+  // `org_role_name` below.
+  let query = supabaseAdmin.from('users').select('*, org_role:org_roles!org_role_id(name)', { count: 'exact' });
 
   const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager', 'sub_admin', 'main_admin', 'client'].includes(user.role?.toLowerCase());
   const isSuper = user.role?.toLowerCase() === 'super_admin';
