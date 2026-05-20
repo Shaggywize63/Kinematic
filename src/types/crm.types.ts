@@ -167,12 +167,40 @@ export interface Deal {
   updated_at: string;
 }
 
+/**
+ * Snapshot of the signals the recommender considered + the closing plan
+ * it produced. Surfaced to the UI in the "How is this calculated?"
+ * modal so reps see *why* this action was chosen.
+ */
+export interface NextBestActionMethodology {
+  signals: {
+    stage: { name: string | null; type: string | null; probability: number } | null;
+    days_in_stage: number | null;
+    deal_age_days: number;
+    win_probability: number | null;
+    activities_30d_total: number;
+    activities_30d_by_type: Record<string, number>;
+    last_activity_at: string | null;
+    last_activity_type: string | null;
+    days_since_last_touch: number | null;
+    stage_transitions: number;
+  };
+  closing_plan: Array<{
+    step: number;
+    action: string;
+    rationale: string;
+    when: 'now' | 'today' | 'this_week' | 'next_week';
+  }>;
+  reasoning: string;
+}
+
 export interface NextBestAction {
   action: 'call' | 'email' | 'meeting' | 'send_proposal' | 'nurture' | 'disqualify';
-  priority: 'high' | 'med' | 'low';
+  priority: 'high' | 'med' | 'low' | 'medium';
   reason: string;
   suggested_template_id?: string | null;
   suggested_when: 'now' | 'today' | 'this_week' | 'next_week';
+  methodology?: NextBestActionMethodology;
 }
 
 export interface Activity {
@@ -299,12 +327,12 @@ export interface DashboardSummary {
   open_deal_value: number;
   won_deals_30d: number;
   won_revenue_30d: number;
-  win_rate_30d: number;          // 0-1 fraction
+  win_rate_30d: number;
   avg_deal_size: number;
   avg_sales_cycle_days: number;
   pipeline_velocity: number;
   activities_7d: number;
-  conversion_rate: number;        // 0-1 fraction
+  conversion_rate: number;
   by_stage: Array<{ stage: string; count: number; value: number }>;
   by_owner: Array<{ owner: string; count: number; value: number }>;
 }
