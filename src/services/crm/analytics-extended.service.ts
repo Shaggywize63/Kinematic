@@ -186,7 +186,19 @@ export async function wonReasons(org_id: string, client_id: string | null = null
   return Array.from(map.entries()).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count);
 }
 
-// 7. Stage conversion — % advanced between adjacent pipeline stages
+/**
+ * Stage conversion — % of deals that advanced between each pair of
+ * adjacent pipeline stages.
+ *
+ * Was reading `history:crm_deal_history(field, new_value)` — neither
+ * column exists on the real schema (the table stores `to_stage_id`
+ * directly, not generic field/value rows). The select silently 500s on
+ * PostgREST. Switched to the actual schema:
+ *   * pull `to_stage_id` from every history row
+ *   * compute each deal's furthest stage by mapping those UUIDs to
+ *     pipeline positions
+ *   * compare pairs of adjacent positions for the entered/advanced rate
+ */
 export async function stageConversion(org_id: string, pipeline_id: string | undefined, client_id: string | null = null) {
   let sq = supabaseAdmin.from('crm_deal_stages')
     .select('id, name, position, pipeline_id')
@@ -197,20 +209,22 @@ export async function stageConversion(org_id: string, pipeline_id: string | unde
   if (!stages?.length) return [];
 
   let dq = supabaseAdmin.from('crm_deals')
-    .select('id, stage_id, pipeline_id, history:crm_deal_history(field, new_value)')
+    .select('id, stage_id, pipeline_id, history:crm_deal_history(to_stage_id)')
     .eq('org_id', org_id).is('deleted_at', null);
   if (pipeline_id) dq = dq.eq('pipeline_id', pipeline_id);
   dq = withClient(dq, client_id);
   const { data: deals } = await dq;
   if (!deals?.length) return [];
 
-  const stageOrder = new Map((stages as Array<{ id: string; name: string; position: number }>).map(s => [s.id, s.position]));
+  const stageOrder = new Map(
+    (stages as Array<{ id: string; name: string; position: number }>).map((s) => [s.id, s.position]),
+  );
   const maxByDeal = new Map<string, number>();
-  for (const d of deals as Array<{ id: string; stage_id: string; history?: Array<{ field: string; new_value: any }> }>) {
+  for (const d of deals as Array<{ id: string; stage_id: string; history?: Array<{ to_stage_id: string | null }> }>) {
     let maxPos = stageOrder.get(d.stage_id) ?? 0;
     for (const h of d.history ?? []) {
-      if (h.field === 'stage_id' && typeof h.new_value === 'string') {
-        const p = stageOrder.get(h.new_value);
+      if (h.to_stage_id) {
+        const p = stageOrder.get(h.to_stage_id);
         if (p != null && p > maxPos) maxPos = p;
       }
     }
