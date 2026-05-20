@@ -42,11 +42,62 @@ export async function getDeal(org_id: string, id: string) {
   return data;
 }
 
+/**
+ * Resolve a sensible pipeline + opening stage when the caller didn't
+ * supply one. Lead → deal conversions, CSV imports, mobile creates and
+ * single-pipeline clients all hit this path: forcing a dropdown of one
+ * option (or, worse, a 400 because pipeline_id is missing) is bad UX.
+ *
+ * Selection rule, in order:
+ *   1. The single matching pipeline (if exactly one exists for the
+ *      org/client scope) — that one is implicitly the default.
+ *   2. The pipeline flagged `is_default = true`.
+ *   3. The first pipeline (oldest by created_at) as last resort.
+ *
+ * `client_id` scoping mirrors the rest of the CRM: client-pinned
+ * pipelines plus legacy NULL-stamped ones are both eligible.
+ */
+async function resolveDefaultPipeline(org_id: string, client_id?: string | null) {
+  let q = supabaseAdmin.from('crm_pipelines')
+    .select('id, is_default, client_id, created_at, crm_deal_stages(id, position, stage_type)')
+    .eq('org_id', org_id).eq('is_active', true).is('deleted_at', null)
+    .order('created_at', { ascending: true });
+  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  const { data } = await q;
+  const list = (data ?? []) as any[];
+  if (list.length === 0) return null;
+  if (list.length === 1) return list[0];
+  return list.find((p) => p.is_default) ?? list[0];
+}
+
 export async function createDeal(org_id: string, payload: Partial<Deal>, user_id?: string) {
+  let pipeline_id = payload.pipeline_id;
+  let stage_id = payload.stage_id;
+
+  // If the caller didn't pin a pipeline, fall back to the org/client's
+  // default. Critical for: lead conversion (no UI to pick), mobile
+  // create (form omits pipeline_id), CSV imports, and the "client has
+  // only one pipeline" UX where forcing a dropdown is noise.
+  if (!pipeline_id) {
+    const chosen = await resolveDefaultPipeline(org_id, payload.client_id ?? null);
+    if (!chosen) {
+      throw new AppError(400, 'No pipeline configured for this organisation. Create a pipeline before adding deals.', 'NO_PIPELINE');
+    }
+    pipeline_id = chosen.id;
+    if (!stage_id) {
+      const stages = ((chosen as any).crm_deal_stages || [])
+        // Open stages only, sorted by position — opening a deal directly
+        // into a Won/Lost stage would skip the funnel.
+        .filter((s: any) => s.stage_type !== 'won' && s.stage_type !== 'lost')
+        .sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0));
+      stage_id = stages[0]?.id;
+    }
+  }
+
   const insertRow = {
     org_id,
     client_id: payload.client_id ?? null,
-    pipeline_id: payload.pipeline_id, stage_id: payload.stage_id,
+    pipeline_id, stage_id,
     name: payload.name,
     account_id: payload.account_id ?? null,
     primary_contact_id: payload.primary_contact_id ?? null,
@@ -147,9 +198,6 @@ export async function dealHistory(org_id: string, id: string) {
   const rows = data ?? [];
   if (rows.length === 0) return rows;
 
-  // Batch-resolve every stage UUID referenced in this trail. One round-trip
-  // beats N+1 per row, and the set is bounded by the deal's lifetime
-  // (typically <20 transitions).
   const stageIds = Array.from(new Set(
     rows.flatMap((r: any) => [r.from_stage_id, r.to_stage_id]).filter(Boolean),
   )) as string[];
@@ -177,8 +225,6 @@ export async function dealHistory(org_id: string, id: string) {
       event_type,
       from_stage: fromStage,
       to_stage: toStage,
-      // Alias `changed_at` as `created_at` so generic timeline renderers
-      // (frontend uses `created_at`) work without a backend-aware helper.
       created_at: r.changed_at,
     };
   });
