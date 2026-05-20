@@ -309,7 +309,7 @@ export const getUserById = asyncHandler<AuthRequest>(async (req, res) => {
 })
 
 export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
-  const { name, mobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email } = req.body
+  const { name, mobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email, org_role_id } = req.body
   const admin = req.user!
 
   // Validate required fields
@@ -380,6 +380,10 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
       mobile:        mobile.trim(),
       email:         email?.trim() || null,
       role:          role || 'executive',
+      // Hierarchy role drives module access via org_roles.permissions; the
+      // legacy `role` column above only governs requireRole() route tiers.
+      // Both need to be set so the new user inherits the right scope.
+      org_role_id:   isUUID(org_role_id as string) ? org_role_id : null,
       zone_id:       zone_id       || null,
       supervisor_id: supervisor_id || null,
       employee_id:   employee_id   || null,
@@ -454,7 +458,11 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
 })
 
 export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
-  const allowed = ['name', 'mobile', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id']
+  // `org_role_id` is allowed here so admins can reassign the hierarchy role
+  // (and the modules it inherits) without having to delete + recreate. The
+  // column exists on `users`; missing it from this list silently dropped
+  // every hierarchy change posted from the dashboard.
+  const allowed = ['name', 'mobile', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id', 'org_role_id']
   const updates: any = {}
   for (const key of allowed) { 
     if (req.body[key] !== undefined && req.body[key] !== '') {
