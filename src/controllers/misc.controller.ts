@@ -198,6 +198,13 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   }
   
   const { role: filterRole, zone_id, is_active, client_id } = req.query;
+  // Dashboard's api.ts auto-attaches the active client picker as the
+  // X-Client-Id header on every request. Honour it as a fallback so the
+  // CRM Settings → Team Members page (and any other consumer that doesn't
+  // pass ?client_id=…) gets scoped to the picked tenant for platform
+  // admins. Header is advisory: client-pinned users are still constrained
+  // to their own JWT client_id below.
+  const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
   const { page, limit, offset } = getPagination(
     parseInt(req.query.page as string) || 1,
     parseInt(req.query.limit as string) || 100
@@ -215,15 +222,22 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   }
 
   if (isUUID(user.client_id)) {
-    // Client-scoped users (including privileged admins of a client) only
+    // Client-pinned users (including privileged admins of a client) only
     // see their own client's users. Platform-level admins (client_id=null)
     // were previously leaking in via an OR clause — they showed up as
     // assignable in every client's CRM, which doesn't match how CRM
     // ownership actually works.
     query = query.eq('client_id', user.client_id);
   } else if (isUUID(client_id as string)) {
+    // Explicit ?client_id= query param wins over the header.
     query = query.eq('client_id', client_id as string);
+  } else if (isUUID(headerClientId)) {
+    // Global client picker — sent as X-Client-Id by dashboard api.ts.
+    // Without this fallback, a super_admin browsing "Tata Tiscon" would
+    // see every user in the org because no client filter was applied.
+    query = query.eq('client_id', headerClientId);
   }
+  // else: platform admin with no picker selection → see all users.
 
   if (zone_id) query = query.eq('zone_id', zone_id as string);
   if (is_active !== undefined) query = query.eq('is_active', is_active === 'true');
@@ -344,10 +358,24 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
 
   const authId = authData.user.id
 
+    // Stamp the new user with the correct tenant. Priority:
+    //   1. Explicit client_id in the request body (e.g. bulk import API).
+    //   2. X-Client-Id header — the global picker set by dashboard api.ts.
+    //      Without this, a platform admin browsing "Tata Tiscon" would
+    //      create users with client_id=null and they'd never show up in
+    //      that client's scoped lists.
+    //   3. Admin's own client_id (client-pinned admins).
+    //   4. null (platform-level user, rare).
+    const headerClientId = req.headers['x-client-id'] as string | undefined;
+    const pickedClientId =
+      isUUID(req.body.client_id as string) ? (req.body.client_id as string)
+      : isUUID(headerClientId)              ? headerClientId
+      : (admin.client_id || null);
+
     const userData: any = {
       id:            authId,
       org_id:        admin.org_id,
-      client_id:     req.body.client_id || admin.client_id || null,
+      client_id:     pickedClientId,
       name:          name.trim(),
       mobile:        mobile.trim(),
       email:         email?.trim() || null,
@@ -989,4 +1017,3 @@ export const nukeTestData = asyncHandler<AuthRequest>(async (req, res) => {
 
   sendSuccess(res, { user_id: userId, user_name: user.name, stats }, 'Data Nuke Complete');
 });
-
