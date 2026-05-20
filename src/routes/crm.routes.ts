@@ -386,8 +386,33 @@ pipelines.get('/:id', wrap(async (req, res) => {
   const sortedStages = Array.isArray(data.stages) ? [...data.stages].sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0)) : [];
   res.json({ ...data, stages: sortedStages });
 }));
-pipelines.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_pipelines', orgId(req), req.params.id, parse(v.pipelineSchema.partial(), req.body), userId(req)))));
+pipelines.patch('/:id', wrap(async (req, res) => {
+  const body = parse(v.pipelineSchema.partial(), req.body);
+  // Promoting a pipeline to default: atomically demote every other
+  // pipeline this tenant owns so the response never shows two flagged
+  // defaults at once. We do NOT touch shared (client_id IS NULL)
+  // pipelines — those belong to the platform; the per-tenant choice
+  // wins over the shared one in the effective-default lookup.
+  if (body.is_default === true) {
+    const cid = clientId(req as any);
+    if (cid) {
+      // Tenant user — demote their own other pipelines only.
+      await supabaseAdmin.from('crm_pipelines')
+        .update({ is_default: false })
+        .eq('org_id', orgId(req))
+        .eq('client_id', cid)
+        .neq('id', req.params.id);
+    } else {
+      // Platform admin — demote the other shared pipelines.
+      await supabaseAdmin.from('crm_pipelines')
+        .update({ is_default: false })
+        .eq('org_id', orgId(req))
+        .is('client_id', null)
+        .neq('id', req.params.id);
+    }
+  }
+  res.json(await crud.update('crm_pipelines', orgId(req), req.params.id, body, userId(req)));
+}));
 pipelines.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_pipelines', orgId(req), req.params.id); res.status(204).end(); }));
 pipelines.get('/:id/stages', wrap(async (req, res) => res.json(
   await crud.list('crm_deal_stages', orgId(req), { pipeline_id: req.params.id }, { softDelete: false, defaultSort: { column: 'position', ascending: true } })

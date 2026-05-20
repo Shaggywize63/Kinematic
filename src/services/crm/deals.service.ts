@@ -67,7 +67,13 @@ async function resolveDefaultPipeline(org_id: string, client_id?: string | null)
   const list = (data ?? []) as any[];
   if (list.length === 0) return null;
   if (list.length === 1) return list[0];
-  return list.find((p) => p.is_default) ?? list[0];
+  // Prefer the tenant-owned default over the shared/global default — a
+  // client that has explicitly picked their own default shouldn't fall
+  // back to the platform's pipeline. If they haven't picked one, use the
+  // shared default; otherwise the first pipeline in the list.
+  return list.find((p) => p.is_default && p.client_id)
+      ?? list.find((p) => p.is_default)
+      ?? list[0];
 }
 
 export async function createDeal(org_id: string, payload: Partial<Deal>, user_id?: string) {
