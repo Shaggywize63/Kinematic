@@ -36,10 +36,21 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       .select(getSelect(tableName))
       .eq('org_id', user.org_id);
 
+    // Tenant scoping precedence (mirrors getUsers in misc.controller.ts):
+    //   1. JWT client_id  — client-pinned users stay in their tenant.
+    //   2. ?client_id=    — explicit query param override (e.g. server-to-server).
+    //   3. X-Client-Id    — global client picker, auto-attached by dashboard api.ts.
+    //   4. none           — platform admin with no picker → see all in org.
+    // Without #3, a super_admin selecting "Tata Tiscon" in the picker still
+    // saw cities/stores created under Kinematic (because only #1 and #2 were
+    // honoured), leaking test data across tenant boundaries.
+    const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
     if (isUUID(user.client_id)) {
       q = q.eq('client_id', user.client_id);
-    } else if (isUUID(req.query.client_id)) {
+    } else if (isUUID(req.query.client_id as string)) {
       q = q.eq('client_id', req.query.client_id as string);
+    } else if (isUUID(headerClientId)) {
+      q = q.eq('client_id', headerClientId);
     }
 
     const { data, error } = await q.order('created_at', { ascending: false });
@@ -59,9 +70,16 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     let q = supabaseAdmin
       .from(tableName).select('*').eq('id', id).eq('org_id', user.org_id);
-    
-    if (isUUID(user.client_id)) q = q.eq('client_id', user.client_id);
-    
+
+    const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
+    if (isUUID(user.client_id)) {
+      q = q.eq('client_id', user.client_id);
+    } else if (isUUID(req.query.client_id as string)) {
+      q = q.eq('client_id', req.query.client_id as string);
+    } else if (isUUID(headerClientId)) {
+      q = q.eq('client_id', headerClientId);
+    }
+
     const { data, error } = await q.single();
     if (error || !data) { notFound(res, `${tableName} record not found`); return; }
     ok(res, data);
@@ -74,10 +92,20 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     for (const f of requiredFields) {
       if (!body[f]) { badRequest(res, `${f} is required`); return; }
     }
-    const payload = { 
-      ...body, 
-      org_id: user.org_id, 
-      client_id: (isUUID(body.client_id) ? body.client_id : (isUUID(user.client_id) ? user.client_id : null))
+    // Stamp the new record with the correct tenant. Priority matches the
+    // list/update/remove precedence above so a platform admin creating a
+    // city while browsing "Tata Tiscon" gets a Tata-scoped row instead of
+    // a client_id=null ghost that nobody can find.
+    const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
+    const pickedClientId =
+      isUUID(body.client_id as string) ? (body.client_id as string)
+      : isUUID(headerClientId)          ? headerClientId
+      : (isUUID(user.client_id) ? user.client_id : null);
+
+    const payload = {
+      ...body,
+      org_id: user.org_id,
+      client_id: pickedClientId,
     };
     const { data, error } = await supabaseAdmin.from(tableName).insert(payload).select().single();
     if (error) { badRequest(res, error.message); return; }
@@ -93,9 +121,16 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     let q = supabaseAdmin
       .from(tableName).update({ ...rest, updated_at: new Date().toISOString() })
       .eq('id', id).eq('org_id', user.org_id);
-    
-    if (isUUID(user.client_id)) q = q.eq('client_id', user.client_id);
-    
+
+    const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
+    if (isUUID(user.client_id)) {
+      q = q.eq('client_id', user.client_id);
+    } else if (isUUID(req.query.client_id as string)) {
+      q = q.eq('client_id', req.query.client_id as string);
+    } else if (isUUID(headerClientId)) {
+      q = q.eq('client_id', headerClientId);
+    }
+
     const { data, error } = await q.select().single();
     if (error) { badRequest(res, error.message); return; }
     if (!data) { notFound(res, `${tableName} record not found`); return; }
@@ -110,9 +145,16 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     let q = supabaseAdmin
       .from(tableName).delete().eq('id', id).eq('org_id', user.org_id);
-    
-    if (isUUID(user.client_id)) q = q.eq('client_id', user.client_id);
-    
+
+    const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
+    if (isUUID(user.client_id)) {
+      q = q.eq('client_id', user.client_id);
+    } else if (isUUID(req.query.client_id as string)) {
+      q = q.eq('client_id', req.query.client_id as string);
+    } else if (isUUID(headerClientId)) {
+      q = q.eq('client_id', headerClientId);
+    }
+
     const { error } = await q;
     if (error) { badRequest(res, error.message); return; }
     ok(res, { deleted: true });
