@@ -10,6 +10,7 @@
  *   - strictJson     — reject non-JSON content-types on mutating routes
  *   - perRouteLimit  — small token-bucket factory for per-route limits
  *   - loginLimiter   — composite (IP + email) brute-force throttle
+ *   - validatePassword — password policy ({ ok, reason }) used by user create/update
  *
  * No semantic change to existing routes; this module is opt-in via app.ts.
  */
@@ -293,3 +294,68 @@ export const loginLimiter = rateLimit({
     });
   },
 });
+
+// ── 9. Password policy ──────────────────────────────────────────────────────
+// Lightweight VAPT-grade password validator used by user create / update /
+// reset flows. Returns `{ ok, reason }` so the controller can surface the
+// specific rule the user violated. Was previously referenced via
+// `require('../middleware/security').validatePassword(...)` but the function
+// itself was missing — that turned every user-with-password create/edit into
+// a 500 (TypeError: validatePassword is not a function).
+//
+// Policy (matches the comment block in misc.controller.ts):
+//   • length ≥ 10
+//   • not in the common-password denylist below
+//   • no 4+ repeated characters in a row (e.g. "aaaa")
+//   • no 6+ char keyboard / numeric sequence (e.g. "123456", "abcdef")
+//   • max 200 chars (DoS-budget on hashing)
+const COMMON_PASSWORDS = new Set<string>([
+  'password', 'password1', 'password12', 'password123', 'pass1234',
+  'qwerty', 'qwerty123', 'qwertyuiop', 'asdfghjkl',
+  'iloveyou', 'iloveyou1', 'admin', 'admin123', 'administrator',
+  'welcome', 'welcome1', 'welcome123', 'letmein', 'letmein123',
+  'monkey', 'dragon', 'sunshine', 'football', 'baseball', 'master',
+  'princess', 'kinematic', 'kinematic123', 'changeme', 'changeme123',
+  '1234567890', '0123456789', '1q2w3e4r5t', 'qazwsxedc',
+]);
+
+const SEQUENCES: string[] = [
+  'abcdefghijklmnopqrstuvwxyz',
+  'zyxwvutsrqponmlkjihgfedcba',
+  '0123456789',
+  '9876543210',
+  'qwertyuiop',
+  'asdfghjkl',
+  'zxcvbnm',
+  '1qaz2wsx3edc',
+];
+
+export function validatePassword(pw: unknown): { ok: true } | { ok: false; reason: string } {
+  if (typeof pw !== 'string') return { ok: false, reason: 'Password must be a string.' };
+  const p = pw;
+  if (p.length < 10) return { ok: false, reason: 'Password must be at least 10 characters.' };
+  if (p.length > 200) return { ok: false, reason: 'Password is too long (max 200 characters).' };
+
+  const lower = p.toLowerCase();
+
+  if (COMMON_PASSWORDS.has(lower)) {
+    return { ok: false, reason: 'This password is too common. Pick something less guessable.' };
+  }
+
+  // Run of 4+ same chars: "aaaa", "1111", "!!!!"
+  if (/(.)\1{3,}/.test(p)) {
+    return { ok: false, reason: 'Password cannot contain 4 or more repeated characters in a row.' };
+  }
+
+  // Common keyboard / numeric sequences (6 chars or longer chunk)
+  for (const seq of SEQUENCES) {
+    for (let i = 0; i <= seq.length - 6; i++) {
+      const slice = seq.slice(i, i + 6);
+      if (lower.includes(slice)) {
+        return { ok: false, reason: 'Password contains a common keyboard or numeric sequence (e.g. 123456, qwerty).' };
+      }
+    }
+  }
+
+  return { ok: true };
+}
