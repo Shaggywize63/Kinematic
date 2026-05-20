@@ -65,8 +65,14 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       : isUUID(headerClientId) ? (headerClientId as string)
       : null;
 
+    // `?own_only=true` opts out of the sharedWithOwn OR-NULL widen for the
+    // request — surfaces ONLY rows the tenant has explicitly added. Used by
+    // the user-assignment cities picker, which must not show the 868 global
+    // India seed cities (those are reference data, not the client's beat).
+    const ownOnly = String(req.query.own_only || '').toLowerCase() === 'true';
+
     if (targetCid) {
-      q = opts.sharedWithOwn
+      q = (opts.sharedWithOwn && !ownOnly)
         ? q.or(`client_id.is.null,client_id.eq.${targetCid}`)
         : q.eq('client_id', targetCid);
     }
