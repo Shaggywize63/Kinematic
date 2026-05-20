@@ -268,12 +268,22 @@ function resolveClientFilter(req: AuthRequest): string | null {
   return null;
 }
 
+// Reads use a "shared + own" pattern: every client sees the org-wide
+// reference data (rows with `client_id IS NULL`, e.g. the 36 Indian states
+// and 354 seed cities) AND their own custom additions. Writes stay strict
+// to the picked tenant via `resolveClientFilter`, so a client editing
+// "Mumbai" can never mutate the shared row — they can only add or update
+// their own copies. Super admin with no picker (cid=null) sees everything.
+function applySharedOrOwn<T extends { or: (s: string) => T; eq: (k: string, v: unknown) => T }>(q: T, cid: string | null): T {
+  if (!cid) return q;
+  return q.or(`client_id.is.null,client_id.eq.${cid}`);
+}
+
 export const states = {
   list: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
     let q = supabaseAdmin.from('crm_states').select('*').eq('org_id', org_id);
-    const cid = resolveClientFilter(req);
-    if (cid) q = q.eq('client_id', cid);
+    q = applySharedOrOwn(q as any, resolveClientFilter(req)) as any;
     const { data, error } = await q.order('name');
     if (error) return badRequest(res, error.message);
     return ok(res, data);
@@ -294,14 +304,18 @@ export const states = {
     const { org_id } = req.user!;
     let q = supabaseAdmin.from('crm_cities').select('*')
       .eq('org_id', org_id).eq('state_id', req.params.id);
-    const cid = resolveClientFilter(req);
-    if (cid) q = q.eq('client_id', cid);
+    q = applySharedOrOwn(q as any, resolveClientFilter(req)) as any;
     const { data, error } = await q.order('name');
     if (error) return badRequest(res, error.message);
     return ok(res, data);
   }),
   seedIndian: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
+    // The 36 Indian states + 354 seed cities already live in the database
+    // as client_id=NULL global reference rows. The read filter
+    // (applySharedOrOwn) surfaces them to every client automatically.
+    // This endpoint stays available for clients that want their OWN
+    // private copy (rare — usually for white-labelled deployments).
     const cid = resolveClientFilter(req);
     const rows = INDIAN_STATES.map((name) => ({ org_id, client_id: cid, name }));
     const { error } = await supabaseAdmin.from('crm_states').upsert(rows, { onConflict: 'org_id,name' });
@@ -316,8 +330,7 @@ export const cities = {
     const { state_id } = req.query as Record<string, string>;
     let q = supabaseAdmin.from('crm_cities').select('*').eq('org_id', org_id);
     if (state_id) q = q.eq('state_id', state_id);
-    const cid = resolveClientFilter(req);
-    if (cid) q = q.eq('client_id', cid);
+    q = applySharedOrOwn(q as any, resolveClientFilter(req)) as any;
     q = q.order('name');
     const { data, error } = await q;
     if (error) return badRequest(res, error.message);
@@ -337,13 +350,16 @@ export const cities = {
     const { org_id } = req.user!;
     let q = supabaseAdmin.from('crm_cities').select('*')
       .eq('id', req.params.id).eq('org_id', org_id);
-    const cid = resolveClientFilter(req);
-    if (cid) q = q.eq('client_id', cid);
+    q = applySharedOrOwn(q as any, resolveClientFilter(req)) as any;
     const { data, error } = await q.single();
     if (error || !data) return notFound(res, 'City not found');
     return ok(res, data);
   }),
   update: asyncHandler(async (req: AuthRequest, res: Response) => {
+    // Writes stay strict — a client can only edit rows they own. The
+    // shared/global rows (`client_id IS NULL`) are immutable from a
+    // client's perspective; a platform admin can edit them by clearing
+    // the picker.
     const { org_id } = req.user!;
     let q = supabaseAdmin.from('crm_cities')
       .update({ name: req.body.name }).eq('id', req.params.id).eq('org_id', org_id);
