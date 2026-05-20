@@ -24,6 +24,19 @@ export async function list(table: string, org_id: string, query: Record<string, 
   if (opts.softDelete !== false) q = q.is('deleted_at', null);
   for (const [k, v] of Object.entries(query)) {
     if (RESERVED.includes(k) || v === undefined || v === null || v === '') continue;
+    // `client_id` from the query string uses "shared + own" semantics —
+    // org-level reference rows (`client_id IS NULL`) stay visible
+    // alongside the picked client's own rows. This is the right
+    // semantic for lookup tables (states, cities, lead_sources,
+    // territories, etc.) where the India seed data sits at the org
+    // level and individual clients only add a few of their own. Tables
+    // that need real tenant isolation (leads, deals, contacts,
+    // accounts) use `clientScopedList` with `strictClient: true`
+    // instead, which never falls through to NULL.
+    if (k === 'client_id' && typeof v === 'string' && v.trim()) {
+      q = q.or(`client_id.is.null,client_id.eq.${v}`);
+      continue;
+    }
     q = q.eq(k, v as never);
   }
   if (query.q && opts.searchColumns?.length) {
