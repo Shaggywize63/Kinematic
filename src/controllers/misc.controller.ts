@@ -253,12 +253,19 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
   const userIds = (data || []).map((u: any) => u.id);
-  const [attRes, permRes] = await Promise.all([
-    userIds.length > 0 
+  const [attRes, permRes, cityRes] = await Promise.all([
+    userIds.length > 0
       ? supabaseAdmin.from('attendance').select('user_id, total_hours, status, checkin_at').eq('date', todayDate()).in('user_id', userIds)
       : { data: [] },
     userIds.length > 0
       ? supabaseAdmin.from('user_module_permissions').select('user_id, module_id').in('user_id', userIds)
+      : { data: [] },
+    // Join `user_city_assignments` so the Team Members table can show
+    // each user's assigned cities (count + names) without an N+1. The
+    // nested `cities!city_id(name)` resolves the city name in one round
+    // trip — falls back to bare id if the FK can't resolve.
+    userIds.length > 0
+      ? supabaseAdmin.from('user_city_assignments').select('user_id, city_id, cities!city_id(name)').in('user_id', userIds)
       : { data: [] }
   ]);
 
@@ -268,6 +275,21 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     const list = permMap.get(p.user_id) || [];
     list.push(p.module_id);
     permMap.set(p.user_id, list);
+  });
+  // city_id list AND name list — frontend uses ids for edit, names for
+  // the table column.
+  const cityIdMap = new Map<string, string[]>();
+  const cityNameMap = new Map<string, string[]>();
+  (cityRes.data || []).forEach((c: any) => {
+    const ids = cityIdMap.get(c.user_id) || [];
+    ids.push(c.city_id);
+    cityIdMap.set(c.user_id, ids);
+    const cityRel = Array.isArray(c.cities) ? c.cities[0] : c.cities;
+    if (cityRel?.name) {
+      const names = cityNameMap.get(c.user_id) || [];
+      names.push(cityRel.name);
+      cityNameMap.set(c.user_id, names);
+    }
   });
 
   const now = new Date().getTime();
@@ -281,6 +303,8 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
       u.hours_worked = 0; u.is_checked_in = false;
     }
     u.permissions = permMap.get(u.id) || [];
+    u.assigned_cities = cityIdMap.get(u.id) || [];
+    u.assigned_city_names = cityNameMap.get(u.id) || [];
     return u;
   });
 
