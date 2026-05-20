@@ -103,14 +103,63 @@ export const winRate = asyncHandler(async (req: AuthRequest, res: Response) => {
   })));
 });
 
+/**
+ * Average time a deal spends in each stage, in days.
+ *
+ * The previous implementation queried `crm_deal_history.created_at`
+ * (which doesn't exist — the column is `changed_at`) and then returned
+ * `[]` unconditionally. So this widget never showed real numbers, the
+ * UI just rendered placeholders.
+ *
+ * Now we use the `time_in_previous_stage_seconds` column that
+ * `updateDeal` already stamps on every stage transition. Grouping by
+ * `from_stage_id` gives us "how long did deals sit in stage X before
+ * leaving" — the answer the Sales Cycle report is asking. Stage names
+ * are resolved in one batched lookup and we sort by pipeline position
+ * so the funnel reads left-to-right.
+ */
 export const salesCycle = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
-  const { data, error } = await supabaseAdmin.from('crm_deal_history').select('from_stage_id,to_stage_id,created_at,deal_id')
-    .eq('org_id', org_id).order('created_at', { ascending: false })
-    .limit(2000);
+  const { data, error } = await supabaseAdmin.from('crm_deal_history')
+    .select('from_stage_id, time_in_previous_stage_seconds')
+    .eq('org_id', org_id)
+    .not('from_stage_id', 'is', null)
+    .not('time_in_previous_stage_seconds', 'is', null)
+    .order('changed_at', { ascending: false })
+    .limit(5000);
   if (error) return badRequest(res, error.message);
-  // Return stage names with placeholder days
-  return ok(res, []);
+
+  const byStage = new Map<string, { total: number; count: number }>();
+  for (const row of (data ?? []) as Array<{ from_stage_id: string; time_in_previous_stage_seconds: number }>) {
+    const k = row.from_stage_id;
+    const agg = byStage.get(k) ?? { total: 0, count: 0 };
+    agg.total += row.time_in_previous_stage_seconds;
+    agg.count += 1;
+    byStage.set(k, agg);
+  }
+  if (byStage.size === 0) return ok(res, []);
+
+  const stageIds = Array.from(byStage.keys());
+  const { data: stages } = await supabaseAdmin.from('crm_deal_stages')
+    .select('id, name, position, pipeline_id').in('id', stageIds);
+  const meta = new Map<string, { name: string; position: number; pipeline_id: string }>(
+    (stages ?? []).map((s: any) => [s.id, { name: s.name, position: s.position ?? 0, pipeline_id: s.pipeline_id }]),
+  );
+
+  const result = stageIds.map((id) => {
+    const agg = byStage.get(id)!;
+    const m = meta.get(id);
+    return {
+      stage_id: id,
+      stage: m?.name ?? 'Unknown',
+      position: m?.position ?? 0,
+      pipeline_id: m?.pipeline_id ?? null,
+      avg_days: Math.round((agg.total / agg.count) / 86400 * 10) / 10,
+      sample_count: agg.count,
+    };
+  }).sort((a, b) => a.position - b.position);
+
+  return ok(res, result);
 });
 
 export const forecast = asyncHandler(async (req: AuthRequest, res: Response) => {
