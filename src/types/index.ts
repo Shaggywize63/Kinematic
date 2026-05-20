@@ -15,6 +15,15 @@ export interface AuthUser {
   client_id?: string;             // client enterprise ID
   permissions?: string[];       // legacy per-user grants from user_module_permissions
   assigned_cities?: string[];    // IDs of assigned cities
+  // City NAMES resolved from user_city_assignments → cities.name. Used by
+  // city-scope enforcement because crm_leads.city / crm_contacts.city are
+  // stored as text (names), not UUIDs.
+  assigned_city_names?: string[];
+  // Cities the user's hierarchy role permits, as NAMES (org_roles.assigned_cities
+  // is a text[] of names). Treated as an upper cap — user-level can only
+  // narrow within this list.
+  org_role_id?: string;
+  role_assigned_cities?: string[];
   enabled_modules?: string[];   // module IDs enabled for this user's client (entitlement)
   enabled_packages?: string[];  // package SKUs enabled for this user's client
   // Single-device login enforcement. Set by /auth/login on mobile platforms;

@@ -112,7 +112,7 @@ export async function listLeads(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null } = {},
 ) {
   let q = supabaseAdmin.from('crm_leads').select('*')
     .eq('org_id', org_id).is('deleted_at', null);
@@ -120,6 +120,16 @@ export async function listLeads(
     q = options.strictClient
       ? q.eq('client_id', client_id)
       : q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  }
+  // City geo-tag scope. Honoured for every CRM read — the user's effective
+  // city set is computed once in the route layer via getEffectiveCityNames()
+  // and passed in. `null` means no restriction; `[]` means the role/user
+  // narrowed to an empty intersection (return zero rows).
+  if (options.effectiveCities !== undefined && options.effectiveCities !== null) {
+    if (options.effectiveCities.length === 0) {
+      return [] as Lead[];
+    }
+    q = q.in('city', options.effectiveCities);
   }
   if (filters.status) q = q.eq('status', String(filters.status));
   if (filters.lifecycle_stage) q = q.eq('lifecycle_stage', String(filters.lifecycle_stage));

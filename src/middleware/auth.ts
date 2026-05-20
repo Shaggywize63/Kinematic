@@ -212,14 +212,16 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (!verified) return unauthorized(res, 'Invalid or expired token');
 
   // Cold path — fetch profile + permissions + cities in parallel (was sequential).
+  // The cities join also resolves the city NAME because downstream RBAC
+  // filters CRM records by name (crm_leads.city/contacts.city are text columns).
   const [profileRes, permsRes, citiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
-      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, active_session_id, active_session_device')
+      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, active_session_id, active_session_device, org_role_id')
       .eq('id', verified.sub)
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', verified.sub),
-    supabaseAdmin.from('user_city_assignments').select('city_id').eq('user_id', verified.sub),
+    supabaseAdmin.from('user_city_assignments').select('city_id, cities!city_id(name)').eq('user_id', verified.sub),
   ]);
 
   if (profileRes.error || !profileRes.data) {
@@ -253,10 +255,35 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     orgId: profile.org_id,
   });
 
+  // City NAMES from the user_city_assignments join — used by CRM list
+  // queries because crm_leads.city / crm_contacts.city are TEXT (names).
+  const userCityIds: string[] = [];
+  const userCityNames: string[] = [];
+  for (const row of (citiesRes.data || []) as Array<{ city_id: string; cities: { name?: string } | { name?: string }[] | null }>) {
+    if (row.city_id) userCityIds.push(row.city_id);
+    const rel = Array.isArray(row.cities) ? row.cities[0] : row.cities;
+    if (rel?.name) userCityNames.push(rel.name);
+  }
+
+  // The hierarchy role caps the user's city access — load its assigned_cities
+  // (text[] of names) so getEffectiveCityNames() can intersect them with the
+  // user's own list. Skipped when the user has no hierarchy role attached.
+  let roleAssignedCities: string[] = [];
+  if (profile.org_role_id) {
+    const { data: roleRow } = await supabaseAdmin
+      .from('org_roles').select('assigned_cities')
+      .eq('id', profile.org_role_id).single();
+    if (Array.isArray(roleRow?.assigned_cities)) {
+      roleAssignedCities = (roleRow!.assigned_cities as string[]).filter(Boolean);
+    }
+  }
+
   const user = {
     ...profile,
     permissions: isDemoEmail ? DEMO_PERMISSIONS : (permsRes.data?.map(p => p.module_id) || []),
-    assigned_cities: citiesRes.data?.map(c => c.city_id) || [],
+    assigned_cities: userCityIds,
+    assigned_city_names: userCityNames,
+    role_assigned_cities: roleAssignedCities,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
   } as AuthRequest['user'];

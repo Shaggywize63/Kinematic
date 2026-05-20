@@ -10,7 +10,9 @@ import multer from 'multer';
 import { z, ZodError } from 'zod';
 import { requireAuth } from '../middleware/auth';
 import { requireModule } from '../middleware/rbac';
+import * as rbac from '../middleware/rbac';
 import { AppError } from '../utils';
+import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
 
 import { demoCrmMiddleware } from '../utils/demoCrm';
@@ -181,7 +183,10 @@ function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> 
 const leads = express.Router();
 leads.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  return res.json(await stampOwnerNames(await leadsSvc.listLeads(orgId(req), req.query, scope.id, { strictClient: scope.strict })));
+  // City geo-tag enforcement: pass the user's effective city set (role ∩
+  // user) so listLeads can restrict by crm_leads.city. null = no scope.
+  const effectiveCities = rbac.getEffectiveCityNames((req as AuthRequest).user);
+  return res.json(await stampOwnerNames(await leadsSvc.listLeads(orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities })));
 }));
 leads.post('/', wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
