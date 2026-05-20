@@ -242,9 +242,39 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   if (zone_id) query = query.eq('zone_id', zone_id as string);
   if (is_active !== undefined) query = query.eq('is_active', is_active === 'true');
   if (user.role === 'supervisor') query = query.eq('supervisor_id', user.id);
-  
+
   if (user.role === 'city_manager' && user.assigned_cities?.length) {
     query = query.in('city', user.assigned_cities);
+  }
+
+  // Hierarchy-scoped visibility: a logged-in user should not see their own
+  // managers. Walks the org_roles tree from the user's org_role_id up via
+  // parent_id, collects every ancestor role id, then excludes users whose
+  // org_role_id sits in that set. Platform-tier users (super_admin / admin)
+  // bypass — they need to see everyone for support / oversight.
+  if (user.role !== 'super_admin' && user.role !== 'admin' && (user as any).org_role_id) {
+    const myRoleId = (user as any).org_role_id as string;
+    // One fetch of the org's roles; walk in memory. Depth is typically <10
+    // so this is faster + simpler than chained DB lookups.
+    const { data: roleRows } = await supabaseAdmin
+      .from('org_roles')
+      .select('id, parent_id')
+      .eq('org_id', user.org_id);
+    const parentMap = new Map<string, string | null>();
+    for (const r of (roleRows || []) as Array<{ id: string; parent_id: string | null }>) {
+      parentMap.set(r.id, r.parent_id);
+    }
+    const ancestors = new Set<string>();
+    let cursor: string | null = parentMap.get(myRoleId) ?? null;
+    // Cap iterations defensively against malformed cycles.
+    for (let i = 0; i < 20 && cursor && !ancestors.has(cursor); i++) {
+      ancestors.add(cursor);
+      cursor = parentMap.get(cursor) ?? null;
+    }
+    if (ancestors.size > 0) {
+      const ids = Array.from(ancestors).join(',');
+      query = query.not('org_role_id', 'in', `(${ids})`);
+    }
   }
 
   query = query.order('name').range(offset, offset + limit - 1);
@@ -253,7 +283,13 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
   const userIds = (data || []).map((u: any) => u.id);
-  const [attRes, permRes, cityRes] = await Promise.all([
+  // UTC year-month for kini_usage rows. Mirrors kiniQuota.service.ts so
+  // the sum here matches the gate's view.
+  const monthNow = (() => {
+    const d = new Date();
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  })();
+  const [attRes, permRes, cityRes, kiniRes] = await Promise.all([
     userIds.length > 0
       ? supabaseAdmin.from('attendance').select('user_id, total_hours, status, checkin_at').eq('date', todayDate()).in('user_id', userIds)
       : { data: [] },
@@ -266,6 +302,11 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     // trip — falls back to bare id if the FK can't resolve.
     userIds.length > 0
       ? supabaseAdmin.from('user_city_assignments').select('user_id, city_id, cities!city_id(name)').in('user_id', userIds)
+      : { data: [] },
+    // KINI AI usage for the current month — summed across platforms per
+    // user so admins can see "X / 20" in the Team Members table.
+    userIds.length > 0
+      ? supabaseAdmin.from('kini_usage').select('user_id, query_count').in('user_id', userIds).eq('month', monthNow)
       : { data: [] }
   ]);
 
@@ -292,6 +333,20 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     }
   });
 
+  // KINI usage (current month) summed across platforms per user.
+  const kiniUsedMap = new Map<string, number>();
+  for (const r of (kiniRes.data || []) as Array<{ user_id: string; query_count: number | null }>) {
+    kiniUsedMap.set(r.user_id, (kiniUsedMap.get(r.user_id) ?? 0) + (r.query_count ?? 0));
+  }
+  // Per-user cap — defaults to env (KINI_MONTHLY_QUERY_CAP) or 20 if unset.
+  // Org/client overrides via org_settings.kini_user_monthly_query_limit are
+  // honoured at request-time by kiniQuota.service.ts; we only need a display
+  // value here so we don't fan out one settings query per row.
+  const KINI_USER_CAP = (() => {
+    const env = Number(process.env.KINI_MONTHLY_QUERY_CAP);
+    return Number.isFinite(env) && env > 0 ? Math.floor(env) : 20;
+  })();
+
   const now = new Date().getTime();
   const enrichedData = (data || []).map((u: any) => {
     if (u.zones && Array.isArray(u.zones)) u.zones = u.zones[0];
@@ -305,6 +360,8 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     u.permissions = permMap.get(u.id) || [];
     u.assigned_cities = cityIdMap.get(u.id) || [];
     u.assigned_city_names = cityNameMap.get(u.id) || [];
+    u.kini_used_this_month = kiniUsedMap.get(u.id) ?? 0;
+    u.kini_monthly_cap = KINI_USER_CAP;
     return u;
   });
 
