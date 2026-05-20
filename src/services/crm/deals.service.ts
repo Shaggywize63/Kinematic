@@ -13,9 +13,6 @@ export async function listDeals(
 ) {
   let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)')
     .eq('org_id', org_id).is('deleted_at', null);
-  // Same scoping rule as leads: JWT-pinned client users get strict
-  // isolation; admin pickers (header-supplied) also surface legacy
-  // NULL-stamped deals so they can administer them.
   if (client_id) {
     q = options.strictClient
       ? q.eq('client_id', client_id)
@@ -26,7 +23,6 @@ export async function listDeals(
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.account_id) q = q.eq('account_id', String(filters.account_id));
   if (filters.q) q = q.ilike('name', `%${String(filters.q)}%`);
-  // Date range filter on created_at
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
   const limit = Math.min(Number(filters.limit ?? 50), 200);
@@ -127,11 +123,65 @@ export async function loseDeal(org_id: string, id: string, payload: { actual_clo
   } as Partial<Deal>, user_id);
 }
 
+/**
+ * Returns the deal's audit trail enriched for the frontend.
+ *
+ * The raw `crm_deal_history` table stores stage transitions as UUIDs
+ * (`from_stage_id` / `to_stage_id`) and timestamps the row with
+ * `changed_at`. The CRM detail page's history card expects:
+ *   - human-readable stage NAMES (so it can render "Qualification → Proposal")
+ *   - an `event_type` discriminator ("stage_changed", "amount_changed",
+ *     "created") to drive the row label
+ *   - `created_at` as the timestamp (matches its date formatter)
+ *
+ * We resolve stage IDs → names in a single batched lookup against
+ * `crm_deal_stages`, then derive the event type from which fields
+ * changed. Rows for deals with no stage transitions still pass through
+ * (they'll show as "Updated" with timestamp only).
+ */
 export async function dealHistory(org_id: string, id: string) {
-  const { data } = await supabaseAdmin.from('crm_deal_history')
+  const { data, error } = await supabaseAdmin.from('crm_deal_history')
     .select('*').eq('org_id', org_id).eq('deal_id', id)
     .order('changed_at', { ascending: false }).limit(100);
-  return data ?? [];
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const rows = data ?? [];
+  if (rows.length === 0) return rows;
+
+  // Batch-resolve every stage UUID referenced in this trail. One round-trip
+  // beats N+1 per row, and the set is bounded by the deal's lifetime
+  // (typically <20 transitions).
+  const stageIds = Array.from(new Set(
+    rows.flatMap((r: any) => [r.from_stage_id, r.to_stage_id]).filter(Boolean),
+  )) as string[];
+  const nameById = new Map<string, string>();
+  if (stageIds.length > 0) {
+    const { data: stages } = await supabaseAdmin.from('crm_deal_stages')
+      .select('id, name').in('id', stageIds);
+    (stages ?? []).forEach((s: any) => nameById.set(s.id, s.name));
+  }
+
+  return rows.map((r: any) => {
+    const fromStage = r.from_stage_id ? nameById.get(r.from_stage_id) ?? null : null;
+    const toStage   = r.to_stage_id   ? nameById.get(r.to_stage_id)   ?? null : null;
+    const stageChanged = r.from_stage_id !== r.to_stage_id;
+    const amountChanged = Number(r.from_amount ?? 0) !== Number(r.to_amount ?? 0);
+
+    let event_type: string;
+    if (!r.from_stage_id && r.to_stage_id) event_type = 'created';
+    else if (stageChanged) event_type = 'stage_changed';
+    else if (amountChanged) event_type = 'amount_changed';
+    else event_type = 'updated';
+
+    return {
+      ...r,
+      event_type,
+      from_stage: fromStage,
+      to_stage: toStage,
+      // Alias `changed_at` as `created_at` so generic timeline renderers
+      // (frontend uses `created_at`) work without a backend-aware helper.
+      created_at: r.changed_at,
+    };
+  });
 }
 
 async function lastHistory(org_id: string, deal_id: string) {
