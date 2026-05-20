@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
-import { asyncHandler, ok, created, badRequest, notFound } from '../../utils';
+import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../../utils';
 
 // Generic CRUD helper for simple lookup tables
 function crudFor(table: string) {
@@ -250,11 +250,31 @@ const INDIAN_STATES = [
   'Delhi','Jammu and Kashmir','Ladakh','Lakshadweep','Puducherry',
 ];
 
+// Tenant scoping precedence (mirrors buildCRUD in management.controller.ts
+// and getUsers in misc.controller.ts):
+//   1. JWT client_id  — client-pinned users stay in their tenant.
+//   2. ?client_id=    — explicit query param override (e.g. server-to-server).
+//   3. X-Client-Id    — global client picker, auto-attached by dashboard api.ts.
+//   4. none           — platform admin with no picker → see all in org.
+// Without #3, a super_admin selecting "Tata Tiscon" in the picker still
+// saw CRM states/cities created under Kinematic, leaking lookup data across
+// tenant boundaries.
+function resolveClientFilter(req: AuthRequest): string | null {
+  const user = req.user!;
+  const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
+  if (isUUID(user.client_id)) return user.client_id as string;
+  if (isUUID(req.query.client_id as string)) return req.query.client_id as string;
+  if (isUUID(headerClientId)) return headerClientId as string;
+  return null;
+}
+
 export const states = {
   list: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
-    const { data, error } = await supabaseAdmin.from('crm_states').select('*')
-      .eq('org_id', org_id).order('name');
+    let q = supabaseAdmin.from('crm_states').select('*').eq('org_id', org_id);
+    const cid = resolveClientFilter(req);
+    if (cid) q = q.eq('client_id', cid);
+    const { data, error } = await q.order('name');
     if (error) return badRequest(res, error.message);
     return ok(res, data);
   }),
@@ -262,21 +282,28 @@ export const states = {
     const { org_id } = req.user!;
     const { name, code } = req.body;
     if (!name?.trim()) return badRequest(res, 'name is required');
+    // Stamp the new lookup row with the picked tenant so admins browsing
+    // "Tata Tiscon" don't accidentally create org-shared rows.
+    const cid = resolveClientFilter(req);
     const { data, error } = await supabaseAdmin.from('crm_states')
-      .insert({ org_id, name: name.trim(), code }).select().single();
+      .insert({ org_id, client_id: cid, name: name.trim(), code }).select().single();
     if (error) return badRequest(res, error.message);
     return created(res, data);
   }),
   getCities: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
-    const { data, error } = await supabaseAdmin.from('crm_cities').select('*')
-      .eq('org_id', org_id).eq('state_id', req.params.id).order('name');
+    let q = supabaseAdmin.from('crm_cities').select('*')
+      .eq('org_id', org_id).eq('state_id', req.params.id);
+    const cid = resolveClientFilter(req);
+    if (cid) q = q.eq('client_id', cid);
+    const { data, error } = await q.order('name');
     if (error) return badRequest(res, error.message);
     return ok(res, data);
   }),
   seedIndian: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
-    const rows = INDIAN_STATES.map((name) => ({ org_id, name }));
+    const cid = resolveClientFilter(req);
+    const rows = INDIAN_STATES.map((name) => ({ org_id, client_id: cid, name }));
     const { error } = await supabaseAdmin.from('crm_states').upsert(rows, { onConflict: 'org_id,name' });
     if (error) return badRequest(res, error.message);
     return ok(res, { states: rows.length, cities: 0 });
@@ -289,6 +316,8 @@ export const cities = {
     const { state_id } = req.query as Record<string, string>;
     let q = supabaseAdmin.from('crm_cities').select('*').eq('org_id', org_id);
     if (state_id) q = q.eq('state_id', state_id);
+    const cid = resolveClientFilter(req);
+    if (cid) q = q.eq('client_id', cid);
     q = q.order('name');
     const { data, error } = await q;
     if (error) return badRequest(res, error.message);
@@ -298,29 +327,39 @@ export const cities = {
     const { org_id } = req.user!;
     const { state_id, name } = req.body;
     if (!state_id || !name?.trim()) return badRequest(res, 'state_id and name are required');
+    const cid = resolveClientFilter(req);
     const { data, error } = await supabaseAdmin.from('crm_cities')
-      .insert({ org_id, state_id, name: name.trim() }).select().single();
+      .insert({ org_id, client_id: cid, state_id, name: name.trim() }).select().single();
     if (error) return badRequest(res, error.message);
     return created(res, data);
   }),
   getOne: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
-    const { data, error } = await supabaseAdmin.from('crm_cities').select('*')
-      .eq('id', req.params.id).eq('org_id', org_id).single();
+    let q = supabaseAdmin.from('crm_cities').select('*')
+      .eq('id', req.params.id).eq('org_id', org_id);
+    const cid = resolveClientFilter(req);
+    if (cid) q = q.eq('client_id', cid);
+    const { data, error } = await q.single();
     if (error || !data) return notFound(res, 'City not found');
     return ok(res, data);
   }),
   update: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
-    const { data, error } = await supabaseAdmin.from('crm_cities')
-      .update({ name: req.body.name }).eq('id', req.params.id).eq('org_id', org_id).select().single();
+    let q = supabaseAdmin.from('crm_cities')
+      .update({ name: req.body.name }).eq('id', req.params.id).eq('org_id', org_id);
+    const cid = resolveClientFilter(req);
+    if (cid) q = q.eq('client_id', cid);
+    const { data, error } = await q.select().single();
     if (error) return badRequest(res, error.message);
     return ok(res, data);
   }),
   remove: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
-    const { error } = await supabaseAdmin.from('crm_cities')
+    let q = supabaseAdmin.from('crm_cities')
       .delete().eq('id', req.params.id).eq('org_id', org_id);
+    const cid = resolveClientFilter(req);
+    if (cid) q = q.eq('client_id', cid);
+    const { error } = await q;
     if (error) return badRequest(res, error.message);
     return ok(res, { success: true });
   }),
