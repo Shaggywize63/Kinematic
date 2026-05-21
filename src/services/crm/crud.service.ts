@@ -120,12 +120,20 @@ export async function get(table: string, org_id: string, id: string, softDelete 
 }
 
 // Tables that don't have created_by/updated_by columns (audit-light lookups)
+// Tables that don't have created_by / updated_by columns — the generic
+// audit stamp would fail with "column does not exist" otherwise. Add a
+// table here only after confirming the columns aren't present in the
+// schema (otherwise audit info should be captured).
 const NO_AUDIT_TABLES = new Set([
   'crm_deal_stages',
   'crm_lead_sources',
   'crm_states',
   'crm_cities',
   'crm_settings',
+  // crm_custom_field_defs has no created_by/updated_by columns —
+  // the "+ Add Field" button on the custom-fields page was 500-ing
+  // every POST because of this stamp before the row hit the DB.
+  'crm_custom_field_defs',
 ]);
 
 export async function create(table: string, org_id: string, payload: Record<string, unknown>, user_id?: string) {

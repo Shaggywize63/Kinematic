@@ -193,6 +193,76 @@ leads.post('/', wrap(async (req, res) => {
   const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
   res.status(201).json(await stampOwnerName(await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload })));
 }));
+// CSV export — same filters as the list endpoint (status, owner, source,
+// state/city/district/block, score_gte, q, from, to, etc.) but caps at
+// 10k rows server-side and streams a real CSV file. Auth + tenant cap +
+// city scope all apply via the same listLeads path; bots can't pull more
+// than the user themselves can see.
+leads.get('/export', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const effectiveCities = rbac.getEffectiveCityNames((req as AuthRequest).user);
+  // Force a high per-page cap; listLeads internally clamps to 200 so we
+  // page through up to 10000 in 200-row chunks. Keeps memory + DB load
+  // bounded.
+  const PAGE = 200;
+  const MAX  = 10000;
+  const rows: any[] = [];
+  for (let page = 1; rows.length < MAX; page++) {
+    const chunk = await leadsSvc.listLeads(
+      orgId(req),
+      { ...req.query, limit: PAGE, page },
+      scope.id,
+      { strictClient: scope.strict, effectiveCities },
+    );
+    rows.push(...chunk);
+    if (chunk.length < PAGE) break;
+  }
+  const stamped = await stampOwnerNames(rows.slice(0, MAX));
+  // Build CSV in-memory. Columns chosen to match the leads list table
+  // plus the geo + score + timing fields most-asked-for in exports.
+  const cols: Array<{ key: string; label: string }> = [
+    { key: 'first_name',     label: 'First Name' },
+    { key: 'last_name',      label: 'Last Name' },
+    { key: 'email',          label: 'Email' },
+    { key: 'phone',          label: 'Phone' },
+    { key: 'company',        label: 'Company' },
+    { key: 'title',          label: 'Title' },
+    { key: 'industry',       label: 'Industry' },
+    { key: 'state',          label: 'State' },
+    { key: 'city',           label: 'City' },
+    { key: 'district',       label: 'District' },
+    { key: 'block',          label: 'Block' },
+    { key: 'status',         label: 'Status' },
+    { key: 'lifecycle_stage',label: 'Lifecycle Stage' },
+    { key: 'score',          label: 'Score' },
+    { key: 'grade',          label: 'Grade' },
+    { key: 'source_id',      label: 'Source ID' },
+    { key: 'owner_id',       label: 'Owner ID' },
+    { key: 'owner_name',     label: 'Owner Name' },
+    { key: 'utm_source',     label: 'UTM Source' },
+    { key: 'utm_campaign',   label: 'UTM Campaign' },
+    { key: 'last_activity_at', label: 'Last Activity At' },
+    { key: 'stage_changed_at', label: 'Stage Changed At' },
+    { key: 'created_at',     label: 'Created At' },
+  ];
+  const escape = (v: unknown): string => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    // RFC 4180 — wrap in quotes if it contains comma, quote, or newline.
+    // Double up internal quotes.
+    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  const header = cols.map((c) => c.label).join(',');
+  const body = stamped.map((r: any) =>
+    cols.map((c) => escape((r as Record<string, unknown>)[c.key])).join(',')
+  ).join('\n');
+  const csv = `${header}\n${body}\n`;
+  const filename = `leads-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}));
 leads.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id)))));
 leads.patch('/:id', wrap(async (req, res) =>
   res.json(await stampOwnerName(await leadsSvc.updateLead(orgId(req), req.params.id, parse(v.leadUpdateSchema, req.body), userId(req))))));
