@@ -13,6 +13,36 @@ import { logger } from '../lib/logger';
 
 const SKIP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+// Keys that should NEVER land in audit_log.after — these are
+// credential-grade or otherwise sensitive. Matching is case-insensitive
+// and works on any nesting depth via scrubBody().
+const SENSITIVE_KEYS = new Set([
+  'password', 'new_password', 'current_password', 'old_password',
+  'token', 'access_token', 'refresh_token', 'id_token',
+  'secret', 'app_secret', 'webhook_secret', 'agent_secret', 'client_secret',
+  'api_key', 'apikey',
+  'mfa_secret', 'totp_secret', 'otp', 'pin',
+  'oauth_credentials', 'oauth_credentials_encrypted', 'credentials',
+  'authorization',
+]);
+
+/**
+ * Recursively replace sensitive values with '[REDACTED]'. Operates on
+ * a structural clone so we don't mutate the live req.body. Arrays and
+ * nested objects walk through; primitives are returned unchanged.
+ */
+function scrubBody(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined) return value;
+  if (depth > 8) return '[depth-limit]'; // defence against pathological nesting
+  if (Array.isArray(value)) return value.map((v) => scrubBody(v, depth + 1));
+  if (typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = SENSITIVE_KEYS.has(k.toLowerCase()) ? '[REDACTED]' : scrubBody(v, depth + 1);
+  }
+  return out;
+}
+
 /**
  * Map a request to a coarse {action, entity_table} based on the URL.
  * Examples:
@@ -60,11 +90,16 @@ export function auditAll(req: AuthRequest, res: Response, next: NextFunction): v
 
   // Capture body shape upfront — by the time res.on('finish') fires, downstream
   // code may have mutated req.body. Cap it to keep the row small.
+  // Sensitive keys (password, *token*, secrets, MFA, OAuth blobs) are
+  // replaced with '[REDACTED]' so the audit row never persists raw
+  // credentials. Org admins routinely read audit_log; without this
+  // any password reset / OAuth refresh would land in plaintext.
   let bodySnapshot: unknown = null;
   try {
     if (req.body && typeof req.body === 'object') {
       const json = JSON.stringify(req.body);
-      bodySnapshot = json.length > 8000 ? '[truncated]' : JSON.parse(json);
+      const parsed = json.length > 8000 ? '[truncated]' : JSON.parse(json);
+      bodySnapshot = typeof parsed === 'string' ? parsed : scrubBody(parsed);
     }
   } catch { /* unparseable; skip */ }
 

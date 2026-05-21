@@ -9,6 +9,8 @@
  */
 import { AIService } from '../../ai.service';
 import { AppError } from '../../../utils';
+// AIService.anthropicFetch wraps fetch with an AbortController so we
+// don't tie up a Node worker on a slow Anthropic response.
 
 export interface CompleteInput {
   org_id?: string;        // accepted for forward-compat (per-org keys); currently unused
@@ -66,7 +68,10 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
   const tool_calls: Array<{ name: string; args: unknown; result: unknown }> = [];
 
   for (let turn = 0; turn < max_turns; turn++) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    // Use the AIService deadline+opaque-error wrapper so a slow
+    // upstream can't pin a worker, and a 401 from Anthropic can't
+    // leak the key fragment back to the user.
+    const res = await AIService.anthropicFetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -77,7 +82,15 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new AppError(res.status, (body as { error?: { message?: string } })?.error?.message || `AI ${res.status}`, 'AI_ERROR');
+      // Log the upstream detail server-side, return an opaque code.
+      const detail = (body as { error?: { message?: string } })?.error?.message || '';
+      console.warn(`[chatWithTools] upstream ${res.status}: ${detail.slice(0, 300).replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]')}`);
+      const opaque =
+        res.status === 401 ? 'AI authentication failed'
+        : res.status === 429 ? 'AI service rate-limited — retry shortly'
+        : res.status >= 500 ? 'AI service temporarily unavailable'
+        : 'AI request failed';
+      throw new AppError(res.status, opaque, 'AI_ERROR');
     }
     const data = await res.json() as {
       stop_reason: string;
