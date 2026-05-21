@@ -6,7 +6,7 @@ import { getEffectiveCityNames } from '../../middleware/rbac';
 
 export const listContacts = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
-  const { account_id, owner_id, limit = '100', page = '1' } = req.query as Record<string, string>;
+  const { account_id, owner_id, city, limit = '100', page = '1' } = req.query as Record<string, string>;
   let q = supabaseAdmin.from('crm_contacts')
     .select('*, account:crm_accounts(id,name)', { count: 'exact' })
     .eq('org_id', org_id).is('deleted_at', null);
@@ -19,6 +19,10 @@ export const listContacts = asyncHandler(async (req: AuthRequest, res: Response)
     if (effectiveCities.length === 0) return ok(res, []);
     q = q.in('city', effectiveCities);
   }
+  // Per-request city narrow — picker on the dashboard sends ?city=<name>;
+  // intersects with the user's allowed scope above so a malicious value
+  // can never escape the cap.
+  if (city) q = q.eq('city', city);
   const lim = Math.min(500, parseInt(limit) || 100);
   const pg = Math.max(1, parseInt(page) || 1);
   q = q.range((pg - 1) * lim, pg * lim - 1).order('created_at', { ascending: false });
