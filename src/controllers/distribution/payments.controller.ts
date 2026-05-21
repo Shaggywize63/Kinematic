@@ -140,7 +140,7 @@ export const updateStatus = asyncHandler(async (req: AuthRequest, res: Response)
 
   const updates: any = { status: parsed.data.status, updated_at: new Date().toISOString() };
   if (parsed.data.status === 'bounced') { updates.bounced_at = new Date().toISOString(); updates.bounce_reason = parsed.data.bounce_reason || null; }
-  const { data: after, error } = await supabaseAdmin.from('payments').update(updates).eq('id', req.params.id).select().single();
+  const { data: after, error } = await supabaseAdmin.from('payments').update(updates).eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
 
   // Ledger only on clearance (CR) — bounces just update status.

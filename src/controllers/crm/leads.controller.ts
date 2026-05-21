@@ -89,10 +89,29 @@ export const getLead = asyncHandler(async (req: AuthRequest, res: Response) => {
   return ok(res, data);
 });
 
+// Columns a user can change via PATCH /crm/leads/:id. Everything else
+// (score*, converted_*, org/client/id/created_*, audit columns) is
+// server-controlled and would let a client overwrite AI outputs,
+// fake-convert leads, or jump tenants if exposed. Keep this list in
+// sync with createLead's payload + the dashboard's LeadEditModal.
+const LEAD_UPDATE_ALLOWED: ReadonlySet<string> = new Set([
+  'first_name', 'last_name', 'email', 'phone', 'company', 'title', 'industry',
+  'is_b2c', 'status', 'source_id', 'owner_id', 'territory_id', 'lost_reason',
+  'date_of_birth', 'gender',
+  'address_line1', 'address_line2', 'city', 'state', 'postal_code', 'country',
+  'preferred_contact_method', 'marketing_consent', 'whatsapp_consent',
+  'custom_fields', 'notes',
+]);
+
 export const updateLead = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id, id: userId } = req.user!;
-  const updates = { ...req.body, updated_by: userId };
-  delete updates.org_id; delete updates.id; delete updates.created_at;
+  // Allowlist write — req.body keys outside LEAD_UPDATE_ALLOWED are
+  // silently dropped. Prevents mass-assignment of score, is_converted,
+  // converted_*, org_id, client_id, created_by, etc. via PATCH.
+  const updates: Record<string, unknown> = { updated_by: userId };
+  for (const k of Object.keys(req.body || {})) {
+    if (LEAD_UPDATE_ALLOWED.has(k)) updates[k] = (req.body as Record<string, unknown>)[k];
+  }
   const { data, error } = await supabaseAdmin
     .from('crm_leads').update(updates).eq('id', req.params.id).eq('org_id', org_id)
     .is('deleted_at', null).select('*, source:crm_lead_sources(id,name)').single();

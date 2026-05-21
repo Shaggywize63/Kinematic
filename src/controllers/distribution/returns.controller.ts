@@ -124,7 +124,7 @@ export const approve = asyncHandler(async (req: AuthRequest, res: Response) => {
     status: 'credited',
     approved_by: user.id, approved_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-  }).eq('id', req.params.id).select().single();
+  }).eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
 
   // Ledger CR for the return value (credit note).
@@ -151,7 +151,7 @@ export const reject = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabaseAdmin.from('returns').update({
     status: 'rejected', rejected_by: user.id, rejected_at: new Date().toISOString(),
     rejection_reason: reason, updated_at: new Date().toISOString(),
-  }).eq('id', req.params.id).select().single();
+  }).eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
   await audit(req, 'return.reject', 'returns', data.id, before, data, { reason });
   ok(res, data);

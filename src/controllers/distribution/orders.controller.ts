@@ -73,9 +73,12 @@ export const approve = asyncHandler(async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id).eq('org_id', user.org_id).maybeSingle();
   if (!before) return notFound(res, 'Order not found');
   if (before.status !== 'placed') return conflict(res, `Cannot approve from status=${before.status}`);
+  // The read above already verified org membership, but a write without
+  // .eq('org_id', ...) would race / be IDOR-vulnerable if a concurrent
+  // request changed org assignment between the two queries. Re-scope.
   const { data, error } = await supabaseAdmin.from('orders')
     .update({ status: 'approved', approved_by: user.id, approved_at: new Date().toISOString() })
-    .eq('id', req.params.id).select().single();
+    .eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
   await audit(req, 'order.approve', 'orders', data.id, before, data);
   ok(res, data, 'Order approved');
@@ -98,7 +101,7 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
   }
   const { data, error } = await supabaseAdmin.from('orders')
     .update({ status: 'cancelled', cancelled_by: user.id, cancelled_at: new Date().toISOString(), cancel_reason: reason })
-    .eq('id', req.params.id).select().single();
+    .eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
   await audit(req, 'order.cancel', 'orders', data.id, before, data);
   ok(res, data, 'Order cancelled');

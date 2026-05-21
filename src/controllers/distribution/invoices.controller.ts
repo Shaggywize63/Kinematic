@@ -197,7 +197,7 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
     cancelled_by: user.id,
     cancel_reason: reason,
     updated_at: new Date().toISOString(),
-  }).eq('id', req.params.id).select().single();
+  }).eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
 
   // Ledger CR for the original invoice value (credit note).
@@ -216,8 +216,10 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
     p_posted_role: user.role,
   });
 
-  // Order reverts to approved.
-  await supabaseAdmin.from('orders').update({ status: 'approved', updated_at: new Date().toISOString() }).eq('id', before.order_id);
+  // Order reverts to approved. Scope by org_id even though order_id
+  // came from `before` (which we already verified is in our org) —
+  // defence-in-depth against any future refactor that decouples them.
+  await supabaseAdmin.from('orders').update({ status: 'approved', updated_at: new Date().toISOString() }).eq('id', before.order_id).eq('org_id', user.org_id);
 
   await audit(req, 'invoice.cancel', 'invoices', after.id, before, after, { reason });
   ok(res, after, 'Invoice cancelled');

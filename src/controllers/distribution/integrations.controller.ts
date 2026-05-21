@@ -218,12 +218,17 @@ export const getEventXml = asyncHandler<AuthRequest>(async (req, res) => {
 function verifyAgentSecret(req: Request, integrationSecret: string | null): boolean {
   const provided = (req.query.key as string | undefined) ?? '';
   if (!provided || !integrationSecret) return false;
-  if (provided.length !== integrationSecret.length) return false;
-  let diff = 0;
-  for (let i = 0; i < provided.length; i++) {
-    diff |= provided.charCodeAt(i) ^ integrationSecret.charCodeAt(i);
-  }
-  return diff === 0;
+  // Use crypto.timingSafeEqual. Buffer.from + the !== length check
+  // BEFORE timingSafeEqual short-circuits on length mismatch, but
+  // that's the *only* allowed branch: the byte-equality test itself
+  // must be constant-time. Avoids leaking the secret one char at a
+  // time via response latency.
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(integrationSecret, 'utf8');
+  if (a.length !== b.length) return false;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const crypto = require('crypto') as typeof import('crypto');
+  return crypto.timingSafeEqual(a, b);
 }
 
 export const agentFetchJobs = asyncHandler<Request>(async (req, res) => {
