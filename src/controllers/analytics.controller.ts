@@ -934,11 +934,19 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
 
   const { start: startRange, end: endRange } = getISTSearchRange(parseAppDate(today));
 
-  // Fetch planned activities (depends on userEmail)
+  // Fetch planned activities (depends on userEmail). The email comes
+  // from a DB-stored profile column that admin UIs can edit; without
+  // escaping a crafted email like `x,fe_email.eq.someone-else@x.com`
+  // smuggles a second predicate into the OR clause. We allow only the
+  // RFC-5322-ish character set; anything else falls back to user_id
+  // alone, which is JWT-derived and safe.
+  const safeEmail = typeof userEmail === 'string' && /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(userEmail)
+    ? userEmail
+    : null;
   let { data: rawPlans } = await supabaseAdmin
     .from('v_route_plan_daily')
     .select('*')
-    .or(`user_id.eq.${user.id}${userEmail ? `,fe_email.ilike.${userEmail}` : ''}`)
+    .or(`user_id.eq.${user.id}${safeEmail ? `,fe_email.ilike.${safeEmail}` : ''}`)
     .eq('plan_date', today);
 
   const visitedOutletNames = new Set((actualSubmissions || []).map(s => (s.outlet_name || '').toLowerCase().trim()));

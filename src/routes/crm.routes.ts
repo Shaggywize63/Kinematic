@@ -51,7 +51,29 @@ router.get('/emails/track/open/:token', async (req, res) => {
 });
 router.get('/emails/track/click/:token', async (req, res) => {
   await emailsSvc.recordClick(req.params.token).catch(() => {});
-  res.redirect(302, String(req.query.u ?? '/'));
+  // Open-redirect guard. Before: `res.redirect(302, req.query.u)` —
+  // anyone could craft a phishing link
+  // `https://api.kinematic.app/.../track/click/<token>?u=https://attacker.com`
+  // that 302s the recipient off-platform. Now we only follow URLs
+  // whose hostname is in CRM_TRACKING_REDIRECT_HOSTS (comma-separated
+  // env list, defaults to the dashboard origin) — anything else
+  // redirects to '/'.
+  const raw = String(req.query.u ?? '/');
+  let target = '/';
+  try {
+    if (raw.startsWith('/')) {
+      target = raw; // relative paths are always same-origin
+    } else {
+      const u = new URL(raw);
+      const allow = (process.env.CRM_TRACKING_REDIRECT_HOSTS || process.env.DASHBOARD_URL || '')
+        .split(',').map(s => s.trim()).filter(Boolean)
+        .map(h => { try { return new URL(h).hostname; } catch { return h.replace(/^https?:\/\//, '').replace(/\/.*$/, ''); } });
+      if (allow.includes(u.hostname) || allow.some(h => u.hostname.endsWith('.' + h))) {
+        target = u.toString();
+      }
+    }
+  } catch { target = '/'; }
+  res.redirect(302, target);
 });
 
 // Meta WhatsApp Business webhook verification (challenge handshake).
