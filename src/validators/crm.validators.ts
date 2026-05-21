@@ -46,7 +46,13 @@ const b2cBase = {
   gender,
   address_line1: z.string().max(200).optional().nullable(),
   address_line2: z.string().max(200).optional().nullable(),
-  city: z.string().max(120).optional().nullable(),
+  // City is REQUIRED on lead/contact create — the CRM enforces
+  // per-user city scope (req.user.assigned_city_names) on every read,
+  // and a lead with no city slips past that filter and becomes visible
+  // to every user in the org. Force it at the schema level so no
+  // creation path (form, integration webhook, KINI tool, bulk import)
+  // can land a city-less row.
+  city: z.string().min(1, { message: 'City is required' }).max(120),
   state: z.string().max(120).optional().nullable(),
   postal_code: z.string().max(20).optional().nullable(),
   country: z.string().max(80).optional().nullable(),
