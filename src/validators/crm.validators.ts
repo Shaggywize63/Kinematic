@@ -369,10 +369,34 @@ export const customFieldSchema = z.object({
   entity_type: z.enum(['lead','contact','account','deal']),
   field_key: z.string().min(1).max(80).regex(/^[a-z][a-z0-9_]*$/),
   label: z.string().min(1).max(120),
-  field_type: z.enum(['text','number','boolean','date','datetime','select','multiselect','url','email']),
+  // Full set of supported field types. New additions beyond the
+  // originals: `longtext` (textarea), `radio` (single-select rendered
+  // as radio buttons; same shape as `select`), `image` (URL after
+  // upload via /api/v1/upload/photo), `file` (URL after upload via
+  // /api/v1/upload/material), `phone` (10-digit Indian mobile), and
+  // `currency` (number with ₹ prefix on the form). Storage is still
+  // the same JSON shape — only the renderer changes.
+  field_type: z.enum([
+    'text', 'longtext', 'number', 'currency', 'boolean',
+    'date', 'datetime',
+    'select', 'multiselect', 'radio',
+    'url', 'email', 'phone',
+    'image', 'file',
+  ]),
   options: z.array(z.string()).optional().nullable(),
   required: z.boolean().optional(),
   position: z.number().int().optional(),
+});
+
+// Bulk-reorder payload for drag-and-drop on the custom-fields page.
+// Frontend sends [{ id, position }] for the new order; backend updates
+// each row's position in a single batch. Position is just an int —
+// gaps are fine, only relative order matters.
+export const customFieldReorderSchema = z.object({
+  items: z.array(z.object({
+    id: uuid,
+    position: z.number().int().min(0),
+  })).min(1).max(200),
 });
 
 export const importPreviewSchema = z.object({

@@ -743,6 +743,26 @@ attach('/assignment-rules', 'crm_lead_assignment_rules', v.assignmentRuleSchema,
 attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false, clientScoped: true });
 attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false, clientScoped: true });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
+// Drag-and-drop reordering. Frontend sends the new (id, position)
+// tuples after a drop; we apply them in a single batch within the
+// tenant's scope. No-op if any row doesn't belong to the caller's
+// org/client — they just stay where they are. Position is just an
+// integer; gaps are fine since the renderer sorts by it.
+router.post('/custom-fields/reorder', wrap(async (req, res) => {
+  const body = parse(v.customFieldReorderSchema, req.body);
+  const scope = clientScope(req);
+  for (const item of body.items) {
+    let q = supabaseAdmin.from('crm_custom_field_defs')
+      .update({ position: item.position, updated_at: new Date().toISOString() })
+      .eq('org_id', orgId(req))
+      .eq('id', item.id);
+    if (scope.id) {
+      q = scope.strict ? q.eq('client_id', scope.id) : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+    }
+    await q;
+  }
+  res.json({ ok: true, count: body.items.length });
+}));
 attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false, clientScoped: true });
 attach('/product-categories', 'crm_product_categories', v.productCategorySchema, { defaultSort: { column: 'sort_order', ascending: true }, clientScoped: true });
 attach('/products', 'crm_products', v.productSchema, { searchColumns: ['name','sku','description'], clientScoped: true });
