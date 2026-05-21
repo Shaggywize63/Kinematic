@@ -389,6 +389,15 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     enabled_packages: entitlements.enabled_packages,
     location_ping_interval_seconds: locationPingIntervalSeconds,
     business_type: businessType,
+    // Surface the user's city scope so the dashboard can render a city
+    // picker. `assigned_city_names` is the user-level cap (resolved from
+    // user_city_assignments → cities.name in auth middleware). Empty
+    // array = no per-user restriction; the picker source then falls back
+    // to the tenant's full city list. Mirrors the fields the auth
+    // middleware already loaded onto req.user.
+    assigned_cities: req.user.assigned_cities ?? [],
+    assigned_city_names: (req.user as any).assigned_city_names ?? [],
+    role_assigned_cities: (req.user as any).role_assigned_cities ?? [],
   };
   return ok(res, result);
 });
