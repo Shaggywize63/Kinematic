@@ -33,6 +33,29 @@ function scopeToClient<Q>(q: Q, client_id: string | null): Q {
   return client_id ? ((q as any).eq('client_id', client_id) as Q) : q;
 }
 
+// Hard guard for AI-driven mutations. Reads the target lead and
+// throws if it lives under a different client than the actor's
+// scope. When the actor has no client_id pinned (org-wide / super
+// admin), any client is allowed. Called BEFORE delegating to the
+// lead service which only checks org_id.
+async function assertLeadInClientScope(org_id: string, client_id: string | null, lead_id: string): Promise<void> {
+  if (!client_id) return; // org-wide actor — leadsSvc enforces org boundary
+  const { data, error } = await supabaseAdmin
+    .from('crm_leads')
+    .select('client_id')
+    .eq('id', lead_id)
+    .eq('org_id', org_id)
+    .maybeSingle();
+  if (error || !data) throw new Error('Lead not found');
+  // Cross-client mutation refused. `client_id` on the lead row can be
+  // null (org-wide lead) — we allow that, since it predates the
+  // multi-client split. The block fires when the lead is explicitly
+  // assigned to a *different* client than the caller.
+  if (data.client_id && data.client_id !== client_id) {
+    throw new Error('Lead belongs to a different client; cannot mutate from this scope');
+  }
+}
+
 export const tools: KiniTool[] = [
   {
     name: 'crm_search_leads',
@@ -309,8 +332,14 @@ export const tools: KiniTool[] = [
       notes: { type: 'string' },
       lost_reason: { type: 'string', description: 'Reason text shown alongside an unqualified/lost transition.' },
     }},
-    exec: async (org_id, _client_id, args) => {
+    exec: async (org_id, client_id, args) => {
       const { id, ...rest } = args as Record<string, unknown>;
+      // Client-scope re-check. When the actor is client-scoped, a
+      // prompt-injected note ("convert all leads") could otherwise
+      // steer Claude into mutating leads from a sibling client in the
+      // same org. updateLead only enforces org_id; we enforce client
+      // here.
+      await assertLeadInClientScope(org_id, client_id, String(id));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const lead = await leadsSvc.updateLead(org_id, String(id), rest as any);
       return { card: { type: 'lead_updated', data: lead }, data: lead };
@@ -325,7 +354,10 @@ export const tools: KiniTool[] = [
       deal_name: { type: 'string' },
       deal_amount: { type: 'number' },
     }},
-    exec: async (org_id, _client_id, args) => {
+    exec: async (org_id, client_id, args) => {
+      // Same client-scope guard as crm_update_lead — conversion is a
+      // destructive mutation, must respect the client boundary.
+      await assertLeadInClientScope(org_id, client_id, String(args.id));
       // Lazy-load the conversion service so we don't introduce a circular dep
       // at module load. Conversion lives next to the lead service.
       const mod: typeof import('../leads.service') & {

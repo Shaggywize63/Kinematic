@@ -60,12 +60,53 @@ export class AIService {
   }
 
   /**
+   * Map an upstream Anthropic error to an opaque message before
+   * surfacing it to the API caller. The raw upstream text can leak
+   * key fragments on 401 ("Invalid API key: sk-ant-..."), rate-limit
+   * metadata on 429, or internal model names on 500. Log the full
+   * detail server-side, return a coarse message to the client.
+   */
+  private static opaqueAiError(status: number, upstreamMessage: string | undefined): AppError {
+    // Server-side log retains the upstream message for ops debugging.
+    // Truncate so a malicious upstream can't pin our log writer.
+    const detail = (upstreamMessage || '').slice(0, 500);
+    console.warn(`[AIService] upstream error status=${status}: ${detail.replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]')}`);
+    const opaque =
+      status === 401 ? 'AI authentication failed'
+      : status === 403 ? 'AI authorization failed'
+      : status === 429 ? 'AI service rate-limited — retry shortly'
+      : status >= 500 ? 'AI service temporarily unavailable'
+      : 'AI request failed';
+    return new AppError(status, opaque, 'AI_ERROR');
+  }
+
+  /**
+   * Fetch with hard deadline. Anthropic calls can hang on slow upstream
+   * or slow downstream client; without a cap we tie up Node workers
+   * indefinitely (100 slow clients = all workers blocked).
+   */
+  static async anthropicFetch(url: string, init: RequestInit, timeoutMs = 60_000): Promise<Response> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: ac.signal });
+    } catch (e: unknown) {
+      if ((e as { name?: string })?.name === 'AbortError') {
+        throw new AppError(504, 'AI service timed out', 'AI_TIMEOUT');
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Centralized helper for Anthropics Messages API
    */
   static async callKiniAI(payload: { system?: string; messages: any[]; model?: string; max_tokens?: number }) {
     const apiKey = await this.getFunctionalKey();
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await this.anthropicFetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type':      'application/json',
@@ -82,8 +123,7 @@ export class AIService {
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      const msg = (err as any)?.error?.message || `AI service error: ${response.status}`;
-      throw new AppError(response.status, msg, 'AI_ERROR');
+      throw this.opaqueAiError(response.status, (err as any)?.error?.message);
     }
 
     const data: any = await response.json();
