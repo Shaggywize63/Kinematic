@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSearchRange, sendSuccess, buildPaginatedResult, isUUID } from '../utils';
+import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSearchRange, sendSuccess, buildPaginatedResult, isUUID, sanitisePostgrestSearch } from '../utils';
 import { getPagination } from '../utils/pagination';
 import { DEMO_ORG_ID, isDemo, getMockFormTemplates, getMockSubmissions, getMockSubmissionDetails } from '../utils/demoData';
 import { logger } from '../lib/logger';
@@ -270,8 +270,12 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (aId) q1 = q1.eq('activity_id', aId);
   
   if (search) {
-      const s = search.toString().trim();
-      q1 = q1.or(`outlet_name.ilike.%${s}%,store_name.ilike.%${s}%`);
+      // sanitisePostgrestSearch strips PostgREST OR-filter syntax
+      // (commas/parens/quotes) AND ilike wildcards so the user input
+      // is treated as a literal substring and can't smuggle extra
+      // predicates into the OR clause (e.g. `,user_id.eq.<other>`).
+      const s = sanitisePostgrestSearch(search);
+      if (s) q1 = q1.or(`outlet_name.ilike.%${s}%,store_name.ilike.%${s}%`);
   }
 
   const { data: fData, count: fCount, error: fErr } = await q1.order('submitted_at', { ascending: false }).range(from, to);
@@ -297,8 +301,8 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (tId) q2 = q2.eq('form_id', tId);
   
   if (search) {
-      const s = search.toString().trim();
-      q2 = q2.or(`outlet_name.ilike.%${s}%,users.name.ilike.%${s}%`);
+      const s = sanitisePostgrestSearch(search);
+      if (s) q2 = q2.or(`outlet_name.ilike.%${s}%,users.name.ilike.%${s}%`);
   }
 
   const { data: bData, count: bCount, error: bErr } = await q2.order('submitted_at', { ascending: false }).range(from, to);
