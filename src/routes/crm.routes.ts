@@ -539,6 +539,90 @@ activities.get('/calendar', wrap(async (req, res) => {
 activities.get('/', wrap(async (req, res) => res.json(
   await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientScope(req).id, req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: clientScope(req).strict }))
 )));
+// CSV export — same filters as the list endpoint. Pages through all
+// matching rows up to a 10k cap with the same tenant + client scope
+// the list path uses. Stamps owner names + resolves the parent record
+// (lead / contact / account / deal) name so the CSV reads in plain
+// English instead of dangling UUIDs.
+activities.get('/export', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const PAGE = 200;
+  const MAX  = 10000;
+  const rows: any[] = [];
+  for (let page = 1; rows.length < MAX; page++) {
+    const chunk = await crud.clientScopedList(
+      'crm_activities',
+      orgId(req),
+      scope.id,
+      { ...req.query, limit: PAGE, page },
+      { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: scope.strict },
+    );
+    rows.push(...(chunk as any[]));
+    if ((chunk as any[]).length < PAGE) break;
+  }
+  const stamped = await stampOwnerNames(rows.slice(0, MAX));
+
+  // Resolve linked-entity names in a few parallel batched queries so the
+  // CSV reads "Lead: Rakesh Sharma" instead of a UUID.
+  const leadIds    = Array.from(new Set(stamped.map((r: any) => r.lead_id).filter(Boolean)));
+  const contactIds = Array.from(new Set(stamped.map((r: any) => r.contact_id).filter(Boolean)));
+  const accountIds = Array.from(new Set(stamped.map((r: any) => r.account_id).filter(Boolean)));
+  const dealIds    = Array.from(new Set(stamped.map((r: any) => r.deal_id).filter(Boolean)));
+
+  const [leadsRes, contactsRes, accountsRes, dealsRes] = await Promise.all([
+    leadIds.length    ? supabaseAdmin.from('crm_leads').select('id, first_name, last_name, company').in('id', leadIds) : Promise.resolve({ data: [] as any[] }),
+    contactIds.length ? supabaseAdmin.from('crm_contacts').select('id, first_name, last_name').in('id', contactIds)    : Promise.resolve({ data: [] as any[] }),
+    accountIds.length ? supabaseAdmin.from('crm_accounts').select('id, name').in('id', accountIds)                     : Promise.resolve({ data: [] as any[] }),
+    dealIds.length    ? supabaseAdmin.from('crm_deals').select('id, name').in('id', dealIds)                            : Promise.resolve({ data: [] as any[] }),
+  ]);
+  const leadName    = new Map<string, string>((leadsRes.data    ?? []).map((l: any) => [l.id, [l.first_name, l.last_name].filter(Boolean).join(' ').trim() || l.company || '']));
+  const contactName = new Map<string, string>((contactsRes.data ?? []).map((c: any) => [c.id, [c.first_name, c.last_name].filter(Boolean).join(' ').trim()]));
+  const accountName = new Map<string, string>((accountsRes.data ?? []).map((a: any) => [a.id, a.name as string]));
+  const dealName    = new Map<string, string>((dealsRes.data    ?? []).map((d: any) => [d.id, d.name as string]));
+
+  const enriched = stamped.map((r: any) => ({
+    ...r,
+    lead_name:    r.lead_id    ? (leadName.get(r.lead_id)    ?? '') : '',
+    contact_name: r.contact_id ? (contactName.get(r.contact_id) ?? '') : '',
+    account_name: r.account_id ? (accountName.get(r.account_id) ?? '') : '',
+    deal_name:    r.deal_id    ? (dealName.get(r.deal_id)    ?? '') : '',
+  }));
+
+  const cols: Array<{ key: string; label: string }> = [
+    { key: 'type',             label: 'Type' },
+    { key: 'subject',          label: 'Subject' },
+    { key: 'body',             label: 'Body' },
+    { key: 'status',           label: 'Status' },
+    { key: 'priority',         label: 'Priority' },
+    { key: 'direction',        label: 'Direction' },
+    { key: 'duration_seconds', label: 'Duration (s)' },
+    { key: 'due_at',           label: 'Due At' },
+    { key: 'completed_at',     label: 'Completed At' },
+    { key: 'lead_name',        label: 'Lead' },
+    { key: 'contact_name',     label: 'Contact' },
+    { key: 'account_name',     label: 'Account' },
+    { key: 'deal_name',        label: 'Deal' },
+    { key: 'owner_name',       label: 'Owner' },
+    { key: 'assigned_to_name', label: 'Assigned To' },
+    { key: 'image_url',        label: 'Image URL' },
+    { key: 'created_at',       label: 'Created At' },
+  ];
+  const escape = (v: unknown): string => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  const header = cols.map((c) => c.label).join(',');
+  const body = enriched.map((r: any) =>
+    cols.map((c) => escape((r as Record<string, unknown>)[c.key])).join(',')
+  ).join('\n');
+  const csv = `${header}\n${body}\n`;
+  const filename = `activities-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}));
 activities.post('/', wrap(async (req, res) => {
   const parsed = parse(v.activitySchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
@@ -546,7 +630,7 @@ activities.post('/', wrap(async (req, res) => {
 }));
 activities.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_activities', orgId(req), req.params.id)))));
 activities.patch('/:id', wrap(async (req, res) =>
-  res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchema.partial(), req.body), userId(req))))));
+  res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchemaBase.partial(), req.body), userId(req))))));
 activities.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id); res.status(204).end(); }));
 router.use('/activities', activities);
 
