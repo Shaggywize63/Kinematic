@@ -218,32 +218,48 @@ leads.get('/export', wrap(async (req, res) => {
     if (chunk.length < PAGE) break;
   }
   const stamped = await stampOwnerNames(rows.slice(0, MAX));
-  // Build CSV in-memory. Columns chosen to match the leads list table
-  // plus the geo + score + timing fields most-asked-for in exports.
+  // Resolve source UUIDs → names in one round-trip so the CSV reads
+  // "Acme Web Form" instead of an opaque a1b2c3d4-… UUID. Mirrors the
+  // owner-name decoration in stampOwnerNames.
+  const sourceIds = Array.from(new Set(stamped.map((r: any) => r.source_id).filter(Boolean))) as string[];
+  const sourceNameById = new Map<string, string>();
+  if (sourceIds.length) {
+    const { data: srcs } = await supabaseAdmin
+      .from('crm_lead_sources')
+      .select('id, name')
+      .in('id', sourceIds);
+    for (const s of srcs ?? []) sourceNameById.set((s as any).id, (s as any).name as string);
+  }
+  const enriched = stamped.map((r: any) => ({
+    ...r,
+    source_name: r.source_id ? (sourceNameById.get(r.source_id) ?? '') : '',
+  }));
+
+  // CSV columns — names only. UUIDs are an implementation detail and
+  // never make it into the exported file.
   const cols: Array<{ key: string; label: string }> = [
-    { key: 'first_name',     label: 'First Name' },
-    { key: 'last_name',      label: 'Last Name' },
-    { key: 'email',          label: 'Email' },
-    { key: 'phone',          label: 'Phone' },
-    { key: 'company',        label: 'Company' },
-    { key: 'title',          label: 'Title' },
-    { key: 'industry',       label: 'Industry' },
-    { key: 'state',          label: 'State' },
-    { key: 'city',           label: 'City' },
-    { key: 'district',       label: 'District' },
-    { key: 'block',          label: 'Block' },
-    { key: 'status',         label: 'Status' },
-    { key: 'lifecycle_stage',label: 'Lifecycle Stage' },
-    { key: 'score',          label: 'Score' },
-    { key: 'grade',          label: 'Grade' },
-    { key: 'source_id',      label: 'Source ID' },
-    { key: 'owner_id',       label: 'Owner ID' },
-    { key: 'owner_name',     label: 'Owner Name' },
-    { key: 'utm_source',     label: 'UTM Source' },
-    { key: 'utm_campaign',   label: 'UTM Campaign' },
+    { key: 'first_name',       label: 'First Name' },
+    { key: 'last_name',        label: 'Last Name' },
+    { key: 'email',            label: 'Email' },
+    { key: 'phone',            label: 'Phone' },
+    { key: 'company',          label: 'Company' },
+    { key: 'title',            label: 'Title' },
+    { key: 'industry',         label: 'Industry' },
+    { key: 'state',            label: 'State' },
+    { key: 'city',             label: 'City' },
+    { key: 'district',         label: 'District' },
+    { key: 'block',            label: 'Block' },
+    { key: 'status',           label: 'Status' },
+    { key: 'lifecycle_stage',  label: 'Lifecycle Stage' },
+    { key: 'score',            label: 'Score' },
+    { key: 'grade',            label: 'Grade' },
+    { key: 'source_name',      label: 'Source' },
+    { key: 'owner_name',       label: 'Owner' },
+    { key: 'utm_source',       label: 'UTM Source' },
+    { key: 'utm_campaign',     label: 'UTM Campaign' },
     { key: 'last_activity_at', label: 'Last Activity At' },
     { key: 'stage_changed_at', label: 'Stage Changed At' },
-    { key: 'created_at',     label: 'Created At' },
+    { key: 'created_at',       label: 'Created At' },
   ];
   const escape = (v: unknown): string => {
     if (v === null || v === undefined) return '';
@@ -254,7 +270,7 @@ leads.get('/export', wrap(async (req, res) => {
     return s;
   };
   const header = cols.map((c) => c.label).join(',');
-  const body = stamped.map((r: any) =>
+  const body = enriched.map((r: any) =>
     cols.map((c) => escape((r as Record<string, unknown>)[c.key])).join(',')
   ).join('\n');
   const csv = `${header}\n${body}\n`;
