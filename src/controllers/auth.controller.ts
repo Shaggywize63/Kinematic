@@ -355,10 +355,11 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     .from('users')
     .select(`
       id, org_id, client_id, name, mobile, email, role, employee_id,
-      zone_id, supervisor_id, city, state, avatar_url,
+      zone_id, supervisor_id, city, state, avatar_url, org_role_id,
       is_active, joined_date, created_at,
       zones!zone_id(id, name, city, meeting_lat, meeting_lng, geofence_radius),
-      organisations!org_id(id, name, logo_url)
+      organisations!org_id(id, name, logo_url),
+      org_role:org_roles!org_role_id(id, name)
     `)
     .eq('id', req.user.id)
     .single();
