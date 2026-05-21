@@ -72,10 +72,19 @@ router.post('/webhooks/whatsapp', express.json({ limit: '2mb' }), async (req, re
     const expected = 'sha256=' + crypto
       .createHmac('sha256', process.env.CRM_WHATSAPP_APP_SECRET)
       .update(raw).digest('hex');
-    if (expected !== sigHeader) return res.sendStatus(401);
+    // Constant-time compare — `expected !== sigHeader` leaks the
+    // correct signature byte-by-byte via timing. Buffer.from + length
+    // guard + timingSafeEqual gives a length-mismatch return without
+    // an early short-circuit.
+    const a = Buffer.from(expected, 'utf8');
+    const b = Buffer.from(sigHeader, 'utf8');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.sendStatus(401);
   }
-  const orgId = (req.body?.org_id as string | undefined)
-    ?? (req.headers['x-org-id'] as string | undefined);
+  // org_id only from the trusted X-Org-Id header — accepting it from
+  // request body let an attacker who can forge the HMAC (or fail open
+  // when the secret is unset) attribute leads to any tenant. Header is
+  // set by the upstream WA-bridge service that owns the integration row.
+  const orgId = (req.headers['x-org-id'] as string | undefined);
   if (!orgId) {
     return res.status(202).json({ ignored: 'no org context resolvable for stub provider' });
   }

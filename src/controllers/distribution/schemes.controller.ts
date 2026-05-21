@@ -76,7 +76,7 @@ export const deactivate = asyncHandler(async (req: AuthRequest, res: Response) =
   if (isDemo(user)) return ok(res, { id: req.params.id, is_active: false });
   const { data: before } = await supabaseAdmin.from('schemes').select('*').eq('id', req.params.id).eq('org_id', user.org_id).maybeSingle();
   if (!before) return notFound(res, 'Scheme not found');
-  const { data, error } = await supabaseAdmin.from('schemes').update({ is_active: false, updated_at: new Date().toISOString() }).eq('id', req.params.id).select().single();
+  const { data, error } = await supabaseAdmin.from('schemes').update({ is_active: false, updated_at: new Date().toISOString() }).eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
   await audit(req, 'scheme.deactivate', 'schemes', data.id, before, data);
   ok(res, data);
