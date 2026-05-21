@@ -182,7 +182,11 @@ export const moveStageSchema = z.object({ stage_id: uuid });
 export const winSchema = z.object({ actual_close_date: isoDate, amount: z.number().nonnegative().optional() });
 export const loseSchema = z.object({ actual_close_date: isoDate, lost_reason: z.string().max(500).optional() });
 
-export const activitySchema = z.object({
+// Activity inner shape — kept separate from the refined wrapper so
+// `.partial()` (used by the PATCH route) still works. ZodEffects from
+// `.refine()` doesn't expose `.partial()`, so route handlers reach for
+// `activitySchemaBase.partial()` on update.
+export const activitySchemaBase = z.object({
   // Accept any short slug — built-ins (call/meeting/email/note/task/sms/whatsapp)
   // are still defaults, but clients can add custom types via Settings →
   // Activity Types. Shape enforced so the DB stays clean.
@@ -207,6 +211,19 @@ export const activitySchema = z.object({
   // uploads via the existing /api/v1/upload pipeline and posts the URL here.
   image_url: z.string().url().max(2048).optional().nullable(),
 });
+
+// Create-side schema enforces a linked entity. Activities without a
+// parent record (no lead / contact / account / deal) are orphans —
+// they never surface in any timeline view and can leak past the
+// per-user city-scope filter (city lives on the lead/contact, not the
+// activity). Block at the validator.
+export const activitySchema = activitySchemaBase.refine(
+  (a) => Boolean(a.lead_id || a.contact_id || a.account_id || a.deal_id),
+  {
+    message: 'Activity must be linked to a lead, contact, account, or deal',
+    path: ['lead_id'],
+  },
+);
 
 export const taskSchema = z.object({
   subject: z.string().min(1).max(200),
