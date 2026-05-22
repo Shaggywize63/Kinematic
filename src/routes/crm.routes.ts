@@ -217,7 +217,24 @@ leads.get('/', wrap(async (req, res) => {
   // City geo-tag enforcement: pass the user's effective city set (role ∩
   // user) so listLeads can restrict by crm_leads.city. null = no scope.
   const effectiveCities = rbac.getEffectiveCityNames((req as AuthRequest).user);
-  return res.json(await stampOwnerNames(await leadsSvc.listLeads(orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities })));
+  // Return both the page and the matching total so the UI can render
+  // real pagination ("Page 2 of 47") and a jump control. `data` is the
+  // existing array shape every legacy caller expects; `pagination` is
+  // additive — old callers ignore it.
+  const { rows, total, page, limit } = await leadsSvc.listLeadsWithCount(
+    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities }
+  );
+  const stamped = await stampOwnerNames(rows);
+  res.json({
+    success: true,
+    data: stamped,
+    pagination: {
+      total, page, limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  });
 }));
 leads.post('/', wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
@@ -406,7 +423,20 @@ router.use('/accounts', accounts);
 const deals = express.Router();
 deals.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  return res.json(await stampOwnerNames(await dealsSvc.listDeals(orgId(req), req.query, scope.id, { strictClient: scope.strict })));
+  const { rows, total, page, limit } = await dealsSvc.listDealsWithCount(
+    orgId(req), req.query, scope.id, { strictClient: scope.strict }
+  );
+  const stamped = await stampOwnerNames(rows);
+  res.json({
+    success: true,
+    data: stamped,
+    pagination: {
+      total, page, limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  });
 }));
 deals.post('/', wrap(async (req, res) => {
   const parsed = parse(v.dealSchema, req.body);
