@@ -114,20 +114,36 @@ export async function listLeads(
   client_id: string | null = null,
   options: { strictClient?: boolean; effectiveCities?: string[] | null } = {},
 ) {
-  let q = supabaseAdmin.from('crm_leads').select('*')
+  const { rows } = await listLeadsWithCount(org_id, filters, client_id, options);
+  return rows;
+}
+
+/**
+ * Same filter set as listLeads but returns both the page of rows AND the
+ * total row count (matching the full filter, not the page). Used by the
+ * paginated list endpoint so the UI can render "Page 2 of 47" and a
+ * jump-to-page control. Counts are computed in the same Supabase query
+ * via `{ count: 'exact' }` so this is one DB round trip, not two.
+ */
+export async function listLeadsWithCount(
+  org_id: string,
+  filters: Record<string, unknown> = {},
+  client_id: string | null = null,
+  options: { strictClient?: boolean; effectiveCities?: string[] | null } = {},
+): Promise<{ rows: Lead[]; total: number; page: number; limit: number }> {
+  const limit = Math.min(Number(filters.limit ?? 50), 200);
+  const page = Math.max(Number(filters.page ?? 1), 1);
+
+  let q = supabaseAdmin.from('crm_leads').select('*', { count: 'exact' })
     .eq('org_id', org_id).is('deleted_at', null);
   if (client_id) {
     q = options.strictClient
       ? q.eq('client_id', client_id)
       : q.or(`client_id.is.null,client_id.eq.${client_id}`);
   }
-  // City geo-tag scope. Honoured for every CRM read — the user's effective
-  // city set is computed once in the route layer via getEffectiveCityNames()
-  // and passed in. `null` means no restriction; `[]` means the role/user
-  // narrowed to an empty intersection (return zero rows).
   if (options.effectiveCities !== undefined && options.effectiveCities !== null) {
     if (options.effectiveCities.length === 0) {
-      return [] as Lead[];
+      return { rows: [], total: 0, page, limit };
     }
     q = q.in('city', options.effectiveCities);
   }
@@ -142,19 +158,19 @@ export async function listLeads(
   if (filters.city)     q = q.eq('city',     String(filters.city));
   if (filters.district) q = q.eq('district', String(filters.district));
   if (filters.block)    q = q.eq('block',    String(filters.block));
+  if (filters.score_grade) q = q.eq('score_grade', String(filters.score_grade));
+  if (filters.is_converted !== undefined) q = q.eq('is_converted', String(filters.is_converted) === 'true');
   if (filters.q) {
     const s = sanitisePostgrestSearch(filters.q);
     if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
   }
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
-  const limit = Math.min(Number(filters.limit ?? 50), 200);
-  const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('score', { ascending: false }).order('created_at', { ascending: false })
        .range((page - 1) * limit, page * limit - 1);
-  const { data, error } = await q;
+  const { data, error, count } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return (data ?? []) as Lead[];
+  return { rows: (data ?? []) as Lead[], total: count ?? 0, page, limit };
 }
 
 /**

@@ -11,7 +11,27 @@ export async function listDeals(
   client_id: string | null = null,
   options: { strictClient?: boolean } = {},
 ) {
-  let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)')
+  const { rows } = await listDealsWithCount(org_id, filters, client_id, options);
+  return rows;
+}
+
+/**
+ * Counts the full filter set in the same Supabase call as the page of
+ * rows so the list endpoint can render real "Page N of M" pagination
+ * without an extra round trip. Status is server-side here too — kanban
+ * already passes status='open', and the list view passes the user's
+ * picked status, so pagination always reflects the visible set.
+ */
+export async function listDealsWithCount(
+  org_id: string,
+  filters: Record<string, unknown> = {},
+  client_id: string | null = null,
+  options: { strictClient?: boolean } = {},
+): Promise<{ rows: Deal[]; total: number; page: number; limit: number }> {
+  const limit = Math.min(Number(filters.limit ?? 50), 200);
+  const page = Math.max(Number(filters.page ?? 1), 1);
+
+  let q = supabaseAdmin.from('crm_deals').select('*, crm_deal_stages(name, stage_type, color)', { count: 'exact' })
     .eq('org_id', org_id).is('deleted_at', null);
   if (client_id) {
     q = options.strictClient
@@ -22,16 +42,15 @@ export async function listDeals(
   if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.account_id) q = q.eq('account_id', String(filters.account_id));
+  if (filters.status) q = q.eq('status', String(filters.status));
   if (filters.q) q = q.ilike('name', `%${String(filters.q)}%`);
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
-  const limit = Math.min(Number(filters.limit ?? 50), 200);
-  const page = Math.max(Number(filters.page ?? 1), 1);
   q = q.order('expected_close_date', { ascending: true, nullsFirst: false })
        .range((page - 1) * limit, page * limit - 1);
-  const { data, error } = await q;
+  const { data, error, count } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return data ?? [];
+  return { rows: (data ?? []) as Deal[], total: count ?? 0, page, limit };
 }
 
 export async function getDeal(org_id: string, id: string) {
