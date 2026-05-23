@@ -38,7 +38,7 @@ import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
-import { stampOwnerNames, stampOwnerName } from '../services/crm/owners.helper';
+import { stampOwnerNames, stampOwnerName, stampLinkedEntityNames } from '../services/crm/owners.helper';
 
 const router: Router = express.Router();
 
@@ -652,7 +652,8 @@ activities.get('/calendar', wrap(async (req, res) => {
     q = q.or(userScope.columns.map((c) => `${c}.eq.${userScope.user_id}`).join(','));
   }
   const { data } = await q.order('due_at', { ascending: true });
-  res.json(await stampOwnerNames(data ?? []));
+  const stamped = await stampOwnerNames(data ?? []);
+  res.json(await stampLinkedEntityNames(stamped as any[]));
 }));
 activities.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
@@ -686,9 +687,14 @@ activities.get('/', wrap(async (req, res) => {
     },
   );
   const stamped = await stampOwnerNames(rows as Record<string, unknown>[]);
+  // Decorate each activity with the linked entity's display name
+  // (lead/contact/account/deal) so the UI can render "Rakesh Sharma"
+  // instead of a generic "Lead" badge. Two extra batched lookups,
+  // one round-trip each, regardless of page size.
+  const enriched = await stampLinkedEntityNames(stamped as any[]);
   res.json({
     success: true,
-    data: stamped,
+    data: enriched,
     pagination: {
       total, page, limit,
       totalPages: Math.max(1, Math.ceil(total / limit)),
@@ -722,32 +728,10 @@ activities.get('/export', wrap(async (req, res) => {
     if ((chunk as any[]).length < PAGE) break;
   }
   const stamped = await stampOwnerNames(rows.slice(0, MAX));
-
-  // Resolve linked-entity names in a few parallel batched queries so the
-  // CSV reads "Lead: Rakesh Sharma" instead of a UUID.
-  const leadIds    = Array.from(new Set(stamped.map((r: any) => r.lead_id).filter(Boolean)));
-  const contactIds = Array.from(new Set(stamped.map((r: any) => r.contact_id).filter(Boolean)));
-  const accountIds = Array.from(new Set(stamped.map((r: any) => r.account_id).filter(Boolean)));
-  const dealIds    = Array.from(new Set(stamped.map((r: any) => r.deal_id).filter(Boolean)));
-
-  const [leadsRes, contactsRes, accountsRes, dealsRes] = await Promise.all([
-    leadIds.length    ? supabaseAdmin.from('crm_leads').select('id, first_name, last_name, company').in('id', leadIds) : Promise.resolve({ data: [] as any[] }),
-    contactIds.length ? supabaseAdmin.from('crm_contacts').select('id, first_name, last_name').in('id', contactIds)    : Promise.resolve({ data: [] as any[] }),
-    accountIds.length ? supabaseAdmin.from('crm_accounts').select('id, name').in('id', accountIds)                     : Promise.resolve({ data: [] as any[] }),
-    dealIds.length    ? supabaseAdmin.from('crm_deals').select('id, name').in('id', dealIds)                            : Promise.resolve({ data: [] as any[] }),
-  ]);
-  const leadName    = new Map<string, string>((leadsRes.data    ?? []).map((l: any) => [l.id, [l.first_name, l.last_name].filter(Boolean).join(' ').trim() || l.company || '']));
-  const contactName = new Map<string, string>((contactsRes.data ?? []).map((c: any) => [c.id, [c.first_name, c.last_name].filter(Boolean).join(' ').trim()]));
-  const accountName = new Map<string, string>((accountsRes.data ?? []).map((a: any) => [a.id, a.name as string]));
-  const dealName    = new Map<string, string>((dealsRes.data    ?? []).map((d: any) => [d.id, d.name as string]));
-
-  const enriched = stamped.map((r: any) => ({
-    ...r,
-    lead_name:    r.lead_id    ? (leadName.get(r.lead_id)    ?? '') : '',
-    contact_name: r.contact_id ? (contactName.get(r.contact_id) ?? '') : '',
-    account_name: r.account_id ? (accountName.get(r.account_id) ?? '') : '',
-    deal_name:    r.deal_id    ? (dealName.get(r.deal_id)    ?? '') : '',
-  }));
+  // Resolve lead / contact / account / deal names via the shared
+  // helper so the CSV reads "Rakesh Sharma" instead of a UUID. Same
+  // decorator the list endpoint uses — keeps the two paths in lockstep.
+  const enriched = await stampLinkedEntityNames(stamped as any[]);
 
   const cols: Array<{ key: string; label: string }> = [
     { key: 'type',             label: 'Type' },
