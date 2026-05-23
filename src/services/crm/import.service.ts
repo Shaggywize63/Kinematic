@@ -40,6 +40,7 @@ export async function uploadFile(org_id: string, user_id: string | undefined, fi
 
   const { data, error } = await supabaseAdmin.from('crm_import_jobs').insert({
     org_id,
+    kind: 'leads',
     file_name: fileName,
     total_rows: rows.length,
     processed_rows: 0,
@@ -123,8 +124,11 @@ async function suggestMapping(org_id: string, headers: string[]): Promise<Record
 }
 
 export async function previewJob(org_id: string, job_id: string, mapping: Record<string, string>) {
+  // Filter by kind='leads' so a wrong job id (e.g. an activity-import
+  // job id pasted in by mistake) returns 404 instead of being treated
+  // as a lead import.
   const { data: job } = await supabaseAdmin.from('crm_import_jobs').select('*')
-    .eq('org_id', org_id).eq('id', job_id).single();
+    .eq('org_id', org_id).eq('id', job_id).eq('kind', 'leads').single();
   if (!job) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
 
   const sample = (job.sample_rows ?? []) as Record<string, unknown>[];
@@ -163,7 +167,7 @@ export async function previewJob(org_id: string, job_id: string, mapping: Record
  */
 export async function commitJob(org_id: string, job_id: string, user_id: string | null = null) {
   const { data: job, error: loadErr } = await supabaseAdmin.from('crm_import_jobs').select('*')
-    .eq('org_id', org_id).eq('id', job_id).single();
+    .eq('org_id', org_id).eq('id', job_id).eq('kind', 'leads').single();
   if (loadErr || !job) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
 
   await supabaseAdmin.from('crm_import_jobs').update({ status: 'running' }).eq('id', job_id);
@@ -244,14 +248,14 @@ export async function commitJob(org_id: string, job_id: string, user_id: string 
 
 export async function getJob(org_id: string, job_id: string) {
   const { data, error } = await supabaseAdmin.from('crm_import_jobs').select('*')
-    .eq('org_id', org_id).eq('id', job_id).single();
+    .eq('org_id', org_id).eq('id', job_id).eq('kind', 'leads').single();
   if (error) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
   return data;
 }
 
 export async function listJobs(org_id: string) {
   const { data } = await supabaseAdmin.from('crm_import_jobs').select('*')
-    .eq('org_id', org_id).order('created_at', { ascending: false }).limit(50);
+    .eq('org_id', org_id).eq('kind', 'leads').order('created_at', { ascending: false }).limit(50);
   return data ?? [];
 }
 

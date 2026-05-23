@@ -21,6 +21,7 @@ import * as crud from '../services/crm/crud.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
+import * as activityImportSvc from '../services/crm/activityImport.service';
 import * as analyticsSvc from '../services/crm/analytics.service';
 import * as analyticsExt from '../services/crm/analytics-extended.service';
 import * as dashboardLayoutSvc from '../services/crm/dashboardLayout.service';
@@ -1039,6 +1040,24 @@ imp.post('/commit', wrap(async (req, res) => {
 }));
 imp.get('/jobs/:id', wrap(async (req, res) => res.json(await importSvc.getJob(orgId(req), req.params.id))));
 imp.get('/jobs', wrap(async (req, res) => res.json(await importSvc.listJobs(orgId(req)))));
+
+// Activity bulk import — parallel three-stage flow to leads import
+// above. Shares the crm_import_jobs table; rows are tagged with
+// kind='activities' so the two never bleed into each other.
+imp.post('/activities/upload', upload.single('file'), wrap(async (req, res) => {
+  if (!req.file) throw new AppError(400, 'No file uploaded', 'NO_FILE');
+  res.status(201).json(await activityImportSvc.uploadFile(orgId(req), userId(req), req.file.originalname, req.file.buffer));
+}));
+imp.post('/activities/preview', wrap(async (req, res) => {
+  const body = parse(v.importPreviewSchema, req.body);
+  res.json(await activityImportSvc.previewJob(orgId(req), body.job_id, body.mapping));
+}));
+imp.post('/activities/commit', wrap(async (req, res) => {
+  const body = parse(v.importCommitSchema, req.body);
+  res.json(await activityImportSvc.commitJob(orgId(req), body.job_id, userId(req) ?? null));
+}));
+imp.get('/activities/jobs/:id', wrap(async (req, res) => res.json(await activityImportSvc.getJob(orgId(req), req.params.id))));
+imp.get('/activities/jobs', wrap(async (req, res) => res.json(await activityImportSvc.listJobs(orgId(req)))));
 router.use('/import', imp);
 
 // ---------- ANALYTICS ------------------------------------------------
