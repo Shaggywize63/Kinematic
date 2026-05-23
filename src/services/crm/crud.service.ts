@@ -21,10 +21,20 @@ export interface CrudOpts {
   // unnecessary because user_id is a UUID from the JWT, never user
   // input.
   userScope?: { user_id: string; columns: string[] };
+  // Caller-supplied extra filters applied after the standard ones.
+  // Lets specific routes (e.g. /activities?view=overdue) layer in
+  // date / null / range predicates the generic helper doesn't know
+  // about, without forking the helper.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extraFilters?: (q: any) => any;
 }
 
 // Reserved query keys that aren't applied as direct .eq() filters.
-const RESERVED = ['limit','page','q','sort','order','from','to'];
+// 'view' is consumed by the activities list route (Overdue / Upcoming
+// / Completed KPI-tile-as-filter) and turned into date predicates via
+// extraFilters — we don't want the generic helper to also try to
+// .eq() against a 'view' column that doesn't exist.
+const RESERVED = ['limit','page','q','sort','order','from','to','view'];
 
 export async function list(table: string, org_id: string, query: Record<string, unknown> = {}, opts: Partial<CrudOpts> = {}) {
   let q = supabaseAdmin.from(table).select('*').eq('org_id', org_id);
@@ -59,6 +69,7 @@ export async function list(table: string, org_id: string, query: Record<string, 
     const orExpr = opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`).join(',');
     q = q.or(orExpr);
   }
+  if (opts.extraFilters) q = opts.extraFilters(q);
   const dateCol = opts.dateRangeColumn ?? 'created_at';
   if (query.from) q = q.gte(dateCol, String(query.from));
   if (query.to) q = q.lte(dateCol, String(query.to));
