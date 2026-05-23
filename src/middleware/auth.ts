@@ -268,13 +268,22 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // The hierarchy role caps the user's city access — load its assigned_cities
   // (text[] of names) so getEffectiveCityNames() can intersect them with the
   // user's own list. Skipped when the user has no hierarchy role attached.
+  // Also fetches `data_scope` (own | team | all) which drives per-user
+  // visibility filters on activities — see activityVisibilityScope() in
+  // crm.routes.ts. Most tenants run users at system_role=sub_admin
+  // regardless of their actual seniority, so the system-role check
+  // alone isn't enough to scope frontline reps to their own data.
   let roleAssignedCities: string[] = [];
+  let orgRoleDataScope: 'own' | 'team' | 'all' = 'all';
   if (profile.org_role_id) {
     const { data: roleRow } = await supabaseAdmin
-      .from('org_roles').select('assigned_cities')
+      .from('org_roles').select('assigned_cities, data_scope')
       .eq('id', profile.org_role_id).single();
     if (Array.isArray(roleRow?.assigned_cities)) {
       roleAssignedCities = (roleRow!.assigned_cities as string[]).filter(Boolean);
+    }
+    if (roleRow?.data_scope === 'own' || roleRow?.data_scope === 'team') {
+      orgRoleDataScope = roleRow.data_scope as 'own' | 'team';
     }
   }
 
@@ -284,6 +293,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     assigned_cities: userCityIds,
     assigned_city_names: userCityNames,
     role_assigned_cities: roleAssignedCities,
+    org_role_data_scope: orgRoleDataScope,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
   } as AuthRequest['user'];

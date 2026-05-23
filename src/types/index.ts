@@ -24,6 +24,12 @@ export interface AuthUser {
   // narrow within this list.
   org_role_id?: string;
   role_assigned_cities?: string[];
+  // Per-designation data visibility. Drives activity scoping (see
+  // activityVisibilityScope in crm.routes.ts). 'own' = user sees only
+  // rows they own / are assigned to; 'team' = reserved for future
+  // supervisor-of-direct-reports pattern (treated as 'all' today);
+  // 'all' = visibility within the org/client tenant scope.
+  org_role_data_scope?: 'own' | 'team' | 'all';
   enabled_modules?: string[];   // module IDs enabled for this user's client (entitlement)
   enabled_packages?: string[];  // package SKUs enabled for this user's client
   // Single-device login enforcement. Set by /auth/login on mobile platforms;

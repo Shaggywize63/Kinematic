@@ -201,28 +201,41 @@ function dateRange(req: Request): { from?: string; to?: string } {
   return { from, to };
 }
 
-// Roles that get to see every activity in their org/client scope.
-// Everyone else (executive, field_executive, hr) gets per-user
-// scoping — they only see activities where they are owner_id OR
-// assigned_to. The split mirrors auth.ts:318's "admin-like" role set.
+// System roles that get full activity visibility in their org/client
+// scope when no narrower org-role designation overrides.
+// Most tenants set EVERY user to sub_admin regardless of seniority,
+// so this check alone isn't enough — the org_role_data_scope below
+// is the canonical signal.
 const ADMIN_LIKE_ROLES = new Set([
   'super_admin', 'admin', 'main_admin', 'sub_admin', 'client', 'city_manager', 'supervisor',
 ]);
 
 /**
  * Returns the userScope opts to pass to crud.list* for activity
- * queries. Admin-like roles get full visibility (null). Everyone else
- * gets restricted to activities where they are the owner or the
- * assignee.
+ * queries. Three layers, in priority order:
+ *
+ *   1. org_role.data_scope = 'own' on the user's designation → always
+ *      restrict to own rows, regardless of system role. This is the
+ *      tenant-configurable signal (set per designation in the
+ *      org_roles table). Tata Tiscon's "Consumer Champion" and
+ *      "Area Sales Officer" designations have data_scope='own' for
+ *      example.
+ *   2. org_role.data_scope = 'team' → reserved for future
+ *      supervisor-of-direct-reports; for now treat as 'all' (the
+ *      hierarchy model isn't wired yet).
+ *   3. system role not in ADMIN_LIKE_ROLES → restrict to own.
+ *   4. Otherwise full visibility.
  *
  * Centralised here so the same scoping is applied uniformly across
  * the activities list, calendar, export, single-fetch, and the
- * lead/contact/deal/account sub-resource activity endpoints. If you
- * add a new activity-listing route, call this.
+ * lead/contact/deal/account sub-resource activity endpoints.
  */
 function activityVisibilityScope(req: Request): { user_id: string; columns: string[] } | undefined {
   const u = (req as AuthRequest).user;
   if (!u?.id) return undefined;
+  if (u.org_role_data_scope === 'own') {
+    return { user_id: u.id, columns: ['owner_id', 'assigned_to'] };
+  }
   if (u.role && ADMIN_LIKE_ROLES.has(u.role)) return undefined;
   return { user_id: u.id, columns: ['owner_id', 'assigned_to'] };
 }
