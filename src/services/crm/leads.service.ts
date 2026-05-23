@@ -455,7 +455,13 @@ export async function convertLead(org_id: string, id: string, opts: {
 
   let deal_id: string | null = null;
   if (opts.create_deal !== false) {
-    const pipeline_id = opts.pipeline_id || await getDefaultPipelineId(org_id);
+    // Client-aware pipeline resolution. Pass the lead's client_id so
+    // tenants with a client-specific default (e.g. Tata Tiscon's
+    // "Home Construction Pipeline") get THEIR default, not the
+    // org-wide one. Previously the helper assumed only one
+    // `is_default=true` row per org and crashed with
+    // "No default pipeline configured" when both existed.
+    const pipeline_id = opts.pipeline_id || await getDefaultPipelineId(org_id, leadClientId);
     const stage_id = opts.stage_id || await getFirstOpenStageId(pipeline_id);
 
     let amount = opts.deal_amount ?? 0;
@@ -560,18 +566,57 @@ export async function reopenLead(
   return data as Lead;
 }
 
-async function getDefaultPipelineId(org_id: string): Promise<string> {
-  const { data } = await supabaseAdmin.from('crm_pipelines').select('id')
-    .eq('org_id', org_id).eq('is_default', true).maybeSingle();
-  if (!data) throw new AppError(400, 'No default pipeline configured. Run crm_seed_defaults() for this org.', 'NO_PIPELINE');
-  return data.id;
+/**
+ * Pick the right pipeline for a lead conversion. Tenants can have
+ * a client-specific default (`client_id = X AND is_default=true`)
+ * AND an org-wide default (`client_id IS NULL AND is_default=true`)
+ * at the same time. Old impl was a `.maybeSingle()` over
+ * `is_default=true` which returned NULL when both existed and
+ * threw "No default pipeline configured" — exactly the bug that
+ * blocked conversions on Tata Tiscon.
+ *
+ * Resolution order (matches deals.service.ts:resolveDefaultPipeline):
+ *   1. If client_id given, look for the client's own default
+ *   2. Otherwise the org-wide default (client_id IS NULL, is_default)
+ *   3. Otherwise the first active pipeline in the client/org scope
+ *
+ * Throws only when NO pipelines exist at all — that's a real
+ * configuration error, not a resolution ambiguity.
+ */
+async function getDefaultPipelineId(org_id: string, client_id: string | null = null): Promise<string> {
+  let q = supabaseAdmin.from('crm_pipelines')
+    .select('id, is_default, client_id, created_at')
+    .eq('org_id', org_id).eq('is_active', true).is('deleted_at', null)
+    .order('created_at', { ascending: true });
+  if (client_id) {
+    q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  } else {
+    q = q.is('client_id', null);
+  }
+  const { data } = await q;
+  const list = (data ?? []) as Array<{ id: string; is_default: boolean; client_id: string | null }>;
+  if (list.length === 0) {
+    throw new AppError(400, 'No pipeline configured for this org/client. Create one under CRM › Settings › Pipelines first.', 'NO_PIPELINE');
+  }
+  // Client-pinned default > org-wide default > first pipeline.
+  const winner =
+    list.find((p) => p.is_default && p.client_id)
+    ?? list.find((p) => p.is_default)
+    ?? list[0];
+  return winner.id;
 }
 
 async function getFirstOpenStageId(pipeline_id: string): Promise<string> {
-  const { data } = await supabaseAdmin.from('crm_deal_stages').select('id')
+  // Prefer the lowest-position stage explicitly tagged stage_type='open'.
+  // Fall back to the lowest-position stage of any type if no 'open'
+  // exists (some legacy pipelines were imported without stage_type).
+  const { data: openStage } = await supabaseAdmin.from('crm_deal_stages').select('id')
     .eq('pipeline_id', pipeline_id).eq('stage_type', 'open').order('position').limit(1).maybeSingle();
-  if (!data) throw new AppError(400, 'No open stages in pipeline', 'NO_STAGE');
-  return data.id;
+  if (openStage?.id) return openStage.id;
+  const { data: anyStage } = await supabaseAdmin.from('crm_deal_stages').select('id')
+    .eq('pipeline_id', pipeline_id).order('position').limit(1).maybeSingle();
+  if (anyStage?.id) return anyStage.id;
+  throw new AppError(400, 'Selected pipeline has no stages. Add at least one stage under CRM › Settings › Pipelines.', 'NO_STAGE');
 }
 
 export async function listScoreHistory(org_id: string, lead_id: string) {
