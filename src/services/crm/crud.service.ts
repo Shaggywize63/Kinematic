@@ -14,6 +14,13 @@ export interface CrudOpts {
   // Column to filter date range on. Defaults to created_at; activities can
   // override to completed_at, deals to expected_close_date, etc.
   dateRangeColumn?: string;
+  // Per-user visibility scope. When set, the query is constrained to
+  // rows where ANY of `columns` matches `user_id`. Used on activities
+  // so non-admin users only see rows they own or are assigned to.
+  // Implemented as `.or()` with `.eq.` predicates — sanitisation is
+  // unnecessary because user_id is a UUID from the JWT, never user
+  // input.
+  userScope?: { user_id: string; columns: string[] };
 }
 
 // Reserved query keys that aren't applied as direct .eq() filters.
@@ -46,6 +53,11 @@ export async function list(table: string, org_id: string, query: Record<string, 
       const orExpr = opts.searchColumns.map(c => `${c}.ilike.%${s}%`).join(',');
       q = q.or(orExpr);
     }
+  }
+  if (opts.userScope) {
+    // user_id is JWT-derived UUID — safe to interpolate.
+    const orExpr = opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`).join(',');
+    q = q.or(orExpr);
   }
   const dateCol = opts.dateRangeColumn ?? 'created_at';
   if (query.from) q = q.gte(dateCol, String(query.from));
@@ -115,6 +127,10 @@ export async function clientScopedListWithCount(
       const orExpr = opts.searchColumns.map(c => `${c}.ilike.%${s}%`).join(',');
       q = q.or(orExpr);
     }
+  }
+  if (opts.userScope) {
+    const orExpr = opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`).join(',');
+    q = q.or(orExpr);
   }
   const dateCol = opts.dateRangeColumn ?? 'created_at';
   if (query.from) q = q.gte(dateCol, String(query.from));
