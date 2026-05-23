@@ -597,9 +597,24 @@ activities.get('/calendar', wrap(async (req, res) => {
   const { data } = await q.order('due_at', { ascending: true });
   res.json(await stampOwnerNames(data ?? []));
 }));
-activities.get('/', wrap(async (req, res) => res.json(
-  await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientScope(req).id, req.query, { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: clientScope(req).strict }))
-)));
+activities.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const { rows, total, page, limit } = await crud.clientScopedListWithCount(
+    'crm_activities', orgId(req), scope.id, req.query,
+    { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject', 'body'], dateRangeColumn: 'completed_at', strictClient: scope.strict },
+  );
+  const stamped = await stampOwnerNames(rows as Record<string, unknown>[]);
+  res.json({
+    success: true,
+    data: stamped,
+    pagination: {
+      total, page, limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  });
+}));
 // CSV export — same filters as the list endpoint. Pages through all
 // matching rows up to a 10k cap with the same tenant + client scope
 // the list path uses. Stamps owner names + resolves the parent record

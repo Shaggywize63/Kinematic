@@ -73,14 +73,33 @@ export async function clientScopedList(
   query: Record<string, unknown> = {},
   opts: Partial<CrudOpts> & { strictClient?: boolean } = {},
 ) {
-  let q = supabaseAdmin.from(table).select('*').eq('org_id', org_id);
+  const { rows } = await clientScopedListWithCount(table, org_id, client_id, query, opts);
+  return rows;
+}
+
+/**
+ * Same as clientScopedList but also returns the matching row count so
+ * the route can render real "Page X of Y" pagination. Uses Supabase's
+ * { count: 'exact' } so the count is computed in the same DB call as
+ * the page of rows — one round trip, not two.
+ *
+ * Used by the activities list route (and any other resource that opts
+ * into server-side pagination going forward). Existing callers of
+ * clientScopedList stay unchanged — that function now delegates here
+ * and just unwraps the rows.
+ */
+export async function clientScopedListWithCount(
+  table: string,
+  org_id: string,
+  client_id: string | null,
+  query: Record<string, unknown> = {},
+  opts: Partial<CrudOpts> & { strictClient?: boolean } = {},
+): Promise<{ rows: unknown[]; total: number; page: number; limit: number }> {
+  const limit = Math.min(Number(query.limit ?? 50), 200);
+  const page = Math.max(Number(query.page ?? 1), 1);
+
+  let q = supabaseAdmin.from(table).select('*', { count: 'exact' }).eq('org_id', org_id);
   if (opts.softDelete !== false) q = q.is('deleted_at', null);
-  // Two scoping modes (see clientScope() in crm.routes for the source
-  // distinction):
-  //   strict       -> only client_id = X    (JWT-pinned client users;
-  //                                          prevents NULL leaks)
-  //   non-strict   -> client_id IS NULL OR  (org-admin picker; still
-  //                   client_id = X          surfaces legacy defaults)
   if (client_id) {
     q = opts.strictClient
       ? q.eq('client_id', client_id)
@@ -91,7 +110,6 @@ export async function clientScopedList(
     q = q.eq(k, v as never);
   }
   if (query.q && opts.searchColumns?.length) {
-    // Sanitise — see utils/postgrest.ts for the threat model.
     const s = sanitisePostgrestSearch(query.q);
     if (s) {
       const orExpr = opts.searchColumns.map(c => `${c}.ilike.%${s}%`).join(',');
@@ -101,14 +119,12 @@ export async function clientScopedList(
   const dateCol = opts.dateRangeColumn ?? 'created_at';
   if (query.from) q = q.gte(dateCol, String(query.from));
   if (query.to) q = q.lte(dateCol, String(query.to));
-  const limit = Math.min(Number(query.limit ?? 50), 200);
-  const page = Math.max(Number(query.page ?? 1), 1);
   const sort = (query.sort as string) || opts.defaultSort?.column || 'created_at';
   const order = (query.order as string) || (opts.defaultSort?.ascending ? 'asc' : 'desc');
   q = q.order(sort, { ascending: order === 'asc' }).range((page - 1) * limit, page * limit - 1);
-  const { data, error } = await q;
+  const { data, error, count } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return data ?? [];
+  return { rows: data ?? [], total: count ?? 0, page, limit };
 }
 
 export async function get(table: string, org_id: string, id: string, softDelete = true) {
