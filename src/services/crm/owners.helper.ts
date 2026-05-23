@@ -62,6 +62,7 @@ type Linked = {
   account_id?: string | null;
   deal_id?: string | null;
   lead_name?: string | null;
+  lead_phone?: string | null;
   contact_name?: string | null;
   account_name?: string | null;
   deal_name?: string | null;
@@ -82,12 +83,13 @@ export async function stampLinkedEntityNames<T extends Linked>(rows: T[]): Promi
   if (!leadIds.size && !contactIds.size && !accountIds.size && !dealIds.size) return rows;
 
   const [leadsRes, contactsRes, accountsRes, dealsRes] = await Promise.all([
-    leadIds.size    ? supabaseAdmin.from('crm_leads').select('id, first_name, last_name, company').in('id', Array.from(leadIds)) : Promise.resolve({ data: [] as any[] }),
+    leadIds.size    ? supabaseAdmin.from('crm_leads').select('id, first_name, last_name, company, phone').in('id', Array.from(leadIds)) : Promise.resolve({ data: [] as any[] }),
     contactIds.size ? supabaseAdmin.from('crm_contacts').select('id, first_name, last_name').in('id', Array.from(contactIds))    : Promise.resolve({ data: [] as any[] }),
     accountIds.size ? supabaseAdmin.from('crm_accounts').select('id, name').in('id', Array.from(accountIds))                     : Promise.resolve({ data: [] as any[] }),
     dealIds.size    ? supabaseAdmin.from('crm_deals').select('id, name').in('id', Array.from(dealIds))                            : Promise.resolve({ data: [] as any[] }),
   ]);
   const leadName    = new Map<string, string>((leadsRes.data    ?? []).map((l: any) => [l.id, [l.first_name, l.last_name].filter(Boolean).join(' ').trim() || l.company || '']));
+  const leadPhone   = new Map<string, string>((leadsRes.data    ?? []).map((l: any) => [l.id, (l.phone as string) || '']));
   const contactName = new Map<string, string>((contactsRes.data ?? []).map((c: any) => [c.id, [c.first_name, c.last_name].filter(Boolean).join(' ').trim()]));
   const accountName = new Map<string, string>((accountsRes.data ?? []).map((a: any) => [a.id, (a.name as string) || '']));
   const dealName    = new Map<string, string>((dealsRes.data    ?? []).map((d: any) => [d.id, (d.name as string) || '']));
@@ -95,6 +97,7 @@ export async function stampLinkedEntityNames<T extends Linked>(rows: T[]): Promi
   return rows.map((r) => ({
     ...r,
     lead_name:    r.lead_id    ? (leadName.get(r.lead_id)       ?? r.lead_name    ?? null) : (r.lead_name    ?? null),
+    lead_phone:   r.lead_id    ? (leadPhone.get(r.lead_id)      ?? r.lead_phone   ?? null) : (r.lead_phone   ?? null),
     contact_name: r.contact_id ? (contactName.get(r.contact_id) ?? r.contact_name ?? null) : (r.contact_name ?? null),
     account_name: r.account_id ? (accountName.get(r.account_id) ?? r.account_name ?? null) : (r.account_name ?? null),
     deal_name:    r.deal_id    ? (dealName.get(r.deal_id)       ?? r.deal_name    ?? null) : (r.deal_name    ?? null),
