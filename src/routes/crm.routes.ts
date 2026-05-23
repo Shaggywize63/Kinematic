@@ -38,7 +38,7 @@ import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
-import { stampOwnerNames, stampOwnerName, stampLinkedEntityNames } from '../services/crm/owners.helper';
+import { stampOwnerNames, stampOwnerName, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
 
 const router: Router = express.Router();
 
@@ -318,13 +318,21 @@ leads.get('/export', wrap(async (req, res) => {
       .in('id', sourceIds);
     for (const s of srcs ?? []) sourceNameById.set((s as any).id, (s as any).name as string);
   }
-  const enriched = stamped.map((r: any) => ({
+  const enrichedBase = stamped.map((r: any) => ({
     ...r,
     source_name: r.source_id ? (sourceNameById.get(r.source_id) ?? '') : '',
   }));
+  // Pull the tenant's admin-defined lead custom fields and flatten each
+  // row.custom_fields[field_key] onto a `custom__<key>` synthetic column
+  // so the CSV writer below picks them up via the same `r[col.key]` lookup
+  // as the built-in columns. Auto-includes every new field the admin adds.
+  const customCols = await listCustomFieldColumns(orgId(req), 'lead');
+  const enriched = stampCustomFieldValues(enrichedBase as any[], customCols);
 
   // CSV columns — names only. UUIDs are an implementation detail and
-  // never make it into the exported file.
+  // never make it into the exported file. Custom fields auto-append at
+  // the end so existing column positions stay stable for downstream
+  // consumers (sheets / pivots tend to reference columns by index).
   const cols: Array<{ key: string; label: string }> = [
     { key: 'first_name',       label: 'First Name' },
     { key: 'last_name',        label: 'Last Name' },
@@ -348,6 +356,7 @@ leads.get('/export', wrap(async (req, res) => {
     { key: 'last_activity_at', label: 'Last Activity At' },
     { key: 'stage_changed_at', label: 'Stage Changed At' },
     { key: 'created_at',       label: 'Created At' },
+    ...customCols.map((c) => ({ key: c.key, label: c.label })),
   ];
   const escape = (v: unknown): string => {
     if (v === null || v === undefined) return '';
@@ -547,6 +556,11 @@ deals.get('/export', wrap(async (req, res) => {
       probability_pct: r.probability != null ? `${Math.round(Number(r.probability) * 100)}%` : null,
     };
   });
+  // Append admin-defined deal custom fields after the built-in columns.
+  // Same flattening + stamping as leads/export so the CSV writer below
+  // reads each value via the synthetic custom__<field_key> column.
+  const customCols = await listCustomFieldColumns(orgId(req), 'deal');
+  const flatWithCustom = stampCustomFieldValues(flat as any[], customCols);
 
   const cols: Array<{ key: string; label: string }> = [
     { key: 'name',                label: 'Name' },
@@ -569,6 +583,7 @@ deals.get('/export', wrap(async (req, res) => {
     { key: 'lost_at',             label: 'Lost At' },
     { key: 'lost_reason',         label: 'Lost Reason' },
     { key: 'created_at',          label: 'Created At' },
+    ...customCols.map((c) => ({ key: c.key, label: c.label })),
   ];
   const escape = (v: unknown): string => {
     if (v === null || v === undefined) return '';
@@ -577,7 +592,7 @@ deals.get('/export', wrap(async (req, res) => {
     return s;
   };
   const header = cols.map((c) => c.label).join(',');
-  const body = flat.map((r: any) =>
+  const body = flatWithCustom.map((r: any) =>
     cols.map((c) => escape((r as Record<string, unknown>)[c.key])).join(',')
   ).join('\n');
   const csv = `${header}\n${body}\n`;
