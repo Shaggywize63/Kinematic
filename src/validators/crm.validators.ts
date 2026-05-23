@@ -68,7 +68,12 @@ const b2cBase = {
 export const leadCreateSchema = z.object({
   client_id: optionalUuid,
   first_name: z.string().min(1).max(120).optional().nullable(),
-  last_name: z.string().min(1).max(120).optional().nullable(),
+  // Last name is mandatory on create — captured at every form entry
+  // point. The .optional().nullable() on leadUpdateSchema (via
+  // .partial() below) still lets PATCH skip the field for partial
+  // updates, so existing records without last_name don't fail on
+  // edit.
+  last_name: z.string().min(1, 'Last name is required').max(120),
   email: z.string().email().optional().nullable(),
   phone: z.string().max(40).optional().nullable(),
   company: z.string().max(200).optional().nullable(),
@@ -160,8 +165,15 @@ export const accountSchema = z.object({
 export const dealSchema = z.object({
   client_id: optionalUuid,
   name: z.string().min(1).max(200),
-  pipeline_id: uuid,
-  stage_id: uuid,
+  // pipeline_id + stage_id are optional at the API boundary because
+  // deals.service.ts:resolveDefaultPipeline() auto-picks the org's
+  // default pipeline (and its first stage) when the caller hasn't
+  // chosen. Previously these were required uuid and Zod rejected the
+  // request before the auto-resolve had a chance to run — every
+  // "create deal" with blank pipeline ended in a 400. Make them
+  // optional so the service-level fallback can do its job.
+  pipeline_id: optionalUuid,
+  stage_id: optionalUuid,
   account_id: optionalUuid,
   primary_contact_id: optionalUuid,
   lead_id: optionalUuid,
