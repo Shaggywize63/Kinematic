@@ -88,6 +88,9 @@ export const leadCreateSchema = z.object({
   notes: z.string().optional().nullable(),
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
+  // Optional profile photo URL — typically a Supabase storage path
+  // produced by /upload/photo. Set to null to clear an existing photo.
+  photo_url: z.string().url().max(2048).optional().nullable(),
   ...utmFields,
   ...b2cBase,
 });
@@ -109,6 +112,18 @@ export const leadConvertSchema = z.object({
   // service derives amount = volume_kg × (product.price / product.weight_kg).
   deal_volume_kg: z.number().nonnegative().optional(),
   deal_product_id: optionalUuid,
+  // Multi-product deal — overrides the single-product fields above when
+  // present. Each line item carries pieces (preferred input), kg, and a
+  // computed subtotal. Backend sums subtotals into deal.amount, sums
+  // kg into custom_fields.volume_kg, and persists the array verbatim
+  // into deal.custom_fields.line_items so the deal detail page can
+  // render the breakdown later.
+  deal_line_items: z.array(z.object({
+    product_id: z.string().uuid(),
+    pieces: z.number().nonnegative().optional(),
+    volume_kg: z.number().nonnegative().optional(),
+    subtotal: z.number().nonnegative().optional(),
+  })).max(50).optional(),
   pipeline_id: optionalUuid,
   stage_id: optionalUuid,
 });

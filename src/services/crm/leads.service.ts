@@ -86,6 +86,7 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
     utm_content:  (p.utm_content  as string | undefined) ?? null,
     referrer_url: (p.referrer_url as string | undefined) ?? null,
     landing_page: (p.landing_page as string | undefined) ?? null,
+    photo_url:    (p.photo_url    as string | undefined) ?? null,
     created_by: user_id ?? null,
   };
 
@@ -405,6 +406,10 @@ export async function markLeadAsWon(
 export async function convertLead(org_id: string, id: string, opts: {
   create_deal?: boolean; deal_name?: string; deal_amount?: number;
   deal_volume_kg?: number; deal_product_id?: string;
+  // Multi-product deal lines. Each row carries the product, the pieces
+  // and/or kg the rep entered, and the computed subtotal. If present,
+  // overrides the single-product fields above.
+  deal_line_items?: Array<{ product_id?: string; pieces?: number; volume_kg?: number; subtotal?: number }>;
   pipeline_id?: string; stage_id?: string;
 }, user_id?: string) {
   const lead = await getLead(org_id, id);
@@ -465,7 +470,51 @@ export async function convertLead(org_id: string, id: string, opts: {
     const stage_id = opts.stage_id || await getFirstOpenStageId(pipeline_id);
 
     let amount = opts.deal_amount ?? 0;
-    if ((amount == null || amount === 0) && opts.deal_volume_kg && opts.deal_product_id) {
+    let totalVolumeKg: number | null = null;
+    let lineItemsForCustomFields: Array<Record<string, unknown>> | null = null;
+
+    // Multi-product path. Fetch the referenced products once, build the
+    // canonical line-items array (with resolved name/price/weight so
+    // future renderers don't have to re-query), and sum into the deal
+    // total. Overrides the single-product fields when present.
+    if (opts.deal_line_items && opts.deal_line_items.length > 0) {
+      // Drop rows that came in without a product_id — the validator
+      // marks the field optional so a half-filled row can sneak through.
+      const validLines = opts.deal_line_items.filter((l): l is { product_id: string; pieces?: number; volume_kg?: number; subtotal?: number } => !!l.product_id);
+      const productIds = Array.from(new Set(validLines.map((l) => l.product_id)));
+      const { data: products } = productIds.length
+        ? await supabaseAdmin.from('crm_products')
+            .select('id, name, price, weight_kg')
+            .eq('org_id', org_id)
+            .in('id', productIds)
+        : { data: [] as any[] };
+      const byId = new Map((products ?? []).map((p: any) => [p.id, p]));
+      const computed = validLines.map((l) => {
+        const p = byId.get(l.product_id) as any;
+        const price = Number(p?.price ?? 0);
+        const weightKg = Number(p?.weight_kg ?? 0);
+        const pieces = Number(l.pieces ?? 0);
+        // Prefer pieces → derive kg + subtotal so the math is identical
+        // to what the frontend showed. Fall back to client-provided kg
+        // when pieces isn't supplied (legacy callers).
+        const kg = pieces > 0 ? pieces * weightKg : Number(l.volume_kg ?? 0);
+        const subtotal = Number(l.subtotal ?? (pieces > 0 ? pieces * price : (weightKg > 0 ? (kg / weightKg) * price : 0)));
+        return {
+          product_id: l.product_id,
+          product_name: p?.name ?? null,
+          unit_price: price,
+          unit_weight_kg: weightKg,
+          pieces,
+          volume_kg: Math.round(kg * 100) / 100,
+          subtotal: Math.round(subtotal),
+        };
+      });
+      const totalAmount = computed.reduce((s, r) => s + (r.subtotal || 0), 0);
+      const totalKg     = computed.reduce((s, r) => s + (r.volume_kg || 0), 0);
+      if (totalAmount > 0) amount = totalAmount;
+      totalVolumeKg = Math.round(totalKg * 100) / 100;
+      lineItemsForCustomFields = computed;
+    } else if ((amount == null || amount === 0) && opts.deal_volume_kg && opts.deal_product_id) {
       const { data: product } = await supabaseAdmin.from('crm_products')
         .select('price, weight_kg').eq('id', opts.deal_product_id).eq('org_id', org_id).maybeSingle();
       if (product?.price && product?.weight_kg) {
@@ -474,13 +523,21 @@ export async function convertLead(org_id: string, id: string, opts: {
       }
     }
 
-    const { data: deal, error: dErr } = await supabaseAdmin.from('crm_deals').insert({
+    const dealInsert: Record<string, unknown> = {
       org_id, client_id: leadClientId, pipeline_id, stage_id,
       name: opts.deal_name || `${lead.company || lead.email || 'New deal'} — Opportunity`,
       account_id, primary_contact_id: contact_id, lead_id: id,
       amount, owner_id: lead.owner_id, source_id: lead.source_id,
       created_by: user_id ?? null,
-    }).select('id').single();
+    };
+    if (lineItemsForCustomFields || totalVolumeKg != null) {
+      dealInsert.custom_fields = {
+        ...(lineItemsForCustomFields ? { line_items: lineItemsForCustomFields } : {}),
+        ...(totalVolumeKg != null ? { volume_kg: totalVolumeKg } : {}),
+      };
+    }
+    const { data: deal, error: dErr } = await supabaseAdmin.from('crm_deals').insert(dealInsert)
+      .select('id').single();
     if (dErr) throw new AppError(500, dErr.message, 'DB_ERROR');
     deal_id = deal.id;
   }
