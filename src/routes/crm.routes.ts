@@ -487,6 +487,105 @@ deals.get('/', wrap(async (req, res) => {
     },
   });
 }));
+// CSV export of every deal visible to the caller. Mirrors the
+// activities/export pattern: paginated fetch up to MAX rows so a
+// massive org can't OOM the server, then enriched in batch with
+// lead / contact / account / owner names and the line-items
+// breakdown captured at convert time.
+deals.get('/export', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const PAGE = 200;
+  const MAX  = 10000;
+  const rows: any[] = [];
+  for (let page = 1; rows.length < MAX; page++) {
+    const { rows: chunk } = await dealsSvc.listDealsWithCount(
+      orgId(req), { ...req.query, limit: PAGE, page }, scope.id, { strictClient: scope.strict },
+    );
+    rows.push(...(chunk as any[]));
+    if ((chunk as any[]).length < PAGE) break;
+  }
+  const limited = rows.slice(0, MAX);
+  const stamped = await stampOwnerNames(limited);
+  // Reuse the shared linked-entity decorator so the CSV reads
+  // "Acme Steel" instead of a UUID. Deals' primary-contact column is
+  // named `primary_contact_id` though, while the decorator expects
+  // `contact_id` — alias it on the way in, strip on the way out so
+  // we don't accidentally clobber the original column name on the
+  // returned row.
+  const aliased = stamped.map((r: any) => ({ ...r, contact_id: r.primary_contact_id ?? null }));
+  const enriched = await stampLinkedEntityNames(aliased as any[]);
+
+  // Resolve stage_name from the embedded crm_deal_stages relation —
+  // listDealsWithCount selects it as `crm_deal_stages` (an object).
+  // Flatten to a single string so the CSV stays one column.
+  const flat = enriched.map((r: any) => {
+    const stage = r.crm_deal_stages || null;
+    const cf    = (r.custom_fields || {}) as Record<string, unknown>;
+    const lines = Array.isArray((cf as any).line_items) ? ((cf as any).line_items as any[]) : [];
+    // Render each line as "ProductName (Npc, Kkg, ₹Subtotal)" joined by
+    // "; " — a single column is easier to filter in Excel than N
+    // variable-width product columns, and the per-row math is already
+    // captured during convert so we don't recompute.
+    const lineItemsStr = lines.map((l) => {
+      const parts: string[] = [];
+      if (l.pieces    != null) parts.push(`${Number(l.pieces).toLocaleString()}pc`);
+      if (l.volume_kg != null) parts.push(`${Number(l.volume_kg).toLocaleString()}kg`);
+      if (l.subtotal  != null) parts.push(`₹${Number(l.subtotal).toLocaleString()}`);
+      const name = l.product_name || l.product_id || 'Product';
+      return parts.length ? `${name} (${parts.join(', ')})` : String(name);
+    }).join('; ');
+    const totalPieces = lines.reduce((s: number, l: any) => s + (Number(l.pieces)    || 0), 0);
+    const totalKg     = Number((cf as any).volume_kg ?? lines.reduce((s: number, l: any) => s + (Number(l.volume_kg) || 0), 0));
+
+    return {
+      ...r,
+      stage_name:   stage?.name ?? null,
+      total_pieces: totalPieces > 0 ? totalPieces : null,
+      total_kg:     totalKg > 0 ? totalKg : null,
+      line_items_str: lineItemsStr || null,
+      tags_str:     Array.isArray(r.tags) ? r.tags.join(', ') : null,
+      probability_pct: r.probability != null ? `${Math.round(Number(r.probability) * 100)}%` : null,
+    };
+  });
+
+  const cols: Array<{ key: string; label: string }> = [
+    { key: 'name',                label: 'Name' },
+    { key: 'stage_name',          label: 'Stage' },
+    { key: 'status',              label: 'Status' },
+    { key: 'amount',              label: 'Amount' },
+    { key: 'currency',            label: 'Currency' },
+    { key: 'probability_pct',     label: 'Probability' },
+    { key: 'expected_close_date', label: 'Expected Close Date' },
+    { key: 'lead_name',           label: 'Source Lead' },
+    { key: 'lead_phone',          label: 'Source Lead Phone' },
+    { key: 'account_name',        label: 'Account' },
+    { key: 'contact_name',        label: 'Primary Contact' },
+    { key: 'owner_name',          label: 'Owner' },
+    { key: 'total_pieces',        label: 'Total Pieces' },
+    { key: 'total_kg',            label: 'Total Volume (kg)' },
+    { key: 'line_items_str',      label: 'Line Items' },
+    { key: 'tags_str',            label: 'Tags' },
+    { key: 'won_at',              label: 'Won At' },
+    { key: 'lost_at',             label: 'Lost At' },
+    { key: 'lost_reason',         label: 'Lost Reason' },
+    { key: 'created_at',          label: 'Created At' },
+  ];
+  const escape = (v: unknown): string => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  const header = cols.map((c) => c.label).join(',');
+  const body = flat.map((r: any) =>
+    cols.map((c) => escape((r as Record<string, unknown>)[c.key])).join(',')
+  ).join('\n');
+  const csv = `${header}\n${body}\n`;
+  const filename = `deals-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}));
 deals.post('/', wrap(async (req, res) => {
   const parsed = parse(v.dealSchema, req.body);
   const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
