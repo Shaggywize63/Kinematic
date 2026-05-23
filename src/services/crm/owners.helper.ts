@@ -103,3 +103,60 @@ export async function stampLinkedEntityNames<T extends Linked>(rows: T[]): Promi
     deal_name:    r.deal_id    ? (dealName.get(r.deal_id)       ?? r.deal_name    ?? null) : (r.deal_name    ?? null),
   }));
 }
+
+// ---------------------------------------------------------------------------
+// Custom-field CSV columns. Admin-defined fields live in
+// crm_custom_field_defs (one row per field per entity) and each row's value
+// is stored under row.custom_fields[field_key]. The CSV export routes call
+// this to learn (a) which extra columns to append and (b) how to pull each
+// value out of the row's jsonb blob in a CSV-safe form. One query per
+// export — definitions list is tiny so caching isn't worth the complexity.
+// ---------------------------------------------------------------------------
+
+export type CustomFieldCol = {
+  key: string;        // synthetic column key the route reads off the row
+  label: string;      // header label shown in the CSV
+  field_key: string;  // original key in row.custom_fields
+};
+
+export async function listCustomFieldColumns(
+  org_id: string,
+  entity: 'lead' | 'contact' | 'account' | 'deal',
+): Promise<CustomFieldCol[]> {
+  const { data } = await supabaseAdmin
+    .from('crm_custom_field_defs')
+    .select('field_key, label, position')
+    .eq('org_id', org_id)
+    .eq('entity_type', entity)
+    .order('position', { ascending: true, nullsFirst: false });
+  return (data ?? []).map((d: any) => ({
+    key: `custom__${d.field_key}`,
+    label: d.label || d.field_key,
+    field_key: d.field_key,
+  }));
+}
+
+// Flatten the row.custom_fields jsonb onto top-level synthetic keys
+// (`custom__<field_key>`) so the CSV writer's plain `r[col.key]` lookup
+// finds the value without special-casing every column. Arrays + objects
+// get JSON.stringified so multi-select / file lists survive the trip
+// to a spreadsheet as readable text.
+export function stampCustomFieldValues<T extends { custom_fields?: Record<string, unknown> | null }>(
+  rows: T[],
+  cols: CustomFieldCol[],
+): T[] {
+  if (rows.length === 0 || cols.length === 0) return rows;
+  return rows.map((r) => {
+    const cf = (r.custom_fields || {}) as Record<string, unknown>;
+    const out: Record<string, unknown> = { ...r };
+    for (const c of cols) {
+      const v = cf[c.field_key];
+      out[c.key] =
+        v === undefined || v === null ? ''
+        : Array.isArray(v) ? v.join('; ')
+        : typeof v === 'object' ? JSON.stringify(v)
+        : v;
+    }
+    return out as T;
+  });
+}
