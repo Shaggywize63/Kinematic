@@ -656,6 +656,22 @@ activities.get('/calendar', wrap(async (req, res) => {
 }));
 activities.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
+  // `view` is the dashboard's KPI-tile-as-filter: clicking the
+  // Overdue / Upcoming / Completed tile sends ?view=<x>, and we
+  // translate that into the right date predicates here.
+  //   overdue   = past due AND not yet completed
+  //   upcoming  = due in the future AND not yet completed
+  //   completed = explicitly marked completed (via completed_at)
+  //   all       = no extra constraint (default)
+  const view = String(req.query.view ?? 'all').toLowerCase();
+  const nowIso = new Date().toISOString();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const extraFilters = (q: any) => {
+    if (view === 'overdue')   return q.not('due_at', 'is', null).lt('due_at', nowIso).is('completed_at', null);
+    if (view === 'upcoming')  return q.not('due_at', 'is', null).gte('due_at', nowIso).is('completed_at', null);
+    if (view === 'completed') return q.not('completed_at', 'is', null);
+    return q;
+  };
   const { rows, total, page, limit } = await crud.clientScopedListWithCount(
     'crm_activities', orgId(req), scope.id, req.query,
     {
@@ -666,6 +682,7 @@ activities.get('/', wrap(async (req, res) => {
       // Per-user visibility — non-admin roles see only their own
       // activities (owner_id OR assigned_to). Admin-like roles see all.
       userScope: activityVisibilityScope(req),
+      extraFilters,
     },
   );
   const stamped = await stampOwnerNames(rows as Record<string, unknown>[]);
