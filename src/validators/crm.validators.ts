@@ -150,6 +150,10 @@ export const contactSchema = z.object({
   email_opt_out: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
+  // Optional profile photo URL — typically a Supabase storage path
+  // produced by /upload/photo. Set to null to clear an existing photo.
+  // Mirrors leadCreateSchema.photo_url.
+  photo_url: z.string().url().max(2048).optional().nullable(),
   ...b2cBase,
   // Customer fields (B2C only)
   loyalty_tier: loyaltyTier,
@@ -175,6 +179,8 @@ export const accountSchema = z.object({
   parent_account_id: optionalUuid,
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
+  // Optional account logo / profile photo. Same upload flow as contacts/leads.
+  photo_url: z.string().url().max(2048).optional().nullable(),
 });
 
 export const dealSchema = z.object({
