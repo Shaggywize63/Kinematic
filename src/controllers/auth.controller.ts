@@ -402,3 +402,31 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
   };
   return ok(res, result);
 });
+
+// PATCH /api/v1/auth/me — lets the authenticated user update their own
+// profile fields without going through the admin-gated /users/:id route.
+// Intentionally narrow allow-list: only avatar_url + name today. Other
+// fields (role, mobile, employee_id, etc.) stay admin-only because they
+// affect access control or routing.
+export const updateMe = asyncHandler<AuthRequest>(async (req, res) => {
+  if (!req.user) return unauthorized(res);
+  const allowed = ['avatar_url', 'name'] as const;
+  const updates: Record<string, unknown> = {};
+  for (const key of allowed) {
+    const v = (req.body as Record<string, unknown>)[key];
+    // null is meaningful (clears the avatar); '' is treated as no-op so
+    // an empty form field doesn't blow away an existing value.
+    if (v !== undefined && v !== '') updates[key] = v;
+  }
+  if (Object.keys(updates).length === 0) {
+    return ok(res, { updated: false });
+  }
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .update(updates)
+    .eq('id', req.user.id)
+    .select('id, name, avatar_url, email, role, org_id')
+    .single();
+  if (error) return serverError(res);
+  return ok(res, data);
+});
