@@ -19,6 +19,7 @@ import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
 import * as leadsSvc from '../services/crm/leads.service';
+import * as hierarchy from '../services/crm/hierarchy.service';
 import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
 import * as activityImportSvc from '../services/crm/activityImport.service';
@@ -257,12 +258,21 @@ leads.get('/', wrap(async (req, res) => {
   // City geo-tag enforcement: pass the user's effective city set (role ∩
   // user) so listLeads can restrict by crm_leads.city. null = no scope.
   const effectiveCities = rbac.getEffectiveCityNames((req as AuthRequest).user);
+  // Hierarchy-RBAC scope: when the caller's client has opted in
+  // (clients.settings.uses_hierarchy_rbac === true), restrict the
+  // visible owners to the caller's subtree via users.supervisor_id.
+  // Every existing client keeps the flag off and skips this branch
+  // entirely, so behaviour is unchanged for Tata Tiscon today.
+  let visibleOwnerIds: string[] | null = null;
+  if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
+    visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
+  }
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
   // additive — old callers ignore it.
   const { rows, total, page, limit } = await leadsSvc.listLeadsWithCount(
-    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities }
+    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds }
   );
   const stamped = await stampOwnerNames(rows);
   res.json({
@@ -289,6 +299,12 @@ leads.post('/', wrap(async (req, res) => {
 leads.get('/export', wrap(async (req, res) => {
   const scope = clientScope(req);
   const effectiveCities = rbac.getEffectiveCityNames((req as AuthRequest).user);
+  // Same hierarchy-RBAC guard as the list endpoint above. Without this,
+  // a user could pull rows via /export that they can't see in the UI.
+  let visibleOwnerIds: string[] | null = null;
+  if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
+    visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
+  }
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
   // bounded.
@@ -300,7 +316,7 @@ leads.get('/export', wrap(async (req, res) => {
       orgId(req),
       { ...req.query, limit: PAGE, page },
       scope.id,
-      { strictClient: scope.strict, effectiveCities },
+      { strictClient: scope.strict, effectiveCities, visibleOwnerIds },
     );
     rows.push(...chunk);
     if (chunk.length < PAGE) break;
