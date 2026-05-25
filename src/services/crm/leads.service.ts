@@ -113,7 +113,7 @@ export async function listLeads(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null } = {},
 ) {
   const { rows } = await listLeadsWithCount(org_id, filters, client_id, options);
   return rows;
@@ -130,7 +130,7 @@ export async function listLeadsWithCount(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null } = {},
 ): Promise<{ rows: Lead[]; total: number; page: number; limit: number }> {
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
@@ -147,6 +147,16 @@ export async function listLeadsWithCount(
       return { rows: [], total: 0, page, limit };
     }
     q = q.in('city', options.effectiveCities);
+  }
+  // Hierarchy-RBAC scope. The route handler passes the subtree owner
+  // ids only when the client has opted in via
+  // clients.settings.uses_hierarchy_rbac. For every other caller this
+  // is null and the existing role/city scope is the only restriction.
+  if (options.visibleOwnerIds !== undefined && options.visibleOwnerIds !== null) {
+    if (options.visibleOwnerIds.length === 0) {
+      return { rows: [], total: 0, page, limit };
+    }
+    q = q.in('owner_id', options.visibleOwnerIds);
   }
   if (filters.status) q = q.eq('status', String(filters.status));
   if (filters.lifecycle_stage) q = q.eq('lifecycle_stage', String(filters.lifecycle_stage));
