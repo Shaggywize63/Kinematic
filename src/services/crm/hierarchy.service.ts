@@ -63,3 +63,14 @@ export async function subtreeUserIds(req: AuthRequest): Promise<string[]> {
   subtreeCache.set(req, p);
   return p;
 }
+
+/**
+ * Combo helper used by list-route handlers: returns the subtree id list
+ * when the gate is on, else null. Callers pass the result straight into
+ * the crud helper's `visibleOwnerIds` option — null means "skip the
+ * filter and keep the legacy code path."
+ */
+export async function maybeSubtreeOwnerIds(req: AuthRequest): Promise<string[] | null> {
+  if (!(await useHierarchyRbac(req))) return null;
+  return subtreeUserIds(req);
+}

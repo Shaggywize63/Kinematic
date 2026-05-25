@@ -240,6 +240,53 @@ function activityVisibilityScope(req: Request): { user_id: string; columns: stri
   if (u.role && ADMIN_LIKE_ROLES.has(u.role)) return undefined;
   return { user_id: u.id, columns: ['owner_id', 'assigned_to'] };
 }
+
+/**
+ * Visibility opts for the activity list/sub-resource endpoints. Picks
+ * between hierarchy-RBAC subtree scoping and the legacy per-user scope
+ * exactly once per request — and returns a spreadable opts fragment so
+ * the call sites stay short. Clients that haven't opted into hierarchy
+ * RBAC (Tata Tiscon today) hit the same code path they always did.
+ */
+async function activityScopeOpts(req: AuthRequest): Promise<{
+  visibleOwnerIds?: string[] | null;
+  ownerColumns?: string[];
+  userScope?: { user_id: string; columns: string[] };
+}> {
+  const subtree = await hierarchy.maybeSubtreeOwnerIds(req);
+  if (subtree) {
+    return { visibleOwnerIds: subtree, ownerColumns: ['owner_id', 'assigned_to'] };
+  }
+  return { userScope: activityVisibilityScope(req) };
+}
+
+/**
+ * Single-row access check for activities (GET / PATCH / DELETE
+ * /activities/:id). Under hierarchy mode the caller is allowed any
+ * activity whose owner_id OR assigned_to is in their subtree; under the
+ * legacy mode the existing "own activities only" guard applies. Returns
+ * a not-found error to throw if the caller may not touch the row,
+ * else null. Using NOT_FOUND (rather than 403) preserves the existing
+ * non-disclosure semantic — we don't tell unauthorised callers a row
+ * exists.
+ */
+async function activityAccessError(req: AuthRequest, row: Record<string, unknown>): Promise<AppError | null> {
+  const subtree = await hierarchy.maybeSubtreeOwnerIds(req);
+  if (subtree) {
+    const owner = row.owner_id as string | null;
+    const assigned = row.assigned_to as string | null;
+    const allowed = (owner && subtree.includes(owner)) || (assigned && subtree.includes(assigned));
+    if (!allowed) return new AppError(404, 'crm_activities not found', 'NOT_FOUND');
+    return null;
+  }
+  const userScope = activityVisibilityScope(req);
+  if (userScope) {
+    if (row.owner_id !== userScope.user_id && row.assigned_to !== userScope.user_id) {
+      return new AppError(404, 'crm_activities not found', 'NOT_FOUND');
+    }
+  }
+  return null;
+}
 function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> {
   try { return schema.parse(payload); }
   catch (e) {
@@ -403,12 +450,15 @@ leads.post('/:id/convert', wrap(async (req, res) =>
 leads.post('/:id/reopen', wrap(async (req, res) =>
   res.json(await stampOwnerName(await leadsSvc.reopenLead(orgId(req), req.params.id, parse(v.leadReopenSchema, req.body), userId(req))))));
 leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc.listScoreHistory(orgId(req), req.params.id))));
-leads.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...req.query }, {
-    defaultSort: { column: 'completed_at', ascending: false },
-    userScope: activityVisibilityScope(req),
-  }),
-)));
+leads.get('/:id/activities', wrap(async (req, res) => {
+  const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  return res.json(
+    await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...req.query }, {
+      defaultSort: { column: 'completed_at', ascending: false },
+      ...visibilityOpts,
+    }),
+  );
+}));
 leads.get('/:id/deals', wrap(async (req, res) => res.json(
   await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query })
 )));
@@ -432,8 +482,9 @@ const contacts = express.Router();
 const contactOpts = { searchColumns: ['first_name','last_name','email','phone'] };
 contacts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
+  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
   return res.json(
-    await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict }))
+    await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds }))
   );
 }));
 contacts.post('/', wrap(async (req, res) => {
@@ -445,12 +496,15 @@ contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(awai
 contacts.patch('/:id', wrap(async (req, res) =>
   res.json(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req))))));
 contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id); res.status(204).end(); }));
-contacts.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, {
-    defaultSort: { column: 'completed_at', ascending: false },
-    userScope: activityVisibilityScope(req),
-  }),
-)));
+contacts.get('/:id/activities', wrap(async (req, res) => {
+  const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  return res.json(
+    await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, {
+      defaultSort: { column: 'completed_at', ascending: false },
+      ...visibilityOpts,
+    }),
+  );
+}));
 contacts.get('/:id/deals', wrap(async (req, res) => res.json(
   await crud.list('crm_deals', orgId(req), { primary_contact_id: req.params.id, ...req.query })
 )));
@@ -462,9 +516,13 @@ router.use('/contacts', contacts);
 
 // ---------- ACCOUNTS -------------------------------------------------
 const accounts = express.Router();
-accounts.get('/', wrap(async (req, res) => res.json(
-  await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), clientScope(req).id, req.query, { searchColumns: ['name','domain','industry'], strictClient: clientScope(req).strict }))
-)));
+accounts.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  return res.json(
+    await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds }))
+  );
+}));
 accounts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
@@ -480,12 +538,15 @@ accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
 accounts.get('/:id/deals', wrap(async (req, res) => res.json(
   await crud.list('crm_deals', orgId(req), { account_id: req.params.id, ...req.query })
 )));
-accounts.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, {
-    defaultSort: { column: 'completed_at', ascending: false },
-    userScope: activityVisibilityScope(req),
-  }),
-)));
+accounts.get('/:id/activities', wrap(async (req, res) => {
+  const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  return res.json(
+    await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, {
+      defaultSort: { column: 'completed_at', ascending: false },
+      ...visibilityOpts,
+    }),
+  );
+}));
 accounts.get('/:id/notes', wrap(async (req, res) => res.json(
   await crud.list('crm_notes', orgId(req), { entity_type: 'account', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
@@ -497,8 +558,9 @@ router.use('/accounts', accounts);
 const deals = express.Router();
 deals.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
+  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
   const { rows, total, page, limit } = await dealsSvc.listDealsWithCount(
-    orgId(req), req.query, scope.id, { strictClient: scope.strict }
+    orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }
   );
   const stamped = await stampOwnerNames(rows);
   res.json({
@@ -519,12 +581,13 @@ deals.get('/', wrap(async (req, res) => {
 // breakdown captured at convert time.
 deals.get('/export', wrap(async (req, res) => {
   const scope = clientScope(req);
+  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
   const PAGE = 200;
   const MAX  = 10000;
   const rows: any[] = [];
   for (let page = 1; rows.length < MAX; page++) {
     const { rows: chunk } = await dealsSvc.listDealsWithCount(
-      orgId(req), { ...req.query, limit: PAGE, page }, scope.id, { strictClient: scope.strict },
+      orgId(req), { ...req.query, limit: PAGE, page }, scope.id, { strictClient: scope.strict, visibleOwnerIds },
     );
     rows.push(...(chunk as any[]));
     if ((chunk as any[]).length < PAGE) break;
@@ -635,12 +698,15 @@ deals.post('/:id/lose', wrap(async (req, res) => res.json(await dealsSvc.loseDea
 deals.post('/:id/win-probability', wrap(async (req, res) => res.json(await winSvc.compute(orgId(req), req.params.id))));
 deals.post('/:id/next-action', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), req.params.id, true))));
 deals.get('/:id/history', wrap(async (req, res) => res.json(await dealsSvc.dealHistory(orgId(req), req.params.id))));
-deals.get('/:id/activities', wrap(async (req, res) => res.json(
-  await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, {
-    defaultSort: { column: 'completed_at', ascending: false },
-    userScope: activityVisibilityScope(req),
-  }),
-)));
+deals.get('/:id/activities', wrap(async (req, res) => {
+  const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  return res.json(
+    await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, {
+      defaultSort: { column: 'completed_at', ascending: false },
+      ...visibilityOpts,
+    }),
+  );
+}));
 deals.get('/:id/contacts', wrap(async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from('crm_deal_contacts')
@@ -769,7 +835,12 @@ activities.get('/calendar', wrap(async (req, res) => {
   const from = String(req.query.from ?? new Date(Date.now() - 7 * 86400000).toISOString());
   const to = String(req.query.to ?? new Date(Date.now() + 30 * 86400000).toISOString());
   const scope = clientScope(req);
-  const userScope = activityVisibilityScope(req);
+  const subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  // Hierarchy mode supersedes the per-user scope (the caller's id is
+  // always in their subtree, so the new filter is a strict superset of
+  // the old "own activities only" filter). When the gate is off we
+  // fall back to the legacy userScope behaviour unchanged.
+  const userScope = subtreeIds ? undefined : activityVisibilityScope(req);
   let q = supabaseAdmin.from('crm_activities').select('*')
     .eq('org_id', orgId(req)).is('deleted_at', null).gte('due_at', from).lte('due_at', to);
   if (scope.id) {
@@ -777,8 +848,11 @@ activities.get('/calendar', wrap(async (req, res) => {
       ? q.eq('client_id', scope.id)
       : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
   }
-  // Non-admin users see only their own calendar events.
-  if (userScope) {
+  if (subtreeIds) {
+    if (subtreeIds.length === 0) { res.json([]); return; }
+    const ids = subtreeIds.join(',');
+    q = q.or(`owner_id.in.(${ids}),assigned_to.in.(${ids})`);
+  } else if (userScope) {
     q = q.or(userScope.columns.map((c) => `${c}.eq.${userScope.user_id}`).join(','));
   }
   const { data } = await q.order('due_at', { ascending: true });
@@ -787,6 +861,7 @@ activities.get('/calendar', wrap(async (req, res) => {
 }));
 activities.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
+  const subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
   // `view` is the dashboard's KPI-tile-as-filter: clicking the
   // Overdue / Upcoming / Completed tile sends ?view=<x>, and we
   // translate that into the right date predicates here.
@@ -810,9 +885,12 @@ activities.get('/', wrap(async (req, res) => {
       searchColumns: ['subject', 'body'],
       dateRangeColumn: 'completed_at',
       strictClient: scope.strict,
-      // Per-user visibility — non-admin roles see only their own
-      // activities (owner_id OR assigned_to). Admin-like roles see all.
-      userScope: activityVisibilityScope(req),
+      // Hierarchy gate on → caller sees self + subtree across
+      // owner_id and assigned_to. Gate off → fall back to the legacy
+      // per-user scope (own activities for non-admins).
+      ...(subtreeIds
+        ? { visibleOwnerIds: subtreeIds, ownerColumns: ['owner_id', 'assigned_to'] }
+        : { userScope: activityVisibilityScope(req) }),
       extraFilters,
     },
   );
@@ -840,9 +918,13 @@ activities.get('/', wrap(async (req, res) => {
 // English instead of dangling UUIDs.
 activities.get('/export', wrap(async (req, res) => {
   const scope = clientScope(req);
-  // Per-user scope applies to CSV export too — non-admins can't
-  // download what they can't see in the list view.
-  const userScope = activityVisibilityScope(req);
+  // Same hierarchy/userScope split as the list endpoint — without it
+  // the export would leak rows the user can't see in the UI.
+  const subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const userScope = subtreeIds ? undefined : activityVisibilityScope(req);
+  const visibilityOpts = subtreeIds
+    ? { visibleOwnerIds: subtreeIds, ownerColumns: ['owner_id', 'assigned_to'] }
+    : { userScope };
   const PAGE = 200;
   const MAX  = 10000;
   const rows: any[] = [];
@@ -852,7 +934,7 @@ activities.get('/export', wrap(async (req, res) => {
       orgId(req),
       scope.id,
       { ...req.query, limit: PAGE, page },
-      { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: scope.strict, userScope },
+      { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: scope.strict, ...visibilityOpts },
     );
     rows.push(...(chunk as any[]));
     if ((chunk as any[]).length < PAGE) break;
@@ -911,41 +993,20 @@ activities.post('/', wrap(async (req, res) => {
 }));
 activities.get('/:id', wrap(async (req, res) => {
   const row = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
-  // Per-user visibility — non-admins can only fetch activities they
-  // own or are assigned to. Returns the same 404 shape as a missing
-  // row so we don't disclose existence to unauthorized callers.
-  const userScope = activityVisibilityScope(req);
-  if (userScope) {
-    const myId = userScope.user_id;
-    if (row.owner_id !== myId && row.assigned_to !== myId) {
-      throw new AppError(404, 'crm_activities not found', 'NOT_FOUND');
-    }
-  }
+  const err = await activityAccessError(req as AuthRequest, row);
+  if (err) throw err;
   res.json(await stampOwnerName(row));
 }));
 activities.patch('/:id', wrap(async (req, res) => {
-  // Same scope guard as GET — a non-admin can only edit activities
-  // they own or are assigned to. Returns 404 on a foreign row so we
-  // don't leak existence.
-  const userScope = activityVisibilityScope(req);
-  if (userScope) {
-    const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
-    if (existing.owner_id !== userScope.user_id && existing.assigned_to !== userScope.user_id) {
-      throw new AppError(404, 'crm_activities not found', 'NOT_FOUND');
-    }
-  }
+  const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
+  const err = await activityAccessError(req as AuthRequest, existing);
+  if (err) throw err;
   res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchemaBase.partial(), req.body), userId(req))));
 }));
 activities.delete('/:id', wrap(async (req, res) => {
-  // Same scope guard for delete. Non-admins can only delete their
-  // own activities; admins can soft-delete anyone's.
-  const userScope = activityVisibilityScope(req);
-  if (userScope) {
-    const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
-    if (existing.owner_id !== userScope.user_id && existing.assigned_to !== userScope.user_id) {
-      throw new AppError(404, 'crm_activities not found', 'NOT_FOUND');
-    }
-  }
+  const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
+  const err = await activityAccessError(req as AuthRequest, existing);
+  if (err) throw err;
   await crud.softDelete('crm_activities', orgId(req), req.params.id);
   res.status(204).end();
 }));
