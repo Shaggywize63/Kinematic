@@ -109,13 +109,21 @@ router.delete(
 
     const { error: e3 } = await supabaseAdmin.from("builder_pages").delete().eq("form_id", req.params.id);
     if (e3) throw new AppError(500, e3.message, "DB_ERROR");
-    
+
+    // route_plans.form_id has no ON DELETE CASCADE — null it out so the
+    // plan survives but stops referencing the form being deleted.
+    const { error: e3b } = await supabaseAdmin
+      .from("route_plans")
+      .update({ form_id: null })
+      .eq("form_id", req.params.id);
+    if (e3b) throw new AppError(500, e3b.message, "DB_ERROR");
+
     const { error: e4 } = await supabaseAdmin
       .from("builder_forms")
       .delete()
       .eq("id", req.params.id)
       .eq("org_id", orgId);
-    
+
     if (e4) throw new AppError(500, e4.message, "DB_ERROR");
 
     return sendSuccess(res, { deleted: true });
