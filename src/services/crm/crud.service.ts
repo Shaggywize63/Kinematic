@@ -21,6 +21,15 @@ export interface CrudOpts {
   // unnecessary because user_id is a UUID from the JWT, never user
   // input.
   userScope?: { user_id: string; columns: string[] };
+  // Hierarchy-RBAC visibility scope. When set, the query is constrained
+  // to rows where ANY of `ownerColumns` (default ['owner_id']) is in
+  // the supplied id list. The list is the caller's subtree fetched via
+  // hierarchy.service.ts#subtreeUserIds, so a manager sees their own +
+  // every direct/indirect report's rows. All UUIDs come from a JWT-
+  // derived RPC result, so interpolation into the postgrest `in.()`
+  // syntax is safe — no escaping needed.
+  visibleOwnerIds?: string[] | null;
+  ownerColumns?: string[];
   // Caller-supplied extra filters applied after the standard ones.
   // Lets specific routes (e.g. /activities?view=overdue) layer in
   // date / null / range predicates the generic helper doesn't know
@@ -67,6 +76,13 @@ export async function list(table: string, org_id: string, query: Record<string, 
   if (opts.userScope) {
     // user_id is JWT-derived UUID — safe to interpolate.
     const orExpr = opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`).join(',');
+    q = q.or(orExpr);
+  }
+  if (opts.visibleOwnerIds !== undefined && opts.visibleOwnerIds !== null) {
+    if (opts.visibleOwnerIds.length === 0) return [];
+    const cols = opts.ownerColumns && opts.ownerColumns.length ? opts.ownerColumns : ['owner_id'];
+    const ids = opts.visibleOwnerIds.join(',');
+    const orExpr = cols.map((c) => `${c}.in.(${ids})`).join(',');
     q = q.or(orExpr);
   }
   if (opts.extraFilters) q = opts.extraFilters(q);
@@ -141,6 +157,13 @@ export async function clientScopedListWithCount(
   }
   if (opts.userScope) {
     const orExpr = opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`).join(',');
+    q = q.or(orExpr);
+  }
+  if (opts.visibleOwnerIds !== undefined && opts.visibleOwnerIds !== null) {
+    if (opts.visibleOwnerIds.length === 0) return { rows: [], total: 0, page, limit };
+    const cols = opts.ownerColumns && opts.ownerColumns.length ? opts.ownerColumns : ['owner_id'];
+    const ids = opts.visibleOwnerIds.join(',');
+    const orExpr = cols.map((c) => `${c}.in.(${ids})`).join(',');
     q = q.or(orExpr);
   }
   const dateCol = opts.dateRangeColumn ?? 'created_at';

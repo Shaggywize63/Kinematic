@@ -26,7 +26,7 @@ export async function listDealsWithCount(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean } = {},
+  options: { strictClient?: boolean; visibleOwnerIds?: string[] | null } = {},
 ): Promise<{ rows: Deal[]; total: number; page: number; limit: number }> {
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
@@ -37,6 +37,13 @@ export async function listDealsWithCount(
     q = options.strictClient
       ? q.eq('client_id', client_id)
       : q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  }
+  // Hierarchy-RBAC scope: route passes the subtree owner ids only when
+  // the caller's client has uses_hierarchy_rbac = true; otherwise null
+  // and we keep the legacy unfiltered behaviour.
+  if (options.visibleOwnerIds !== undefined && options.visibleOwnerIds !== null) {
+    if (options.visibleOwnerIds.length === 0) return { rows: [], total: 0, page, limit };
+    q = q.in('owner_id', options.visibleOwnerIds);
   }
   if (filters.pipeline_id) q = q.eq('pipeline_id', String(filters.pipeline_id));
   if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));
