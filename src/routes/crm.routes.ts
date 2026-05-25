@@ -1211,6 +1211,151 @@ settings.post('/seed-defaults', wrap(async (req, res) => {
 }));
 router.use('/settings', settings);
 
+// ---------- HIERARCHY (Phase 3 — client-admin org hierarchy) ---------
+// Every endpoint here (except /enabled) 404s when the active client
+// hasn't opted in to hierarchy RBAC. Tata Tiscon therefore never sees
+// this surface — the dashboard hides the menu entry too, but the gate
+// is enforced server-side regardless.
+const hier = express.Router();
+// Cheap probe the dashboard uses to decide whether to render the
+// Hierarchy menu entry. Returns { enabled } without throwing, so the
+// nav bar render path can stay synchronous.
+hier.get('/enabled', wrap(async (req, res) => {
+  const enabled = await hierarchy.useHierarchyRbac(req as AuthRequest);
+  res.json({ success: true, data: { enabled } });
+}));
+hier.use(async (req, res, next) => {
+  try {
+    if (!(await hierarchy.useHierarchyRbac(req as AuthRequest))) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Hierarchy not enabled for this client' } });
+    }
+    next();
+  } catch (e) { next(e); }
+});
+
+// List levels for the active client. Includes org-wide rows
+// (client_id IS NULL) so a tenant inherits shared scaffolding when
+// they exist. Levels are sorted by level_order ascending (1 = top).
+hier.get('/levels', wrap(async (req, res) => {
+  const cid = clientId(req);
+  let q = supabaseAdmin
+    .from('org_hierarchy_levels')
+    .select('*')
+    .eq('org_id', orgId(req))
+    .order('level_order', { ascending: true });
+  q = cid ? q.or(`client_id.is.null,client_id.eq.${cid}`) : q.is('client_id', null);
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json({ success: true, data: data ?? [] });
+}));
+
+hier.post('/levels', wrap(async (req, res) => {
+  const { name, level_order, parent_level_id, capabilities } = req.body ?? {};
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'name is required' } });
+  }
+  if (level_order === undefined || level_order === null || Number.isNaN(Number(level_order))) {
+    return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'level_order is required' } });
+  }
+  const { data, error } = await supabaseAdmin
+    .from('org_hierarchy_levels')
+    .insert({
+      org_id: orgId(req),
+      client_id: clientId(req),
+      name: name.trim(),
+      level_order: Number(level_order),
+      parent_level_id: parent_level_id || null,
+      capabilities: capabilities ?? {},
+    })
+    .select('*').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return res.status(201).json({ success: true, data });
+}));
+
+hier.patch('/levels/:id', wrap(async (req, res) => {
+  const { name, level_order, parent_level_id, capabilities } = req.body ?? {};
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (name !== undefined) updates.name = String(name).trim();
+  if (level_order !== undefined) updates.level_order = Number(level_order);
+  if (parent_level_id !== undefined) updates.parent_level_id = parent_level_id || null;
+  if (capabilities !== undefined) updates.capabilities = capabilities;
+  const { data, error } = await supabaseAdmin
+    .from('org_hierarchy_levels')
+    .update(updates)
+    .eq('id', req.params.id)
+    .eq('org_id', orgId(req))
+    .select('*').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json({ success: true, data });
+}));
+
+hier.delete('/levels/:id', wrap(async (req, res) => {
+  // Safety: refuse to delete a level that still has users on it. They
+  // would silently lose their hierarchy slot and fall back to the
+  // role-based path, which we want to be an explicit admin action.
+  const { count } = await supabaseAdmin
+    .from('users')
+    .select('id', { count: 'exact', head: true })
+    .eq('hierarchy_level_id', req.params.id);
+  if ((count ?? 0) > 0) {
+    return res.status(409).json({ success: false, error: { code: 'IN_USE', message: `${count} users are still on this level — reassign them first.` } });
+  }
+  const { error } = await supabaseAdmin
+    .from('org_hierarchy_levels')
+    .delete()
+    .eq('id', req.params.id)
+    .eq('org_id', orgId(req));
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.status(204).end();
+}));
+
+// Members listing: every user belonging to the active client, joined
+// with their hierarchy_level_id + supervisor_id so the page can group
+// them by level. The active client filter mirrors clientScopedList:
+// when client_id is set we accept rows where users.client_id matches
+// OR is null (org-level admins are visible to every client).
+hier.get('/members', wrap(async (req, res) => {
+  const cid = clientId(req);
+  let q = supabaseAdmin
+    .from('users')
+    .select('id, name, email, role, supervisor_id, hierarchy_level_id, client_id')
+    .eq('org_id', orgId(req))
+    .order('name', { ascending: true });
+  if (cid) q = q.or(`client_id.is.null,client_id.eq.${cid}`);
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json({ success: true, data: data ?? [] });
+}));
+
+hier.patch('/members/:id', wrap(async (req, res) => {
+  const { hierarchy_level_id, supervisor_id } = req.body ?? {};
+  // Guard against accidentally pointing a user at their own subtree
+  // (which would create a cycle in the supervisor chain).
+  if (supervisor_id && supervisor_id === req.params.id) {
+    return res.status(400).json({ success: false, error: { code: 'CYCLE', message: 'A user cannot be their own supervisor.' } });
+  }
+  if (supervisor_id) {
+    const { data: rpc } = await supabaseAdmin.rpc('user_subtree_ids', { p_user_id: req.params.id });
+    const subtree = (rpc ?? []).map((r: any) => r.user_id as string);
+    if (subtree.includes(supervisor_id)) {
+      return res.status(400).json({ success: false, error: { code: 'CYCLE', message: 'New supervisor is already a direct/indirect report — would create a cycle.' } });
+    }
+  }
+  const updates: Record<string, unknown> = {};
+  if (hierarchy_level_id !== undefined) updates.hierarchy_level_id = hierarchy_level_id || null;
+  if (supervisor_id !== undefined) updates.supervisor_id = supervisor_id || null;
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .update(updates)
+    .eq('id', req.params.id)
+    .eq('org_id', orgId(req))
+    .select('id, name, email, role, supervisor_id, hierarchy_level_id, client_id').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json({ success: true, data });
+}));
+
+router.use('/hierarchy', hier);
+
 const locations = express.Router();
 locations.get('/', wrap(async (req, res) => {
   const { state, city, district } = req.query as Record<string, string | undefined>;
