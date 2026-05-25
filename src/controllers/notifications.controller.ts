@@ -287,3 +287,47 @@ export const deleteHistory = asyncHandler(async (req: AuthRequest, res: Response
   if (error) return badRequest(res, 'Failed to delete history');
   return ok(res, null, 'Broadcast history deleted successfully');
 });
+
+// DELETE /api/v1/notifications/clear
+// Clears every notification belonging to the current user. The broadcast
+// history rows in notification_broadcasts are untouched so admins can still
+// see what was sent.
+export const clearMyNotifications = asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (isDemo(req.user)) return ok(res, null, 'Cleared (Demo)');
+  const user = req.user!;
+  const { error } = await supabaseAdmin
+    .from('notifications')
+    .delete()
+    .eq('user_id', user.id);
+  if (error) return badRequest(res, error.message);
+  return ok(res, null, 'Notifications cleared');
+});
+
+// DELETE /api/v1/notifications/item/:id
+// Deletes one of the current user's notifications. Scoped by user_id so a
+// caller can't remove someone else's row even by guessing the id.
+export const deleteMyNotification = asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (isDemo(req.user)) return ok(res, null, 'Deleted (Demo)');
+  const user = req.user!;
+  const { id } = req.params;
+  const { error } = await supabaseAdmin
+    .from('notifications')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', user.id);
+  if (error) return badRequest(res, error.message);
+  return ok(res, null, 'Notification deleted');
+});
+
+// DELETE /api/v1/notifications/history/clear
+// Admin-only: wipes every notification_broadcasts row in the caller's org.
+export const clearHistory = asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (isDemo(req.user)) return ok(res, null, 'Cleared (Demo)');
+  const user = req.user!;
+  const { error } = await supabaseAdmin
+    .from('notification_broadcasts')
+    .delete()
+    .eq('org_id', user.org_id);
+  if (error) return badRequest(res, 'Failed to clear history');
+  return ok(res, null, 'Broadcast history cleared');
+});

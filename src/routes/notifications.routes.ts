@@ -6,7 +6,13 @@ const router = Router();
 
 router.use(requireAuth);
 
+// Per-user clear actions — register before /:id so they aren't shadowed by
+// the admin deleteHistory route below.
+router.delete('/clear',      ctrl.clearMyNotifications);
+router.delete('/item/:id',   ctrl.deleteMyNotification);
+
 // Admin-specific notification management (History & Send)
+router.delete('/history/clear', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.clearHistory);
 router.delete('/:id',       requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.deleteHistory);
 router.get('/history',       requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.getHistory);
 router.post('/send',         requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.sendNotification);
