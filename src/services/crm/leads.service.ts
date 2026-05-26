@@ -91,7 +91,18 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   };
 
   const { data, error } = await supabaseAdmin.from('crm_leads').insert(insertRow).select('*').single();
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  if (error) {
+    // Race-safe net for the dedup unique indexes (ux_crm_leads_org_email_open
+    // and ux_crm_leads_org_phone_hash_open). If two parallel POSTs both
+    // pass the pre-insert dedup check, one of them lands here with
+    // Postgres error 23505 — translate it to the same 409 the synchronous
+    // path returns so the API contract stays consistent.
+    const pgCode = (error as { code?: string }).code;
+    if (pgCode === '23505') {
+      throw new AppError(409, 'A lead with this email or phone already exists.', 'DUPLICATE_LEAD');
+    }
+    throw new AppError(500, error.message, 'DB_ERROR');
+  }
 
   await supabaseAdmin.from('crm_lead_scores').insert({
     lead_id: data.id, org_id, score, model: 'heuristic_v1', breakdown,
