@@ -174,26 +174,29 @@ app.get(`${V1}/integrations/google/callback`, async (req, res, next) => {
     const { default: jwt } = await import('jsonwebtoken');
     const { completeOAuth, isConfigured } = await import('./services/integrations/googleCalendar.service');
     const dashUrl = process.env.DASHBOARD_URL || 'http://localhost:3000';
+    // Bounce back to the Activities calendar view (where the banner
+    // lives) instead of the old standalone settings page.
+    const back = `${dashUrl}/dashboard/crm/activities?layout=calendar`;
     if (!isConfigured()) {
-      return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=not_configured`);
+      return res.redirect(`${back}&error=not_configured`);
     }
     const code  = String(req.query.code || '');
     const state = String(req.query.state || '');
     const err   = String(req.query.error || '');
-    if (err) return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=${encodeURIComponent(err)}`);
-    if (!code || !state) return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=missing_params`);
+    if (err) return res.redirect(`${back}&error=${encodeURIComponent(err)}`);
+    if (!code || !state) return res.redirect(`${back}&error=missing_params`);
     const secret = process.env.GOOGLE_OAUTH_STATE_SECRET || process.env.SUPABASE_JWT_SECRET || 'dev-only-secret-replace-me';
     let payload: { uid: string; oid: string; kind: string };
     try {
       payload = jwt.verify(state, secret) as { uid: string; oid: string; kind: string };
     } catch {
-      return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=invalid_state`);
+      return res.redirect(`${back}&error=invalid_state`);
     }
     if (payload.kind !== 'google_oauth' || !payload.uid || !payload.oid) {
-      return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=invalid_state`);
+      return res.redirect(`${back}&error=invalid_state`);
     }
     const { email } = await completeOAuth(payload.uid, payload.oid, code);
-    return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?connected=${encodeURIComponent(email)}`);
+    return res.redirect(`${back}&connected=${encodeURIComponent(email)}`);
   } catch (e) { next(e); }
 });
 
