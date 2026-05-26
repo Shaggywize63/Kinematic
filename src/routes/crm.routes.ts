@@ -1386,7 +1386,13 @@ const BUILTIN_TYPES = [
   { slug: 'note',     name: 'Note',     icon: '📝' },
   { slug: 'email',    name: 'Email',    icon: '✉️' },
   { slug: 'sms',      name: 'SMS',      icon: '💬' },
-  { slug: 'whatsapp', name: 'WhatsApp', icon: '💚' },
+  // No emoji for WhatsApp — the dashboard renders the official brand
+  // SVG via <ActivityTypeIcon>. Any emoji here (a heart, a phone, a
+  // speech bubble) gets misread as the WhatsApp logo and we've had
+  // multiple complaints. Leave this empty; clients that fall back to
+  // the emoji column just see "WhatsApp" with no glyph, which is
+  // still less wrong than 💚.
+  { slug: 'whatsapp', name: 'WhatsApp', icon: '' },
 ];
 activityTypes.get('/', wrap(async (req, res) => {
   const cid = clientId(req);
