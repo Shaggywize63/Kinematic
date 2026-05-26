@@ -166,6 +166,37 @@ import { requireModule, enforceCityScope } from './middleware/rbac';
 // Mirrors the WhatsApp webhook pattern at /crm/webhooks/whatsapp.
 app.use(`${V1}/integrations/webhook`, integrationsPublicRoutes);
 
+// Public Google OAuth callback — Google redirects without an auth
+// header so this MUST be mounted before the requireAuth gate. The
+// state JWT carries the user id, so we still verify identity.
+app.get(`${V1}/integrations/google/callback`, async (req, res, next) => {
+  try {
+    const { default: jwt } = await import('jsonwebtoken');
+    const { completeOAuth, isConfigured } = await import('./services/integrations/googleCalendar.service');
+    const dashUrl = process.env.DASHBOARD_URL || 'http://localhost:3000';
+    if (!isConfigured()) {
+      return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=not_configured`);
+    }
+    const code  = String(req.query.code || '');
+    const state = String(req.query.state || '');
+    const err   = String(req.query.error || '');
+    if (err) return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=${encodeURIComponent(err)}`);
+    if (!code || !state) return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=missing_params`);
+    const secret = process.env.GOOGLE_OAUTH_STATE_SECRET || process.env.SUPABASE_JWT_SECRET || 'dev-only-secret-replace-me';
+    let payload: { uid: string; oid: string; kind: string };
+    try {
+      payload = jwt.verify(state, secret) as { uid: string; oid: string; kind: string };
+    } catch {
+      return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=invalid_state`);
+    }
+    if (payload.kind !== 'google_oauth' || !payload.uid || !payload.oid) {
+      return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?error=invalid_state`);
+    }
+    const { email } = await completeOAuth(payload.uid, payload.oid, code);
+    return res.redirect(`${dashUrl}/dashboard/settings/integrations/google?connected=${encodeURIComponent(email)}`);
+  } catch (e) { next(e); }
+});
+
 // ── Public Tally bridge-agent endpoints (NO auth) ────────────────────
 // The Windows bridge agent running on the distributor's PC polls these
 // to fetch pending Tally jobs and report back results. Per-integration
