@@ -88,7 +88,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
         .eq('crm_deal_stages.stage_type', 'open'),
       client_id,
     ),
-    withClient(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id),
+    withClient(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id),
     withClient(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), client_id),
   ]);
 
@@ -130,7 +130,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   // Avg sales cycle (days from created_at → actual_close_date) for won deals in window
   const { data: cycleRows } = await withClient(supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
-    .eq('org_id', org_id).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null)
+    .eq('org_id', org_id).is('deleted_at', null).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null)
     .gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id)
     .limit(200);
   const cycles = (cycleRows ?? []).map(r => (new Date(r.actual_close_date!).getTime() - new Date(r.created_at).getTime()) / 86400000);
@@ -254,7 +254,7 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
 export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
-    .eq('org_id', org_id).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null);
+    .eq('org_id', org_id).is('deleted_at', null).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null);
   q = withClient(q, client_id);
   if (range?.from) q = q.gte('actual_close_date', range.from.slice(0, 10));
   if (range?.to) q = q.lte('actual_close_date', range.to.slice(0, 10));
@@ -385,7 +385,7 @@ export async function leadSourceRoi(org_id: string, client_id: string | null = n
   if (dealIds.length) {
     const { data: deals } = await supabaseAdmin.from('crm_deals')
       .select('id, amount, crm_deal_stages!inner(stage_type)')
-      .in('id', dealIds).eq('crm_deal_stages.stage_type', 'won');
+      .in('id', dealIds).is('deleted_at', null).eq('crm_deal_stages.stage_type', 'won');
     for (const d of (deals ?? []) as unknown as Array<{ id: string; amount: number }>) {
       dealsById.set(d.id, Number(d.amount ?? 0));
     }
