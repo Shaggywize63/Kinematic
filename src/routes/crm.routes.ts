@@ -1160,35 +1160,31 @@ router.get('/whatsapp-templates-supported-languages', wrap(async (_req, res) => 
 
 const settings = express.Router();
 settings.get('/', wrap(async (req, res) => {
+  // crm_settings has UNIQUE(org_id) — exactly one row per org — so we
+  // look it up by org_id alone and let the row's own client_id be
+  // informational. Earlier code filtered by client_id, which silently
+  // returned an empty fallback when the dashboard's X-Client-Id didn't
+  // match the row's stored client_id and made saves appear to vanish
+  // on refresh.
   const cid = clientId(req);
-  let data: any = null;
-  if (cid) {
-    const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).eq('client_id', cid).maybeSingle();
-    data = r.data;
-  }
-  if (!data) {
-    const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).is('client_id', null).maybeSingle();
-    data = r.data;
-  }
-  res.json(data ?? { org_id: orgId(req), client_id: cid, config: {}, business_type: 'both' });
+  const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
+  res.json(r.data ?? { org_id: orgId(req), client_id: cid, config: {}, business_type: 'both' });
 }));
 settings.patch('/', wrap(async (req, res) => {
   const body = parse(v.settingsUpdateSchema, req.body);
   const cid = clientId(req);
-  let existing: any = null;
-  if (cid) {
-    const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).eq('client_id', cid).maybeSingle();
-    existing = r.data;
-  } else {
-    const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).is('client_id', null).maybeSingle();
-    existing = r.data;
-  }
+  // Same single-row-per-org rule on writes — look up by org_id alone,
+  // update in place. If no row exists yet, insert (the UNIQUE(org_id)
+  // constraint guarantees there's no duplicate to conflict with).
+  const { data: existing } = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
   const mergedConfig = body.config !== undefined
     ? { ...(existing?.config || {}), ...body.config }
     : existing?.config ?? {};
   const update: Record<string, unknown> = {
     org_id: orgId(req),
-    client_id: cid,
+    // Preserve whatever client_id the row already has; only stamp the
+    // header value when creating a brand-new row.
+    client_id: existing?.client_id ?? cid,
     config: mergedConfig,
   };
   if (body.business_type !== undefined) update.business_type = body.business_type;
