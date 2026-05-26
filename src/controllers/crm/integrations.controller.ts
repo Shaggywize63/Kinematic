@@ -159,8 +159,13 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
 
   // Webhook URL is shown ONCE on creation — admin must copy/paste it now.
   // GET responses strip webhook_secret to keep it out of casual UI logs.
+  // Fall back to req.protocol + host if API_PUBLIC_URL isn't set on the
+  // host, so the URL we hand back is always reachable.
+  const envBase = (process.env.API_PUBLIC_URL || '').replace(/\/+$/, '');
+  const reqBase = `${req.protocol}://${req.get('host')}`;
+  const base = envBase || reqBase;
   const webhook_url = webhook_secret
-    ? `${process.env.API_PUBLIC_URL ?? ''}/api/v1/integrations/webhook/${provider.replace('_', '-')}/${integration.id}?key=${webhook_secret}`
+    ? `${base}/api/v1/integrations/webhook/${provider.replace('_', '-')}/${integration.id}?key=${webhook_secret}`
     : null;
 
   return created(res, {
