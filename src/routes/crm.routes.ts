@@ -989,7 +989,20 @@ activities.post('/', wrap(async (req, res) => {
     const uid = userId(req);
     if (uid) payload.owner_id = uid;
   }
-  res.status(201).json(await stampOwnerName(await crud.create('crm_activities', orgId(req), payload, userId(req))));
+  const created = await crud.create('crm_activities', orgId(req), payload, userId(req)) as Record<string, unknown>;
+  // Side-effect: mirror to the assignee/owner's Google Calendar when
+  // they've connected the integration. Fire-and-forget — calendar
+  // hiccups must not block the CRM write or the response.
+  void (async () => {
+    try {
+      const { pushActivity } = await import('../services/integrations/googleCalendar.service');
+      const evId = await pushActivity(orgId(req), created as any);
+      if (evId) {
+        await supabaseAdmin.from('crm_activities').update({ google_event_id: evId }).eq('id', created.id);
+      }
+    } catch (e) { console.warn('[googleCalendar] post-create hook failed', (e as Error).message); }
+  })();
+  res.status(201).json(await stampOwnerName(created));
 }));
 activities.get('/:id', wrap(async (req, res) => {
   const row = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
@@ -1001,13 +1014,29 @@ activities.patch('/:id', wrap(async (req, res) => {
   const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
   const err = await activityAccessError(req as AuthRequest, existing);
   if (err) throw err;
-  res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchemaBase.partial(), req.body), userId(req))));
+  const updated = await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchemaBase.partial(), req.body), userId(req)) as Record<string, unknown>;
+  void (async () => {
+    try {
+      const { pushActivity } = await import('../services/integrations/googleCalendar.service');
+      const evId = await pushActivity(orgId(req), updated as any);
+      if (evId && evId !== updated.google_event_id) {
+        await supabaseAdmin.from('crm_activities').update({ google_event_id: evId }).eq('id', updated.id);
+      }
+    } catch (e) { console.warn('[googleCalendar] post-update hook failed', (e as Error).message); }
+  })();
+  res.json(await stampOwnerName(updated));
 }));
 activities.delete('/:id', wrap(async (req, res) => {
   const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
   const err = await activityAccessError(req as AuthRequest, existing);
   if (err) throw err;
   await crud.softDelete('crm_activities', orgId(req), req.params.id);
+  void (async () => {
+    try {
+      const { deleteActivity } = await import('../services/integrations/googleCalendar.service');
+      await deleteActivity(orgId(req), existing as any);
+    } catch (e) { console.warn('[googleCalendar] post-delete hook failed', (e as Error).message); }
+  })();
   res.status(204).end();
 }));
 router.use('/activities', activities);
