@@ -63,6 +63,7 @@ export async function timeToFirstTouch(org_id: string, client_id: string | null 
   const { data: acts } = await supabaseAdmin.from('crm_activities')
     .select('lead_id, created_at')
     .in('lead_id', leadIds)
+    .is('deleted_at', null)
     .order('created_at', { ascending: true });
 
   const firstByLead = new Map<string, string>();
