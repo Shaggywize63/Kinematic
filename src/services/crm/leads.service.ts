@@ -43,8 +43,14 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   }
 
   const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload));
-  // Use client-specific ICP if the lead has a client_id stamped, else fall back to org-level.
-  const { score, breakdown } = scoring.computeHeuristic(payload, await scoring.getIcp(org_id, payload.client_id ?? null));
+  // Unified scorer — branches B2B/B2C correctly, no zero-padding of
+  // off-profile signals in the breakdown. Engagement is skipped on
+  // creation since there are no activities for a lead that doesn't
+  // exist yet; rescoreLead picks them up later from crm_activities +
+  // crm_lead_updates.
+  const { score, breakdown } = await scoring.computeUnifiedScore(
+    org_id, payload.client_id ?? null, payload, { skipEngagement: true },
+  );
 
   const p = asRow(payload);
   const nowIso = new Date().toISOString();
@@ -331,15 +337,29 @@ export async function deleteLead(org_id: string, id: string) {
 
 export async function rescoreLead(org_id: string, id: string) {
   const lead = await getLead(org_id, id);
-  const { score, breakdown } = scoring.computeHeuristic(lead, await scoring.getIcp(org_id));
+  // v2 path — pulls real engagement signals from crm_activities +
+  // crm_lead_updates so a hot lead with recent WhatsApp / call traffic
+  // gets the engagement credit the v1 heuristic was blind to.
+  const result = await scoring.computeUnifiedScore(
+    org_id, (lead as any).client_id ?? null, lead, { skipEngagement: false },
+  );
+  // grade is computed inside computeUnifiedScore but the existing
+  // crm_leads schema also has score_grade — keep it in sync so the list
+  // view's grade chip matches the breakdown's grade.
   await supabaseAdmin.from('crm_leads').update({
-    score, score_breakdown: breakdown, score_updated_at: new Date().toISOString(),
+    score: result.score,
+    score_grade: result.grade,
+    score_breakdown: result.breakdown,
+    score_updated_at: new Date().toISOString(),
   }).eq('id', id).eq('org_id', org_id);
   await supabaseAdmin.from('crm_lead_scores').insert({
-    lead_id: id, org_id, score, model: 'heuristic_v1', breakdown,
+    lead_id: id, org_id, score: result.score, grade: result.grade,
+    model: result.breakdown.model || 'heuristic_v2', breakdown: result.breakdown,
   });
+  // Edge function still runs the async LLM rerank with profile-aware
+  // prompt; it'll update score + breakdown in place when it finishes.
   triggerEdgeFunction('crm-rescore-lead', { lead_id: id, org_id }).catch(() => {});
-  return { score, breakdown };
+  return { score: result.score, breakdown: result.breakdown, grade: result.grade };
 }
 
 /**
