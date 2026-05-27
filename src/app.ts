@@ -7,6 +7,8 @@ import morgan from 'morgan';
 import { rateLimit } from 'express-rate-limit';
 import aiRouter from './routes/ai.routes';
 import kiniRoutes from './routes/kini.routes';
+import leadNbaRoutes from './routes/crm/lead-nba.routes';
+import leadUpdatesRoutes from './routes/crm/lead-updates.routes';
 
 import { logger } from './lib/logger';
 import { notFoundHandler } from './middleware/errorHandler';
@@ -379,6 +381,13 @@ app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope, perR
 // routes mounted above.
 app.use(`${V1}/distribution/integrations`,   requireAuth,                                             distIntegrationsRoutes);
 
+// ── CRM lead NBA + Updates timeline (mounted BEFORE the main CRM router) ───
+// Express short-circuits at the first mount whose path prefix matches AND
+// whose router responds. Non-matching /leads/* and /ai/* paths fall
+// through to crmRoutes below, so the existing routes are untouched.
+app.use(`${V1}/crm/ai/next-best-action/lead`, requireAuth, leadNbaRoutes);
+app.use(`${V1}/crm/leads`,                    requireAuth, leadUpdatesRoutes);
+
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
 
@@ -401,8 +410,6 @@ app.use(notFoundHandler);
 app.use(sanitiseError);                                         // no stacks/PII to client; log full detail server-side
 
 // ── Background workers ───────────────────────────────────
-// Start the Tally enqueue poller. Skipped in test runs by checking a
-// flag so unit tests don't kick off a 30s setInterval inside CI.
 if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TALLY_POLLER !== 'true') {
   startTallyEnqueuePoller();
 }
