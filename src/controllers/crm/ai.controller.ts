@@ -245,8 +245,16 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
         return r ?? { data: { error: `Unknown tool: ${name}` } };
       },
     });
+    // If the agentic loop returned no text (e.g. it spent all turns on tools
+    // and the wrap-up call also failed), fall back to a useful default so the
+    // client doesn't render its generic apology string.
+    const text =
+      result.reply ||
+      (result.tool_calls.length > 0
+        ? 'Done — see the results above.'
+        : "Sorry, I couldn't generate a response for that. Could you rephrase?");
     return ok(res, {
-      text: result.reply,
+      text,
       cards: result.cards,
       tool_calls: result.tool_calls.map((t) => ({ name: t.name, args: t.args })),
     });
