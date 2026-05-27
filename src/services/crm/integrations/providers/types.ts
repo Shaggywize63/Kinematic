@@ -14,7 +14,7 @@ import type { Request } from 'express';
 import type { NormalizedLead } from '../dedup.orchestrator';
 export type { NormalizedLead };
 
-export type ProviderId = 'web_form' | 'generic_webhook' | 'meta_lead_ads' | 'google_ads' | 'zoho';
+export type ProviderId = 'web_form' | 'generic_webhook' | 'meta_lead_ads' | 'google_ads' | 'zoho' | 'salesforce';
 
 export interface IntegrationRow {
   id: string;
