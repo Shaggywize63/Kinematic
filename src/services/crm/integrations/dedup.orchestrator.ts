@@ -112,7 +112,14 @@ export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOr
     title:         normalized.title        ?? null,
     industry:      normalized.industry     ?? null,
     country:       normalized.country      ?? null,
-    city:          normalized.city         ?? null,
+    // Inbound webhooks (web forms, Meta, Google Ads, Zapier…) often
+    // don't carry a city. City-scoped reps can't see crm_leads rows
+    // where city IS NULL — the list endpoint filters via .in('city',
+    // effectiveCities). Default missing city to 'Online' so the lead
+    // is visible to anyone with that catch-all city in their scope,
+    // and to admins (who bypass city scope) on the Leads page. Org
+    // admins can re-assign a real city later when they triage.
+    city:          (normalized.city && normalized.city.trim()) || 'Online',
     notes:         normalized.notes        ?? null,
     tags:          normalized.tags         ?? [],
     custom_fields: normalized.custom_fields ?? {},
