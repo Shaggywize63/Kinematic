@@ -128,5 +128,43 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
     }
     messages.push({ role: 'user', content: toolResults });
   }
+
+  // Loop hit max_turns without a final text-only turn. Do one no-tools
+  // wrap-up call so the user gets a real summary instead of an empty reply
+  // (which the dashboard renders as a generic apology).
+  try {
+    const finalRes = await AIService.anthropicFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens,
+        system:
+          input.system +
+          '\n\nIMPORTANT: Tools have already run. Reply with a brief 1-2 sentence summary of what was done or found. Do NOT call any more tools.',
+        messages,
+      }),
+    });
+    if (finalRes.ok) {
+      const finalData = (await finalRes.json()) as {
+        content: Array<{ type: string; text?: string }>;
+      };
+      const reply = (finalData.content || [])
+        .filter((c) => c.type === 'text')
+        .map((c) => (c as { text: string }).text)
+        .join('\n')
+        .trim();
+      return { reply, cards, tool_calls };
+    }
+    const body = await finalRes.json().catch(() => ({}));
+    const detail = (body as { error?: { message?: string } })?.error?.message || '';
+    console.warn(`[chatWithTools.final] upstream ${finalRes.status}: ${detail.slice(0, 300).replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]')}`);
+  } catch (e) {
+    console.warn('[chatWithTools.final] error:', (e as Error)?.message);
+  }
   return { reply: '', cards, tool_calls };
 }
