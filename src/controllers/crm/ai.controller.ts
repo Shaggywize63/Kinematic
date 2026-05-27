@@ -6,62 +6,12 @@ import { AIService } from '../../services/ai.service';
 import { chatWithTools } from '../../services/crm/ai/aiClient';
 import { toAnthropicTools, executeTool } from '../../services/crm/ai/kiniTools.service';
 
-function computeLeadScore(lead: Record<string, unknown>): { score: number; grade: string; breakdown: Record<string, number> } {
-  const breakdown: Record<string, number> = {};
-  let score = 0;
-  const add = (key: string, val: number) => { breakdown[key] = val; score += val; };
-  if (lead.company) add('has_company', 8);
-  if (lead.title) add('has_title', 5);
-  if (lead.industry) add('has_industry', 4);
-  if (lead.phone) add('has_phone', 4);
-  if (lead.email) add('has_email', 4);
-  score = Math.max(0, Math.min(100, score));
-  const grade = score >= 75 ? 'A' : score >= 55 ? 'B' : score >= 35 ? 'C' : 'D';
-  return { score, grade, breakdown };
-}
-
-export const scoreLead = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
-  const { data: lead, error: le } = await supabaseAdmin.from('crm_leads').select('*')
-    .eq('id', req.params.id).eq('org_id', org_id).single();
-  if (le || !lead) return notFound(res, 'Lead not found');
-
-  const heuristic = computeLeadScore(lead);
-  let finalScore = heuristic.score;
-  let model = 'heuristic';
-  let reasons: string[] = [];
-
-  try {
-    const aiText = await AIService.callKiniAI({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
-      system: 'You are a B2B/B2C lead scoring expert. Reply ONLY with valid JSON: {"adjustment":number,"reasons":["string"],"confidence":"low"|"medium"|"high"}. adjustment must be between -15 and 15.',
-      messages: [{
-        role: 'user',
-        content: `Lead profile: ${JSON.stringify({ name: `${lead.first_name} ${lead.last_name}`, company: lead.company, title: lead.title, industry: lead.industry, status: lead.status, source: lead.source_id, is_b2c: lead.is_b2c })}. Heuristic score: ${heuristic.score}. Provide adjustment.`,
-      }],
-    });
-    const parsed = JSON.parse(aiText.trim());
-    finalScore = Math.max(0, Math.min(100, heuristic.score + (parsed.adjustment || 0)));
-    model = 'heuristic+ai';
-    reasons = parsed.reasons || [];
-  } catch (_) { /* fallback to heuristic only */ }
-
-  const grade = finalScore >= 75 ? 'A' : finalScore >= 55 ? 'B' : finalScore >= 35 ? 'C' : 'D';
-
-  await supabaseAdmin.from('crm_leads').update({
-    score: finalScore, score_grade: grade,
-    score_breakdown: { ...heuristic.breakdown, ai_reasons: reasons },
-    score_updated_at: new Date().toISOString(),
-  }).eq('id', lead.id);
-
-  await supabaseAdmin.from('crm_lead_scores').insert({
-    org_id, lead_id: lead.id, score: finalScore, grade,
-    breakdown: { ...heuristic.breakdown, ai_reasons: reasons }, model,
-  });
-
-  return ok(res, { id: lead.id, score: finalScore, grade, breakdown: heuristic.breakdown, reasons, model });
-});
+// Lead scoring was previously implemented inline here and exported as
+// `scoreLead` / `computeLeadScore`. Those functions were orphaned — no
+// route in crm.routes.ts imported them; the actual /ai/score-lead/:id
+// route calls leads.service.rescoreLead via the unified scorer in
+// leadScoring.service.ts. Removed in the scoring-v2 cleanup so the
+// codebase has exactly one scoring path.
 
 export const draftReply = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
