@@ -6,6 +6,7 @@ import compression from 'compression';
 import morgan from 'morgan';
 import { rateLimit } from 'express-rate-limit';
 import aiRouter from './routes/ai.routes';
+import kiniRoutes from './routes/kini.routes';
 
 import { logger } from './lib/logger';
 import { notFoundHandler } from './middleware/errorHandler';
@@ -101,7 +102,7 @@ app.get('/embed.js', cors({ origin: '*' }), function (_req, res) {
   res.sendFile(path.join(__dirname, '..', 'public', 'embed.js'));
 });
 
-// ── Hosted lead-capture form ──────────────────────────────────────
+// ── Hosted lead-capture form ─────────────────────────────────────
 // Zero-code option for clients who don't have / can't edit a website.
 // They share https://<api>/f/<integration_id>?key=<webhook_secret> as
 // a link or QR — visitors land on a clean Kinematic-branded page that
@@ -202,7 +203,7 @@ app.use(morgan('combined', {
   skip: (req) => req.path === '/health',
 }));
 
-// ── Body parsing & misc ──────────────────────────────────
+// ── Body parsing & misc ────────────────────────────────────
 app.use(compression({ threshold: 1024 }));   // skip gzip on payloads <1KB — saves CPU on small JSON
 app.use(express.json({
   limit: '2mb',
@@ -219,7 +220,7 @@ app.use(strictJson);                                            // mutating rout
 app.use(prototypePoll);                                         // block __proto__ / constructor injection
 app.use(auditAll);                                              // log every state change after the response finishes
 
-// ── Health check ────────────────────────────────────
+// ── Health check ───────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -354,7 +355,7 @@ app.use(`${V1}/warehouse`,     requireAuth, requireModule('inventory'), warehous
 // ── Org-level admin settings (location-ping cadence today; more to come) ──
 app.use(`${V1}/org-settings`,  requireAuth, orgSettingsRoutes);
 
-// ── Distribution module ──────────────────────────────────
+// ── Distribution module ────────────────────────────────
 app.use(`${V1}/distribution/brands`,         requireAuth, requireModule('distribution_brands'),       distBrandsRoutes);
 app.use(`${V1}/distribution/distributors`,   requireAuth, requireModule('distribution_distributors'), distDistributorsRoutes);
 app.use(`${V1}/distribution/price-lists`,    requireAuth, requireModule('distribution_pricing'),      distPriceListsRoutes);
@@ -378,8 +379,14 @@ app.use(`${V1}/salesman`,                    requireAuth, enforceCityScope, perR
 // routes mounted above.
 app.use(`${V1}/distribution/integrations`,   requireAuth,                                             distIntegrationsRoutes);
 
-// ── CRM module ───────────────────────────────────────
+// ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
+
+// ── KINI agentic v2 (flag-gated; legacy /crm/ai/chat untouched) ─────────────
+// Per-tenant rollout is controlled by org_settings(key='kini_agentic_v2'),
+// enforced inside each handler via gate(). Disabled tenants get a clean
+// 403 KINI_V2_DISABLED and clients fall back to the legacy v1 chat path.
+app.use(`${V1}/kini`, requireAuth, kiniRoutes);
 
 // ── Lead-source integrations (admin CRUD) ──────────────────────────
 // Public webhook ingestion lives above the auth catch-all; this is the
