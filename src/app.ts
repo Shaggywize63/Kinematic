@@ -6,6 +6,7 @@ import compression from 'compression';
 import morgan from 'morgan';
 import { rateLimit } from 'express-rate-limit';
 import aiRouter from './routes/ai.routes';
+import kiniRoutes from './routes/kini.routes';
 import leadNbaRoutes from './routes/crm/lead-nba.routes';
 import leadUpdatesRoutes from './routes/crm/lead-updates.routes';
 
@@ -390,6 +391,12 @@ app.use(`${V1}/crm/leads`,                    requireAuth, leadUpdatesRoutes);
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
 
+// ── KINI agentic v2 (flag-gated; legacy /crm/ai/chat untouched) ─────────────
+// Per-tenant rollout is controlled by org_settings(key='kini_agentic_v2'),
+// enforced inside each handler via gate(). Disabled tenants get a clean
+// 403 KINI_V2_DISABLED and clients fall back to the legacy v1 chat path.
+app.use(`${V1}/kini`, requireAuth, kiniRoutes);
+
 // ── Lead-source integrations (admin CRUD) ──────────────────────────
 // Public webhook ingestion lives above the auth catch-all; this is the
 // authenticated admin surface for connect/list/edit/disconnect/events.
@@ -403,8 +410,6 @@ app.use(notFoundHandler);
 app.use(sanitiseError);                                         // no stacks/PII to client; log full detail server-side
 
 // ── Background workers ───────────────────────────────────
-// Start the Tally enqueue poller. Skipped in test runs by checking a
-// flag so unit tests don't kick off a 30s setInterval inside CI.
 if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TALLY_POLLER !== 'true') {
   startTallyEnqueuePoller();
 }
