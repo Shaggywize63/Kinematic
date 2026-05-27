@@ -1,11 +1,47 @@
 /**
- * Lead scoring: deterministic heuristic + Claude Haiku rerank.
- * Heuristic runs synchronously; LLM rerank runs in Edge Function.
+ * Lead scoring v2 — unified path with proper B2B / B2C separation,
+ * real engagement signals, and a profile-aware LLM rerank prompt.
+ *
+ * Earlier behaviour (heuristic_v1) had three problems users could see:
+ *   1. The breakdown JSON always carried B2B keys ("title", "company_size")
+ *      even on B2C leads, just zeroed-out — making the UI look like B2C
+ *      leads were being judged on company size and job title.
+ *   2. Engagement was derived from a single timestamp (`last_activity_at`)
+ *      and never counted WhatsApp / call / meeting / Updates activity, so
+ *      a hot B2C lead with 20 inbound WhatsApp messages scored the same as
+ *      a cold one with zero engagement.
+ *   3. The LLM rerank prompt was hard-coded as "B2B sales lead qualification
+ *      expert" — a B2C-specific bias bug independent of the heuristic.
+ *
+ * v2 fixes all three:
+ *   - Breakdown carries ONLY the keys that apply to the chosen profile
+ *     (model tag is `heuristic_b2c_v2` or `heuristic_b2b_v2` so analytics
+ *     can A/B against v1 entries already in `crm_lead_scores`).
+ *   - Engagement is counted from `crm_activities` + `crm_lead_updates`
+ *     over the last 30 days. Created leads skip the engagement fetch
+ *     (no activities yet); rescored leads always fetch it.
+ *   - The rerank prompt switches on profile: B2C reads consumer-intent
+ *     signals (reachability, recency, source quality, inbound activity);
+ *     B2B reads firmographic + BANT signals.
+ *
+ * Per-tenant override surface lives at `crm_settings.config.scoring`:
+ *   {
+ *     "scoring": {
+ *       "active_profile": "auto" | "b2c" | "b2b",   // default: auto
+ *       "grade_thresholds": { "A": 75, "B": 55, "C": 35 },
+ *       "weights": { "b2c": { ... }, "b2b": { ... } }
+ *     }
+ *   }
+ * Missing keys fall through to the defaults below.
  */
 import { supabaseAdmin } from '../../../lib/supabase';
 import { createTtlCache } from '../../../utils/ttlCache';
 import { complete as aiComplete } from './aiClient';
 import type { Lead, ScoreBreakdown } from '../../../types/crm.types';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface Icp {
   industries?: string[];
@@ -13,130 +49,338 @@ export interface Icp {
   titles?: string[];
 }
 
-// Cache ICP per (org_id, client_id) for 5 minutes. ICP changes via the
-// settings UI which calls invalidateIcpCache below; otherwise we'd be
-// hammering crm_settings on every lead create / rescore.
+export interface EngagementSignals {
+  whatsapp_count_30d: number;
+  call_count_30d: number;
+  meeting_count_30d: number;
+  email_count_30d: number;
+  updates_count_30d: number;
+  bant_signals_in_updates: number;
+  days_since_last_touch: number | null;
+}
+
+export interface ScoringConfig {
+  active_profile?: 'auto' | 'b2c' | 'b2b';
+  grade_thresholds?: { A?: number; B?: number; C?: number };
+  weights?: {
+    b2c?: Record<string, number>;
+    b2b?: Record<string, number>;
+  };
+}
+
+const DEFAULT_THRESHOLDS = { A: 75, B: 55, C: 35 };
+const EMPTY_ENGAGEMENT: EngagementSignals = {
+  whatsapp_count_30d: 0, call_count_30d: 0, meeting_count_30d: 0,
+  email_count_30d: 0, updates_count_30d: 0, bant_signals_in_updates: 0,
+  days_since_last_touch: null,
+};
+
+// Words the BANT-detector looks for in update bodies. Generic enough to
+// catch the most common phrasings without over-fitting to one tenant.
+const BANT_REGEX = /\b(budget|timeline|deadline|decision\s*maker|approver|approval|sign[\s-]?off|procurement|finalis|finaliz|RFP|quotation)\b/i;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ICP cache (unchanged from v1)
+// ─────────────────────────────────────────────────────────────────────────────
+
 const icpCache = createTtlCache<Icp>({ defaultTtlMs: 5 * 60_000, maxSize: 500 });
 
 export function invalidateIcpCache(org_id: string, client_id: string | null = null) {
   icpCache.delete(`${org_id}:${client_id ?? 'org'}`);
-  // Also drop the org-level fallback because client-scoped lookups try it next.
   if (client_id) icpCache.delete(`${org_id}:org`);
 }
 
 export async function getIcp(org_id: string, client_id: string | null = null): Promise<Icp> {
   return icpCache.remember(`${org_id}:${client_id ?? 'org'}`, async () => {
-    // Multi-tenant: prefer client-specific settings if present, fall back to org-level.
     if (client_id) {
       const { data } = await supabaseAdmin
-        .from('crm_settings')
-        .select('config')
-        .eq('org_id', org_id)
-        .eq('client_id', client_id)
-        .maybeSingle();
+        .from('crm_settings').select('config')
+        .eq('org_id', org_id).eq('client_id', client_id).maybeSingle();
       const icp = ((data?.config as Record<string, unknown>)?.icp as Icp) ?? null;
       if (icp) return icp;
     }
     const { data } = await supabaseAdmin
-      .from('crm_settings')
-      .select('config')
-      .eq('org_id', org_id)
-      .is('client_id', null)
-      .maybeSingle();
+      .from('crm_settings').select('config')
+      .eq('org_id', org_id).is('client_id', null).maybeSingle();
     return ((data?.config as Record<string, unknown>)?.icp as Icp) ?? {};
   });
 }
 
-// B2B leans on title seniority, company match, and ICP industry signals.
-function scoreB2B(lead: Partial<Lead>, icp: Icp): ScoreBreakdown {
-  const b: ScoreBreakdown = { base: 0, title: 0, company_size: 0, source: 0, engagement: 0, recency: 0, icp: 0, model: 'heuristic_b2b_v1' };
+// Settings → scoring config. Org-level (no client scoping) is enough for
+// scoring overrides today; per-client config can be added by adapting
+// the ICP cache pattern if it's ever needed.
+async function getScoringConfig(org_id: string): Promise<ScoringConfig> {
+  const { data } = await supabaseAdmin
+    .from('crm_settings').select('config')
+    .eq('org_id', org_id).is('client_id', null).maybeSingle();
+  return ((data?.config as Record<string, unknown>)?.scoring as ScoringConfig) ?? {};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Engagement signals
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function fetchEngagement(org_id: string, lead_id: string): Promise<EngagementSignals> {
+  const since30d = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const [{ data: acts }, { data: updates }] = await Promise.all([
+    supabaseAdmin.from('crm_activities')
+      .select('type, completed_at')
+      .eq('org_id', org_id).eq('lead_id', lead_id).is('deleted_at', null)
+      .gte('completed_at', since30d),
+    supabaseAdmin.from('crm_lead_updates')
+      .select('body, created_at')
+      .eq('org_id', org_id).eq('lead_id', lead_id)
+      .gte('created_at', since30d),
+  ]);
+
+  const out = { ...EMPTY_ENGAGEMENT };
+  let mostRecent: number | null = null;
+  for (const a of (acts ?? [])) {
+    const t = String(a.type || '').toLowerCase();
+    if (t === 'whatsapp') out.whatsapp_count_30d += 1;
+    else if (t === 'call') out.call_count_30d += 1;
+    else if (t === 'meeting') out.meeting_count_30d += 1;
+    else if (t === 'email') out.email_count_30d += 1;
+    if (a.completed_at) {
+      const tms = new Date(a.completed_at).getTime();
+      if (mostRecent === null || tms > mostRecent) mostRecent = tms;
+    }
+  }
+  for (const u of (updates ?? [])) {
+    out.updates_count_30d += 1;
+    if (BANT_REGEX.test(u.body || '')) out.bant_signals_in_updates += 1;
+  }
+  out.days_since_last_touch = mostRecent === null
+    ? null
+    : Math.floor((Date.now() - mostRecent) / 86_400_000);
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Heuristics — profile-specific. Breakdown contains ONLY the keys that
+// apply to the chosen profile, so the UI no longer surfaces zero-valued
+// B2B signals on B2C leads.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function tieredScore(value: number, tiers: Array<[number, number]>): number {
+  // tiers: [[threshold, points], ...] — first matching tier wins (descending).
+  for (const [threshold, points] of tiers) {
+    if (value >= threshold) return points;
+  }
+  return 0;
+}
+
+function scoreB2C(
+  lead: Partial<Lead>,
+  engagement: EngagementSignals,
+  weightsOverride: Record<string, number> = {},
+): ScoreBreakdown {
+  const w = (k: string, def: number) => weightsOverride[k] ?? def;
+  const b: ScoreBreakdown = { model: 'heuristic_b2c_v2' } as ScoreBreakdown;
+
+  if (lead.phone) (b as any).phone_present = w('phone_present', 12);
+  if (lead.email) (b as any).email_present = w('email_present', 8);
+  if ((lead as any).marketing_consent) (b as any).marketing_consent = w('marketing_consent', 8);
+  if ((lead as any).whatsapp_consent) (b as any).whatsapp_consent = w('whatsapp_consent', 8);
+
+  // Source quality — referral > paid (utm) > organic with source_id > nothing
+  const utm = String((lead as any).utm_medium || '').toLowerCase();
+  const referralLike = String(lead.source_id || '').toLowerCase().includes('referral');
+  if (referralLike) (b as any).source_quality = w('source_quality_referral', 12);
+  else if (utm === 'cpc' || utm === 'paid' || utm === 'social') (b as any).source_quality = w('source_quality_paid', 8);
+  else if (lead.source_id) (b as any).source_quality = w('source_quality_organic', 4);
+
+  if (lead.city || lead.country) (b as any).geo = w('geo', 5);
+
+  // Engagement — counts from real activities + updates, not just a timestamp.
+  const wa = tieredScore(engagement.whatsapp_count_30d, [[3, w('whatsapp_high', 15)], [1, w('whatsapp_low', 8)]]);
+  if (wa > 0) (b as any).whatsapp_30d = wa;
+  const ca = tieredScore(engagement.call_count_30d, [[3, w('call_high', 10)], [1, w('call_low', 5)]]);
+  if (ca > 0) (b as any).calls_30d = ca;
+  if (engagement.updates_count_30d > 0) (b as any).updates_30d = w('updates', 7);
+
+  // Recency of last touch (any activity type).
+  if (engagement.days_since_last_touch !== null) {
+    if (engagement.days_since_last_touch < 7) (b as any).recent_touch = w('recent_touch_high', 8);
+    else if (engagement.days_since_last_touch < 14) (b as any).recent_touch = w('recent_touch_med', 4);
+  } else if (lead.last_activity_at) {
+    // Fallback when crm_activities is empty but the lead row has a stamp.
+    const days = (Date.now() - new Date(lead.last_activity_at).getTime()) / 86_400_000;
+    (b as any).recent_touch = Math.max(0, Math.round(w('recent_touch_fallback', 8) - days * 0.3));
+  }
+
+  return b;
+}
+
+function scoreB2B(
+  lead: Partial<Lead>,
+  icp: Icp,
+  engagement: EngagementSignals,
+  weightsOverride: Record<string, number> = {},
+): ScoreBreakdown {
+  const w = (k: string, def: number) => weightsOverride[k] ?? def;
+  const b: ScoreBreakdown = { model: 'heuristic_b2b_v2' } as ScoreBreakdown;
 
   const t = (lead.title || '').toLowerCase();
-  if (/(ceo|cto|cfo|cmo|coo|chief|founder|owner)/.test(t)) b.title = 20;
-  else if (/(vp|vice president|head of)/.test(t)) b.title = 15;
-  else if (/(director)/.test(t)) b.title = 10;
-  else if (/(manager|lead)/.test(t)) b.title = 5;
-  else if (t) b.title = 2;
+  if (/(ceo|cto|cfo|cmo|coo|chief|founder|owner)/.test(t)) (b as any).title_seniority = w('title_executive', 20);
+  else if (/(vp|vice president|head of)/.test(t)) (b as any).title_seniority = w('title_vp', 15);
+  else if (/(director)/.test(t)) (b as any).title_seniority = w('title_director', 10);
+  else if (/(manager|lead)/.test(t)) (b as any).title_seniority = w('title_manager', 5);
+  else if (t) (b as any).title_seniority = w('title_ic', 2);
 
-  if ((lead.company || '').length > 0) b.company_size = 8;
-  if (lead.source_id) b.source = 10;
+  if (lead.company) (b as any).company_present = w('company_present', 8);
 
-  if (lead.last_activity_at) {
-    const days = (Date.now() - new Date(lead.last_activity_at).getTime()) / (1000 * 60 * 60 * 24);
-    b.recency = Math.max(0, Math.round(10 - days * 0.3));
-    b.engagement = days < 7 ? 15 : days < 30 ? 8 : 3;
+  if (icp.industries?.length && lead.industry &&
+      icp.industries.some((i) => i.toLowerCase() === (lead.industry || '').toLowerCase())) {
+    (b as any).industry_match = w('industry_match', 7);
   }
 
-  const industryMatch = icp.industries && lead.industry &&
-    icp.industries.some((i) => i.toLowerCase() === (lead.industry || '').toLowerCase());
-  const titleMatch = icp.titles && lead.title &&
-    icp.titles.some((i) => (lead.title || '').toLowerCase().includes(i.toLowerCase()));
-  if (industryMatch) b.icp = (b.icp ?? 0) + 5;
-  if (titleMatch) b.icp = (b.icp ?? 0) + 5;
+  // Contact completeness — both > one > neither.
+  const hasEmail = !!lead.email, hasPhone = !!lead.phone;
+  if (hasEmail && hasPhone) (b as any).contact_complete = w('contact_both', 8);
+  else if (hasEmail || hasPhone) (b as any).contact_complete = w('contact_one', 4);
+
+  if (lead.source_id) (b as any).source_quality = w('source_quality', 8);
+
+  const mt = tieredScore(engagement.meeting_count_30d, [[3, w('meetings_high', 12)], [1, w('meetings_low', 6)]]);
+  if (mt > 0) (b as any).meetings_30d = mt;
+  const ca = tieredScore(engagement.call_count_30d, [[3, w('calls_high', 8)], [1, w('calls_low', 4)]]);
+  if (ca > 0) (b as any).calls_30d = ca;
+
+  // BANT signals from updates — captures qualifying conversations the
+  // heuristic alone can't see.
+  if (engagement.bant_signals_in_updates > 0) {
+    (b as any).bant_signals_in_updates = w('bant_signals', 12);
+  } else if (engagement.updates_count_30d > 0) {
+    (b as any).updates_30d = w('updates_present', 4);
+  }
+
+  if (engagement.days_since_last_touch !== null) {
+    if (engagement.days_since_last_touch < 7) (b as any).recent_touch = w('recent_touch', 7);
+    else if (engagement.days_since_last_touch < 14) (b as any).recent_touch = w('recent_touch_med', 3);
+  } else if (lead.last_activity_at) {
+    const days = (Date.now() - new Date(lead.last_activity_at).getTime()) / 86_400_000;
+    (b as any).recent_touch = Math.max(0, Math.round(w('recent_touch_fallback', 7) - days * 0.25));
+  }
+
   return b;
 }
 
-// B2C ignores company/title and weighs reachability, consent, recency, and source quality.
-function scoreB2C(lead: Partial<Lead>, _icp: Icp): ScoreBreakdown {
-  const b: ScoreBreakdown = { base: 0, title: 0, company_size: 0, source: 0, engagement: 0, recency: 0, icp: 0, model: 'heuristic_b2c_v1' };
+// ─────────────────────────────────────────────────────────────────────────────
+// Grade computation
+// ─────────────────────────────────────────────────────────────────────────────
 
-  if (lead.phone) (b as any).phone_present = 12;
-  if (lead.email) (b as any).email_quality = 8;
+export function gradeFromScore(score: number, thresholds: { A?: number; B?: number; C?: number } = {}): 'A' | 'B' | 'C' | 'D' {
+  const tA = thresholds.A ?? DEFAULT_THRESHOLDS.A;
+  const tB = thresholds.B ?? DEFAULT_THRESHOLDS.B;
+  const tC = thresholds.C ?? DEFAULT_THRESHOLDS.C;
+  if (score >= tA) return 'A';
+  if (score >= tB) return 'B';
+  if (score >= tC) return 'C';
+  return 'D';
+}
 
-  if ((lead as any).marketing_consent) (b as any).marketing_consent = 10;
-  if ((lead as any).whatsapp_consent) (b as any).whatsapp_consent = 8;
-
-  const referralLike = String(lead.source_id || '').toLowerCase().includes('referral');
-  b.source = referralLike ? 15 : (lead.source_id ? 8 : 0);
-
-  if (lead.city || lead.country) (b as any).geo = 5;
-
-  if (lead.last_activity_at) {
-    const days = (Date.now() - new Date(lead.last_activity_at).getTime()) / (1000 * 60 * 60 * 24);
-    b.recency = Math.max(0, Math.round(15 - days * 0.5));
-    b.engagement = days < 3 ? 20 : days < 14 ? 12 : days < 30 ? 6 : 2;
+function sumBreakdown(b: ScoreBreakdown): number {
+  let s = 0;
+  for (const [k, v] of Object.entries(b)) {
+    if (k === 'model' || k === 'total' || k === 'llm_adjustment' || k === 'llm_confidence' || k === 'llm_reasons') continue;
+    if (typeof v === 'number') s += v;
   }
-  return b;
+  return Math.max(0, Math.min(100, s));
 }
 
-export function computeHeuristic(lead: Partial<Lead>, icp: Icp): { score: number; breakdown: ScoreBreakdown } {
-  const isB2C = (lead as any).is_b2c === true;
-  const breakdown = isB2C ? scoreB2C(lead, icp) : scoreB2B(lead, icp);
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified entry point
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const total = Math.max(0, Math.min(100,
-    Object.entries(breakdown).reduce((sum, [k, v]) => {
-      if (k === 'model' || k === 'total') return sum;
-      return sum + (typeof v === 'number' ? v : 0);
-    }, 0),
-  ));
-  breakdown.total = total;
-  return { score: total, breakdown };
+export interface ComputeScoreOptions {
+  // Skip the per-lead engagement fetch. Use for lead creation where the
+  // lead just got inserted and there are no activities yet anyway.
+  skipEngagement?: boolean;
+  // Pre-loaded engagement (e.g. when the caller already pulled them).
+  engagement?: EngagementSignals;
+  // Pre-loaded ICP — saves a cache hit if the caller already has it.
+  icp?: Icp;
+  // Pre-loaded scoring config (per-tenant overrides).
+  scoringConfig?: ScoringConfig;
 }
 
-const SYSTEM_PROMPT = `You are a B2B sales lead qualification expert. Given a lead profile and a heuristic score, return JSON only:
+export async function computeUnifiedScore(
+  org_id: string,
+  client_id: string | null,
+  lead: Partial<Lead>,
+  opts: ComputeScoreOptions = {},
+): Promise<{
+  score: number;
+  grade: 'A' | 'B' | 'C' | 'D';
+  breakdown: ScoreBreakdown;
+  engagement: EngagementSignals;
+  profile: 'b2c' | 'b2b';
+}> {
+  const icp = opts.icp ?? await getIcp(org_id, client_id);
+  const config = opts.scoringConfig ?? await getScoringConfig(org_id);
+
+  // Profile selection — tenant override beats per-lead is_b2c.
+  const force = config.active_profile;
+  const profile: 'b2c' | 'b2b' = force === 'b2c' ? 'b2c'
+    : force === 'b2b' ? 'b2b'
+    : (((lead as any).is_b2c === true) ? 'b2c' : 'b2b');
+
+  // Engagement — skip on creation (no activities yet), fetch otherwise
+  // unless the caller pre-loaded them.
+  const engagement: EngagementSignals = opts.engagement
+    ?? (opts.skipEngagement || !lead.id
+      ? { ...EMPTY_ENGAGEMENT }
+      : await fetchEngagement(org_id, String(lead.id)));
+
+  const breakdown = profile === 'b2c'
+    ? scoreB2C(lead, engagement, config.weights?.b2c ?? {})
+    : scoreB2B(lead, icp, engagement, config.weights?.b2b ?? {});
+
+  const score = sumBreakdown(breakdown);
+  breakdown.total = score;
+  const grade = gradeFromScore(score, config.grade_thresholds);
+  return { score, grade, breakdown, engagement, profile };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LLM rerank — profile-aware system prompt
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SYSTEM_PROMPT_B2B = `You are a B2B sales lead qualification expert. Given a lead profile, heuristic score, and engagement signals, return JSON only:
 {"adjustment": int -15..15, "reasons": [string], "confidence": "low"|"med"|"high"}.
-Stay within ±15 of heuristic unless strong signal. Output JSON only, no prose.`;
+Weigh title seniority, company fit with the ICP, recent meetings/calls, and BANT cues mentioned in free-form updates. Stay within ±15 of the heuristic unless a strong signal demands more. Output JSON only, no prose.`;
 
-export async function rerankWithLlm(
+const SYSTEM_PROMPT_B2C = `You are a consumer-direct (B2C) lead qualification expert. Given a lead profile, heuristic score, and engagement signals, return JSON only:
+{"adjustment": int -15..15, "reasons": [string], "confidence": "low"|"med"|"high"}.
+For B2C, job title and company size are NOT relevant. Weigh reachability (phone present, recent inbound message), engagement (WhatsApp / call activity in the last 30 days, updates mentioning interest), source quality (referral > paid > organic), and consent flags (marketing, WhatsApp). Stay within ±15 of the heuristic unless a strong signal demands more. Output JSON only, no prose.`;
+
+export async function rerankWithLlmV2(
   org_id: string,
   lead: Partial<Lead>,
-  base: { score: number; breakdown: ScoreBreakdown },
+  base: { score: number; breakdown: ScoreBreakdown; engagement: EngagementSignals; profile: 'b2c' | 'b2b' },
 ): Promise<{ score: number; breakdown: ScoreBreakdown }> {
   try {
     const userPayload = {
+      profile: base.profile,
       lead: {
         first_name: lead.first_name, last_name: lead.last_name, email: lead.email,
-        company: lead.company, title: lead.title, industry: lead.industry,
+        phone: lead.phone, company: lead.company, title: lead.title, industry: lead.industry,
         country: lead.country, city: lead.city, source_id: lead.source_id,
+        is_b2c: (lead as any).is_b2c,
+        marketing_consent: (lead as any).marketing_consent,
+        whatsapp_consent: (lead as any).whatsapp_consent,
+        latest_update: (lead as any).latest_update,
       },
       heuristic_score: base.score,
       heuristic_breakdown: base.breakdown,
-      icp: await getIcp(org_id),
+      engagement: base.engagement,
+      icp: base.profile === 'b2b' ? await getIcp(org_id) : null,
     };
     const response = await aiComplete({
       org_id,
       model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-haiku-4-5-20251001',
-      system: SYSTEM_PROMPT,
+      system: base.profile === 'b2c' ? SYSTEM_PROMPT_B2C : SYSTEM_PROMPT_B2B,
       messages: [{ role: 'user', content: JSON.stringify(userPayload) }],
       max_tokens: 300,
     });
@@ -147,14 +391,46 @@ export async function rerankWithLlm(
       ...base.breakdown,
       llm_adjustment: adjustment,
       llm_reasons: Array.isArray(parsed.reasons) ? parsed.reasons.slice(0, 5) : [],
-      llm_confidence: ['low','med','high'].includes(parsed.confidence) ? parsed.confidence : 'med',
+      llm_confidence: ['low', 'med', 'high'].includes(parsed.confidence) ? parsed.confidence : 'med',
       total: final,
-      model: 'heuristic_v1+llm_rerank_v1',
+      model: `${base.breakdown.model}+llm_rerank_v2`,
     };
     return { score: final, breakdown };
   } catch {
-    return base;
+    return { score: base.score, breakdown: base.breakdown };
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Back-compat — kept so older callers don't break. New code should use
+// computeUnifiedScore + rerankWithLlmV2 directly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** @deprecated Use computeUnifiedScore. Kept for back-compat with older callers. */
+export function computeHeuristic(
+  lead: Partial<Lead>,
+  icp: Icp,
+): { score: number; breakdown: ScoreBreakdown } {
+  // Synchronous shim — engagement is empty, so the score is a "no activity
+  // yet" baseline. Callers that need real engagement should switch to
+  // computeUnifiedScore.
+  const isB2C = (lead as any).is_b2c === true;
+  const breakdown = isB2C
+    ? scoreB2C(lead, EMPTY_ENGAGEMENT, {})
+    : scoreB2B(lead, icp, EMPTY_ENGAGEMENT, {});
+  const score = sumBreakdown(breakdown);
+  breakdown.total = score;
+  return { score, breakdown };
+}
+
+/** @deprecated Use rerankWithLlmV2. */
+export async function rerankWithLlm(
+  org_id: string,
+  lead: Partial<Lead>,
+  base: { score: number; breakdown: ScoreBreakdown },
+): Promise<{ score: number; breakdown: ScoreBreakdown }> {
+  const profile: 'b2c' | 'b2b' = ((lead as any).is_b2c === true) ? 'b2c' : 'b2b';
+  return rerankWithLlmV2(org_id, lead, { ...base, engagement: EMPTY_ENGAGEMENT, profile });
 }
 
 function clamp(n: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, n)); }

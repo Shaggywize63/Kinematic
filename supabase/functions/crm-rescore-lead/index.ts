@@ -34,16 +34,41 @@ serve(async (req) => {
   const baseline = lead.score ?? 0;
   const breakdown = lead.score_breakdown ?? {};
 
+  // Profile-aware rerank — earlier this prompt was hard-coded as "B2B
+  // sales lead qualification expert" even when scoring a B2C lead, which
+  // biased adjustments toward firmographic signals that don't apply.
+  // The synchronous heuristic in leads.service already picks a profile;
+  // we mirror that decision here so the rerank stays on-profile.
+  const isB2C = lead.is_b2c === true;
+  const SYSTEM_B2B = `You are a B2B sales lead qualification expert. Given a lead profile, heuristic score, and engagement signals, return JSON only:
+{"adjustment": int -15..15, "reasons": [string], "confidence": "low"|"med"|"high"}.
+Weigh title seniority, company fit with the ICP, recent meetings/calls, and BANT cues in the breakdown. Stay within ±15 of the heuristic.`;
+  const SYSTEM_B2C = `You are a consumer-direct (B2C) lead qualification expert. Given a lead profile, heuristic score, and engagement signals, return JSON only:
+{"adjustment": int -15..15, "reasons": [string], "confidence": "low"|"med"|"high"}.
+For B2C, job title and company size are NOT relevant. Weigh reachability (phone present), engagement (WhatsApp / call activity, updates mentioning interest), source quality (referral > paid > organic), and consent flags (marketing, WhatsApp). Stay within ±15 of the heuristic.`;
+
   try {
     const msg = await client.messages.create({
-      model: Deno.env.get('CRM_LEAD_SCORING_MODEL') || 'claude-3-haiku-20240307',
+      // Default model bumped to claude-haiku-4-5 to match the backend
+      // setting in leadScoring.service.ts. Override per-org via env if a
+      // tenant needs a specific snapshot.
+      model: Deno.env.get('CRM_LEAD_SCORING_MODEL') || 'claude-haiku-4-5-20251001',
       max_tokens: 300,
-      system: `You are a B2B sales lead qualification expert. Given a lead profile and heuristic score, return JSON only:
-{"adjustment": int -15..15, "reasons": [string], "confidence": "low"|"med"|"high"}`,
+      system: isB2C ? SYSTEM_B2C : SYSTEM_B2B,
       messages: [{ role: 'user', content: JSON.stringify({
-        lead: { first_name: lead.first_name, last_name: lead.last_name, email: lead.email,
-                company: lead.company, title: lead.title, industry: lead.industry, country: lead.country },
-        heuristic_score: baseline, heuristic_breakdown: breakdown, icp,
+        profile: isB2C ? 'b2c' : 'b2b',
+        lead: {
+          first_name: lead.first_name, last_name: lead.last_name, email: lead.email,
+          phone: lead.phone, company: lead.company, title: lead.title,
+          industry: lead.industry, country: lead.country, city: lead.city,
+          source_id: lead.source_id, is_b2c: lead.is_b2c,
+          marketing_consent: lead.marketing_consent,
+          whatsapp_consent: lead.whatsapp_consent,
+          latest_update: lead.latest_update,
+        },
+        heuristic_score: baseline,
+        heuristic_breakdown: breakdown,
+        icp: isB2C ? null : icp,
       }) }],
     });
     const text = (msg.content[0] as { type: string; text?: string })?.text ?? '{}';
@@ -57,7 +82,7 @@ serve(async (req) => {
       llm_reasons: Array.isArray(parsed.reasons) ? parsed.reasons.slice(0, 5) : [],
       llm_confidence: ['low','med','high'].includes(parsed.confidence) ? parsed.confidence : 'med',
       total: final,
-      model: 'heuristic_v1+llm_rerank_v1',
+      model: `${breakdown?.model || 'heuristic_v2'}+llm_rerank_v2`,
     };
 
     await sb.from('crm_leads').update({
