@@ -100,6 +100,65 @@ app.get('/embed.js', cors({ origin: '*' }), function (_req, res) {
   res.setHeader('Cache-Control', 'public, max-age=3600');
   res.sendFile(path.join(__dirname, '..', 'public', 'embed.js'));
 });
+
+// ── Hosted lead-capture form ──────────────────────────────────────
+// Zero-code option for clients who don't have / can't edit a website.
+// They share https://<api>/f/<integration_id>?key=<webhook_secret> as
+// a link or QR — visitors land on a clean Kinematic-branded page that
+// posts directly to the integration's webhook. Same dedup + scope as
+// every other inbound surface.
+app.get('/f/:id', cors({ origin: '*' }), async function (req, res, next) {
+  try {
+    const { supabaseAdmin } = await import('./lib/supabase');
+    const integrationId = String(req.params.id || '').trim();
+    const key = String(req.query.key || '').trim();
+    if (!integrationId || !key) {
+      res.status(400).type('text/html').send('<h2 style="font-family:sans-serif">Invalid form link</h2>');
+      return;
+    }
+    const { data: integration } = await supabaseAdmin.from('crm_lead_source_integrations')
+      .select('id, label, provider, webhook_secret, status')
+      .eq('id', integrationId)
+      .maybeSingle();
+    if (!integration || integration.webhook_secret !== key || integration.status === 'disabled') {
+      res.status(404).type('text/html').send('<h2 style="font-family:sans-serif">Form not found</h2>');
+      return;
+    }
+    const providerSlug = String(integration.provider).replace('_', '-');
+    const webhookBase = `${req.protocol}://${req.get('host')}`;
+    const webhookUrl = `${webhookBase}/api/v1/integrations/webhook/${providerSlug}/${integration.id}?key=${encodeURIComponent(key)}`;
+    const embedUrl   = `${webhookBase}/embed.js`;
+    const title      = (integration.label || 'Get a callback').replace(/</g, '&lt;');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${title}</title>
+  <style>
+    html,body{margin:0;padding:0;background:#F3F4F6;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#111827;}
+    .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
+    .card{max-width:440px;width:100%;background:#fff;border-radius:14px;box-shadow:0 6px 30px rgba(0,0,0,0.08);padding:8px;}
+    footer{margin-top:14px;font-size:11px;color:#6B7280;text-align:center;}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="card">
+      <div data-kinematic-form="${webhookUrl}"
+           data-title="${title}"
+           data-primary-color="#E01E2C"
+           data-fields="name,email,phone,city,message"></div>
+    </div>
+  </main>
+  <script src="${embedUrl}" async></script>
+</body>
+</html>`);
+  } catch (e) { next(e); }
+});
+
 // Wildcard CORS specifically for the inbound webhook path. The endpoint
 // authenticates per request via the `?key=<webhook_secret>` query param,
 // so opening it to all origins is intentional — anyone with the URL is
