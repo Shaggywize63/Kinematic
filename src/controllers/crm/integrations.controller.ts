@@ -97,13 +97,21 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
     return badRequest(res, `Invalid provider. Must be one of: ${Object.keys(PROVIDER_LABEL).join(', ')}`);
   }
 
+  // Capture the active client_id from the request header so every
+  // inbound lead this integration produces auto-inherits the right
+  // client scope. UUID-only — non-UUID values (e.g. "Kinematic" for
+  // the org-level picker) are treated as null = org-wide.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const headerCid = String(req.headers['x-client-id'] || '').trim();
+  const integration_client_id = UUID_RE.test(headerCid) ? headerCid : null;
+
   // 1. Auto-create the matching crm_lead_sources row so reports +
   //    assignment rules can target this provider without further setup.
   const sourceName = label?.trim()
     ? `${PROVIDER_LABEL[provider]} — ${label.trim()}`
     : PROVIDER_LABEL[provider];
   const { data: source, error: srcErr } = await supabaseAdmin.from('crm_lead_sources')
-    .insert({ org_id, name: sourceName, created_by: user_id })
+    .insert({ org_id, name: sourceName, created_by: user_id, client_id: integration_client_id })
     .select('id, name')
     .single();
   if (srcErr) {
@@ -118,7 +126,9 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
     ? crypto.randomBytes(24).toString('base64url')
     : null;
 
-  // 3. Insert the integration row.
+  // 3. Insert the integration row. client_id flows through from the
+  //    creating user's active client picker so inbound leads auto-
+  //    scope correctly (see findOrCreateLead).
   const { data: integration, error: intErr } = await supabaseAdmin.from('crm_lead_source_integrations')
     .insert({
       org_id,
@@ -129,6 +139,7 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
       config: config ?? {},
       webhook_secret,
       created_by: user_id,
+      client_id: integration_client_id,
     })
     .select('*')
     .single();
@@ -338,6 +349,10 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
         source_id: integration.source_id!,
         normalized: n,
         integration_id,
+        // Stamp the integration's client scope onto the lead so the
+        // creating tenant's reps see it without an org-level admin
+        // having to re-assign. NULL = org-wide.
+        client_id: (integration as { client_id?: string | null }).client_id ?? null,
         raw_event_id: event_id,
       });
       if (r.was_new) created++; else merged++;

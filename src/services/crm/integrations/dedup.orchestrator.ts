@@ -62,6 +62,10 @@ export interface FindOrCreateInput {
   integration_id?: string | null;     // crm_lead_source_integrations.id (null when called by Excel import)
   raw_event_id?: string | null;       // crm_lead_inbound_events.id  (null for import path)
   user_id?: string | null;            // created_by when a new lead is inserted
+  /** Client scope stamped onto the lead so reps with a pinned X-Client-Id
+   *  see it. The webhook router fetches this from the integration row
+   *  (which captured it at integration-create time). NULL = org-wide. */
+  client_id?: string | null;
 }
 
 export interface FindOrCreateResult {
@@ -72,7 +76,7 @@ export interface FindOrCreateResult {
 }
 
 export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOrCreateResult> {
-  const { org_id, source_id, normalized, integration_id, raw_event_id, user_id } = input;
+  const { org_id, source_id, normalized, integration_id, raw_event_id, user_id, client_id } = input;
 
   const phone_hash = hashPhone(normalized.phone);
   const email_hash = hashEmail(normalized.email);
@@ -124,7 +128,10 @@ export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOr
     tags:          normalized.tags         ?? [],
     custom_fields: normalized.custom_fields ?? {},
     source_id,
-  };
+    // Auto-inherit client scope from the integration so reps pinned to
+    // that client (X-Client-Id strict mode) see the lead immediately.
+    ...(client_id ? { client_id } : {}),
+  } as Partial<Lead> & { client_id?: string };
 
   // UTM + landing-page attribution lives on crm_leads but isn't on the
   // Lead type today — pass through via the same as-Record cast createLead

@@ -18,18 +18,25 @@ import type { IntegrationProvider, IntegrationRow } from './types';
 import type { NormalizedLead } from '../dedup.orchestrator';
 
 // Same recognition set as web_form — let "Zapier with no mapping" work.
-const NAME_KEYS:    string[] = ['first_name', 'firstName', 'fname', 'name', 'full_name', 'fullName'];
-const LAST_KEYS:    string[] = ['last_name', 'lastName', 'lname'];
-const EMAIL_KEYS:   string[] = ['email', 'email_address'];
-const PHONE_KEYS:   string[] = ['phone', 'mobile', 'phone_number', 'whatsapp'];
-const COMPANY_KEYS: string[] = ['company', 'organization', 'organisation'];
-const TITLE_KEYS:   string[] = ['title', 'designation', 'role'];
-const NOTES_KEYS:   string[] = ['notes', 'message', 'comments', 'requirements'];
+// Aliases expanded to cover Indian form builders and Mailchimp / HubSpot /
+// Pardot exports verbatim. New aliases here MUST also be added to KNOWN_KEYS
+// below or they'll leak into custom_fields and skew the lead-detail UI.
+const NAME_KEYS:    string[] = ['first_name', 'firstName', 'fname', 'f_name', 'name', 'full_name', 'fullName', 'fullname', 'lead_name', 'customer_name', 'contact_name', 'your_name', 'subscriber_name'];
+const LAST_KEYS:    string[] = ['last_name', 'lastName', 'lname', 'l_name', 'surname', 'family_name'];
+const EMAIL_KEYS:   string[] = ['email', 'email_address', 'emailAddress', 'e_mail', 'subscriber_email'];
+const PHONE_KEYS:   string[] = ['phone', 'mobile', 'mobile_number', 'mobileNumber', 'mobile_no', 'phone_number', 'phoneNumber', 'phone_no', 'whatsapp', 'whatsapp_number', 'contact_number', 'tel', 'telephone'];
+const COMPANY_KEYS: string[] = ['company', 'organization', 'organisation', 'company_name', 'companyName', 'org_name', 'business_name'];
+const TITLE_KEYS:   string[] = ['title', 'job_title', 'jobTitle', 'designation', 'role', 'position'];
+const NOTES_KEYS:   string[] = ['notes', 'message', 'comments', 'requirements', 'enquiry', 'inquiry', 'description', 'remarks'];
+const CITY_KEYS:    string[] = ['city', 'town', 'location'];
+const STATE_KEYS:   string[] = ['state', 'region', 'province'];
+const COUNTRY_KEYS: string[] = ['country', 'country_code'];
+const INDUSTRY_KEYS:string[] = ['industry', 'sector', 'vertical'];
 
 const KNOWN_KEYS = new Set<string>([
   ...NAME_KEYS, ...LAST_KEYS, ...EMAIL_KEYS, ...PHONE_KEYS,
   ...COMPANY_KEYS, ...TITLE_KEYS, ...NOTES_KEYS,
-  'industry', 'sector', 'country', 'city', 'state',
+  ...CITY_KEYS, ...STATE_KEYS, ...COUNTRY_KEYS, ...INDUSTRY_KEYS,
   'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
   'referrer', 'referrer_url', 'landing_page', 'page_url',
 ]);
@@ -83,10 +90,10 @@ export const genericWebhookProvider: IntegrationProvider = {
     };
 
     // Name handling — same split-on-space logic as web_form.
-    let first_name = pick('first_name', ['first_name', 'firstName', 'fname']);
+    let first_name = pick('first_name', ['first_name', 'firstName', 'fname', 'f_name']);
     let last_name  = pick('last_name',  LAST_KEYS);
     if (!first_name && !last_name) {
-      const full = pick('name', ['name', 'full_name', 'fullName']);
+      const full = pick('name', ['name', 'full_name', 'fullName', 'fullname', 'lead_name', 'customer_name', 'contact_name', 'your_name', 'subscriber_name']);
       if (full) {
         const { first, last } = splitName(full);
         first_name = first ?? null;
@@ -114,10 +121,10 @@ export const genericWebhookProvider: IntegrationProvider = {
       phone:   pick('phone',   PHONE_KEYS),
       company: pick('company', COMPANY_KEYS),
       title:   pick('title',   TITLE_KEYS),
-      industry: pick('industry', ['industry', 'sector']),
-      country: pick('country', ['country']),
-      city:    pick('city',    ['city']),
-      state:   pick('state',   ['state']),
+      industry: pick('industry', INDUSTRY_KEYS),
+      country: pick('country', COUNTRY_KEYS),
+      city:    pick('city',    CITY_KEYS),
+      state:   pick('state',   STATE_KEYS),
       notes:   pick('notes',   NOTES_KEYS),
       utm_source:   pick('utm_source',   ['utm_source']),
       utm_medium:   pick('utm_medium',   ['utm_medium']),
