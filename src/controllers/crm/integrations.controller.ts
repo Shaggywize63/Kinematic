@@ -30,6 +30,8 @@ import { webFormProvider } from '../../services/crm/integrations/providers/webFo
 import { genericWebhookProvider } from '../../services/crm/integrations/providers/genericWebhook';
 import { metaLeadAdsProvider } from '../../services/crm/integrations/providers/metaLeadAds';
 import { googleAdsProvider } from '../../services/crm/integrations/providers/googleAds';
+import { zohoProvider } from '../../services/crm/integrations/providers/zoho';
+import { salesforceProvider } from '../../services/crm/integrations/providers/salesforce';
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
 import { logger } from '../../lib/logger';
 
@@ -39,19 +41,22 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   meta_lead_ads:   'Meta Lead Ads',
   google_ads:      'Google Ads',
   zoho:            'Zoho CRM',
+  salesforce:      'Salesforce',
 };
 
-// Providers that need a webhook secret (push-mode). Pull providers (zoho)
-// authenticate via stored OAuth tokens, no shared secret needed.
-const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads'];
+// All v1 providers are push-mode: an external system POSTs leads to our
+// webhook URL with `?key=<webhook_secret>`. OAuth / pull-mode (Zoho's
+// native API polling, Salesforce's REST sync) can come later as a
+// power-user upgrade — the webhook path covers 90% of real-world setups.
+const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads', 'zoho', 'salesforce'];
 
-/** Provider dispatch — Zoho returns a 200 "not implemented" from
- *  the webhook handler until its OAuth + pull-sync provider lands. */
 function getProvider(id: ProviderId) {
   if (id === 'web_form')        return webFormProvider;
   if (id === 'generic_webhook') return genericWebhookProvider;
   if (id === 'meta_lead_ads')   return metaLeadAdsProvider;
   if (id === 'google_ads')      return googleAdsProvider;
+  if (id === 'zoho')            return zohoProvider;
+  if (id === 'salesforce')      return salesforceProvider;
   return null;
 }
 
