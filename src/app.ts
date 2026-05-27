@@ -89,6 +89,23 @@ app.use(helmet(helmetConfig));
 app.set('trust proxy', 1);
 
 // ── CORS allowlist (env-driven, no more open `cb(null,true)`) ──
+// Public lead-capture endpoints (embed.js + the matching webhook POST)
+// need to allow ANY origin so customers can paste them on their own
+// sites. Mount this BEFORE the env-driven cors() so the global
+// allowlist doesn't block the cross-origin POST that the embed makes.
+import * as path from 'path';
+app.get('/embed.js', cors({ origin: '*' }), function (_req, res) {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  // Short cache so brand-tweaks ship within an hour without a version bump.
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.sendFile(path.join(__dirname, '..', 'public', 'embed.js'));
+});
+// Wildcard CORS specifically for the inbound webhook path. The endpoint
+// authenticates per request via the `?key=<webhook_secret>` query param,
+// so opening it to all origins is intentional — anyone with the URL is
+// already authorised.
+app.use('/api/v1/integrations/webhook', cors({ origin: '*' }));
+
 app.use(cors({
   origin: corsOrigin,
   credentials: true,
