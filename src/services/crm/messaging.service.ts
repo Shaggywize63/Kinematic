@@ -273,14 +273,21 @@ function linkForSource(kind: SourceKind, id: string): string {
 // Threads + messages
 // ─────────────────────────────────────────────────────────────────────
 
+export interface ThreadMember {
+  id: string;
+  name: string;
+}
+
 export interface ThreadRow {
   id: string;
   kind: 'dm' | 'team';
   name: string | null;
+  display_name: string;          // "John Doe" for DMs (the other party), team-name for team chats
   last_message_at: string | null;
   last_message_preview: string | null;
   unread_count: number;
   member_ids: string[];
+  members: ThreadMember[];       // {id, name} pairs so the FE can render headers + member lists
   created_at: string;
 }
 
@@ -312,6 +319,21 @@ export async function listThreads(req: AuthRequest): Promise<ThreadRow[]> {
     memberByThread.get(row.thread_id)!.push(row.user_id);
   }
 
+  // Hydrate display names for every member across every thread in one
+  // round-trip. Without this the FE shows "Direct Message" for every DM
+  // because it has no way to resolve the counterparty's name from uuids.
+  const allMemberIds = Array.from(new Set((members ?? []).map((m: any) => m.user_id as string)));
+  const nameById = new Map<string, string>();
+  if (allMemberIds.length > 0) {
+    const { data: users } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email')
+      .in('id', allMemberIds);
+    for (const u of (users ?? []) as any[]) {
+      nameById.set(u.id, (u.name as string) || (u.email as string) || 'User');
+    }
+  }
+
   // Unread count = messages in thread newer than my last_read_at.
   const readByThread = new Map<string, string | null>();
   for (const m of (memberships ?? []) as any[]) readByThread.set(m.thread_id, m.last_read_at);
@@ -332,16 +354,31 @@ export async function listThreads(req: AuthRequest): Promise<ThreadRow[]> {
   );
   const unreadMap = new Map(unreadCounts);
 
-  return (threads ?? []).map((t: any) => ({
-    id: t.id,
-    kind: t.kind,
-    name: t.name,
-    last_message_at: t.last_message_at,
-    last_message_preview: t.last_message_preview,
-    unread_count: unreadMap.get(t.id) ?? 0,
-    member_ids: memberByThread.get(t.id) ?? [],
-    created_at: t.created_at,
-  }));
+  return (threads ?? []).map((t: any) => {
+    const ids = memberByThread.get(t.id) ?? [];
+    const hydrated: ThreadMember[] = ids.map((id) => ({ id, name: nameById.get(id) || 'User' }));
+    // DM display name = the OTHER party's name. Team threads keep their
+    // stored title; if a team has no title fall back to a member list.
+    let display_name = '';
+    if (t.kind === 'dm') {
+      const other = hydrated.find((h) => h.id !== me.id);
+      display_name = other?.name || 'Direct Message';
+    } else {
+      display_name = (t.name as string) || hydrated.filter((h) => h.id !== me.id).slice(0, 3).map((h) => h.name).join(', ') || 'Team Chat';
+    }
+    return {
+      id: t.id,
+      kind: t.kind,
+      name: t.name,
+      display_name,
+      last_message_at: t.last_message_at,
+      last_message_preview: t.last_message_preview,
+      unread_count: unreadMap.get(t.id) ?? 0,
+      member_ids: ids,
+      members: hydrated,
+      created_at: t.created_at,
+    };
+  });
 }
 
 export async function createOrGetDmThread(req: AuthRequest, otherUserId: string): Promise<string> {
