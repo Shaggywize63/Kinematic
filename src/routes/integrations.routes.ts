@@ -25,8 +25,13 @@ import {
   isConfigured as googleConfigured,
 } from '../services/integrations/googleCalendar.service';
 import { AppError } from '../utils';
+import { demoIntegrationsMiddleware } from '../utils/demoCrm';
 
 const router = Router();
+
+// Demo tenants short-circuit to canned integrations so the wizard,
+// Google Calendar banner, and provider list have visible content.
+router.use(demoIntegrationsMiddleware);
 
 const wrap = (fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) =>
   (req: Request, res: Response, next: NextFunction) => fn(req, res, next).catch(next);

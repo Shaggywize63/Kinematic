@@ -398,6 +398,68 @@ const DEMO_ANALYTICS_LAYOUT = {
   },
 };
 
+// CRM settings — realistic so the new B2B/B2C-aware settings page,
+// field overrides, and notification preferences render with content
+// instead of empty inputs.
+const DEMO_CRM_SETTINGS = {
+  business_type: 'both' as const,
+  default_currency: 'INR',
+  default_pipeline_id: 'demo-pipe',
+  config: {
+    field_overrides: {
+      lead: {
+        company:  { label: 'Company / Customer Name', required: true,  visible: true },
+        industry: { label: 'Industry',                 required: false, visible: true },
+        city:     { label: 'City',                     required: true,  visible: true },
+        state:    { label: 'State',                    required: false, visible: true },
+      },
+      deal: {
+        amount: { label: 'Order Value',          required: true, visible: true },
+        name:   { label: 'Deal / Order Name',    required: true, visible: true },
+      },
+    },
+    lead_scoring: {
+      enabled: true,
+      version: 2,
+      grading: { A: 80, B: 60, C: 40, D: 0 },
+      engagement_signals: { email_open: 5, email_click: 10, form_submit: 15, meeting_attended: 20 },
+    },
+    notifications: {
+      email_enabled:    true,
+      whatsapp_enabled: true,
+      sms_enabled:      false,
+    },
+  },
+};
+
+// Sample integrations so the integrations wizard surface has visible
+// entries on the demo account (the real /api/v1/integrations endpoint
+// has its own demo middleware below).
+const DEMO_INTEGRATIONS = [
+  { id: 'demo-int-1', provider: 'web_form', name: 'Website Lead Form', is_active: true,  events_count: 14, last_event_at: new Date(Date.now() - 2*3600*1000).toISOString(),  created_at: new Date(Date.now() - 30*86400000).toISOString() },
+  { id: 'demo-int-2', provider: 'zoho',     name: 'Zoho CRM Sync',     is_active: true,  events_count: 86, last_event_at: new Date(Date.now() - 1*3600*1000).toISOString(),  created_at: new Date(Date.now() - 45*86400000).toISOString() },
+  { id: 'demo-int-3', provider: 'meta',     name: 'Meta Lead Ads',     is_active: true,  events_count: 42, last_event_at: new Date(Date.now() - 6*3600*1000).toISOString(),  created_at: new Date(Date.now() - 20*86400000).toISOString() },
+  { id: 'demo-int-4', provider: 'google_ads',name:'Google Lead Form',  is_active: false, events_count: 0,  last_event_at: null,                                              created_at: new Date(Date.now() - 5*86400000).toISOString() },
+];
+
+// Lead/deal custom fields so the columns picker + form has options.
+const DEMO_CUSTOM_FIELDS = [
+  { id: 'demo-cf-1', entity: 'lead', key: 'preferred_grade', label: 'Preferred Steel Grade', type: 'select',  options: ['Fe-415','Fe-500','Fe-550','Fe-600'], required: false, visible: true, position: 0 },
+  { id: 'demo-cf-2', entity: 'lead', key: 'monthly_volume',  label: 'Monthly Volume (MT)',   type: 'number',  options: [],                                  required: false, visible: true, position: 1 },
+  { id: 'demo-cf-3', entity: 'lead', key: 'gst_number',      label: 'GST Number',            type: 'text',    options: [],                                  required: false, visible: true, position: 2 },
+  { id: 'demo-cf-4', entity: 'deal', key: 'delivery_terms',  label: 'Delivery Terms',        type: 'select',  options: ['Ex-Works','FOR Site','CIF'],       required: false, visible: true, position: 0 },
+  { id: 'demo-cf-5', entity: 'deal', key: 'payment_terms',   label: 'Payment Terms',         type: 'select',  options: ['Advance','15 days','30 days','45 days'], required: false, visible: true, position: 1 },
+];
+
+// One sample automation + assignment rule so the empty-state cards on
+// those tabs no longer hide the fact that the feature ships.
+const DEMO_AUTOMATIONS = [
+  { id: 'demo-auto-1', name: 'Auto-assign hot leads to top rep', trigger: 'lead.created', conditions: { score_gte: 75 }, actions: [{ type: 'assign_to_user', user_id: 'demo-user-id' }], is_active: true, created_at: new Date(Date.now() - 20*86400000).toISOString() },
+];
+const DEMO_ASSIGNMENT_RULES = [
+  { id: 'demo-rule-1', name: 'Round-robin by territory', strategy: 'round_robin', territory_id: 'demo-terr-1', user_ids: ['demo-user-id'], is_active: true, created_at: new Date(Date.now() - 60*86400000).toISOString() },
+];
+
 const DEMO_OVERVIEW_LAYOUT = {
   widgets: [
     { id: 'demo-pin-1', widget_type: 'stuck_leads',   chart_type: 'number', config: {} },
@@ -446,10 +508,16 @@ export function demoCrmMiddleware(req: Request, res: Response, next: NextFunctio
     if (path === '/products')       { json(res, list(DEMO_PRODUCTS));   return; }
     if (path === '/email-templates'){ json(res, list([]));              return; }
     if (path === '/whatsapp-templates'){ json(res, list([]));           return; }
-    if (path === '/automations')    { json(res, list([]));              return; }
-    if (path === '/assignment-rules'){ json(res, list([]));             return; }
-    if (path === '/custom-fields')  { json(res, list([]));              return; }
-    if (path === '/settings')       { json(res, ok({})); return; }
+    if (path === '/automations')    { json(res, list(DEMO_AUTOMATIONS));        return; }
+    if (path === '/assignment-rules'){ json(res, list(DEMO_ASSIGNMENT_RULES));  return; }
+    if (path === '/custom-fields')  { json(res, list(DEMO_CUSTOM_FIELDS));      return; }
+    if (path === '/settings')       { json(res, ok(DEMO_CRM_SETTINGS));         return; }
+
+    // KINI quota/credits + tools manifest — keep the chat surface usable
+    // without burning real Anthropic credits on the shared demo tenant.
+    if (path === '/ai/credits')     { json(res, ok({ balance: 9999, plan: 'demo', renews_at: null })); return; }
+    if (path === '/ai/usage')       { json(res, ok({ used_today: 0, daily_limit: 9999, queries_this_month: 0 })); return; }
+    if (path === '/ai/tools')       { json(res, ok([])); return; }
 
     // Stuck leads list (the lead-management listing — distinct from
     // the /analytics/stuck-leads KPI tile below).
@@ -567,6 +635,37 @@ export function demoCrmMiddleware(req: Request, res: Response, next: NextFunctio
     }
   }
 
+  // KINI agentic chat — return a friendly canned response so the demo
+  // can show off the chat UI without hitting Anthropic. The shape mirrors
+  // the legacy /crm/ai/chat handler: { reply, cards?, thread_id }.
+  if (method === 'POST' && (path === '/ai/chat' || path === '/ai/chat/')) {
+    const body = (req.body as { message?: string; thread_id?: string } | undefined) ?? {};
+    const q = (body.message || '').toLowerCase();
+    let reply = "Hi! I'm KINI, your CRM copilot. In demo mode I'll show you canned answers — try asking 'show me hot leads' or 'forecast for this quarter'.";
+    type Card = { type: string; title: string; rows?: Array<Record<string, unknown>>; value?: string; subtitle?: string };
+    let cards: Card[] = [];
+    if (q.includes('hot') || q.includes('lead')) {
+      reply = "Here are your top 3 leads by score. Vikram Reddy at Skyline Developers is your hottest — score 88, qualified, last touched yesterday.";
+      cards = [{
+        type: 'lead_list',
+        title: 'Top leads',
+        rows: LEADS.slice(0, 3).map(l => ({ id: l.id, name: `${l.first_name} ${l.last_name}`, company: l.company, score: l.score, status: l.status })),
+      }];
+    } else if (q.includes('forecast') || q.includes('pipeline') || q.includes('revenue')) {
+      reply = "Your committed forecast this quarter is ₹2.4Cr against a ₹6.1Cr pipeline. Two deals close this week: Suryadev OPC Cement (₹98L) and Zenith Pune Hi-Rise (₹1.24Cr).";
+      cards = [{ type: 'forecast', title: 'Quarter forecast', value: '₹2.4Cr committed', subtitle: 'of ₹6.1Cr pipeline' }];
+    } else if (q.includes('stuck') || q.includes('risk')) {
+      reply = "3 deals are stuck >14 days without activity. Trident Substation has had no touch for 18 days — worth a call.";
+      cards = [{
+        type: 'deal_list',
+        title: 'Stuck deals',
+        rows: DEALS.filter(d => d.status === 'open').slice(0, 3).map(d => ({ id: d.id, name: d.name, amount: d.amount, stage: d.stage_name })),
+      }];
+    }
+    json(res, { reply, cards, thread_id: body.thread_id || 'demo-thread-1', tool_calls: [], usage: { input_tokens: 0, output_tokens: 0 } });
+    return;
+  }
+
   // Mark lead as won / reopen — return a lead-shaped body so the FE can
   // update its local row without choking on a generic {id, ok, demo} stub.
   if (method === 'POST') {
@@ -590,6 +689,40 @@ export function demoCrmMiddleware(req: Request, res: Response, next: NextFunctio
   if (method === 'POST' || method === 'PATCH' || method === 'PUT' || method === 'DELETE') {
     if (method === 'DELETE') { res.status(204).end(); return; }
     res.status(method === 'POST' ? 201 : 200).json({ id: 'demo-noop-' + Math.random().toString(36).slice(2, 8), ok: true, demo: true });
+    return;
+  }
+
+  return next();
+}
+
+/**
+ * Demo middleware for /api/v1/integrations — separate from the CRM router
+ * so the integrations wizard, Google Calendar status banner, and per-row
+ * events surface canned content instead of an empty list.
+ */
+export function demoIntegrationsMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const user = (req as Request & { user?: { org_id?: string } }).user;
+  if (!isDemo(user)) return next();
+
+  const path = req.path; // relative to /api/v1/integrations
+  const method = req.method;
+
+  if (method === 'GET') {
+    if (path === '/' || path === '')                  { json(res, DEMO_INTEGRATIONS); return; }
+    if (path === '/google/status')                    { json(res, { connected: false, configured: true }); return; }
+    if (path === '/google/authorize')                 { json(res, { url: '#demo-google-oauth' }); return; }
+    const idM = path.match(/^\/([^/]+)$/);
+    if (idM) {
+      const row = DEMO_INTEGRATIONS.find(i => i.id === idM[1]) || DEMO_INTEGRATIONS[0];
+      json(res, row); return;
+    }
+    const eventsM = path.match(/^\/([^/]+)\/events$/);
+    if (eventsM) { json(res, list([])); return; }
+  }
+
+  if (method === 'POST' || method === 'PATCH' || method === 'PUT' || method === 'DELETE') {
+    if (method === 'DELETE') { res.status(204).end(); return; }
+    res.status(method === 'POST' ? 201 : 200).json({ id: 'demo-int-noop-' + Math.random().toString(36).slice(2, 8), ok: true, demo: true });
     return;
   }
 
