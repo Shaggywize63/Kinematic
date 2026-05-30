@@ -33,37 +33,37 @@ router.get('/mentions/search', wrap(async (req, res) => {
   const filtered = q
     ? users.filter((u) => (u.full_name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q))
     : users;
-  res.json({ data: filtered.slice(0, 20) });
+  res.json({ success: true, data: filtered.slice(0, 20) });
 }));
 
 // ── Threads ───────────────────────────────────────────────────────────────
 router.get('/threads', wrap(async (req, res) => {
   const rows = await listThreads(req);
-  res.json({ data: rows });
+  res.json({ success: true, data: rows });
 }));
 
 router.post('/threads/dm', wrap(async (req, res) => {
   const { other_user_id } = (req.body || {}) as { other_user_id?: string };
   if (!other_user_id) return res.status(400).json({ message: 'other_user_id required' });
   const id = await createOrGetDmThread(req, other_user_id);
-  res.status(201).json({ data: { id } });
+  res.status(201).json({ success: true, data: { id } });
 }));
 
 router.post('/threads/team', wrap(async (req, res) => {
   const { name, member_ids } = (req.body || {}) as { name?: string; member_ids?: string[] };
   const id = await createTeamThread(req, name || '', Array.isArray(member_ids) ? member_ids : []);
-  res.status(201).json({ data: { id } });
+  res.status(201).json({ success: true, data: { id } });
 }));
 
 router.get('/threads/:id/messages', wrap(async (req, res) => {
   const rows = await listMessages(req, req.params.id, Number(req.query.limit) || 100);
-  res.json({ data: rows });
+  res.json({ success: true, data: rows });
 }));
 
 router.post('/threads/:id/messages', wrap(async (req, res) => {
   const { body, language } = (req.body || {}) as { body?: string; language?: string };
   const row = await sendMessage(req, req.params.id, body || '', language);
-  res.status(201).json({ data: row });
+  res.status(201).json({ success: true, data: row });
 }));
 
 router.post('/threads/:id/read', wrap(async (req, res) => {
@@ -73,7 +73,7 @@ router.post('/threads/:id/read', wrap(async (req, res) => {
 
 // ── Web Push subscription mgmt ────────────────────────────────────────────
 router.get('/push/vapid-public-key', (req, res) => {
-  res.json({ data: { publicKey: vapidPublicKey() } });
+  res.json({ success: true, data: { publicKey: vapidPublicKey() } });
 });
 
 router.post('/push/subscribe', wrap(async (req, res) => {
@@ -192,7 +192,7 @@ router.get('/audit/messages', wrap(async (req, res) => {
     thread_kind:  refs.threadById.get(r.thread_id)?.kind ?? null,
     sender_name:  refs.userById.get(r.sender_id) ?? null,
   }));
-  res.json({ data: hydrated });
+  res.json({ success: true, data: hydrated });
 }));
 
 router.get('/audit/mentions', wrap(async (req, res) => {
@@ -216,7 +216,7 @@ router.get('/audit/mentions', wrap(async (req, res) => {
     mentioner_name:  refs.userById.get(r.mentioner_id) ?? null,
     mentioned_name:  refs.userById.get(r.mentioned_user_id) ?? null,
   }));
-  res.json({ data: hydrated });
+  res.json({ success: true, data: hydrated });
 }));
 
 // Full conversation view for the audit drill-down. Returns the thread
@@ -266,6 +266,7 @@ router.get('/audit/threads/:id', wrap(async (req, res) => {
     : memberHydrated.map((m) => m.name).join(' ↔ ');
 
   res.json({
+    success: true,
     data: {
       id: (thread as any).id,
       org_id: (thread as any).org_id,
