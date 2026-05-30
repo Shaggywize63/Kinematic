@@ -99,5 +99,16 @@ export async function createUpdate(
     .eq('id', lead_id)
     .eq('org_id', org_id);
 
-  return data as LeadUpdate;
+  // Hydrate the author's display name on the way out — listUpdates does
+  // the same lookup for historic rows, but the FE prepends this single
+  // row into its in-memory list without a refetch, so without this the
+  // brand-new entry renders as "Unknown" until the user reloads.
+  const { data: author } = await supabaseAdmin
+    .from('users')
+    .select('full_name, email')
+    .eq('id', author_id)
+    .maybeSingle();
+  const author_name = (author as any)?.full_name || (author as any)?.email || null;
+
+  return { ...(data as LeadUpdate), author_name };
 }
