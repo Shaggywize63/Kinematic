@@ -33,7 +33,7 @@ interface ScopedUser {
 // Roles that count as "platform admin" for the bypass — matches the
 // dashboard's isPlatformAdmin predicate so the same users that see
 // every tenant on the web also reach every user in the messaging picker.
-function isPlatformAdmin(role: string | undefined, name: string | undefined): boolean {
+export function isPlatformAdmin(role: string | undefined, name: string | undefined): boolean {
   const r = (role || '').toLowerCase().trim().replace(/-/g, '_');
   if (['super_admin', 'admin', 'main_admin', 'sub_admin', 'master_admin'].includes(r)) return true;
   if (r.includes('admin')) return true;
