@@ -34,10 +34,18 @@ interface ScopedUser {
  * The set of users a given user can mention or message. The caller is
  * always included so reps can self-reference (and so the FE picker can
  * show a "Me" entry without a separate code path).
+ *
+ * Super-admins bypass scope entirely — they can mention/message anyone
+ * in the system across every org. The platform-admin role is meant for
+ * operators who need to reach any tenant for support reasons.
  */
 export async function scopedUsers(req: AuthRequest): Promise<ScopedUser[]> {
   const me = req.user;
   if (!me) throw new AppError(401, 'Not authenticated', 'NO_USER');
+  const role = ((me.role as string) || '').toLowerCase().replace(/-/g, '_');
+  if (role === 'super_admin') {
+    return scopedUsersForSuperAdmin();
+  }
   const myId = me.id;
   const orgId = me.org_id;
   const myCities = Array.isArray(me.assigned_city_names) ? me.assigned_city_names : [];
@@ -99,6 +107,35 @@ export async function scopedUsers(req: AuthRequest): Promise<ScopedUser[]> {
   return result;
 }
 
+async function scopedUsersForSuperAdmin(): Promise<ScopedUser[]> {
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .select('id, full_name, email')
+    .order('full_name', { ascending: true })
+    .limit(2000);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const candidates = (data ?? []) as Array<{ id: string; full_name: string | null; email: string }>;
+  if (candidates.length === 0) return [];
+  const { data: assignmentRows } = await supabaseAdmin
+    .from('user_city_assignments')
+    .select('user_id, cities!city_id(name)')
+    .in('user_id', candidates.map((c) => c.id));
+  const cityMap = new Map<string, string[]>();
+  for (const row of (assignmentRows ?? []) as any[]) {
+    const uid = row.user_id as string;
+    const cityName = (row.cities?.name as string) || '';
+    if (!cityName) continue;
+    if (!cityMap.has(uid)) cityMap.set(uid, []);
+    cityMap.get(uid)!.push(cityName);
+  }
+  return candidates.map((c) => ({
+    id: c.id,
+    full_name: c.full_name,
+    email: c.email,
+    city_names: cityMap.get(c.id) ?? [],
+  }));
+}
+
 async function fetchDescendantIds(userId: string): Promise<string[]> {
   const { data, error } = await supabaseAdmin.rpc('user_subtree_ids', { p_user_id: userId });
   if (error) return [];
@@ -132,6 +169,8 @@ async function fetchAncestorIds(userId: string): Promise<string[]> {
  */
 export async function assertWithinScope(req: AuthRequest, targetUserIds: string[]): Promise<void> {
   if (targetUserIds.length === 0) return;
+  const role = ((req.user?.role as string) || '').toLowerCase().replace(/-/g, '_');
+  if (role === 'super_admin') return; // Platform-admin reaches every user.
   const allowed = new Set((await scopedUsers(req)).map((u) => u.id));
   for (const id of targetUserIds) {
     if (!allowed.has(id)) {
