@@ -14,6 +14,7 @@ import {
   listUpdates,
   createUpdate,
 } from '../../services/crm/leadUpdates.service';
+import { persistMentions, parseMentionIds } from '../../services/crm/messaging.service';
 import type { AuthRequest } from '../../types';
 import { requireModule } from '../../middleware/rbac';
 
@@ -43,6 +44,14 @@ router.post(
       user.id,
       parsed.body,
     );
+    // Parse @[uid] tokens, scope-check them, persist + fan out notifications.
+    // Errors bubble up as 403 if the caller mentioned someone outside their
+    // city ∩ hierarchy subtree — saves us writing the mention quietly and
+    // showing the user a phantom send.
+    const mentionIds = parseMentionIds(parsed.body);
+    if (mentionIds.length > 0) {
+      await persistMentions(auth, 'lead_update', update.id, mentionIds);
+    }
     return res.status(201).json({ success: true, data: update });
   }),
 );

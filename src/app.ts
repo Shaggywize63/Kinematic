@@ -47,6 +47,7 @@ import clientRoutes          from './routes/client.routes';
 import miscRoutes            from './routes/misc.routes';
 import planogramRoutes       from './routes/planogram.routes';
 import integrationsRoutes        from './routes/integrations.routes';
+import messagingRoutes           from './routes/messaging.routes';
 import integrationsPublicRoutes  from './routes/integrations-public.routes';
 import distIntegrationsRoutes    from './routes/distribution/integrations.routes';
 import tallyAgentPublicRoutes    from './routes/tally-agent-public.routes';
@@ -401,6 +402,10 @@ app.use(`${V1}/kini`, requireAuth, kiniRoutes);
 // Public webhook ingestion lives above the auth catch-all; this is the
 // authenticated admin surface for connect/list/edit/disconnect/events.
 app.use(`${V1}/integrations`, requireAuth, integrationsRoutes);
+
+// ── Messaging — DMs, team chat, @mentions, web-push subscriptions ─────────
+// Scope enforcement (city ∩ hierarchy subtree) lives in the service layer.
+app.use(`${V1}/messaging`, requireAuth, messagingRoutes);
 
 // ── Activity Log (super-admin only) ────────────────────────────
 app.use(`${V1}/audit-log`, requireAuth, auditLogRoutes);
