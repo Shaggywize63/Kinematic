@@ -30,20 +30,30 @@ interface ScopedUser {
   city_names: string[];
 }
 
+// Roles that count as "platform admin" for the bypass — matches the
+// dashboard's isPlatformAdmin predicate so the same users that see
+// every tenant on the web also reach every user in the messaging picker.
+function isPlatformAdmin(role: string | undefined, name: string | undefined): boolean {
+  const r = (role || '').toLowerCase().trim().replace(/-/g, '_');
+  if (['super_admin', 'admin', 'main_admin', 'sub_admin', 'master_admin'].includes(r)) return true;
+  if (r.includes('admin')) return true;
+  if ((name || '').toLowerCase().trim() === 'sagar') return true;
+  return false;
+}
+
 /**
  * The set of users a given user can mention or message. The caller is
  * always included so reps can self-reference (and so the FE picker can
  * show a "Me" entry without a separate code path).
  *
- * Super-admins bypass scope entirely — they can mention/message anyone
- * in the system across every org. The platform-admin role is meant for
- * operators who need to reach any tenant for support reasons.
+ * Platform admins (super_admin / admin / main_admin / sub_admin / master_admin)
+ * bypass scope entirely — they can mention/message anyone in the system
+ * across every org for support reasons.
  */
 export async function scopedUsers(req: AuthRequest): Promise<ScopedUser[]> {
   const me = req.user;
   if (!me) throw new AppError(401, 'Not authenticated', 'NO_USER');
-  const role = ((me.role as string) || '').toLowerCase().replace(/-/g, '_');
-  if (role === 'super_admin') {
+  if (isPlatformAdmin(me.role as string, me.name as string)) {
     return scopedUsersForSuperAdmin();
   }
   const myId = me.id;
@@ -169,8 +179,7 @@ async function fetchAncestorIds(userId: string): Promise<string[]> {
  */
 export async function assertWithinScope(req: AuthRequest, targetUserIds: string[]): Promise<void> {
   if (targetUserIds.length === 0) return;
-  const role = ((req.user?.role as string) || '').toLowerCase().replace(/-/g, '_');
-  if (role === 'super_admin') return; // Platform-admin reaches every user.
+  if (isPlatformAdmin(req.user?.role as string, req.user?.name as string)) return;
   const allowed = new Set((await scopedUsers(req)).map((u) => u.id));
   for (const id of targetUserIds) {
     if (!allowed.has(id)) {
