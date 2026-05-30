@@ -70,13 +70,16 @@ export async function scopedUsers(req: AuthRequest): Promise<ScopedUser[]> {
   const hierarchyIds = new Set<string>([myId, ...descendants, ...ancestors]);
 
   // 2. Pull every candidate user in the org, then intersect on city.
+  //    NB: public.users has a `name` column, not `full_name` — selecting
+  //    `full_name` errors out at PostgREST, which the FE silently swallows
+  //    as an empty list. Keep the API shape stable by aliasing.
   const { data: rows, error } = await supabaseAdmin
     .from('users')
-    .select('id, full_name, email')
+    .select('id, name, email')
     .eq('org_id', orgId)
     .in('id', Array.from(hierarchyIds));
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  const candidates = (rows ?? []) as Array<{ id: string; full_name: string | null; email: string }>;
+  const candidates = (rows ?? []) as Array<{ id: string; name: string | null; email: string }>;
 
   if (candidates.length === 0) return [];
 
@@ -104,7 +107,7 @@ export async function scopedUsers(req: AuthRequest): Promise<ScopedUser[]> {
   const result: ScopedUser[] = [];
   for (const c of candidates) {
     if (c.id === myId) {
-      result.push({ id: c.id, full_name: c.full_name, email: c.email, city_names: Array.from(candidateCities.get(c.id) ?? []) });
+      result.push({ id: c.id, full_name: c.name, email: c.email, city_names: Array.from(candidateCities.get(c.id) ?? []) });
       continue;
     }
     const theirCities = candidateCities.get(c.id) ?? new Set();
@@ -112,19 +115,22 @@ export async function scopedUsers(req: AuthRequest): Promise<ScopedUser[]> {
     // fallback). Otherwise we need a non-empty intersection.
     const cityOk = myCitySet.size === 0 || Array.from(theirCities).some((city) => myCitySet.has(city));
     if (!cityOk) continue;
-    result.push({ id: c.id, full_name: c.full_name, email: c.email, city_names: Array.from(theirCities) });
+    result.push({ id: c.id, full_name: c.name, email: c.email, city_names: Array.from(theirCities) });
   }
   return result;
 }
 
 async function scopedUsersForSuperAdmin(): Promise<ScopedUser[]> {
+  // Platform admins reach every user in every tenant. Filter out inactive
+  // accounts so deactivated reps don't clutter the picker.
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select('id, full_name, email')
-    .order('full_name', { ascending: true })
+    .select('id, name, email')
+    .eq('is_active', true)
+    .order('name', { ascending: true })
     .limit(2000);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  const candidates = (data ?? []) as Array<{ id: string; full_name: string | null; email: string }>;
+  const candidates = (data ?? []) as Array<{ id: string; name: string | null; email: string }>;
   if (candidates.length === 0) return [];
   const { data: assignmentRows } = await supabaseAdmin
     .from('user_city_assignments')
@@ -140,7 +146,7 @@ async function scopedUsersForSuperAdmin(): Promise<ScopedUser[]> {
   }
   return candidates.map((c) => ({
     id: c.id,
-    full_name: c.full_name,
+    full_name: c.name,
     email: c.email,
     city_names: cityMap.get(c.id) ?? [],
   }));
@@ -417,8 +423,8 @@ export async function listMessages(req: AuthRequest, threadId: string, limit = 1
   // Hydrate sender names in one round-trip.
   const senderIds = Array.from(new Set(rows.map((r: any) => r.sender_id as string)));
   if (senderIds.length === 0) return rows;
-  const { data: users } = await supabaseAdmin.from('users').select('id, full_name, email').in('id', senderIds);
-  const byId = new Map((users ?? []).map((u: any) => [u.id, u.full_name || u.email || 'User']));
+  const { data: users } = await supabaseAdmin.from('users').select('id, name, email').in('id', senderIds);
+  const byId = new Map((users ?? []).map((u: any) => [u.id, u.name || u.email || 'User']));
   return rows.map((r: any) => ({ ...r, sender_name: byId.get(r.sender_id) ?? 'User' }));
 }
 
