@@ -47,10 +47,12 @@ export async function listUpdates(
   if (authorIds.length === 0) return rows;
   const { data: users } = await supabaseAdmin
     .from('users')
-    .select('id, full_name, email')
+    .select('id, name, email')
     .in('id', authorIds);
+  // public.users carries `name`, not `full_name` — the wrong column name
+  // would throw at PostgREST and silently empty the timeline.
   const byId = new Map<string, string>(
-    (users || []).map((u: any) => [u.id, u.full_name || u.email || 'User']),
+    (users || []).map((u: any) => [u.id, u.name || u.email || 'User']),
   );
   return rows.map((r) => ({ ...r, author_name: byId.get(r.author_id) ?? null }));
 }
@@ -105,10 +107,10 @@ export async function createUpdate(
   // brand-new entry renders as "Unknown" until the user reloads.
   const { data: author } = await supabaseAdmin
     .from('users')
-    .select('full_name, email')
+    .select('name, email')
     .eq('id', author_id)
     .maybeSingle();
-  const author_name = (author as any)?.full_name || (author as any)?.email || null;
+  const author_name = (author as any)?.name || (author as any)?.email || null;
 
   return { ...(data as LeadUpdate), author_name };
 }
