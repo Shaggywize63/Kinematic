@@ -82,6 +82,8 @@ import distSecondaryRoutes     from './routes/distribution/secondary-sales.route
 import distGstinRoutes         from './routes/distribution/gstin.routes';
 import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
+import verifiedSendersRoutes   from './routes/crm/verified-senders.routes';
+import emailAlertsRoutes       from './routes/crm/email-alerts.routes';
 
 const app = express();
 
@@ -388,6 +390,10 @@ app.use(`${V1}/distribution/integrations`,   requireAuth,                       
 // through to crmRoutes below, so the existing routes are untouched.
 app.use(`${V1}/crm/ai/next-best-action/lead`, requireAuth, leadNbaRoutes);
 app.use(`${V1}/crm/leads`,                    requireAuth, leadUpdatesRoutes);
+// Verified senders + email alerts — same prefix-before-catch-all pattern
+// so /crm/verified-senders/:id doesn't fall into a stray /crm/:id handler.
+app.use(`${V1}/crm/verified-senders`,         requireAuth, verifiedSendersRoutes);
+app.use(`${V1}/crm/email-alerts`,             requireAuth, emailAlertsRoutes);
 
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
