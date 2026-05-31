@@ -15,6 +15,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { dispatchPendingPushes } from '../services/notifications.service';
 import { rescoreLead } from '../services/crm/leads.service';
+import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -118,6 +119,23 @@ router.post('/rescore-all-leads-now', requireEdgeSecret, async (req, res) => {
   } catch (err: any) {
     logger.error(`[cron] rescore-all-leads-now crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err), data: { processed, failed } });
+  }
+});
+
+/**
+ * POST /api/v1/cron/dispatch-scheduled-emails
+ *
+ * Picks up crm_email_alerts rows whose scheduled_at has passed and
+ * dispatches each one. Wire up via pg_cron + the existing edge function
+ * pattern (every minute, 50 alerts per tick).
+ */
+router.post('/dispatch-scheduled-emails', requireEdgeSecret, async (_req, res) => {
+  try {
+    const result = await dispatchDueAlerts(50);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] dispatch-scheduled-emails crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });
 
