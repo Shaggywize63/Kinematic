@@ -49,6 +49,39 @@ export async function stampOwnerName<T extends Row>(row: T | null | undefined): 
   return decorated;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Source-name decoration. Leads carry source_id (FK to crm_lead_sources);
+// the FE list table renders `row.source_name`. Without this stamping the
+// Source column always reads "—" even when the source_id is populated.
+// Same O(1)-round-trip shape as stampOwnerNames.
+// ─────────────────────────────────────────────────────────────────────
+
+type SourceRow = { source_id?: string | null; source_name?: string | null };
+
+export async function stampSourceNames<T extends SourceRow>(rows: T[]): Promise<T[]> {
+  if (!rows || rows.length === 0) return rows;
+  const ids = Array.from(new Set(rows.map((r) => r.source_id).filter(Boolean) as string[]));
+  if (ids.length === 0) return rows;
+  const { data: sources } = await supabaseAdmin
+    .from('crm_lead_sources')
+    .select('id, name')
+    .in('id', ids);
+  const nameById = new Map<string, string>();
+  for (const s of sources ?? []) {
+    nameById.set((s as any).id, ((s as any).name as string) || '');
+  }
+  return rows.map((r) => ({
+    ...r,
+    source_name: r.source_id ? (nameById.get(r.source_id) ?? r.source_name ?? null) : (r.source_name ?? null),
+  }));
+}
+
+export async function stampSourceName<T extends SourceRow>(row: T | null | undefined): Promise<T | null> {
+  if (!row) return row ?? null;
+  const [decorated] = await stampSourceNames([row]);
+  return decorated;
+}
+
 // ---------------------------------------------------------------------------
 // Linked-entity name decorator. Activities (and anything else with a FK to a
 // lead / contact / account / deal) get pretty `*_name` fields so the UI can

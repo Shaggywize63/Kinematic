@@ -39,7 +39,7 @@ import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
-import { stampOwnerNames, stampOwnerName, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
+import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
 
 const router: Router = express.Router();
 
@@ -293,7 +293,10 @@ leads.get('/', wrap(async (req, res) => {
   const { rows, total, page, limit } = await leadsSvc.listLeadsWithCount(
     orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds }
   );
-  const stamped = await stampOwnerNames(rows);
+  // Owner UUIDs → owner_name; source UUIDs → source_name. Both columns
+  // are rendered by the leads list table; source_name was previously
+  // missing on this hot path so the Source column always rendered "—".
+  const stamped = await stampSourceNames(await stampOwnerNames(rows));
   res.json({
     success: true,
     data: stamped,
@@ -308,7 +311,7 @@ leads.get('/', wrap(async (req, res) => {
 leads.post('/', wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
   const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
-  res.status(201).json(await stampOwnerName(await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload })));
+  res.status(201).json(await stampSourceName(await stampOwnerName(await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload }))));
 }));
 // CSV export — same filters as the list endpoint (status, owner, source,
 // state/city/district/block, score_gte, q, from, to, etc.) but caps at
@@ -411,16 +414,16 @@ leads.get('/export', wrap(async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(csv);
 }));
-leads.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id)))));
+leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))))));
 leads.patch('/:id', wrap(async (req, res) =>
-  res.json(await stampOwnerName(await leadsSvc.updateLead(orgId(req), req.params.id, parse(v.leadUpdateSchema, req.body), userId(req))))));
+  res.json(await stampSourceName(await stampOwnerName(await leadsSvc.updateLead(orgId(req), req.params.id, parse(v.leadUpdateSchema, req.body), userId(req)))))));
 leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(req), req.params.id); res.status(204).end(); }));
 leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
 leads.post('/:id/convert', wrap(async (req, res) =>
   res.json(await leadsSvc.convertLead(orgId(req), req.params.id, parse(v.leadConvertSchema, req.body), userId(req)))));
 // Reopen / unconvert — flips back to 'working' and clears terminal fields.
 leads.post('/:id/reopen', wrap(async (req, res) =>
-  res.json(await stampOwnerName(await leadsSvc.reopenLead(orgId(req), req.params.id, parse(v.leadReopenSchema, req.body), userId(req))))));
+  res.json(await stampSourceName(await stampOwnerName(await leadsSvc.reopenLead(orgId(req), req.params.id, parse(v.leadReopenSchema, req.body), userId(req)))))));
 leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc.listScoreHistory(orgId(req), req.params.id))));
 leads.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
