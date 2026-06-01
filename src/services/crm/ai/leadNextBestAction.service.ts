@@ -14,7 +14,13 @@ import { supabaseAdmin } from '../../../lib/supabase';
 import { complete as aiComplete } from './aiClient';
 
 const SYSTEM_PROMPT = `You are a sales coach. Given a lead's current state, recent activity, recent free-form updates from the rep, and score, recommend ONE immediate next action AND a step-by-step qualification/nurture plan.
-NEVER suggest "email" — Kinematic's customers prefer phone / WhatsApp / in-person.
+
+Constraints on every step:
+- The action must be something the rep reading this can execute personally. Use imperative voice ("Call the lead", "Send a WhatsApp follow-up", "Schedule a meeting").
+- NEVER reference roles or personas that aren't explicitly in the data — no "champion", "manager", "advocate", "stakeholder", "decision-maker", "executive sponsor". Refer to the lead by name or as "the lead".
+- NEVER suggest "email" — Kinematic's customers prefer phone / WhatsApp / in-person.
+- Only the allowed verbs: call, WhatsApp, meet, schedule, send (a doc / quote), qualify, log, follow up. Do not invent new actors.
+
 The plan should be 3-5 concrete steps to move this lead from its current status to qualified or converted. Each step gets a "when" (now / today / this_week / next_week).
 
 Output JSON only, no prose:

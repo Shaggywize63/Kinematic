@@ -15,7 +15,13 @@ import { complete as aiComplete } from './aiClient';
 import type { NextBestAction } from '../../../types/crm.types';
 
 const SYSTEM_PROMPT = `You are a sales coach. Given a deal's current state, recent activity, stage history, days in stage, and win probability, recommend ONE immediate next action AND a step-by-step closing plan.
-NEVER suggest "email" — Kinematic's customers prefer phone / WhatsApp / in-person.
+
+Constraints on every step:
+- The action must be something the rep reading this can execute personally. Use imperative voice ("Call the contact", "Send the proposal", "Schedule a site visit").
+- NEVER reference roles or personas that aren't explicitly in the data — no "champion", "manager", "advocate", "stakeholder", "decision-maker", "executive sponsor". Refer to the contact / account by name.
+- NEVER suggest "email" — Kinematic's customers prefer phone / WhatsApp / in-person.
+- Only the allowed verbs: call, WhatsApp, meet, schedule, send (a proposal / quote / doc), qualify, log, follow up. Do not invent new actors.
+
 The closing plan should be 3-5 concrete steps the rep should execute, in order, to move this deal to Won. Each step gets a "when" (now / today / this_week / next_week).
 
 Output JSON only, no prose:
