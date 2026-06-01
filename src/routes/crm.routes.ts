@@ -40,6 +40,7 @@ import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
+import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 
 const router: Router = express.Router();
 
@@ -360,42 +361,71 @@ leads.get('/export', wrap(async (req, res) => {
     ...r,
     source_name: r.source_id ? (sourceNameById.get(r.source_id) ?? '') : '',
   }));
+
+  // Hydrate the latest_update_by UUID into a display name + pull the full
+  // updates timeline (latest-first) so the CSV carries the conversation
+  // history each lead carries inside the dashboard. Capped at the last
+  // 20 updates per lead in the joined cell so big rows stay manageable;
+  // anything more is rare in practice.
+  const leadIds = enrichedBase.map((r: any) => r.id).filter(Boolean) as string[];
+  const updaterIds = Array.from(new Set(enrichedBase.map((r: any) => r.latest_update_by).filter(Boolean))) as string[];
+  const updaterNameById = new Map<string, string>();
+  if (updaterIds.length) {
+    const { data: us } = await supabaseAdmin
+      .from('users').select('id, name, email').in('id', updaterIds);
+    for (const u of us ?? []) {
+      updaterNameById.set((u as any).id, ((u as any).name as string) || ((u as any).email as string) || '');
+    }
+  }
+  const updatesByLead = new Map<string, Array<{ created_at: string; body: string; author: string }>>();
+  if (leadIds.length) {
+    const { data: us } = await supabaseAdmin
+      .from('crm_lead_updates')
+      .select('lead_id, body, created_at, author_id')
+      .in('lead_id', leadIds)
+      .order('created_at', { ascending: false })
+      .limit(20 * leadIds.length);
+    const authorIds = Array.from(new Set((us ?? []).map((u: any) => u.author_id).filter(Boolean))) as string[];
+    const authorNameById = new Map<string, string>();
+    if (authorIds.length) {
+      const { data: au } = await supabaseAdmin.from('users').select('id, name, email').in('id', authorIds);
+      for (const a of au ?? []) {
+        authorNameById.set((a as any).id, ((a as any).name as string) || ((a as any).email as string) || '');
+      }
+    }
+    for (const u of (us ?? []) as any[]) {
+      if (!updatesByLead.has(u.lead_id)) updatesByLead.set(u.lead_id, []);
+      const list = updatesByLead.get(u.lead_id)!;
+      if (list.length >= 20) continue;
+      list.push({
+        created_at: u.created_at,
+        body: u.body,
+        author: u.author_id ? (authorNameById.get(u.author_id) ?? '') : '',
+      });
+    }
+  }
+
   // Pull the tenant's admin-defined lead custom fields and flatten each
   // row.custom_fields[field_key] onto a `custom__<key>` synthetic column
   // so the CSV writer below picks them up via the same `r[col.key]` lookup
   // as the built-in columns. Auto-includes every new field the admin adds.
   const customCols = await listCustomFieldColumns(orgId(req), 'lead');
-  const enriched = stampCustomFieldValues(enrichedBase as any[], customCols);
+  const enrichedHydrated = enrichedBase.map((r: any) => ({
+    ...r,
+    latest_update_by_name: r.latest_update_by ? (updaterNameById.get(r.latest_update_by) ?? '') : '',
+    updates_history: (updatesByLead.get(r.id) ?? [])
+      .map((u) => `${u.created_at.slice(0, 16).replace('T', ' ')} ${u.author ? `[${u.author}]` : ''} ${u.body}`)
+      .join(' | '),
+  }));
+  const enriched = stampCustomFieldValues(enrichedHydrated as any[], customCols);
 
-  // CSV columns — names only. UUIDs are an implementation detail and
-  // never make it into the exported file. Custom fields auto-append at
-  // the end so existing column positions stay stable for downstream
-  // consumers (sheets / pivots tend to reference columns by index).
-  const cols: Array<{ key: string; label: string }> = [
-    { key: 'first_name',       label: 'First Name' },
-    { key: 'last_name',        label: 'Last Name' },
-    { key: 'email',            label: 'Email' },
-    { key: 'phone',            label: 'Phone' },
-    { key: 'company',          label: 'Company' },
-    { key: 'title',            label: 'Title' },
-    { key: 'industry',         label: 'Industry' },
-    { key: 'state',            label: 'State' },
-    { key: 'city',             label: 'City' },
-    { key: 'district',         label: 'District' },
-    { key: 'block',            label: 'Block' },
-    { key: 'status',           label: 'Status' },
-    { key: 'lifecycle_stage',  label: 'Lifecycle Stage' },
-    { key: 'score',            label: 'Score' },
-    { key: 'grade',            label: 'Grade' },
-    { key: 'source_name',      label: 'Source' },
-    { key: 'owner_name',       label: 'Owner' },
-    { key: 'utm_source',       label: 'UTM Source' },
-    { key: 'utm_campaign',     label: 'UTM Campaign' },
-    { key: 'last_activity_at', label: 'Last Activity At' },
-    { key: 'stage_changed_at', label: 'Stage Changed At' },
-    { key: 'created_at',       label: 'Created At' },
-    ...customCols.map((c) => ({ key: c.key, label: c.label })),
-  ];
+  // Auto-discover the column set from the sample row so any column added
+  // by a future migration appears in the next CSV pull without a code
+  // change. exportColumns.helper applies an exclude list (UUIDs, hashes,
+  // internal jsonb, soft-delete markers) and a preferred ordering.
+  const cols: Array<{ key: string; label: string }> = enriched.length > 0
+    ? discoverExportColumns(enriched[0] as Record<string, unknown>)
+    : [];
   const escape = (v: unknown): string => {
     if (v === null || v === undefined) return '';
     const s = String(v);
