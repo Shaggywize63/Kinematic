@@ -320,6 +320,9 @@ app.use(V1, (req, res, next) => {
   // mount, otherwise the global requireAuth here 401's the click before
   // it ever reaches the public router below.
   if (p.startsWith('/crm/emails/track/')) return next();
+  // Same shape for the verified-sender confirmation link the recipient
+  // clicks from the verification email. Token in path = auth.
+  if (p.startsWith('/crm/verified-senders/verify/')) return next();
   return requireAuth(req as any, res, next);
 }, demoExtensionsMiddleware);
 
