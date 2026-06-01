@@ -84,6 +84,7 @@ import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
 import verifiedSendersRoutes   from './routes/crm/verified-senders.routes';
 import emailAlertsRoutes       from './routes/crm/email-alerts.routes';
+import emailTrackingRoutes     from './routes/crm/email-tracking.routes';
 
 const app = express();
 
@@ -394,6 +395,12 @@ app.use(`${V1}/crm/leads`,                    requireAuth, leadUpdatesRoutes);
 // so /crm/verified-senders/:id doesn't fall into a stray /crm/:id handler.
 app.use(`${V1}/crm/verified-senders`,         requireAuth, verifiedSendersRoutes);
 app.use(`${V1}/crm/email-alerts`,             requireAuth, emailAlertsRoutes);
+
+// Public email tracking — recipients click these from their inbox without
+// an Authorization header. Mounted BEFORE the auth-gated crm router so
+// the inbound click doesn't bounce on requireAuth. The token in the path
+// IS the auth: it's a 32-char secret stamped onto the message at send time.
+app.use(`${V1}/crm/emails/track`,             emailTrackingRoutes);
 
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
