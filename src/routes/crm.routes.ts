@@ -43,40 +43,12 @@ import { stampOwnerNames, stampOwnerName, stampLinkedEntityNames, listCustomFiel
 
 const router: Router = express.Router();
 
-// ----- PUBLIC ROUTES (registered before requireAuth) -----
-// Email tracking + WhatsApp webhook accept signed/tokened requests; the
-// shared secret in the URL path or body IS the auth.
-router.get('/emails/track/open/:token', async (req, res) => {
-  await emailsSvc.recordOpen(req.params.token).catch(() => {});
-  res.set('Content-Type', 'image/gif');
-  res.send(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
-});
-router.get('/emails/track/click/:token', async (req, res) => {
-  await emailsSvc.recordClick(req.params.token).catch(() => {});
-  // Open-redirect guard. Before: `res.redirect(302, req.query.u)` —
-  // anyone could craft a phishing link
-  // `https://api.kinematic.app/.../track/click/<token>?u=https://attacker.com`
-  // that 302s the recipient off-platform. Now we only follow URLs
-  // whose hostname is in CRM_TRACKING_REDIRECT_HOSTS (comma-separated
-  // env list, defaults to the dashboard origin) — anything else
-  // redirects to '/'.
-  const raw = String(req.query.u ?? '/');
-  let target = '/';
-  try {
-    if (raw.startsWith('/')) {
-      target = raw; // relative paths are always same-origin
-    } else {
-      const u = new URL(raw);
-      const allow = (process.env.CRM_TRACKING_REDIRECT_HOSTS || process.env.DASHBOARD_URL || '')
-        .split(',').map(s => s.trim()).filter(Boolean)
-        .map(h => { try { return new URL(h).hostname; } catch { return h.replace(/^https?:\/\//, '').replace(/\/.*$/, ''); } });
-      if (allow.includes(u.hostname) || allow.some(h => u.hostname.endsWith('.' + h))) {
-        target = u.toString();
-      }
-    }
-  } catch { target = '/'; }
-  res.redirect(302, target);
-});
+// Email tracking (open pixel + click redirect) moved to a dedicated public
+// router at src/routes/crm/email-tracking.routes.ts. Those routes have to
+// be reachable without a Bearer token because the recipient hits them
+// straight from their email client; leaving them in this router meant the
+// router-level requireAuth applied in app.ts was 401'ing every inbound
+// click. Mount happens before the auth-gated /crm prefix in app.ts.
 
 // Meta WhatsApp Business webhook verification (challenge handshake).
 router.get('/webhooks/whatsapp', (req, res) => {
