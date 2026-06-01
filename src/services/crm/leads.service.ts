@@ -42,7 +42,12 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
     }
   }
 
-  const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload));
+  // Owner resolution: explicit owner_id wins, then assignment rules, then
+  // the creator (user_id), then the org-wide default, then null. Passing
+  // user_id into assignOwner lets the rule engine still take precedence
+  // when a real rule matches, while keeping the "creator becomes owner"
+  // fallback for the common "rep types in a new lead" case.
+  const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload, user_id));
   // Unified scorer — branches B2B/B2C correctly, no zero-padding of
   // off-profile signals in the breakdown. Engagement is skipped on
   // creation since there are no activities for a lead that doesn't
