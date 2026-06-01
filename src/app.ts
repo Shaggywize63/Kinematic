@@ -314,6 +314,12 @@ app.use(`${V1}/cron`, cronRoutes);
 app.use(V1, (req, res, next) => {
   const p = req.path;
   if (p === '/auth' || p.startsWith('/auth/')) return next();
+  // Email open/click trackers are hit straight from a recipient's inbox
+  // without any Bearer header — the 32-char token in the URL path is the
+  // auth. Has to bypass the catch-all gate too, not just the inner /crm
+  // mount, otherwise the global requireAuth here 401's the click before
+  // it ever reaches the public router below.
+  if (p.startsWith('/crm/emails/track/')) return next();
   return requireAuth(req as any, res, next);
 }, demoExtensionsMiddleware);
 
