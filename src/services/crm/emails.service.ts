@@ -6,9 +6,18 @@ import crypto from 'crypto';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { stubProvider } from './providers/stub.provider';
+import { resendProvider } from './providers/resend.provider';
 import type { EmailProvider } from './providers/emailProvider.interface';
 
-const provider: EmailProvider = stubProvider;
+// Provider is picked once at module load via EMAIL_PROVIDER env. Falling
+// back to the stub on unknown values keeps dev/test envs running without
+// real credentials (stub still records every send into crm_email_logs).
+const provider: EmailProvider = (() => {
+  switch ((process.env.EMAIL_PROVIDER || '').toLowerCase()) {
+    case 'resend': return resendProvider;
+    default:       return stubProvider;
+  }
+})();
 
 export interface SendEmailInput {
   org_id: string;
