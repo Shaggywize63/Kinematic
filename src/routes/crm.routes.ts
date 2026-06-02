@@ -442,8 +442,13 @@ leads.get('/export', wrap(async (req, res) => {
   // by a future migration appears in the next CSV pull without a code
   // change. exportColumns.helper applies an exclude list (UUIDs, hashes,
   // internal jsonb, soft-delete markers) and a preferred ordering.
+  // We prepend the raw lead id as a leading "Lead ID" column — it's the
+  // exact match key for the bulk coordinate upload (Leads → export → add
+  // lat/long → re-upload). discoverExportColumns excludes UUIDs by design,
+  // so we add it explicitly here rather than un-excluding it globally
+  // (which would leak/mislabel ids in deal/contact/account exports).
   const cols: Array<{ key: string; label: string }> = enriched.length > 0
-    ? discoverExportColumns(enriched[0] as Record<string, unknown>)
+    ? [{ key: 'id', label: 'Lead ID' }, ...discoverExportColumns(enriched[0] as Record<string, unknown>)]
     : [];
   const escape = (v: unknown): string => {
     if (v === null || v === undefined) return '';
