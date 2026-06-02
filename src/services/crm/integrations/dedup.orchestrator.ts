@@ -62,6 +62,13 @@ export interface FindOrCreateInput {
   integration_id?: string | null;     // crm_lead_source_integrations.id (null when called by Excel import)
   raw_event_id?: string | null;       // crm_lead_inbound_events.id  (null for import path)
   user_id?: string | null;            // created_by when a new lead is inserted
+  /** Resolved owner for a newly-inserted lead. The bulk-import path resolves
+   *  the CSV's `owner_email` column to a user id and passes it here so the
+   *  lead is assigned to its real owner instead of falling through to the
+   *  "creator becomes owner" assignment fallback (which would assign every
+   *  imported lead to the person running the import). NULL/undefined keeps
+   *  the existing assignment-rule → creator → default-owner chain. */
+  owner_id?: string | null;
   /** Client scope stamped onto the lead so reps with a pinned X-Client-Id
    *  see it. The webhook router fetches this from the integration row
    *  (which captured it at integration-create time). NULL = org-wide. */
@@ -76,7 +83,7 @@ export interface FindOrCreateResult {
 }
 
 export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOrCreateResult> {
-  const { org_id, source_id, normalized, integration_id, raw_event_id, user_id, client_id } = input;
+  const { org_id, source_id, normalized, integration_id, raw_event_id, user_id, owner_id, client_id } = input;
 
   const phone_hash = hashPhone(normalized.phone);
   const email_hash = hashEmail(normalized.email);
@@ -128,6 +135,11 @@ export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOr
     tags:          normalized.tags         ?? [],
     custom_fields: normalized.custom_fields ?? {},
     source_id,
+    // Explicit owner from the caller (e.g. bulk import resolving
+    // owner_email → user id) wins over the assignment fallback. Omitted
+    // when null/undefined so webhook leads keep the rule → creator →
+    // default-owner chain in createLead.
+    ...(owner_id ? { owner_id } : {}),
     // Auto-inherit client scope from the integration so reps pinned to
     // that client (X-Client-Id strict mode) see the lead immediately.
     ...(client_id ? { client_id } : {}),

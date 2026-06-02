@@ -110,6 +110,32 @@ export async function stampCreatedByNames<T extends CreatedByRow>(rows: T[]): Pr
   }));
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Uploaded-by relabel. Records ingested through the CSV/Excel importer keep
+// the real importer in `created_by` (audit trail stays honest), but the UI's
+// "Uploaded By" column should read a neutral "Kinematic Admin" rather than
+// the admin's personal name. We discriminate purely on the lead source: the
+// importer auto-stamps every imported lead with the "Excel/CSV Import"
+// source, so any row whose source_name matches gets the label. Run this
+// AFTER stampSourceNames + stampCreatedByNames so both inputs are populated.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Lead source name the importer auto-creates per org (see import.service.ts). */
+export const IMPORT_SOURCE_NAME = 'Excel/CSV Import';
+/** Neutral label shown for uploaded/imported records instead of the importer. */
+export const ADMIN_UPLOADER_LABEL = 'Kinematic Admin';
+
+type UploaderRelabelRow = { source_name?: string | null; created_by_name?: string | null };
+
+export function relabelImportedUploader<T extends UploaderRelabelRow>(rows: T[]): T[] {
+  if (!rows || rows.length === 0) return rows;
+  return rows.map((r) =>
+    r.source_name === IMPORT_SOURCE_NAME
+      ? { ...r, created_by_name: ADMIN_UPLOADER_LABEL }
+      : r,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Linked-entity name decorator. Activities (and anything else with a FK to a
 // lead / contact / account / deal) get pretty `*_name` fields so the UI can
