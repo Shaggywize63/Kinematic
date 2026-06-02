@@ -84,6 +84,10 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
     stage_changed_at: nowIso,
     country: payload.country ?? null,
     city: payload.city ?? null,
+    // Geo coordinates captured on add (device GPS / manual). Optional — the
+    // map falls back to the city centroid when absent.
+    latitude:  (p.latitude  as number | undefined) ?? null,
+    longitude: (p.longitude as number | undefined) ?? null,
     industry: payload.industry ?? null,
     notes: payload.notes ?? null,
     tags: payload.tags ?? [],
@@ -787,4 +791,98 @@ export async function bulkAssign(org_id: string, lead_ids: string[], owner_id: s
   }
 
   return { updated: lead_ids.length };
+}
+
+export interface BulkCoordinateRow {
+  id?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  latitude: number;
+  longitude: number;
+}
+
+/**
+ * Backfill lat/long on existing leads in one shot. Each row is matched to a
+ * lead by id (preferred), then email, then phone — all scoped to org_id so a
+ * row can never touch another tenant's lead. Returns per-row outcome counts
+ * so the dashboard uploader can show "geotagged 412, skipped 8".
+ */
+export async function bulkUpdateCoordinates(
+  org_id: string,
+  rows: BulkCoordinateRow[],
+  user_id?: string,
+): Promise<{ updated: number; skipped: number; errors: Array<{ row: number; reason: string }> }> {
+  const errors: Array<{ row: number; reason: string }> = [];
+
+  // Resolve id + email matches in bulk to keep round trips low; phone-only
+  // rows (the rare fallback) are resolved individually via the dedup helper
+  // so its last-10-digits normalisation applies.
+  const idRows    = rows.filter((r) => r.id);
+  const emailRows = rows.filter((r) => !r.id && r.email);
+
+  const validIds = new Set<string>();
+  if (idRows.length) {
+    const ids = [...new Set(idRows.map((r) => r.id as string))];
+    for (let i = 0; i < ids.length; i += 500) {
+      const { data } = await supabaseAdmin.from('crm_leads')
+        .select('id').eq('org_id', org_id).is('deleted_at', null).in('id', ids.slice(i, i + 500));
+      for (const r of data ?? []) validIds.add(r.id as string);
+    }
+  }
+
+  const emailToId = new Map<string, string>();
+  if (emailRows.length) {
+    const emails = [...new Set(emailRows.map((r) => (r.email as string).toLowerCase()))];
+    for (let i = 0; i < emails.length; i += 500) {
+      const { data } = await supabaseAdmin.from('crm_leads')
+        .select('id, email').eq('org_id', org_id).is('deleted_at', null).in('email', emails.slice(i, i + 500));
+      for (const r of data ?? []) {
+        const key = String(r.email ?? '').toLowerCase();
+        if (key && !emailToId.has(key)) emailToId.set(key, r.id as string);
+      }
+    }
+  }
+
+  // Resolve every row to a target lead id.
+  const targets: Array<{ index: number; id: string; latitude: number; longitude: number }> = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    let id: string | null = null;
+    if (r.id) {
+      if (validIds.has(r.id)) id = r.id;
+      else { errors.push({ row: i + 1, reason: `No lead with id ${r.id} in this org` }); continue; }
+    } else if (r.email) {
+      id = emailToId.get(r.email.toLowerCase()) ?? null;
+      if (!id) { errors.push({ row: i + 1, reason: `No lead matched email ${r.email}` }); continue; }
+    } else if (r.phone) {
+      const dup = await dedup.findLeadByPhone(org_id, r.phone);
+      if (!dup) { errors.push({ row: i + 1, reason: `No lead matched phone ${r.phone}` }); continue; }
+      id = dup.id as string;
+    } else {
+      errors.push({ row: i + 1, reason: 'Row has no id, email, or phone' });
+      continue;
+    }
+    targets.push({ index: i, id, latitude: r.latitude, longitude: r.longitude });
+  }
+
+  // Apply updates with bounded concurrency so a large backfill doesn't open
+  // thousands of simultaneous connections.
+  let updated = 0;
+  const nowIso = new Date().toISOString();
+  const CONCURRENCY = 20;
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    const batch = targets.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(batch.map(async (t) => {
+      const { error } = await supabaseAdmin.from('crm_leads')
+        .update({ latitude: t.latitude, longitude: t.longitude, updated_by: user_id ?? null, updated_at: nowIso })
+        .eq('org_id', org_id).eq('id', t.id);
+      return error ? { ok: false as const, index: t.index, msg: error.message } : { ok: true as const };
+    }));
+    for (const res of results) {
+      if (res.ok) updated++;
+      else errors.push({ row: res.index + 1, reason: res.msg });
+    }
+  }
+
+  return { updated, skipped: rows.length - updated, errors };
 }

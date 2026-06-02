@@ -91,6 +91,11 @@ export const leadCreateSchema = z.object({
   // Optional profile photo URL — typically a Supabase storage path
   // produced by /upload/photo. Set to null to clear an existing photo.
   photo_url: z.string().url().max(2048).optional().nullable(),
+  // Geo coordinates — captured on add via device GPS / manual entry, or
+  // backfilled via the bulk coordinate upload. Rendered on the dashboard
+  // map. Optional + nullable so non-geo creation paths are unaffected.
+  latitude:  z.coerce.number().min(-90).max(90).optional().nullable(),
+  longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
   ...utmFields,
   ...b2cBase,
 });
@@ -133,6 +138,23 @@ export const leadConvertSchema = z.object({
 // crm_lead_history.new_value jsonb without bloating the audit table.
 export const leadReopenSchema = z.object({
   reason: z.string().max(500).optional(),
+});
+
+// Bulk lat/long backfill for existing leads. Each row matches one lead by
+// id (preferred), then email, then phone. Used by the dashboard "upload
+// coordinates" tool to geotag old leads in one shot.
+export const leadBulkCoordinatesSchema = z.object({
+  rows: z.array(
+    z.object({
+      id: optionalUuid,
+      email: z.string().email().optional().nullable(),
+      phone: z.string().max(40).optional().nullable(),
+      latitude:  z.coerce.number().min(-90).max(90),
+      longitude: z.coerce.number().min(-180).max(180),
+    }).refine((r) => Boolean(r.id || r.email || r.phone), {
+      message: 'Each row needs an id, email, or phone to match a lead',
+    }),
+  ).min(1).max(10000),
 });
 
 export const contactSchema = z.object({
