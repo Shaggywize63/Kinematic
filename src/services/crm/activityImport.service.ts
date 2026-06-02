@@ -244,7 +244,8 @@ export async function commitJob(org_id: string, job_id: string, user_id: string 
 
   const { data: updated, error: updErr } = await supabaseAdmin.from('crm_import_jobs')
     .update({
-      status: errors.length > 0 && created === 0 ? 'failed' : 'done',
+      // CHECK constraint accepts 'completed', not 'done' — see import.service.ts
+      status: errors.length > 0 && created === 0 ? 'failed' : 'completed',
       processed_rows: rows.length,
       inserted: created,
       skipped,
