@@ -1514,11 +1514,16 @@ imp.post('/upload', upload.single('file'), wrap(async (req, res) => {
 }));
 imp.post('/preview', wrap(async (req, res) => {
   const body = parse(v.importPreviewSchema, req.body);
-  res.json(await importSvc.previewJob(orgId(req), body.job_id, body.mapping));
+  const result = await importSvc.previewJob(orgId(req), body.job_id, body.mapping);
+  // FE reads r.data.sample + r.data.job — wrap so the response shape
+  // matches every other crud endpoint instead of returning the bare
+  // {mapped_sample, warnings} which would TypeError on the client.
+  res.json({ success: true, data: result });
 }));
 imp.post('/commit', wrap(async (req, res) => {
   const body = parse(v.importCommitSchema, req.body);
-  res.json(await importSvc.commitJob(orgId(req), body.job_id));
+  const result = await importSvc.commitJob(orgId(req), body.job_id);
+  res.json({ success: true, data: result });
 }));
 imp.get('/jobs/:id', wrap(async (req, res) => res.json(await importSvc.getJob(orgId(req), req.params.id))));
 imp.get('/jobs', wrap(async (req, res) => res.json(await importSvc.listJobs(orgId(req)))));

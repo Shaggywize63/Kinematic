@@ -146,8 +146,23 @@ export async function previewJob(org_id: string, job_id: string, mapping: Record
     });
   }
 
-  await supabaseAdmin.from('crm_import_jobs').update({ status: 'previewing', mapping }).eq('id', job_id);
-  return { mapped_sample: mapped.slice(0, 25), warnings };
+  // Persist the mapping AND return the refreshed job alongside the
+  // mapped sample so the dashboard's Map → Review step can render
+  // sample rows + the total_rows / status pills without a second
+  // fetch. Keeps the {mapped_sample, warnings} keys for any older
+  // callers that still read them.
+  const { data: updatedJob } = await supabaseAdmin
+    .from('crm_import_jobs')
+    .update({ status: 'previewing', mapping })
+    .eq('id', job_id)
+    .select('*')
+    .single();
+  return {
+    job: updatedJob ?? job,
+    sample: mapped.slice(0, 25),
+    mapped_sample: mapped.slice(0, 25),
+    warnings,
+  };
 }
 
 /**
