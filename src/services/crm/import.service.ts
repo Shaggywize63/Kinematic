@@ -181,7 +181,12 @@ export async function previewJob(org_id: string, job_id: string, mapping: Record
  * auto-created lead source so audit logs attribute the first import
  * correctly.
  */
-export async function commitJob(org_id: string, job_id: string, user_id: string | null = null) {
+export async function commitJob(
+  org_id: string,
+  job_id: string,
+  user_id: string | null = null,
+  client_id: string | null = null,
+) {
   const { data: job, error: loadErr } = await supabaseAdmin.from('crm_import_jobs').select('*')
     .eq('org_id', org_id).eq('id', job_id).eq('kind', 'leads').single();
   if (loadErr || !job) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
@@ -197,7 +202,7 @@ export async function commitJob(org_id: string, job_id: string, user_id: string 
 
   // Fire-and-forget. Node keeps this in the event loop until it finishes,
   // even after the HTTP response has been returned to the FE.
-  void runCommitInBackground(org_id, job_id, user_id, rows, (job.mapping ?? {}) as Record<string, string>, Array.isArray(job.errors) ? job.errors : []);
+  void runCommitInBackground(org_id, job_id, user_id, client_id, rows, (job.mapping ?? {}) as Record<string, string>, Array.isArray(job.errors) ? job.errors : []);
 
   return { ...job, status: 'running', processed_rows: 0, total_rows: rows.length };
 }
@@ -206,6 +211,7 @@ async function runCommitInBackground(
   org_id: string,
   job_id: string,
   user_id: string | null,
+  client_id: string | null,
   rows: Record<string, unknown>[],
   mapping: Record<string, string>,
   existingErrors: any[],
@@ -256,6 +262,7 @@ async function runCommitInBackground(
         const r = await findOrCreateLead({
           org_id, source_id, normalized,
           integration_id: null, raw_event_id: null, user_id,
+          client_id: client_id ?? undefined,
         });
         // Counter increments in JS are safe under Promise.all — the event
         // loop runs synchronous code without preemption between awaits.
