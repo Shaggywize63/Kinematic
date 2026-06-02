@@ -32,10 +32,14 @@ router.get('/click/:token', async (req: Request, res: Response) => {
       target = raw; // relative paths are always same-origin
     } else {
       const u = new URL(raw);
+      // Same-host is always allowed — can't be an open-redirect by
+      // definition (we're redirecting from the API back to itself, e.g.
+      // the sender-verification email's link → /verified-senders/verify/:token).
+      const sameHost = req.hostname && u.hostname === req.hostname;
       const allow = (process.env.CRM_TRACKING_REDIRECT_HOSTS || process.env.DASHBOARD_URL || '')
         .split(',').map((s) => s.trim()).filter(Boolean)
         .map((h) => { try { return new URL(h).hostname; } catch { return h.replace(/^https?:\/\//, '').replace(/\/.*$/, ''); } });
-      if (allow.includes(u.hostname) || allow.some((h) => u.hostname.endsWith('.' + h))) {
+      if (sameHost || allow.includes(u.hostname) || allow.some((h) => u.hostname.endsWith('.' + h))) {
         target = u.toString();
       }
     }
