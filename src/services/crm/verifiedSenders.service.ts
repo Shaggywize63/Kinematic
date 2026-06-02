@@ -98,8 +98,18 @@ async function dispatchVerificationEmail(
   to: string,
   token: string,
 ): Promise<void> {
-  const base = process.env.DASHBOARD_URL || 'https://app.kinematicapp.com';
-  const link = `${base.replace(/\/+$/, '')}/dashboard/crm/email-senders?verify=${encodeURIComponent(token)}`;
+  // Link goes DIRECTLY to the backend's public /verify/:token endpoint
+  // (not the dashboard) so a recipient can verify even when they're
+  // not logged in or are clicking from a different browser / device.
+  // The backend flips verified_at and renders its own success page.
+  // PUBLIC_API_BASE_URL is the canonical Railway URL; falls back to
+  // CRM_TRACKING_DOMAIN which is the same host in our setup.
+  const apiBase = (
+    process.env.PUBLIC_API_BASE_URL ||
+    process.env.CRM_TRACKING_BASE_URL ||
+    'https://kinematic-production.up.railway.app'
+  ).replace(/\/+$/, '');
+  const link = `${apiBase}/api/v1/crm/verified-senders/verify/${encodeURIComponent(token)}`;
   const html = `
     <div style="font-family:-apple-system,system-ui,sans-serif;line-height:1.5;color:#111">
       <h2 style="margin:0 0 12px">Verify your sender address</h2>
