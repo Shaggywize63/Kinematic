@@ -287,12 +287,19 @@ leads.get('/', wrap(async (req, res) => {
   if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
     visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
   }
+  // A rep always sees their own leads (selfOwnerId) even when the lead's
+  // city is outside their scope or absent; a tenant-wide admin
+  // (data_scope='all') additionally sees city-less leads. Both broaden the
+  // city filter without ever narrowing it — see listLeadsWithCount.
+  const me = (req as AuthRequest).user;
+  const selfOwnerId = me?.id ?? null;
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all';
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
   // additive — old callers ignore it.
   const { rows, total, page, limit } = await leadsSvc.listLeadsWithCount(
-    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds }
+    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity }
   );
   // Owner UUIDs → owner_name; source UUIDs → source_name; created_by
   // UUIDs → created_by_name. The created_by stamp lets the leads list
@@ -334,6 +341,12 @@ leads.get('/export', wrap(async (req, res) => {
   if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
     visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
   }
+  // Mirror the list endpoint's visibility so /export never returns more (or
+  // fewer) rows than the UI shows: own leads always, city-less leads for
+  // tenant-wide admins.
+  const me = (req as AuthRequest).user;
+  const selfOwnerId = me?.id ?? null;
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all';
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
   // bounded.
@@ -345,7 +358,7 @@ leads.get('/export', wrap(async (req, res) => {
       orgId(req),
       { ...req.query, limit: PAGE, page },
       scope.id,
-      { strictClient: scope.strict, effectiveCities, visibleOwnerIds },
+      { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity },
     );
     rows.push(...chunk);
     if (chunk.length < PAGE) break;

@@ -135,7 +135,7 @@ export async function listLeads(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean } = {},
 ) {
   const { rows } = await listLeadsWithCount(org_id, filters, client_id, options);
   return rows;
@@ -152,7 +152,7 @@ export async function listLeadsWithCount(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean } = {},
 ): Promise<{ rows: Lead[]; total: number; page: number; limit: number }> {
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
@@ -164,11 +164,33 @@ export async function listLeadsWithCount(
       ? q.eq('client_id', client_id)
       : q.or(`client_id.is.null,client_id.eq.${client_id}`);
   }
+  // City scope, broadened so it never hides a lead from the people who
+  // must always see it. A lead is visible when ANY of these hold:
+  //   • its city is in the caller's effective city set (the existing rule);
+  //   • the caller OWNS it (owner_id = self) — a rep always sees their own
+  //     leads even when the lead carries no city or a city outside their
+  //     scope (e.g. web-form / Excel-imported leads with no geo);
+  //   • the lead has no city AND the caller is a tenant-wide admin
+  //     (data_scope='all') — city-less leads aren't pinned to any region,
+  //     so an admin should see them rather than have them vanish.
+  // Expressed as a single PostgREST OR so pagination + exact count stay
+  // correct in one round trip.
   if (options.effectiveCities !== undefined && options.effectiveCities !== null) {
-    if (options.effectiveCities.length === 0) {
+    const orParts: string[] = [];
+    if (options.effectiveCities.length > 0) {
+      // Quote each city for the in.() list so names with spaces/commas
+      // (e.g. "Vasco da Gama") parse correctly.
+      const cityCsv = options.effectiveCities
+        .map((c) => `"${String(c).replace(/[\\"]/g, (m) => '\\' + m)}"`)
+        .join(',');
+      orParts.push(`city.in.(${cityCsv})`);
+    }
+    if (options.selfOwnerId) orParts.push(`owner_id.eq.${options.selfOwnerId}`);
+    if (options.includeNullCity) orParts.push('city.is.null');
+    if (orParts.length === 0) {
       return { rows: [], total: 0, page, limit };
     }
-    q = q.in('city', options.effectiveCities);
+    q = q.or(orParts.join(','));
   }
   // Hierarchy-RBAC scope. The route handler passes the subtree owner
   // ids only when the client has opted in via

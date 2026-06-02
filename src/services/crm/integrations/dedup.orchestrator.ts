@@ -123,14 +123,16 @@ export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOr
     title:         normalized.title        ?? null,
     industry:      normalized.industry     ?? null,
     country:       normalized.country      ?? null,
-    // Inbound webhooks (web forms, Meta, Google Ads, Zapier…) often
-    // don't carry a city. City-scoped reps can't see crm_leads rows
-    // where city IS NULL — the list endpoint filters via .in('city',
-    // effectiveCities). Default missing city to 'Online' so the lead
-    // is visible to anyone with that catch-all city in their scope,
-    // and to admins (who bypass city scope) on the Leads page. Org
-    // admins can re-assign a real city later when they triage.
-    city:          (normalized.city && normalized.city.trim()) || 'Online',
+    // Inbound webhooks (web forms, Meta, Google Ads, Zapier…) and Excel
+    // imports often don't carry a city. Leave it NULL rather than stamping
+    // a synthetic placeholder — the leads list now shows a lead to its
+    // owner regardless of city scope, and surfaces city-less leads to
+    // tenant-wide (data_scope='all') admins, so a real geo value is no
+    // longer required for visibility. Org admins can set a real city on
+    // triage. (Previously this defaulted to the literal 'Online', which
+    // sat outside every rep's and city-capped admin's scope and so hid
+    // the lead from everyone but platform super-admins.)
+    city:          (normalized.city && normalized.city.trim()) || null,
     notes:         normalized.notes        ?? null,
     tags:          normalized.tags         ?? [],
     custom_fields: normalized.custom_fields ?? {},
