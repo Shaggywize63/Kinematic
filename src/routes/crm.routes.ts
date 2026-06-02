@@ -1510,7 +1510,23 @@ router.use('/whatsapp', whatsapp);
 const imp = express.Router();
 imp.post('/upload', upload.single('file'), wrap(async (req, res) => {
   if (!req.file) throw new AppError(400, 'No file uploaded', 'NO_FILE');
-  res.status(201).json(await importSvc.uploadFile(orgId(req), userId(req), req.file.originalname, req.file.buffer));
+  const out = await importSvc.uploadFile(orgId(req), userId(req), req.file.originalname, req.file.buffer);
+  // FE reads `r.data.id` from this response to seed the import job
+  // state; without an `id` field the Map → Preview flow silently
+  // no-ops (Preview's `if (!job) return` exits without a toast).
+  res.status(201).json({
+    success: true,
+    data: {
+      id: out.job_id,
+      job_id: out.job_id,
+      headers: out.headers,
+      sample: out.sample,
+      sample_rows: out.sample,
+      suggested_mapping: out.suggested_mapping,
+      total_rows: out.sample.length,
+      status: 'mapping',
+    },
+  });
 }));
 imp.post('/preview', wrap(async (req, res) => {
   const body = parse(v.importPreviewSchema, req.body);
