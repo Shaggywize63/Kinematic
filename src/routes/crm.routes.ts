@@ -486,7 +486,7 @@ leads.post('/:id/won', wrap(async (req, res) => {
     await leadsSvc.markLeadAsWon(orgId(req), req.params.id, body.reason ?? null, userId(req)),
   ));
 }));
-router.use('/leads', leads);
+router.use('/leads', rbac.requireModuleAccess('crm_leads'), leads);
 
 // ---------- CONTACTS -------------------------------------------------
 const contacts = express.Router();
@@ -523,7 +523,7 @@ contacts.get('/:id/notes', wrap(async (req, res) => res.json(
   await crud.list('crm_notes', orgId(req), { entity_type: 'contact', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
 contacts.get('/:id/emails', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), { contact_id: req.params.id }))));
-router.use('/contacts', contacts);
+router.use('/contacts', rbac.requireModuleAccess('crm_contacts'), contacts);
 
 // ---------- ACCOUNTS -------------------------------------------------
 const accounts = express.Router();
@@ -563,7 +563,7 @@ accounts.get('/:id/notes', wrap(async (req, res) => res.json(
 )));
 accounts.post('/:id/summarize', wrap(async (req, res) =>
   res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), req.params.id) })));
-router.use('/accounts', accounts);
+router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
 
 // ---------- DEALS ----------------------------------------------------
 const deals = express.Router();
@@ -737,7 +737,7 @@ deals.get('/:id/notes', wrap(async (req, res) => res.json(
 deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc.listLineItems(orgId(req), req.params.id))));
 deals.post('/:id/line-items', wrap(async (req, res) =>
   res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req)))));
-router.use('/deals', deals);
+router.use('/deals', rbac.requireModuleAccess('crm_deals'), deals);
 
 const lineItems = express.Router();
 lineItems.patch('/:id', wrap(async (req, res) =>
@@ -1050,7 +1050,7 @@ activities.delete('/:id', wrap(async (req, res) => {
   })();
   res.status(204).end();
 }));
-router.use('/activities', activities);
+router.use('/activities', rbac.requireModuleAccess('crm_activities'), activities);
 
 const notes = express.Router();
 notes.get('/', wrap(async (req, res) => res.json(
@@ -1085,7 +1085,7 @@ tasks.patch('/:id', wrap(async (req, res) => {
   res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, payload, userId(req))));
 }));
 tasks.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id); res.status(204).end(); }));
-router.use('/tasks', tasks);
+router.use('/tasks', rbac.requireModuleAccess('crm_tasks'), tasks);
 
 // ---------- STATES + CITIES (location management) -------------------
 const states = express.Router();
@@ -1245,7 +1245,7 @@ settings.post('/seed-defaults', wrap(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   res.json({ ok: true });
 }));
-router.use('/settings', settings);
+router.use('/settings', rbac.requireModuleAccess('crm_settings'), settings);
 
 // ---------- HIERARCHY (Phase 3 — client-admin org hierarchy) ---------
 // Every endpoint here (except /enabled) 404s when the active client
@@ -1511,7 +1511,7 @@ whatsapp.post('/send', wrap(async (req, res) => {
   }));
 }));
 whatsapp.get('/logs', wrap(async (req, res) => res.json(await whatsappSvc.listLogs(orgId(req), req.query))));
-router.use('/whatsapp', whatsapp);
+router.use('/whatsapp', rbac.requireModuleAccess('crm_whatsapp'), whatsapp);
 
 const imp = express.Router();
 imp.post('/upload', upload.single('file'), wrap(async (req, res) => {
@@ -1574,7 +1574,7 @@ imp.post('/activities/commit', wrap(async (req, res) => {
 }));
 imp.get('/activities/jobs/:id', wrap(async (req, res) => res.json(await activityImportSvc.getJob(orgId(req), req.params.id))));
 imp.get('/activities/jobs', wrap(async (req, res) => res.json(await activityImportSvc.listJobs(orgId(req)))));
-router.use('/import', imp);
+router.use('/import', rbac.requireModuleAccess('crm_leads'), imp);
 
 // ---------- ANALYTICS ------------------------------------------------
 const analytics = express.Router();
@@ -1678,7 +1678,7 @@ analytics.get('/touchpoints-to-response', wrap(async (req, res) => res.json(
 analytics.get('/leads-at-risk', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'leads-at-risk'), ANALYTICS_TTL,
     () => analyticsExt.leadsAtRisk(orgId(req), clientId(req), Number(req.query.score ?? 60), Number(req.query.idle_days ?? 14))))));
-router.use('/analytics', analytics);
+router.use('/analytics', rbac.requireModuleAccess('crm_lead_analytics'), analytics);
 
 // ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
 const layouts = express.Router();
