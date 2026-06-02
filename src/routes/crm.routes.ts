@@ -1541,7 +1541,10 @@ imp.post('/commit', wrap(async (req, res) => {
   const result = await importSvc.commitJob(orgId(req), body.job_id);
   res.json({ success: true, data: result });
 }));
-imp.get('/jobs/:id', wrap(async (req, res) => res.json(await importSvc.getJob(orgId(req), req.params.id))));
+imp.get('/jobs/:id', wrap(async (req, res) => {
+  const job = await importSvc.getJob(orgId(req), req.params.id);
+  res.json({ success: true, data: job });
+}));
 imp.get('/jobs', wrap(async (req, res) => res.json(await importSvc.listJobs(orgId(req)))));
 
 // Activity bulk import — parallel three-stage flow to leads import
