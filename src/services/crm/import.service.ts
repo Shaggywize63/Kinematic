@@ -355,7 +355,20 @@ function mapRow(row: Record<string, unknown>, mapping: Record<string, string>): 
   const out: Record<string, unknown> = {};
   for (const [src, dest] of Object.entries(mapping)) {
     if (!dest) continue;
-    out[dest] = row[src];
+    const val = row[src];
+    // First-non-empty wins. When two source columns map to the same
+    // destination (a common auto-mapper accident — e.g. both `email`
+    // and `owner_email` accidentally pointing at `email`), the second
+    // one used to silently overwrite the first, and an empty CSV cell
+    // would wipe a real value. Keep the earlier non-empty value
+    // instead of nuking it.
+    if (val === undefined || val === null) continue;
+    if (typeof val === 'string' && val.trim() === '') continue;
+    const existing = out[dest];
+    if (existing !== undefined && existing !== null && !(typeof existing === 'string' && existing.trim() === '')) {
+      continue;
+    }
+    out[dest] = val;
   }
   return out;
 }
