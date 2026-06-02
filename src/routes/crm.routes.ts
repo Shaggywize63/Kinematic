@@ -1541,7 +1541,11 @@ imp.post('/preview', wrap(async (req, res) => {
 }));
 imp.post('/commit', wrap(async (req, res) => {
   const body = parse(v.importCommitSchema, req.body);
-  const result = await importSvc.commitJob(orgId(req), body.job_id, userId(req));
+  // Pass the importing user's client scope through so every imported lead
+  // inherits the right client_id. Without this, a super-admin importing
+  // while the dashboard's client picker points at a tenant would dump
+  // leads as client_id=null and the tenant view wouldn't show them.
+  const result = await importSvc.commitJob(orgId(req), body.job_id, userId(req), clientId(req));
   res.json({ success: true, data: result });
 }));
 imp.get('/jobs/:id', wrap(async (req, res) => {
