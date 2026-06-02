@@ -172,7 +172,7 @@ export async function previewJob(org_id: string, job_id: string, mapping: Record
  *
  * The processing loop runs as an unawaited promise — Node keeps the work in
  * the event loop until it's done. The FE polls /jobs/:id to track progress
- * (processed_rows / total_rows) and detect completion (status='done' /
+ * (processed_rows / total_rows) and detect completion (status='completed' /
  * 'failed').
  *
  * `user_id` is positional-last + optional so existing call sites
@@ -264,7 +264,12 @@ async function runCommitInBackground(
 
   const summary = { total: rows.length, created, merged, error_count: errors.length };
   await supabaseAdmin.from('crm_import_jobs').update({
-    status: errors.length > 0 && created + merged === 0 ? 'failed' : 'done',
+    // crm_import_jobs.status is enum-constrained to
+    // pending|mapping|previewing|running|completed|failed. Writing 'done'
+    // here used to fail the CHECK constraint silently — the entire final
+    // write got rolled back, the row stayed at status='running' with
+    // summary=null, and the FE polled forever.
+    status: errors.length > 0 && created + merged === 0 ? 'failed' : 'completed',
     processed_rows: rows.length,
     inserted: created,
     skipped: merged + errors.length,
@@ -280,6 +285,29 @@ export async function getJob(org_id: string, job_id: string) {
   const { data, error } = await supabaseAdmin.from('crm_import_jobs').select('*')
     .eq('org_id', org_id).eq('id', job_id).eq('kind', 'leads').single();
   if (error) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
+
+  // Self-heal: if the background loop wrote all rows but the final
+  // summary update failed for any reason (CHECK violation, process
+  // recycle, DB blip), the row stays at status='running' with
+  // summary=null and the FE polls forever. Detect that on poll and
+  // finalize inline so the user never sees a perpetually-stuck import.
+  const row = data as any;
+  const total = (row.total_rows as number) || 0;
+  const processed = (row.processed_rows as number) || 0;
+  if (row.status === 'running' && total > 0 && processed >= total && !row.summary) {
+    const summary = {
+      total,
+      created: row.inserted ?? 0,
+      merged: row.skipped ?? 0,
+      error_count: Array.isArray(row.errors) ? row.errors.length : 0,
+    };
+    const { data: healed } = await supabaseAdmin
+      .from('crm_import_jobs')
+      .update({ status: 'completed', summary, data: null })
+      .eq('id', job_id).eq('org_id', org_id)
+      .select('*').single();
+    return healed ?? { ...row, status: 'completed', summary };
+  }
   return data;
 }
 
