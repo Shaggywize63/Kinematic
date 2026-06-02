@@ -1,2 +1,2 @@
-2026-06-02b: Trigger redeploy to pick up commit 5e7e16e
-(leads list: owner-OR-city visibility; imported city-less leads visible to owners & admins).
+2026-06-02c: Trigger redeploy to pick up commit ada02ca
+(login response now includes assigned_city_names).
