@@ -1,2 +1,2 @@
-2026-05-17: Trigger redeploy to pick up commit 07a636d
-(15 Lead Analytics endpoints + /dashboard-layouts CRUD + markLeadAsWon).
+2026-06-02: Trigger redeploy to pick up commit f360c1f
+(role-based module RBAC + role-tree hierarchy visibility; data_scope='all' tenant-wide).
