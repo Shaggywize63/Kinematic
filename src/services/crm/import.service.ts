@@ -166,31 +166,50 @@ export async function previewJob(org_id: string, job_id: string, mapping: Record
 }
 
 /**
- * Runs the import inline (no Edge Function dispatch) so we get an atomic
- * summary back to the dashboard. For each row: apply mapping → call
- * findOrCreateLead → bucket as created or merged. Errors per row are
- * collected and returned without aborting the rest of the import.
+ * Kicks off the import in the background and returns the job row IMMEDIATELY
+ * (status='running', processed_rows=0). Long-running imports would otherwise
+ * exceed the Railway request timeout and the FE would never see the result.
+ *
+ * The processing loop runs as an unawaited promise — Node keeps the work in
+ * the event loop until it's done. The FE polls /jobs/:id to track progress
+ * (processed_rows / total_rows) and detect completion (status='done' /
+ * 'failed').
  *
  * `user_id` is positional-last + optional so existing call sites
- * (crm.routes.ts:733 `commitJob(orgId(req), body.job_id)`) keep working
- * without a route-file edit. When supplied, it stamps `created_by` on
- * the auto-created lead source so audit logs attribute the first
- * import correctly.
- *
- * Returns the updated job row so the dashboard can display
- * job.summary.{total, created, merged, error_count}.
+ * (crm.routes.ts:1521 `commitJob(orgId(req), body.job_id)`) keep working
+ * without a route-file edit. When supplied, it stamps `created_by` on the
+ * auto-created lead source so audit logs attribute the first import
+ * correctly.
  */
 export async function commitJob(org_id: string, job_id: string, user_id: string | null = null) {
   const { data: job, error: loadErr } = await supabaseAdmin.from('crm_import_jobs').select('*')
     .eq('org_id', org_id).eq('id', job_id).eq('kind', 'leads').single();
   if (loadErr || !job) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
 
-  await supabaseAdmin.from('crm_import_jobs').update({ status: 'running' }).eq('id', job_id);
-
-  const mapping = (job.mapping ?? {}) as Record<string, string>;
   const stored = (job.data ?? {}) as { headers?: string[]; rows?: Record<string, unknown>[] };
   const rows = stored.rows ?? [];
 
+  // Flip to running + reset counters so the FE's first poll sees a clean state.
+  await supabaseAdmin.from('crm_import_jobs').update({
+    status: 'running', processed_rows: 0, inserted: 0, skipped: 0,
+    total_rows: rows.length,
+  }).eq('id', job_id);
+
+  // Fire-and-forget. Node keeps this in the event loop until it finishes,
+  // even after the HTTP response has been returned to the FE.
+  void runCommitInBackground(org_id, job_id, user_id, rows, (job.mapping ?? {}) as Record<string, string>, Array.isArray(job.errors) ? job.errors : []);
+
+  return { ...job, status: 'running', processed_rows: 0, total_rows: rows.length };
+}
+
+async function runCommitInBackground(
+  org_id: string,
+  job_id: string,
+  user_id: string | null,
+  rows: Record<string, unknown>[],
+  mapping: Record<string, string>,
+  existingErrors: any[],
+) {
   // Auto-create or fetch the single "Excel/CSV Import" lead source per org
   // so every import attributes its leads consistently. Reports and
   // assignment rules can then target this source by name.
@@ -199,6 +218,9 @@ export async function commitJob(org_id: string, job_id: string, user_id: string 
   let created = 0;
   let merged  = 0;
   const errors: Array<{ row: number; reason: string }> = [];
+  // Write progress every PROGRESS_BATCH rows so the FE's poll sees the bar
+  // tick. 25 keeps the DB write load light even on 10k-row imports.
+  const PROGRESS_BATCH = 25;
 
   for (let i = 0; i < rows.length; i++) {
     const mapped = mapRow(rows[i], mapping);
@@ -215,50 +237,43 @@ export async function commitJob(org_id: string, job_id: string, user_id: string 
       notes:      textOrNull(mapped.notes),
     };
 
-    // Skip rows with no identity at all — every other column comes through
-    // as custom_fields on dedup-orchestrator anyway, but if there's no
-    // name/email/phone there's nothing to do.
     if (!normalized.email && !normalized.phone && !normalized.first_name && !normalized.last_name) {
-      errors.push({ row: i + 2 /* +2 to 1-index past the header row */, reason: 'No name, email, or phone' });
-      continue;
+      errors.push({ row: i + 2, reason: 'No name, email, or phone' });
+    } else {
+      try {
+        const r = await findOrCreateLead({
+          org_id, source_id, normalized,
+          integration_id: null, raw_event_id: null, user_id,
+        });
+        if (r.was_new) created++; else merged++;
+      } catch (e) {
+        errors.push({ row: i + 2, reason: (e as Error).message?.slice(0, 200) ?? 'unknown' });
+      }
     }
 
-    try {
-      const r = await findOrCreateLead({
-        org_id,
-        source_id,
-        normalized,
-        integration_id: null,
-        raw_event_id: null,
-        user_id,
-      });
-      if (r.was_new) created++; else merged++;
-    } catch (e) {
-      errors.push({ row: i + 2, reason: (e as Error).message?.slice(0, 200) ?? 'unknown' });
+    // Flush progress periodically — and at the end so the final tick lands
+    // before the status flip below.
+    if ((i + 1) % PROGRESS_BATCH === 0 || i === rows.length - 1) {
+      await supabaseAdmin.from('crm_import_jobs').update({
+        processed_rows: i + 1,
+        inserted: created,
+        skipped: merged + errors.length,
+      }).eq('id', job_id);
     }
   }
 
   const summary = { total: rows.length, created, merged, error_count: errors.length };
-  // Preserve any errors from upload-time (e.g. row-cap warnings) by
-  // appending instead of overwriting.
-  const existingErrors = Array.isArray(job.errors) ? job.errors : [];
-
-  const { data: updated, error: updErr } = await supabaseAdmin.from('crm_import_jobs')
-    .update({
-      status: errors.length > 0 && created + merged === 0 ? 'failed' : 'done',
-      processed_rows: rows.length,
-      inserted: created,
-      skipped: merged + errors.length,
-      errors: [...existingErrors, ...errors.slice(0, 100)], // cap stored errors at 100 to keep the row small
-      summary,
-      // Free the parsed-rows payload now that we're done — no need to keep ~10k row JSON around.
-      data: null,
-    })
-    .eq('org_id', org_id).eq('id', job_id)
-    .select('*').single();
-  if (updErr) throw new AppError(500, updErr.message, 'DB_ERROR');
-
-  return updated;
+  await supabaseAdmin.from('crm_import_jobs').update({
+    status: errors.length > 0 && created + merged === 0 ? 'failed' : 'done',
+    processed_rows: rows.length,
+    inserted: created,
+    skipped: merged + errors.length,
+    errors: [...existingErrors, ...errors.slice(0, 100)],
+    summary,
+    // Free the parsed-rows payload now that we're done — no need to keep
+    // ~10k row JSON around once the import has run.
+    data: null,
+  }).eq('id', job_id);
 }
 
 export async function getJob(org_id: string, job_id: string) {
