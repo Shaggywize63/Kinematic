@@ -83,6 +83,7 @@ import distGstinRoutes         from './routes/distribution/gstin.routes';
 import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
 import verifiedSendersRoutes   from './routes/crm/verified-senders.routes';
+import verifiedSendersPublicRoutes from './routes/crm/verified-senders-public.routes';
 import emailAlertsRoutes       from './routes/crm/email-alerts.routes';
 import emailTrackingRoutes     from './routes/crm/email-tracking.routes';
 
@@ -410,6 +411,11 @@ app.use(`${V1}/crm/email-alerts`,             requireAuth, emailAlertsRoutes);
 // the inbound click doesn't bounce on requireAuth. The token in the path
 // IS the auth: it's a 32-char secret stamped onto the message at send time.
 app.use(`${V1}/crm/emails/track`,             emailTrackingRoutes);
+// Public verified-sender confirmation — split out from the auth-gated
+// verified-senders router because the recipient clicking the link in
+// their inbox has no Bearer token. Same shape as email-tracking above;
+// the 48+ char token in the URL path is the auth.
+app.use(`${V1}/crm/verified-senders/verify`,  verifiedSendersPublicRoutes);
 
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
