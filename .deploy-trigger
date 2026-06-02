@@ -1,2 +1,2 @@
-2026-06-02: Trigger redeploy to pick up commit f360c1f
-(role-based module RBAC + role-tree hierarchy visibility; data_scope='all' tenant-wide).
+2026-06-02b: Trigger redeploy to pick up commit 5e7e16e
+(leads list: owner-OR-city visibility; imported city-less leads visible to owners & admins).
