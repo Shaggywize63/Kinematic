@@ -9,7 +9,9 @@ import { logger } from '../../lib/logger';
 // long-lived state to worry about.
 
 const gateCache = new WeakMap<AuthRequest, Promise<boolean>>();
-const subtreeCache = new WeakMap<AuthRequest, Promise<string[]>>();
+// null = "no owner restriction" (the caller's data_scope is 'all'); an array
+// = the explicit set of owner ids the caller may see.
+const subtreeCache = new WeakMap<AuthRequest, Promise<string[] | null>>();
 
 /**
  * True when the caller's client has opted into hierarchy-based scoping
@@ -47,33 +49,47 @@ export async function useHierarchyRbac(req: AuthRequest): Promise<boolean> {
  * (Business Head → Area Sales Manager → Area Sales Officer → …) and assign
  * users to those roles, leaving supervisor_id empty.
  *
- * Two layers combine:
- *   1. org_role.data_scope = 'own'  → the caller sees ONLY their own records.
- *      A frontline rep (Area Sales Officer / Consumer Champion) is capped to
- *      themselves regardless of how many peers share their designation.
- *   2. data_scope 'team' | 'all'    → the caller (a manager) sees themselves
- *      plus every user whose role is a DESCENDANT of theirs in the role tree.
- *      A manager therefore sees down the tree, never up to their own
- *      supervisor or sideways to a sibling branch. Backed by the SQL function
- *      public.role_subtree_user_ids.
+ * Driven by the role's data_scope (org_roles.data_scope):
+ *   - 'own'  → the caller sees ONLY their own records. A frontline rep is
+ *              capped to themselves regardless of peers sharing the role.
+ *   - 'team' → the caller sees themselves plus every user whose role is a
+ *              DESCENDANT of theirs in the role tree (down the tree only,
+ *              never up to a supervisor or sideways). Backed by the SQL
+ *              function public.role_subtree_user_ids.
+ *   - 'all'  → NO owner restriction (returns null). The caller — an admin /
+ *              tenant-wide role such as CRM Admin or Business Head — sees
+ *              every owner's records. City scope still applies on top, so a
+ *              user with all CRM modules + all cities sees all leads, while a
+ *              user with all modules but a narrow city set still only sees
+ *              that city's leads. This is what makes an admin-level role with
+ *              no descendants (a leaf in the tree) see the whole tenant rather
+ *              than just themselves.
  *
+ * Returns null = "no owner filter"; an array = the explicit visible-owner set.
  * Failures fall back to "the caller alone" rather than throwing — read-scope
  * must always degrade safely (showing less data, never more, and never an
  * error from the list endpoint).
  */
-export async function subtreeUserIds(req: AuthRequest): Promise<string[]> {
+export async function subtreeUserIds(req: AuthRequest): Promise<string[] | null> {
   const cached = subtreeCache.get(req);
-  if (cached) return cached;
+  if (cached !== undefined) return cached;
   const userId = req.user?.id;
   if (!userId) return [];
-  // 'own'-scoped designations never see beyond themselves — short-circuit
-  // before the role-tree query so a frontline rep can't see a peer's leads.
-  if (req.user?.org_role_data_scope === 'own') {
-    const self = Promise.resolve([userId]);
+  const scope = req.user?.org_role_data_scope ?? 'all';
+  // 'all' → tenant-wide: no owner restriction (city scope still applies).
+  if (scope === 'all') {
+    const none = Promise.resolve<string[] | null>(null);
+    subtreeCache.set(req, none);
+    return none;
+  }
+  // 'own' → only the caller's own records.
+  if (scope === 'own') {
+    const self = Promise.resolve<string[] | null>([userId]);
     subtreeCache.set(req, self);
     return self;
   }
-  const p = (async () => {
+  // 'team' → the caller plus their role-tree descendants.
+  const p = (async (): Promise<string[] | null> => {
     const { data, error } = await supabaseAdmin.rpc('role_subtree_user_ids', { p_user_id: userId });
     if (error) {
       logger.warn(`role_subtree_user_ids RPC failed for ${userId}: ${error.message}`);
