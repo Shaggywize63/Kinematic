@@ -19,7 +19,7 @@ import { complete as aiComplete } from './ai/aiClient';
 import { findOrCreateLead, type NormalizedLead } from './integrations/dedup.orchestrator';
 
 const CANONICAL_FIELDS = [
-  'first_name','last_name','email','phone','company','title','source','country','city','industry','notes',
+  'first_name','last_name','email','phone','company','title','source','country','city','industry','notes','owner_email',
 ];
 
 // Cap on rows persisted to crm_import_jobs.data so the JSONB column stays
@@ -93,6 +93,11 @@ async function suggestMapping(org_id: string, headers: string[]): Promise<Record
     const k = h.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (/^(firstname|fname|givenname|first)$/.test(k)) heuristic[h] = 'first_name';
     else if (/^(lastname|lname|surname|familyname|last)$/.test(k)) heuristic[h] = 'last_name';
+    // Owner / assignee email MUST be checked before the generic email rule,
+    // otherwise "owner_email" collapses onto `email` and the lead loses its
+    // assignment (every imported lead then falls back to the importer).
+    else if (/(owner|assignee|assignedto|leadowner|repemail|salesrep)/.test(k) && /(email|mail)/.test(k)) heuristic[h] = 'owner_email';
+    else if (/^(owneremail|leadowner|assignee|assignedto)$/.test(k)) heuristic[h] = 'owner_email';
     else if (/(email|mail)/.test(k)) heuristic[h] = 'email';
     else if (/(phone|mobile|tel)/.test(k)) heuristic[h] = 'phone';
     else if (/(company|org|account|business)/.test(k)) heuristic[h] = 'company';
@@ -221,6 +226,13 @@ async function runCommitInBackground(
   // assignment rules can then target this source by name.
   const source_id = await getOrCreateImportSource(org_id, user_id);
 
+  // Resolve the CSV's `owner_email` column to user ids up front. One query
+  // for the whole org (tens of users, not thousands) → an email→id map,
+  // so the parallel row loop below stays lookup-free and race-free. Without
+  // this, owner_email was silently dropped and every lead fell back to the
+  // importer as owner.
+  const ownerByEmail = await buildOwnerEmailMap(org_id);
+
   let created = 0;
   let merged  = 0;
   const errors: Array<{ row: number; reason: string }> = [];
@@ -258,9 +270,15 @@ async function runCommitInBackground(
         errors.push({ row: i + 2, reason: 'No name, email, or phone' });
         return;
       }
+      // Map the row's owner_email → user id. When present and matched, the
+      // lead is assigned to that user; when absent or unmatched, owner_id
+      // stays null and createLead's assignment chain (rule → creator →
+      // default owner) takes over as before.
+      const ownerEmail = textOrNull(mapped.owner_email);
+      const owner_id = ownerEmail ? (ownerByEmail.get(ownerEmail.toLowerCase()) ?? null) : null;
       try {
         const r = await findOrCreateLead({
-          org_id, source_id, normalized,
+          org_id, source_id, normalized, owner_id,
           integration_id: null, raw_event_id: null, user_id,
           client_id: client_id ?? undefined,
         });
@@ -339,6 +357,22 @@ export async function listJobs(org_id: string) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+// Builds a lowercased email → user-id map for the org so the import loop can
+// resolve each row's `owner_email` to an owner without a per-row SELECT.
+// Users with no email are skipped. Returns an empty map on error so the
+// import degrades to the previous "assign to creator" behaviour rather than
+// failing outright.
+async function buildOwnerEmailMap(org_id: string): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const { data: users } = await supabaseAdmin.from('users')
+    .select('id, email').eq('org_id', org_id);
+  for (const u of users ?? []) {
+    const email = (u as { email?: string | null }).email;
+    if (email) map.set(String(email).toLowerCase().trim(), (u as { id: string }).id);
+  }
+  return map;
+}
 
 async function getOrCreateImportSource(org_id: string, user_id: string | null): Promise<string> {
   const { data: existing } = await supabaseAdmin.from('crm_lead_sources')
