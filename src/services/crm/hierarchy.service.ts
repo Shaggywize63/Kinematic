@@ -41,24 +41,48 @@ export async function useHierarchyRbac(req: AuthRequest): Promise<boolean> {
 }
 
 /**
- * Returns the caller's own id plus the id of every direct/indirect
- * report (via users.supervisor_id). Backed by the SQL function
- * public.user_subtree_ids. Failures fall back to "the caller alone"
- * rather than throwing — read-scope must always degrade safely (showing
- * less data, never more, and never an error from the list endpoint).
+ * Returns the set of user ids whose records the caller may see, derived from
+ * the org-role tree (org_roles.parent_id) rather than users.supervisor_id —
+ * because tenants configure their hierarchy as a tree of designations
+ * (Business Head → Area Sales Manager → Area Sales Officer → …) and assign
+ * users to those roles, leaving supervisor_id empty.
+ *
+ * Two layers combine:
+ *   1. org_role.data_scope = 'own'  → the caller sees ONLY their own records.
+ *      A frontline rep (Area Sales Officer / Consumer Champion) is capped to
+ *      themselves regardless of how many peers share their designation.
+ *   2. data_scope 'team' | 'all'    → the caller (a manager) sees themselves
+ *      plus every user whose role is a DESCENDANT of theirs in the role tree.
+ *      A manager therefore sees down the tree, never up to their own
+ *      supervisor or sideways to a sibling branch. Backed by the SQL function
+ *      public.role_subtree_user_ids.
+ *
+ * Failures fall back to "the caller alone" rather than throwing — read-scope
+ * must always degrade safely (showing less data, never more, and never an
+ * error from the list endpoint).
  */
 export async function subtreeUserIds(req: AuthRequest): Promise<string[]> {
   const cached = subtreeCache.get(req);
   if (cached) return cached;
   const userId = req.user?.id;
   if (!userId) return [];
+  // 'own'-scoped designations never see beyond themselves — short-circuit
+  // before the role-tree query so a frontline rep can't see a peer's leads.
+  if (req.user?.org_role_data_scope === 'own') {
+    const self = Promise.resolve([userId]);
+    subtreeCache.set(req, self);
+    return self;
+  }
   const p = (async () => {
-    const { data, error } = await supabaseAdmin.rpc('user_subtree_ids', { p_user_id: userId });
+    const { data, error } = await supabaseAdmin.rpc('role_subtree_user_ids', { p_user_id: userId });
     if (error) {
-      logger.warn(`user_subtree_ids RPC failed for ${userId}: ${error.message}`);
+      logger.warn(`role_subtree_user_ids RPC failed for ${userId}: ${error.message}`);
       return [userId];
     }
-    return (data ?? []).map((r: any) => r.user_id as string);
+    const ids = (data ?? []).map((r: any) => r.user_id as string);
+    // Guarantee the caller is always included even if their role row is
+    // missing/misconfigured, so a manager never loses sight of their own work.
+    return ids.includes(userId) ? ids : [userId, ...ids];
   })();
   subtreeCache.set(req, p);
   return p;
