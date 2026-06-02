@@ -231,6 +231,19 @@ export const login = asyncHandler<Request>(async (req, res) => {
   const permissions = permsData?.map(p => p.module_id) || [];
   console.log(`[DEBUG] Login successful for ${email}. Permissions: ${permissions.length}`);
 
+  // City NAMES the user is assigned to (resolved from user_city_assignments
+  // → cities.name). The CRM city-scope picker in the dashboard reads this
+  // off the stored login profile to show ONLY the user's assigned cities;
+  // without it the picker falls back to listing every tenant city. Mirrors
+  // the same resolution the auth middleware does for /auth/me.
+  const { data: cityRows } = await supabaseAdmin
+    .from('user_city_assignments')
+    .select('cities!city_id(name)')
+    .eq('user_id', userProfile.id);
+  const assignedCityNames = ((cityRows || []) as Array<{ cities: { name?: string } | { name?: string }[] | null }>)
+    .map((row) => (Array.isArray(row.cities) ? row.cities[0] : row.cities)?.name)
+    .filter((n): n is string => !!n);
+
   // Resolve module entitlements (per-client SKU + universal modules).
   const entitlements = await resolveEntitlements({
     role: userProfile.role,
@@ -295,6 +308,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
     user: {
       ...userProfile,
       permissions,
+      assigned_city_names: assignedCityNames,
       enabled_modules: entitlements.enabled_modules,
       enabled_packages: entitlements.enabled_packages,
       location_ping_interval_seconds: locationPingIntervalSeconds,
