@@ -1,2 +1,1 @@
-2026-06-02d: Trigger redeploy to pick up commit 3e2fa9a
-(lead latitude/longitude + bulk-coordinates backfill endpoint).
+2026-06-02e: Trigger redeploy to pick up #85 (Lead ID column in leads CSV export).
