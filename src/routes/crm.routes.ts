@@ -490,6 +490,15 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
 }));
+// Bulk lat/long backfill for existing leads. Body: { rows: [{ id|email|phone,
+// latitude, longitude }] }. Matched to leads by id → email → phone, all
+// org-scoped. Powers the dashboard "upload coordinates" tool.
+leads.post('/bulk-coordinates', wrap(async (req, res) => {
+  const body = parse(v.leadBulkCoordinatesSchema, req.body);
+  // Schema requires latitude/longitude on every row (refine guarantees a
+  // matcher too); cast past zod's optional-number inference.
+  res.json(await leadsSvc.bulkUpdateCoordinates(orgId(req), body.rows as leadsSvc.BulkCoordinateRow[], userId(req)));
+}));
 // Mark a lead as won (status=converted + lifecycle_stage=customer + won_reason).
 // Distinct from /convert which spawns Account+Contact+Deal — this is the
 // lightweight "rep flagged the win" path used by mobile + dashboard.
