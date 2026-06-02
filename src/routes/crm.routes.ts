@@ -1541,7 +1541,7 @@ imp.post('/preview', wrap(async (req, res) => {
 }));
 imp.post('/commit', wrap(async (req, res) => {
   const body = parse(v.importCommitSchema, req.body);
-  const result = await importSvc.commitJob(orgId(req), body.job_id);
+  const result = await importSvc.commitJob(orgId(req), body.job_id, userId(req));
   res.json({ success: true, data: result });
 }));
 imp.get('/jobs/:id', wrap(async (req, res) => {
