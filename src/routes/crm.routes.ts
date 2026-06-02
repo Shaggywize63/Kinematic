@@ -39,7 +39,7 @@ import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
-import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
+import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 
 const router: Router = express.Router();
@@ -294,10 +294,13 @@ leads.get('/', wrap(async (req, res) => {
   const { rows, total, page, limit } = await leadsSvc.listLeadsWithCount(
     orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds }
   );
-  // Owner UUIDs → owner_name; source UUIDs → source_name. Both columns
-  // are rendered by the leads list table; source_name was previously
-  // missing on this hot path so the Source column always rendered "—".
-  const stamped = await stampSourceNames(await stampOwnerNames(rows));
+  // Owner UUIDs → owner_name; source UUIDs → source_name; created_by
+  // UUIDs → created_by_name. The created_by stamp lets the leads list
+  // surface "Uploaded by" without the FE having to resolve user names
+  // itself.
+  const stamped = await stampCreatedByNames(
+    (await stampSourceNames(await stampOwnerNames(rows))) as unknown as Array<Record<string, unknown> & { created_by?: string | null; created_by_name?: string | null }>
+  );
   res.json({
     success: true,
     data: stamped,
