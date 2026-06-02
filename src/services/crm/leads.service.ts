@@ -199,7 +199,14 @@ export async function listLeadsWithCount(
   }
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
-  q = q.order('score', { ascending: false }).order('created_at', { ascending: false })
+  // Default sort: latest-update first so a rep typing in a note (or any
+  // backend event that bumps latest_update_at) bubbles the row to the
+  // top. Falls back to updated_at then score so leads with no updates
+  // yet still get a sensible order. Existing `sort=score` callers stay
+  // honoured via the explicit filter handling above.
+  q = q.order('latest_update_at', { ascending: false, nullsFirst: false })
+       .order('updated_at', { ascending: false })
+       .order('score', { ascending: false })
        .range((page - 1) * limit, page * limit - 1);
   const { data, error, count } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');

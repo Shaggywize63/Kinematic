@@ -218,44 +218,58 @@ async function runCommitInBackground(
   let created = 0;
   let merged  = 0;
   const errors: Array<{ row: number; reason: string }> = [];
+  // Parallelise findOrCreateLead. Each row was ~150-400ms sequentially
+  // (3-6 DB roundtrips for hash lookup + insert + attribution); 8-way
+  // parallel × in-process JS event loop drops a 1130-row import from
+  // ~3-5 min to ~25-40s. Pool stays well under Supabase's default
+  // connection ceiling, and per-row writes don't conflict because each
+  // hits a different lead row.
+  const CONCURRENCY = 10;
   // Write progress every PROGRESS_BATCH rows so the FE's poll sees the bar
-  // tick. 25 keeps the DB write load light even on 10k-row imports.
-  const PROGRESS_BATCH = 25;
+  // tick. 50 keeps the DB write load light even on 10k-row imports.
+  const PROGRESS_BATCH = 50;
 
-  for (let i = 0; i < rows.length; i++) {
-    const mapped = mapRow(rows[i], mapping);
-    const normalized: NormalizedLead = {
-      first_name: textOrNull(mapped.first_name),
-      last_name:  textOrNull(mapped.last_name),
-      email:      textOrNull(mapped.email),
-      phone:      textOrNull(mapped.phone),
-      company:    textOrNull(mapped.company),
-      title:      textOrNull(mapped.title),
-      industry:   textOrNull(mapped.industry),
-      country:    textOrNull(mapped.country),
-      city:       textOrNull(mapped.city),
-      notes:      textOrNull(mapped.notes),
-    };
+  let nextProgressFlush = PROGRESS_BATCH;
+  for (let chunkStart = 0; chunkStart < rows.length; chunkStart += CONCURRENCY) {
+    const chunk = rows.slice(chunkStart, chunkStart + CONCURRENCY);
+    await Promise.all(chunk.map(async (rawRow, j) => {
+      const i = chunkStart + j;
+      const mapped = mapRow(rawRow, mapping);
+      const normalized: NormalizedLead = {
+        first_name: textOrNull(mapped.first_name),
+        last_name:  textOrNull(mapped.last_name),
+        email:      textOrNull(mapped.email),
+        phone:      textOrNull(mapped.phone),
+        company:    textOrNull(mapped.company),
+        title:      textOrNull(mapped.title),
+        industry:   textOrNull(mapped.industry),
+        country:    textOrNull(mapped.country),
+        city:       textOrNull(mapped.city),
+        notes:      textOrNull(mapped.notes),
+      };
 
-    if (!normalized.email && !normalized.phone && !normalized.first_name && !normalized.last_name) {
-      errors.push({ row: i + 2, reason: 'No name, email, or phone' });
-    } else {
+      if (!normalized.email && !normalized.phone && !normalized.first_name && !normalized.last_name) {
+        errors.push({ row: i + 2, reason: 'No name, email, or phone' });
+        return;
+      }
       try {
         const r = await findOrCreateLead({
           org_id, source_id, normalized,
           integration_id: null, raw_event_id: null, user_id,
         });
+        // Counter increments in JS are safe under Promise.all — the event
+        // loop runs synchronous code without preemption between awaits.
         if (r.was_new) created++; else merged++;
       } catch (e) {
         errors.push({ row: i + 2, reason: (e as Error).message?.slice(0, 200) ?? 'unknown' });
       }
-    }
+    }));
 
-    // Flush progress periodically — and at the end so the final tick lands
-    // before the status flip below.
-    if ((i + 1) % PROGRESS_BATCH === 0 || i === rows.length - 1) {
+    const processed = Math.min(chunkStart + chunk.length, rows.length);
+    if (processed >= nextProgressFlush || processed === rows.length) {
+      nextProgressFlush = processed + PROGRESS_BATCH;
       await supabaseAdmin.from('crm_import_jobs').update({
-        processed_rows: i + 1,
+        processed_rows: processed,
         inserted: created,
         skipped: merged + errors.length,
       }).eq('id', job_id);

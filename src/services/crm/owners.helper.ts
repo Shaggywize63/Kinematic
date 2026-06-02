@@ -82,6 +82,34 @@ export async function stampSourceName<T extends SourceRow>(row: T | null | undef
   return decorated;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Created-by-name decoration. Leads and other crm_* rows carry created_by
+// (FK to users). For "who uploaded this lead?" the FE wants the user's
+// name, not the raw uuid. Same batched-IN() round-trip shape as the
+// owner/source stamps; reuses the result map when both are hit on the
+// same set of rows by hydrating user names once.
+// ─────────────────────────────────────────────────────────────────────
+
+type CreatedByRow = { created_by?: string | null; created_by_name?: string | null };
+
+export async function stampCreatedByNames<T extends CreatedByRow>(rows: T[]): Promise<T[]> {
+  if (!rows || rows.length === 0) return rows;
+  const ids = Array.from(new Set(rows.map((r) => r.created_by).filter(Boolean) as string[]));
+  if (ids.length === 0) return rows;
+  const { data: users } = await supabaseAdmin
+    .from('users')
+    .select('id, name, email')
+    .in('id', ids);
+  const nameById = new Map<string, string>();
+  for (const u of users ?? []) {
+    nameById.set((u as any).id, ((u as any).name as string) || ((u as any).email as string) || '');
+  }
+  return rows.map((r) => ({
+    ...r,
+    created_by_name: r.created_by ? (nameById.get(r.created_by) ?? r.created_by_name ?? null) : (r.created_by_name ?? null),
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // Linked-entity name decorator. Activities (and anything else with a FK to a
 // lead / contact / account / deal) get pretty `*_name` fields so the UI can
