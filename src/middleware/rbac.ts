@@ -35,6 +35,82 @@ export function requireModule(moduleName: string) {
   };
 }
 
+// Methods that only read data — everything else is treated as a write and
+// gated against the role's permissions_write set.
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Returns true when the caller has an explicit, role-driven permission set
+ * we should enforce strictly. Users with an org_role attached are governed
+ * by org_roles.permissions / permissions_write; users without one fall back
+ * to the legacy entitlement-only behaviour so existing admin accounts that
+ * were never given a granular role keep working unchanged.
+ */
+function hasRoleGovernedPerms(user: AuthRequest['user']): boolean {
+  // Only enforce strictly when the role actually carries a permissions array.
+  // A role whose `permissions` is NULL (never configured) is treated as
+  // unconfigured and falls back to the legacy path, so a misconfiguration
+  // can't silently lock a user out of every module.
+  return !!(user && (user as any).org_role_id && Array.isArray(user.role_permissions));
+}
+
+/**
+ * Granular, method-aware module gate. Unlike requireModule (which gates the
+ * CRM *package* and is satisfied by a client-level entitlement), this enforces
+ * the per-designation grants the Roles UI configures:
+ *
+ *   - GET/HEAD  → module must be in the role's read permissions.
+ *   - mutating  → module must be in the role's permissions_write set.
+ *
+ * Entitlement is still a necessary upper bound (the client must own the SKU),
+ * but it is no longer *sufficient*: a user whose role omits `crm_settings`
+ * can no longer read or write settings just because the client is entitled.
+ *
+ * Users without an org_role (legacy admins) keep the old entitlement-or-
+ * per-user-permission behaviour so this change can't lock them out.
+ */
+export function requireModuleAccess(moduleName: string) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) return unauthorized(res);
+    if (isDemo(req.user)) return next();
+
+    const role = req.user.role?.toLowerCase();
+    if (role === 'super_admin') return next();
+
+    const entitlements = req.user.enabled_modules || [];
+    // Entitlement gate: the client must own the module SKU at all.
+    if (entitlements.length > 0 && !entitlements.includes(moduleName)) {
+      return forbidden(res, `Module not enabled for your account: ${moduleName}`);
+    }
+
+    const isWrite = !READ_METHODS.has(req.method.toUpperCase());
+
+    if (hasRoleGovernedPerms(req.user)) {
+      const readPerms = req.user.role_permissions || [];
+      // Fall back to read perms when a role has no explicit write list, so a
+      // misconfigured (empty) permissions_write doesn't silently freeze writes
+      // for a role that can clearly read+act on the module.
+      const writePerms = (req.user.role_permissions_write && req.user.role_permissions_write.length > 0)
+        ? req.user.role_permissions_write
+        : readPerms;
+      const perms = isWrite ? writePerms : readPerms;
+      if (perms.includes(moduleName)) return next();
+      return forbidden(
+        res,
+        isWrite
+          ? `You don't have write access to the ${moduleName} module.`
+          : `Access denied: You do not have permission to access the ${moduleName} module.`,
+      );
+    }
+
+    // Legacy path (no org_role): per-user permissions or entitlement suffice.
+    const permissions = req.user.permissions || [];
+    if (permissions.includes(moduleName)) return next();
+    if (entitlements.includes(moduleName)) return next();
+    return forbidden(res, `Access denied: You do not have permission to access the ${moduleName} module.`);
+  };
+}
+
 /**
  * Middleware to enforce city-level data restriction.
  * City Managers only see data for their assigned cities.

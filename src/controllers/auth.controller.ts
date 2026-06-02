@@ -359,20 +359,34 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
       is_active, joined_date, created_at,
       zones!zone_id(id, name, city, meeting_lat, meeting_lng, geofence_radius),
       organisations!org_id(id, name, logo_url),
-      org_role:org_roles!org_role_id(id, name)
+      org_role:org_roles!org_role_id(id, name, permissions, permissions_write, data_scope)
     `)
     .eq('id', req.user.id)
     .single();
 
   if (error) return serverError(res);
 
-  // Fetch permissions separately (Bypass join relationship requirements)
+  // Legacy per-user grants — used only as a fallback when the user has no
+  // org_role attached.
   const { data: permsData } = await supabaseAdmin
     .from('user_module_permissions')
     .select('module_id')
     .eq('user_id', req.user.id);
 
-  const permissions = permsData?.map(p => p.module_id) || [];
+  const userModulePerms = permsData?.map(p => p.module_id) || [];
+
+  // The org_role is the source of truth the Roles UI configures. When the user
+  // has one, expose its read grants as `permissions` (so the dashboard nav hides
+  // modules the role omits) plus `permissions_write` for write-action gating.
+  // Users without a role fall back to the legacy per-user permission list — this
+  // keeps existing admin accounts (no granular role) behaving as before.
+  const orgRole = (data as any)?.org_role as
+    | { permissions?: string[]; permissions_write?: string[] }
+    | null
+    | undefined;
+  const hasRole = !!(data as any)?.org_role_id && Array.isArray(orgRole?.permissions);
+  const permissions = hasRole ? (orgRole!.permissions as string[]) : userModulePerms;
+  const permissions_write = hasRole ? (orgRole!.permissions_write ?? []) : userModulePerms;
 
   const entitlements = await resolveEntitlements({
     role: (data as any)?.role,
@@ -386,6 +400,7 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
   const result = {
     ...data,
     permissions,
+    permissions_write,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
     location_ping_interval_seconds: locationPingIntervalSeconds,

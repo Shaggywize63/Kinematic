@@ -30,6 +30,13 @@ export interface AuthUser {
   // supervisor-of-direct-reports pattern (treated as 'all' today);
   // 'all' = visibility within the org/client tenant scope.
   org_role_data_scope?: 'own' | 'team' | 'all';
+  // Granular module grants resolved from the user's org_role (org_roles.permissions
+  // / permissions_write). These are the source of truth the Roles UI configures —
+  // `permissions` above (user_module_permissions) is the legacy per-user fallback
+  // used only when the user has no org_role attached. requireModuleAccess() reads
+  // these to gate reads (GET) vs writes (POST/PATCH/DELETE) per module.
+  role_permissions?: string[];
+  role_permissions_write?: string[];
   enabled_modules?: string[];   // module IDs enabled for this user's client (entitlement)
   enabled_packages?: string[];  // package SKUs enabled for this user's client
   // Single-device login enforcement. Set by /auth/login on mobile platforms;
