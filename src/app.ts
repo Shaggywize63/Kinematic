@@ -410,8 +410,8 @@ app.use(`${V1}/crm/leads`,                    requireAuth, leadUpdatesRoutes);
 app.use(`${V1}/crm/verified-senders/verify`,  verifiedSendersPublicRoutes);
 // Verified senders + email alerts — same prefix-before-catch-all pattern
 // so /crm/verified-senders/:id doesn't fall into a stray /crm/:id handler.
-app.use(`${V1}/crm/verified-senders`,         requireAuth, verifiedSendersRoutes);
-app.use(`${V1}/crm/email-alerts`,             requireAuth, emailAlertsRoutes);
+app.use(`${V1}/crm/verified-senders`,         requireAuth, requireModule('crm_email'), verifiedSendersRoutes);
+app.use(`${V1}/crm/email-alerts`,             requireAuth, requireModule('crm_email'), emailAlertsRoutes);
 
 // Public email tracking — recipients click these from their inbox without
 // an Authorization header. Mounted BEFORE the auth-gated crm router so
