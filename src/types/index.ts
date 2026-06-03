@@ -49,6 +49,16 @@ export interface AuthUser {
 export type AuthRequest = Request & {
   user?: AuthUser;
   accessToken?: string;
+  // Per-request CRM analytics visibility scope (assigned cities + role
+  // hierarchy), computed once by the analytics router middleware. Structural
+  // match for analytics.service AnalyticsScope (kept inline to avoid a
+  // circular import).
+  analyticsScope?: {
+    effectiveCities?: string[] | null;
+    visibleOwnerIds?: string[] | null;
+    selfOwnerId?: string | null;
+    includeNullCity?: boolean;
+  };
 };
 
 export type ApiResponse<T = unknown> = {

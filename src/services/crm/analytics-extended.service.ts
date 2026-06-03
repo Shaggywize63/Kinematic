@@ -4,6 +4,7 @@
  * to drop straight into a Recharts component on the dashboard.
  */
 import { supabaseAdmin } from '../../lib/supabase';
+import { applyLeadScope, applyOwnerScope, type AnalyticsScope } from './analytics.service';
 
 export interface DateRange { from?: string; to?: string }
 
@@ -16,7 +17,7 @@ function withClient<T>(q: T, client_id: string | null): T {
 function monthKey(iso: string): string { return iso.slice(0, 7); }
 
 // 1. Lead Velocity Rate — MoM % growth in qualified leads
-export async function leadVelocity(org_id: string, client_id: string | null = null, months_back = 6) {
+export async function leadVelocity(org_id: string, client_id: string | null = null, months_back = 6, scope?: AnalyticsScope) {
   const since = new Date();
   since.setUTCMonth(since.getUTCMonth() - months_back);
   since.setUTCDate(1);
@@ -27,6 +28,7 @@ export async function leadVelocity(org_id: string, client_id: string | null = nu
     .eq('org_id', org_id).is('deleted_at', null)
     .gte('created_at', since.toISOString());
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   const { data } = await q;
 
   const buckets = new Map<string, { total: number; qualified: number }>();
@@ -47,7 +49,7 @@ export async function leadVelocity(org_id: string, client_id: string | null = nu
 }
 
 // 2. Time-to-first-touch — avg + median + SLA breach %
-export async function timeToFirstTouch(org_id: string, client_id: string | null = null, range?: DateRange, sla_minutes = 60) {
+export async function timeToFirstTouch(org_id: string, client_id: string | null = null, range?: DateRange, sla_minutes = 60, scope?: AnalyticsScope) {
   const fromIso = range?.from ?? new Date(Date.now() - 30 * 86_400_000).toISOString();
   const toIso = range?.to ?? new Date().toISOString();
 
@@ -56,6 +58,7 @@ export async function timeToFirstTouch(org_id: string, client_id: string | null 
     .eq('org_id', org_id).is('deleted_at', null)
     .gte('created_at', fromIso).lte('created_at', toIso);
   lq = withClient(lq, client_id);
+  lq = applyLeadScope(lq, scope);
   const { data: leads } = await lq;
   if (!leads?.length) return { avg_minutes: 0, median_minutes: 0, sla_breach_pct: 0, total: 0, breaches: 0, sla_minutes, distribution: [] };
 
@@ -112,13 +115,14 @@ export async function timeToFirstTouch(org_id: string, client_id: string | null 
 }
 
 // 3. Stuck leads — counts at 7/14/30 day idle thresholds
-export async function stuckLeads(org_id: string, client_id: string | null = null) {
+export async function stuckLeads(org_id: string, client_id: string | null = null, scope?: AnalyticsScope) {
   const now = Date.now();
   let lq = supabaseAdmin.from('crm_leads')
     .select('id, owner_id, last_activity_at, created_at, status')
     .eq('org_id', org_id).is('deleted_at', null)
     .in('status', ['new', 'working', 'nurturing', 'qualified']);
   lq = withClient(lq, client_id);
+  lq = applyLeadScope(lq, scope);
   const { data: leads } = await lq;
 
   let c7 = 0, c14 = 0, c30 = 0;
@@ -148,11 +152,13 @@ async function reasonsByStatus(
   range: DateRange | undefined,
   status: 'lost' | 'unqualified',
   reasonColumn: 'lost_reason',
+  scope?: AnalyticsScope,
 ) {
   let q = supabaseAdmin.from('crm_leads')
     .select(`${reasonColumn}`)
     .eq('org_id', org_id).is('deleted_at', null).eq('status', status);
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('updated_at', range.from);
   if (range?.to) q = q.lte('updated_at', range.to);
   const { data } = await q;
@@ -164,17 +170,18 @@ async function reasonsByStatus(
   return Array.from(map.entries()).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count);
 }
 
-export async function lostReasons(org_id: string, client_id: string | null = null, range?: DateRange) {
-  return reasonsByStatus(org_id, client_id, range, 'lost', 'lost_reason');
+export async function lostReasons(org_id: string, client_id: string | null = null, range?: DateRange, scope?: AnalyticsScope) {
+  return reasonsByStatus(org_id, client_id, range, 'lost', 'lost_reason', scope);
 }
-export async function disqualificationReasons(org_id: string, client_id: string | null = null, range?: DateRange) {
-  return reasonsByStatus(org_id, client_id, range, 'unqualified', 'lost_reason');
+export async function disqualificationReasons(org_id: string, client_id: string | null = null, range?: DateRange, scope?: AnalyticsScope) {
+  return reasonsByStatus(org_id, client_id, range, 'unqualified', 'lost_reason', scope);
 }
-export async function wonReasons(org_id: string, client_id: string | null = null, range?: DateRange) {
+export async function wonReasons(org_id: string, client_id: string | null = null, range?: DateRange, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_leads')
     .select('won_reason')
     .eq('org_id', org_id).is('deleted_at', null).eq('status', 'converted').not('won_reason', 'is', null);
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('updated_at', range.from);
   if (range?.to) q = q.lte('updated_at', range.to);
   const { data, error } = await q;
@@ -200,7 +207,7 @@ export async function wonReasons(org_id: string, client_id: string | null = null
  *     pipeline positions
  *   * compare pairs of adjacent positions for the entered/advanced rate
  */
-export async function stageConversion(org_id: string, pipeline_id: string | undefined, client_id: string | null = null) {
+export async function stageConversion(org_id: string, pipeline_id: string | undefined, client_id: string | null = null, scope?: AnalyticsScope) {
   let sq = supabaseAdmin.from('crm_deal_stages')
     .select('id, name, position, pipeline_id')
     .eq('org_id', org_id);
@@ -214,6 +221,7 @@ export async function stageConversion(org_id: string, pipeline_id: string | unde
     .eq('org_id', org_id).is('deleted_at', null);
   if (pipeline_id) dq = dq.eq('pipeline_id', pipeline_id);
   dq = withClient(dq, client_id);
+  dq = applyOwnerScope(dq, scope);
   const { data: deals } = await dq;
   if (!deals?.length) return [];
 
@@ -254,12 +262,13 @@ export async function stageConversion(org_id: string, pipeline_id: string | unde
 }
 
 // 8. Lead aging — open leads by age bucket
-export async function leadAging(org_id: string, client_id: string | null = null) {
+export async function leadAging(org_id: string, client_id: string | null = null, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_leads')
     .select('created_at, status')
     .eq('org_id', org_id).is('deleted_at', null)
     .not('status', 'in', '(converted,lost,unqualified)');
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   const { data } = await q;
   const buckets = [
     { bucket: '0–7d', max: 7, count: 0 },
@@ -277,7 +286,7 @@ export async function leadAging(org_id: string, client_id: string | null = null)
 }
 
 // 9. Cohort conversion — month cohort × age matrix
-export async function cohortConversion(org_id: string, client_id: string | null = null, months_back = 6) {
+export async function cohortConversion(org_id: string, client_id: string | null = null, months_back = 6, scope?: AnalyticsScope) {
   const since = new Date();
   since.setUTCMonth(since.getUTCMonth() - months_back);
   since.setUTCDate(1);
@@ -288,6 +297,7 @@ export async function cohortConversion(org_id: string, client_id: string | null 
     .eq('org_id', org_id).is('deleted_at', null)
     .gte('created_at', since.toISOString());
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   const { data } = await q;
 
   const cohorts = new Map<string, { total: number; conv: Map<number, number> }>();
@@ -324,12 +334,13 @@ function monthOffset(aYM: string, bYM: string): number {
 }
 
 // 10. Engagement comparison — avg touches per won vs lost
-export async function engagementComparison(org_id: string, client_id: string | null = null, range?: DateRange) {
+export async function engagementComparison(org_id: string, client_id: string | null = null, range?: DateRange, scope?: AnalyticsScope) {
   let lq = supabaseAdmin.from('crm_leads')
     .select('id, status')
     .eq('org_id', org_id).is('deleted_at', null)
     .in('status', ['converted', 'lost']);
   lq = withClient(lq, client_id);
+  lq = applyLeadScope(lq, scope);
   if (range?.from) lq = lq.gte('updated_at', range.from);
   if (range?.to) lq = lq.lte('updated_at', range.to);
   const { data: leads } = await lq;
@@ -358,12 +369,13 @@ export async function engagementComparison(org_id: string, client_id: string | n
 }
 
 // 11. Days-since-last-touch distribution
-export async function daysSinceTouch(org_id: string, client_id: string | null = null) {
+export async function daysSinceTouch(org_id: string, client_id: string | null = null, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_leads')
     .select('last_activity_at, created_at, status')
     .eq('org_id', org_id).is('deleted_at', null)
     .not('status', 'in', '(converted,lost)');
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   const { data } = await q;
   const buckets = [
     { bucket: '0d', max: 0, count: 0 },
@@ -384,11 +396,12 @@ export async function daysSinceTouch(org_id: string, client_id: string | null = 
 }
 
 // 12. Score-band conversion — % of leads in each score band that converted
-export async function scoreBandConversion(org_id: string, client_id: string | null = null, range?: DateRange) {
+export async function scoreBandConversion(org_id: string, client_id: string | null = null, range?: DateRange, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_leads')
     .select('score, status')
     .eq('org_id', org_id).is('deleted_at', null);
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
   const { data } = await q;
@@ -413,11 +426,12 @@ export async function scoreBandConversion(org_id: string, client_id: string | nu
 }
 
 // 13. Territory conversion — by state (or city when state isn't stamped)
-export async function territoryConversion(org_id: string, client_id: string | null = null, range?: DateRange) {
+export async function territoryConversion(org_id: string, client_id: string | null = null, range?: DateRange, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_leads')
     .select('state, city, status')
     .eq('org_id', org_id).is('deleted_at', null);
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
   const { data } = await q;
@@ -439,11 +453,12 @@ export async function territoryConversion(org_id: string, client_id: string | nu
 }
 
 // 14. Touchpoints-to-response — outbound touches before first inbound response
-export async function touchpointsToResponse(org_id: string, client_id: string | null = null, range?: DateRange) {
+export async function touchpointsToResponse(org_id: string, client_id: string | null = null, range?: DateRange, scope?: AnalyticsScope) {
   let lq = supabaseAdmin.from('crm_leads')
     .select('id, created_at')
     .eq('org_id', org_id).is('deleted_at', null);
   lq = withClient(lq, client_id);
+  lq = applyLeadScope(lq, scope);
   if (range?.from) lq = lq.gte('created_at', range.from);
   if (range?.to) lq = lq.lte('created_at', range.to);
   const { data: leads } = await lq;
@@ -484,13 +499,14 @@ export async function touchpointsToResponse(org_id: string, client_id: string | 
 }
 
 // 15. Leads at risk — open leads with high score AND no activity in 14d+
-export async function leadsAtRisk(org_id: string, client_id: string | null = null, score_threshold = 60, idle_days = 14) {
+export async function leadsAtRisk(org_id: string, client_id: string | null = null, score_threshold = 60, idle_days = 14, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_leads')
     .select('id, first_name, last_name, company, score, owner_id, last_activity_at, created_at')
     .eq('org_id', org_id).is('deleted_at', null)
     .gte('score', score_threshold)
     .in('status', ['new', 'working', 'nurturing', 'qualified']);
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   const { data } = await q;
   const now = Date.now();
   return ((data ?? []) as Array<{ id: string; first_name: string | null; last_name: string | null; company: string | null; score: number; owner_id: string | null; last_activity_at: string | null; created_at: string }>)

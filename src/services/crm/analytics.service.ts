@@ -72,7 +72,7 @@ const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Lead-visibility scope (city ∪ self ∪ null-city, then owner subtree) on a
 // crm_leads query — kept identical to listLeads so analytics match the list.
-function applyLeadScope(q: any, scope?: AnalyticsScope): any {
+export function applyLeadScope(q: any, scope?: AnalyticsScope): any {
   if (!scope) return q;
   if (scope.effectiveCities !== undefined && scope.effectiveCities !== null) {
     const orParts: string[] = [];
@@ -93,7 +93,7 @@ function applyLeadScope(q: any, scope?: AnalyticsScope): any {
 
 // Owner-subtree scope on a crm_deals query (deals carry no city, so they are
 // scoped by ownership only — same as the deals list).
-function applyOwnerScope(q: any, scope?: AnalyticsScope): any {
+export function applyOwnerScope(q: any, scope?: AnalyticsScope): any {
   if (!scope) return q;
   if (scope.visibleOwnerIds !== undefined && scope.visibleOwnerIds !== null) {
     q = q.in('owner_id', scope.visibleOwnerIds.length ? scope.visibleOwnerIds : [NO_MATCH_UUID]);
