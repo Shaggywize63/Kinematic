@@ -57,6 +57,9 @@ export interface EngagementSignals {
   updates_count_30d: number;
   bant_signals_in_updates: number;
   days_since_last_touch: number | null;
+  // All-time activity volume — rewards leads worked over a longer horizon,
+  // not just the trailing 30 days.
+  total_activity_count: number;
 }
 
 export interface ScoringConfig {
@@ -72,7 +75,7 @@ const DEFAULT_THRESHOLDS = { A: 75, B: 55, C: 35 };
 const EMPTY_ENGAGEMENT: EngagementSignals = {
   whatsapp_count_30d: 0, call_count_30d: 0, meeting_count_30d: 0,
   email_count_30d: 0, updates_count_30d: 0, bant_signals_in_updates: 0,
-  days_since_last_touch: null,
+  days_since_last_touch: null, total_activity_count: 0,
 };
 
 // Words the BANT-detector looks for in update bodies. Generic enough to
@@ -122,7 +125,7 @@ async function getScoringConfig(org_id: string): Promise<ScoringConfig> {
 
 async function fetchEngagement(org_id: string, lead_id: string): Promise<EngagementSignals> {
   const since30d = new Date(Date.now() - 30 * 86_400_000).toISOString();
-  const [{ data: acts }, { data: updates }] = await Promise.all([
+  const [{ data: acts }, { data: updates }, { count: totalActs }] = await Promise.all([
     supabaseAdmin.from('crm_activities')
       .select('type, completed_at')
       .eq('org_id', org_id).eq('lead_id', lead_id).is('deleted_at', null)
@@ -131,9 +134,13 @@ async function fetchEngagement(org_id: string, lead_id: string): Promise<Engagem
       .select('body, created_at')
       .eq('org_id', org_id).eq('lead_id', lead_id)
       .gte('created_at', since30d),
+    supabaseAdmin.from('crm_activities')
+      .select('id', { count: 'exact', head: true })
+      .eq('org_id', org_id).eq('lead_id', lead_id).is('deleted_at', null),
   ]);
 
   const out = { ...EMPTY_ENGAGEMENT };
+  out.total_activity_count = totalActs ?? 0;
   let mostRecent: number | null = null;
   for (const a of (acts ?? [])) {
     const t = String(a.type || '').toLowerCase();
@@ -176,38 +183,80 @@ function scoreB2C(
   weightsOverride: Record<string, number> = {},
 ): ScoreBreakdown {
   const w = (k: string, def: number) => weightsOverride[k] ?? def;
-  const b: ScoreBreakdown = { model: 'heuristic_b2c_v2' } as ScoreBreakdown;
+  const b: ScoreBreakdown = { model: 'heuristic_b2c_v3' } as ScoreBreakdown;
+  const L = lead as Record<string, unknown>;
 
-  if (lead.phone) (b as any).phone_present = w('phone_present', 12);
-  if (lead.email) (b as any).email_present = w('email_present', 8);
-  if ((lead as any).marketing_consent) (b as any).marketing_consent = w('marketing_consent', 8);
-  if ((lead as any).whatsapp_consent) (b as any).whatsapp_consent = w('whatsapp_consent', 8);
+  // ── Reachability — can a rep actually get hold of this person? ──
+  if (lead.phone) {
+    (b as any).phone_present = w('phone_present', 10);
+    if (String(lead.phone).replace(/\D/g, '').length >= 10) (b as any).phone_valid = w('phone_valid', 3);
+  }
+  if (lead.email) (b as any).email_present = w('email_present', 5);
+  if (Array.isArray(L.alternate_mobiles) && (L.alternate_mobiles as unknown[]).length > 0) (b as any).alt_mobiles = w('alt_mobiles', 3);
+  if (L.whatsapp_consent) (b as any).whatsapp_consent = w('whatsapp_consent', 5);
+  else if (L.marketing_consent) (b as any).marketing_consent = w('marketing_consent', 3);
 
-  // Source quality — referral > paid (utm) > organic with source_id > nothing
-  const utm = String((lead as any).utm_medium || '').toLowerCase();
-  const referralLike = String(lead.source_id || '').toLowerCase().includes('referral');
-  if (referralLike) (b as any).source_quality = w('source_quality_referral', 12);
-  else if (utm === 'cpc' || utm === 'paid' || utm === 'social') (b as any).source_quality = w('source_quality_paid', 8);
-  else if (lead.source_id) (b as any).source_quality = w('source_quality_organic', 4);
-
+  // ── Profile quality / field verification ──
+  if (lead.first_name && lead.last_name) (b as any).full_name = w('full_name', 4);
   if (lead.city || lead.country) (b as any).geo = w('geo', 5);
+  // GPS captured on-site → a rep physically met this lead. Strong quality signal.
+  const lat = Number(L.latitude), lng = Number(L.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)) {
+    (b as any).gps_verified = w('gps_verified', 8);
+  }
+  if (L.photo_url) (b as any).photo_captured = w('photo_captured', 5);
+  if (L.address_line1 || L.postal_code) (b as any).address = w('address', 2);
 
-  // Engagement — counts from real activities + updates, not just a timestamp.
-  const wa = tieredScore(engagement.whatsapp_count_30d, [[3, w('whatsapp_high', 15)], [1, w('whatsapp_low', 8)]]);
+  // ── Intent / lifecycle progression ──
+  const status = String(lead.status || 'new').toLowerCase();
+  if (status === 'qualified') (b as any).status = w('status_qualified', 18);
+  else if (status === 'working' || status === 'nurturing') (b as any).status = w('status_working', 9);
+  const stage = String(L.lifecycle_stage || '').toLowerCase();
+  if (['customer', 'opportunity'].includes(stage)) (b as any).lifecycle = w('lifecycle_opportunity', 12);
+  else if (['sql', 'mql'].includes(stage)) (b as any).lifecycle = w('lifecycle_qualified', 8);
+  else if (stage === 'subscriber') (b as any).lifecycle = w('lifecycle_subscriber', 3);
+  if (L.converted_deal_id || status === 'converted') (b as any).converted = w('converted', 15);
+
+  // Product / volume interest — for a materials business, captured monthly
+  // volume (MT) is a direct deal-size proxy.
+  const cf = (L.custom_fields ?? {}) as Record<string, unknown>;
+  const vol = Number(cf.monthly_volume ?? cf.volume_mt ?? cf.volume_kg);
+  if (Number.isFinite(vol) && vol > 0) {
+    (b as any).volume_interest = tieredScore(vol, [[50, w('volume_high', 12)], [10, w('volume_med', 8)], [1, w('volume_low', 4)]]);
+  }
+  const interests = L.interests, productIds = L.product_ids;
+  if ((Array.isArray(interests) && interests.length > 0) || (Array.isArray(productIds) && productIds.length > 0)) {
+    (b as any).product_interest = w('product_interest', 6);
+  }
+  if (Array.isArray(lead.tags) && lead.tags.length > 0) (b as any).tags = w('tags', 2);
+
+  // ── Engagement (real activity) ──
+  const wa = tieredScore(engagement.whatsapp_count_30d, [[3, w('whatsapp_high', 12)], [1, w('whatsapp_low', 6)]]);
   if (wa > 0) (b as any).whatsapp_30d = wa;
   const ca = tieredScore(engagement.call_count_30d, [[3, w('call_high', 10)], [1, w('call_low', 5)]]);
   if (ca > 0) (b as any).calls_30d = ca;
-  if (engagement.updates_count_30d > 0) (b as any).updates_30d = w('updates', 7);
+  const mt = tieredScore(engagement.meeting_count_30d, [[2, w('meet_high', 10)], [1, w('meet_low', 6)]]);
+  if (mt > 0) (b as any).meetings_30d = mt;
+  if (engagement.updates_count_30d > 0) (b as any).updates_30d = w('updates', 5);
+  const hist = tieredScore(engagement.total_activity_count, [[5, w('history_high', 6)], [1, w('history_low', 3)]]);
+  if (hist > 0) (b as any).activity_history = hist;
 
-  // Recency of last touch (any activity type).
+  // Recency of last touch.
   if (engagement.days_since_last_touch !== null) {
     if (engagement.days_since_last_touch < 7) (b as any).recent_touch = w('recent_touch_high', 8);
     else if (engagement.days_since_last_touch < 14) (b as any).recent_touch = w('recent_touch_med', 4);
   } else if (lead.last_activity_at) {
-    // Fallback when crm_activities is empty but the lead row has a stamp.
     const days = (Date.now() - new Date(lead.last_activity_at).getTime()) / 86_400_000;
     (b as any).recent_touch = Math.max(0, Math.round(w('recent_touch_fallback', 8) - days * 0.3));
   }
+
+  // ── Source / attribution ──
+  const utm = String(L.utm_medium || '').toLowerCase();
+  const referralLike = String(lead.source_id || '').toLowerCase().includes('referral');
+  if (referralLike) (b as any).source_quality = w('source_quality_referral', 10);
+  else if (utm === 'cpc' || utm === 'paid' || utm === 'social') (b as any).source_quality = w('source_quality_paid', 6);
+  else if (lead.source_id) (b as any).source_quality = w('source_quality_organic', 3);
+  if (L.utm_campaign) (b as any).campaign = w('campaign', 2);
 
   return b;
 }
@@ -219,41 +268,59 @@ function scoreB2B(
   weightsOverride: Record<string, number> = {},
 ): ScoreBreakdown {
   const w = (k: string, def: number) => weightsOverride[k] ?? def;
-  const b: ScoreBreakdown = { model: 'heuristic_b2b_v2' } as ScoreBreakdown;
+  const b: ScoreBreakdown = { model: 'heuristic_b2b_v3' } as ScoreBreakdown;
+  const L = lead as Record<string, unknown>;
 
+  // ── Firmographics ──
   const t = (lead.title || '').toLowerCase();
-  if (/(ceo|cto|cfo|cmo|coo|chief|founder|owner)/.test(t)) (b as any).title_seniority = w('title_executive', 20);
-  else if (/(vp|vice president|head of)/.test(t)) (b as any).title_seniority = w('title_vp', 15);
-  else if (/(director)/.test(t)) (b as any).title_seniority = w('title_director', 10);
+  if (/(ceo|cto|cfo|cmo|coo|chief|founder|owner|proprietor)/.test(t)) (b as any).title_seniority = w('title_executive', 18);
+  else if (/(vp|vice president|head of)/.test(t)) (b as any).title_seniority = w('title_vp', 13);
+  else if (/(director)/.test(t)) (b as any).title_seniority = w('title_director', 9);
   else if (/(manager|lead)/.test(t)) (b as any).title_seniority = w('title_manager', 5);
   else if (t) (b as any).title_seniority = w('title_ic', 2);
 
-  if (lead.company) (b as any).company_present = w('company_present', 8);
-
+  if (lead.company) (b as any).company_present = w('company_present', 7);
   if (icp.industries?.length && lead.industry &&
       icp.industries.some((i) => i.toLowerCase() === (lead.industry || '').toLowerCase())) {
     (b as any).industry_match = w('industry_match', 7);
   }
 
-  // Contact completeness — both > one > neither.
+  // ── Contact completeness / verification ──
   const hasEmail = !!lead.email, hasPhone = !!lead.phone;
   if (hasEmail && hasPhone) (b as any).contact_complete = w('contact_both', 8);
   else if (hasEmail || hasPhone) (b as any).contact_complete = w('contact_one', 4);
+  const lat = Number(L.latitude), lng = Number(L.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)) (b as any).gps_verified = w('gps_verified', 6);
+  if (L.photo_url) (b as any).photo_captured = w('photo_captured', 4);
+  if (lead.city || lead.country) (b as any).geo = w('geo', 3);
 
-  if (lead.source_id) (b as any).source_quality = w('source_quality', 8);
+  // ── Intent / lifecycle ──
+  const status = String(lead.status || 'new').toLowerCase();
+  if (status === 'qualified') (b as any).status = w('status_qualified', 14);
+  else if (status === 'working' || status === 'nurturing') (b as any).status = w('status_working', 7);
+  const stage = String(L.lifecycle_stage || '').toLowerCase();
+  if (['customer', 'opportunity'].includes(stage)) (b as any).lifecycle = w('lifecycle_opportunity', 10);
+  else if (['sql', 'mql'].includes(stage)) (b as any).lifecycle = w('lifecycle_qualified', 6);
+  if (L.converted_deal_id || status === 'converted') (b as any).converted = w('converted', 12);
+  const cf = (L.custom_fields ?? {}) as Record<string, unknown>;
+  const vol = Number(cf.monthly_volume ?? cf.volume_mt ?? cf.volume_kg);
+  if (Number.isFinite(vol) && vol > 0) {
+    (b as any).volume_interest = tieredScore(vol, [[50, w('volume_high', 10)], [10, w('volume_med', 6)], [1, w('volume_low', 3)]]);
+  }
 
+  if (lead.source_id) (b as any).source_quality = w('source_quality', 6);
+
+  // ── Engagement ──
   const mt = tieredScore(engagement.meeting_count_30d, [[3, w('meetings_high', 12)], [1, w('meetings_low', 6)]]);
   if (mt > 0) (b as any).meetings_30d = mt;
   const ca = tieredScore(engagement.call_count_30d, [[3, w('calls_high', 8)], [1, w('calls_low', 4)]]);
   if (ca > 0) (b as any).calls_30d = ca;
+  const hist = tieredScore(engagement.total_activity_count, [[5, w('history_high', 6)], [1, w('history_low', 3)]]);
+  if (hist > 0) (b as any).activity_history = hist;
 
-  // BANT signals from updates — captures qualifying conversations the
-  // heuristic alone can't see.
-  if (engagement.bant_signals_in_updates > 0) {
-    (b as any).bant_signals_in_updates = w('bant_signals', 12);
-  } else if (engagement.updates_count_30d > 0) {
-    (b as any).updates_30d = w('updates_present', 4);
-  }
+  // BANT signals from updates — qualifying conversations the heuristic can't see.
+  if (engagement.bant_signals_in_updates > 0) (b as any).bant_signals_in_updates = w('bant_signals', 12);
+  else if (engagement.updates_count_30d > 0) (b as any).updates_30d = w('updates_present', 4);
 
   if (engagement.days_since_last_touch !== null) {
     if (engagement.days_since_last_touch < 7) (b as any).recent_touch = w('recent_touch', 7);
