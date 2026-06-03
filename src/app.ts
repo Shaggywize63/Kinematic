@@ -401,6 +401,13 @@ app.use(`${V1}/distribution/integrations`,   requireAuth,                       
 // through to crmRoutes below, so the existing routes are untouched.
 app.use(`${V1}/crm/ai/next-best-action/lead`, requireAuth, leadNbaRoutes);
 app.use(`${V1}/crm/leads`,                    requireAuth, leadUpdatesRoutes);
+// Public verified-sender confirmation — split out from the auth-gated
+// verified-senders router because the recipient clicking the link in their
+// inbox has no Bearer token (the 48+ char token in the path IS the auth).
+// MUST be mounted BEFORE the auth-gated /crm/verified-senders router below,
+// otherwise that broader prefix matches /verify/:token first and its
+// requireAuth 401s the click.
+app.use(`${V1}/crm/verified-senders/verify`,  verifiedSendersPublicRoutes);
 // Verified senders + email alerts — same prefix-before-catch-all pattern
 // so /crm/verified-senders/:id doesn't fall into a stray /crm/:id handler.
 app.use(`${V1}/crm/verified-senders`,         requireAuth, verifiedSendersRoutes);
@@ -411,11 +418,6 @@ app.use(`${V1}/crm/email-alerts`,             requireAuth, emailAlertsRoutes);
 // the inbound click doesn't bounce on requireAuth. The token in the path
 // IS the auth: it's a 32-char secret stamped onto the message at send time.
 app.use(`${V1}/crm/emails/track`,             emailTrackingRoutes);
-// Public verified-sender confirmation — split out from the auth-gated
-// verified-senders router because the recipient clicking the link in
-// their inbox has no Bearer token. Same shape as email-tracking above;
-// the 48+ char token in the URL path is the auth.
-app.use(`${V1}/crm/verified-senders/verify`,  verifiedSendersPublicRoutes);
 
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
