@@ -83,7 +83,9 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     // any per-client dashboard.
     withClient(
       supabaseAdmin.from('crm_deals')
-        .select(`amount, owner_id, crm_deal_stages!inner(name, stage_type)${lines}`)
+        // Always join the weight view here (not just in weight mode) so the
+        // Open Pipeline card can show total volume (kg) alongside value.
+        .select(`amount, owner_id, crm_deal_stages!inner(name, stage_type)${weightJoin}`)
         .eq('org_id', org_id).is('deleted_at', null)
         .eq('crm_deal_stages.stage_type', 'open'),
       client_id,
@@ -96,12 +98,15 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   // the "value" carried in every aggregation is kg derived from line items
   // instead of rupees.
   let open_deal_value = 0;
+  let open_deal_volume = 0;
   let open_deals = 0;
   const stageMap = new Map<string, { count: number; value: number }>();
   const ownerMap = new Map<string, { count: number; value: number }>();
   for (const r of (pipelineRows ?? []) as unknown as Array<DealWithWeight & { owner_id?: string | null; crm_deal_stages: { name: string } }>) {
     const v = dealValue(r, unit);
     open_deal_value += v;
+    // Volume is always the kg from the weight view, regardless of unit mode.
+    open_deal_volume += dealWeightKg(r);
     open_deals += 1;
     const stageName = r.crm_deal_stages?.name ?? 'Unknown';
     const s = stageMap.get(stageName) ?? { count: 0, value: 0 };
@@ -148,6 +153,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     new_leads_30d: newInWindow ?? 0,
     open_deals,
     open_deal_value,
+    open_deal_volume,
     won_deals_30d: wonCount,
     won_revenue_30d: won_revenue,
     win_rate_30d,
