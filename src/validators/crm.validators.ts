@@ -474,6 +474,16 @@ export const draftReplySchema = z.preprocess((raw) => {
   template_hint: z.string().optional(),
 }));
 
+// Purpose-built email TEMPLATE generation (KINI AI Generate in the template
+// section). Unlike draftReply this is not lead/deal-centric — just a goal +
+// tone + optional audience/language.
+export const draftEmailTemplateSchema = z.object({
+  goal: z.string().min(1),
+  tone: z.enum(['friendly','formal','concise']).default('friendly'),
+  audience: z.string().optional(),
+  language: z.string().max(8).optional(),
+});
+
 export const summarizeSchema = z.object({});
 
 // Settings — including new business_type for B2B/B2C

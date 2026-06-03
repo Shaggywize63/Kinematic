@@ -1845,6 +1845,19 @@ ai.post('/draft-reply', wrap(async (req, res) => {
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
 }));
+ai.post('/draft-email-template', wrap(async (req, res) => {
+  const g = await gateAi(req, res); if (!g.proceed) return;
+  const body = parse(v.draftEmailTemplateSchema, req.body);
+  const out = await autoRespSvc.draftEmailTemplate({
+    org_id: orgId(req),
+    goal: body.goal!,
+    tone: body.tone,
+    audience: body.audience,
+    language: body.language,
+  });
+  void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
+  res.json(out);
+}));
 ai.post('/next-best-action/:dealId', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const out = await nbaSvc.compute(orgId(req), req.params.dealId, true);
