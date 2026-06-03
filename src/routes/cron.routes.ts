@@ -75,51 +75,64 @@ router.post('/dispatch-pushes', requireEdgeSecret, async (_req, res) => {
  * several minutes for large tenants. Idempotent: re-running just
  * overwrites with the same heuristic result.
  */
-router.post('/rescore-all-leads-now', requireEdgeSecret, async (req, res) => {
-  const body = (req.body ?? {}) as { org_id?: string; batch?: number; max_batches?: number };
-  const batchSize = Math.min(500, Math.max(10, Number(body.batch) || 100));
-  const maxBatches = Math.min(200, Math.max(1, Number(body.max_batches) || 50));
+// Guards against overlapping full-rescore runs (the loop can take minutes).
+let rescoreAllRunning = false;
 
+async function runRescoreAll(opts: { org_id?: string; batchSize: number; maxBatches: number }): Promise<void> {
   let processed = 0;
   let failed = 0;
   let lastId: string | null = null;
+  for (let i = 0; i < opts.maxBatches; i++) {
+    let q = supabaseAdmin.from('crm_leads')
+      .select('id, org_id')
+      .is('deleted_at', null)
+      .neq('status', 'converted')
+      .neq('status', 'unqualified')
+      .neq('status', 'lost')
+      .order('id', { ascending: true })
+      .limit(opts.batchSize);
+    if (opts.org_id) q = q.eq('org_id', opts.org_id);
+    if (lastId) q = q.gt('id', lastId);
 
-  try {
-    for (let i = 0; i < maxBatches; i++) {
-      let q = supabaseAdmin.from('crm_leads')
-        .select('id, org_id')
-        .is('deleted_at', null)
-        .neq('status', 'converted')
-        .neq('status', 'unqualified')
-        .neq('status', 'lost')
-        .order('id', { ascending: true })
-        .limit(batchSize);
-      if (body.org_id) q = q.eq('org_id', body.org_id);
-      if (lastId) q = q.gt('id', lastId);
+    const { data: rows, error } = await q;
+    if (error) { logger.error(`[cron] rescore-all query failed: ${error.message}`); break; }
+    if (!rows || rows.length === 0) break;
 
-      const { data: rows, error } = await q;
-      if (error) throw new Error(error.message);
-      if (!rows || rows.length === 0) break;
-
-      // Sequential per batch — keeps Anthropic 429 risk low even though
-      // rescoreLead itself only fires the LLM rerank as fire-and-forget.
-      for (const row of rows) {
-        try {
-          await rescoreLead(row.org_id, row.id);
-          processed += 1;
-        } catch (e: any) {
-          failed += 1;
-          logger.warn(`[cron] rescore failed for ${row.id}: ${e?.message || e}`);
-        }
+    // Sequential per batch — keeps Anthropic 429 risk low even though
+    // rescoreLead itself only fires the LLM rerank as fire-and-forget.
+    for (const row of rows) {
+      try {
+        await rescoreLead(row.org_id, row.id);
+        processed += 1;
+      } catch (e: any) {
+        failed += 1;
+        logger.warn(`[cron] rescore failed for ${row.id}: ${e?.message || e}`);
       }
-      lastId = rows[rows.length - 1].id;
-      if (rows.length < batchSize) break;
     }
-    res.json({ success: true, data: { processed, failed, last_id: lastId } });
-  } catch (err: any) {
-    logger.error(`[cron] rescore-all-leads-now crashed: ${err?.message || err}`);
-    res.status(500).json({ success: false, error: String(err?.message || err), data: { processed, failed } });
+    lastId = rows[rows.length - 1].id;
+    if (rows.length < opts.batchSize) break;
   }
+  logger.info(`[cron] rescore-all complete: processed=${processed} failed=${failed}`);
+}
+
+// The full rescore can run for several minutes (per-lead heuristic + engagement
+// fetch). Run it DETACHED and return 202 immediately, so the request isn't
+// bounded by the gateway timeout (a synchronous loop 502s after ~1 min and
+// only ever covers the first slice of leads).
+router.post('/rescore-all-leads-now', requireEdgeSecret, async (req, res) => {
+  const body = (req.body ?? {}) as { org_id?: string; batch?: number; max_batches?: number };
+  const batchSize = Math.min(500, Math.max(10, Number(body.batch) || 100));
+  const maxBatches = Math.min(500, Math.max(1, Number(body.max_batches) || 50));
+
+  if (rescoreAllRunning) {
+    return res.status(409).json({ success: false, error: 'A rescore is already running', code: 'RESCORE_IN_PROGRESS' });
+  }
+  rescoreAllRunning = true;
+  runRescoreAll({ org_id: body.org_id, batchSize, maxBatches })
+    .catch((e: any) => logger.error(`[cron] rescore-all crashed: ${e?.message || e}`))
+    .finally(() => { rescoreAllRunning = false; });
+
+  res.status(202).json({ success: true, data: { started: true, batch: batchSize, max_batches: maxBatches } });
 });
 
 /**
