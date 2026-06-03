@@ -1612,7 +1612,10 @@ const unitFromReq = (req: Request): 'inr' | 'weight' => req.query.unit === 'weig
 const ANALYTICS_TTL = 60;
 const cacheKey = (req: Request, name: string) => {
   const r = dateRange(req);
-  return `crm:an:${name}:${orgId(req)}:${clientId(req) ?? 'org'}:${unitFromReq(req)}:${r.from ?? ''}:${r.to ?? ''}:${req.query.pipeline_id ?? ''}:${req.query.by ?? ''}:${req.query.period ?? ''}:${req.query.days ?? ''}`;
+  // The per-user scope signature is part of the key so a scoped result is
+  // never served to a different user from cache.
+  const sig = analyticsSvc.analyticsScopeSig((req as AuthRequest).analyticsScope);
+  return `crm:an:${name}:${orgId(req)}:${clientId(req) ?? 'org'}:${unitFromReq(req)}:${r.from ?? ''}:${r.to ?? ''}:${req.query.pipeline_id ?? ''}:${req.query.by ?? ''}:${req.query.period ?? ''}:${req.query.days ?? ''}:${sig}`;
 };
 const { cached: cachedAnalytics } = require('../utils/analyticsCache') as typeof import('../utils/analyticsCache');
 
@@ -1632,31 +1635,32 @@ async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope
 }
 // The scope signature MUST be part of the cache key, otherwise one user's
 // scoped dashboard would be served to another from the cache.
-analytics.get('/dashboard-summary', wrap(async (req, res) => {
-  const scope = await analyticsScope(req);
-  res.json(await cachedAnalytics(`${cacheKey(req, 'dashboard-summary')}:${analyticsSvc.analyticsScopeSig(scope)}`, ANALYTICS_TTL,
-    () => analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req), unitFromReq(req), scope)));
-}));
-analytics.get('/dashboard-complete', wrap(async (req, res) => {
-  const scope = await analyticsScope(req);
-  res.json(await cachedAnalytics(`${cacheKey(req, 'dashboard-complete')}:${analyticsSvc.analyticsScopeSig(scope)}`, ANALYTICS_TTL,
-    () => analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req), unitFromReq(req), scope)));
-}));
+// Compute the caller's analytics scope once per request and stash it on req
+// so cacheKey + every handler below share it without re-querying.
+analytics.use((req, _res, next) => {
+  analyticsScope(req).then((sc) => { (req as AuthRequest).analyticsScope = sc; next(); }).catch(next);
+});
+analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'dashboard-summary'), ANALYTICS_TTL,
+    () => analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req), unitFromReq(req), (req as AuthRequest).analyticsScope)))));
+analytics.get('/dashboard-complete', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'dashboard-complete'), ANALYTICS_TTL,
+    () => analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req), unitFromReq(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/pipeline-value', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'pipeline-value'), ANALYTICS_TTL,
-    () => analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined, clientId(req), unitFromReq(req))))));
+    () => analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined, clientId(req), unitFromReq(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/funnel', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'funnel'), ANALYTICS_TTL,
-    () => analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req), clientId(req))))));
+    () => analyticsSvc.funnel(orgId(req), Number(req.query.days ?? 30), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/win-rate', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'win-rate'), ANALYTICS_TTL,
-    () => analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req), clientId(req))))));
+    () => analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/sales-cycle', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'sales-cycle'), ANALYTICS_TTL,
     () => analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req))))));
 analytics.get('/forecast', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'forecast'), ANALYTICS_TTL,
-    () => analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req), clientId(req), unitFromReq(req))))));
+    () => analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req), clientId(req), unitFromReq(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'activity-heatmap'), ANALYTICS_TTL,
     () => analyticsSvc.activityHeatmap(orgId(req), clientId(req))))));
@@ -1665,7 +1669,7 @@ analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(
     () => analyticsSvc.leadSourceRoi(orgId(req), clientId(req))))));
 analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lead-score-distribution'), ANALYTICS_TTL,
-    () => analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req), clientId(req))))));
+    () => analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/by-state', wrap(async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from('crm_contacts')
@@ -1685,49 +1689,49 @@ analytics.get('/by-state', wrap(async (req, res) => {
 // ── Extended analytics (15 widgets for the customisable Lead Analytics page) ──
 analytics.get('/lead-velocity', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lead-velocity'), ANALYTICS_TTL,
-    () => analyticsExt.leadVelocity(orgId(req), clientId(req), Number(req.query.months ?? 6))))));
+    () => analyticsExt.leadVelocity(orgId(req), clientId(req), Number(req.query.months ?? 6), (req as AuthRequest).analyticsScope)))));
 analytics.get('/time-to-first-touch', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'time-to-first-touch'), ANALYTICS_TTL,
-    () => analyticsExt.timeToFirstTouch(orgId(req), clientId(req), dateRange(req), Number(req.query.sla_minutes ?? 60))))));
+    () => analyticsExt.timeToFirstTouch(orgId(req), clientId(req), dateRange(req), Number(req.query.sla_minutes ?? 60), (req as AuthRequest).analyticsScope)))));
 analytics.get('/stuck-leads', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'stuck-leads'), ANALYTICS_TTL,
-    () => analyticsExt.stuckLeads(orgId(req), clientId(req))))));
+    () => analyticsExt.stuckLeads(orgId(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/lost-reasons', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lost-reasons'), ANALYTICS_TTL,
-    () => analyticsExt.lostReasons(orgId(req), clientId(req), dateRange(req))))));
+    () => analyticsExt.lostReasons(orgId(req), clientId(req), dateRange(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/won-reasons', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'won-reasons'), ANALYTICS_TTL,
-    () => analyticsExt.wonReasons(orgId(req), clientId(req), dateRange(req))))));
+    () => analyticsExt.wonReasons(orgId(req), clientId(req), dateRange(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/disqualification-reasons', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'disqualification-reasons'), ANALYTICS_TTL,
-    () => analyticsExt.disqualificationReasons(orgId(req), clientId(req), dateRange(req))))));
+    () => analyticsExt.disqualificationReasons(orgId(req), clientId(req), dateRange(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/stage-conversion', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'stage-conversion'), ANALYTICS_TTL,
-    () => analyticsExt.stageConversion(orgId(req), req.query.pipeline_id as string | undefined, clientId(req))))));
+    () => analyticsExt.stageConversion(orgId(req), req.query.pipeline_id as string | undefined, clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/lead-aging', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lead-aging'), ANALYTICS_TTL,
-    () => analyticsExt.leadAging(orgId(req), clientId(req))))));
+    () => analyticsExt.leadAging(orgId(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/cohort-conversion', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'cohort-conversion'), ANALYTICS_TTL,
-    () => analyticsExt.cohortConversion(orgId(req), clientId(req), Number(req.query.months ?? 6))))));
+    () => analyticsExt.cohortConversion(orgId(req), clientId(req), Number(req.query.months ?? 6), (req as AuthRequest).analyticsScope)))));
 analytics.get('/engagement-comparison', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'engagement-comparison'), ANALYTICS_TTL,
-    () => analyticsExt.engagementComparison(orgId(req), clientId(req), dateRange(req))))));
+    () => analyticsExt.engagementComparison(orgId(req), clientId(req), dateRange(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/days-since-touch', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'days-since-touch'), ANALYTICS_TTL,
-    () => analyticsExt.daysSinceTouch(orgId(req), clientId(req))))));
+    () => analyticsExt.daysSinceTouch(orgId(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/score-band-conversion', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'score-band-conversion'), ANALYTICS_TTL,
-    () => analyticsExt.scoreBandConversion(orgId(req), clientId(req), dateRange(req))))));
+    () => analyticsExt.scoreBandConversion(orgId(req), clientId(req), dateRange(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/territory-conversion', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'territory-conversion'), ANALYTICS_TTL,
-    () => analyticsExt.territoryConversion(orgId(req), clientId(req), dateRange(req))))));
+    () => analyticsExt.territoryConversion(orgId(req), clientId(req), dateRange(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/touchpoints-to-response', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'touchpoints-to-response'), ANALYTICS_TTL,
-    () => analyticsExt.touchpointsToResponse(orgId(req), clientId(req), dateRange(req))))));
+    () => analyticsExt.touchpointsToResponse(orgId(req), clientId(req), dateRange(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/leads-at-risk', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'leads-at-risk'), ANALYTICS_TTL,
-    () => analyticsExt.leadsAtRisk(orgId(req), clientId(req), Number(req.query.score ?? 60), Number(req.query.idle_days ?? 14))))));
+    () => analyticsExt.leadsAtRisk(orgId(req), clientId(req), Number(req.query.score ?? 60), Number(req.query.idle_days ?? 14), (req as AuthRequest).analyticsScope)))));
 router.use('/analytics', rbac.requireModuleAccess('crm_lead_analytics'), analytics);
 
 // ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
