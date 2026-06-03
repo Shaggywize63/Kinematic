@@ -5,4 +5,4 @@ from GitHub when the auto-deploy webhook gets stuck on a cached commit.
 
 Touch this file (change the timestamp below) to trigger a redeploy.
 
-Last bumped: 2026-06-03T05:00Z — picks up #87 (open-pipeline volume + deals totals).
+Last bumped: 2026-06-03T06:10Z — picks up #89 (per-user analytics scoping).
