@@ -1616,12 +1616,32 @@ const cacheKey = (req: Request, name: string) => {
 };
 const { cached: cachedAnalytics } = require('../utils/analyticsCache') as typeof import('../utils/analyticsCache');
 
-analytics.get('/dashboard-summary', wrap(async (req, res) => res.json(
-  await cachedAnalytics(cacheKey(req, 'dashboard-summary'), ANALYTICS_TTL,
-    () => analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req), unitFromReq(req))))));
-analytics.get('/dashboard-complete', wrap(async (req, res) => res.json(
-  await cachedAnalytics(cacheKey(req, 'dashboard-complete'), ANALYTICS_TTL,
-    () => analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req), unitFromReq(req))))));
+// Per-user analytics scope — identical to the leads/deals list endpoints so
+// the dashboard shows each user only their slice (assigned city + role
+// hierarchy). null fields = no extra restriction (admins see everything).
+async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope> {
+  const me = (req as AuthRequest).user;
+  const effectiveCities = rbac.getEffectiveCityNames(me);
+  const selfOwnerId = me?.id ?? null;
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all';
+  let visibleOwnerIds: string[] | null = null;
+  if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
+    visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
+  }
+  return { effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity };
+}
+// The scope signature MUST be part of the cache key, otherwise one user's
+// scoped dashboard would be served to another from the cache.
+analytics.get('/dashboard-summary', wrap(async (req, res) => {
+  const scope = await analyticsScope(req);
+  res.json(await cachedAnalytics(`${cacheKey(req, 'dashboard-summary')}:${analyticsSvc.analyticsScopeSig(scope)}`, ANALYTICS_TTL,
+    () => analyticsSvc.dashboardSummary(orgId(req), dateRange(req), clientId(req), unitFromReq(req), scope)));
+}));
+analytics.get('/dashboard-complete', wrap(async (req, res) => {
+  const scope = await analyticsScope(req);
+  res.json(await cachedAnalytics(`${cacheKey(req, 'dashboard-complete')}:${analyticsSvc.analyticsScopeSig(scope)}`, ANALYTICS_TTL,
+    () => analyticsSvc.dashboardComplete(orgId(req), dateRange(req), clientId(req), unitFromReq(req), scope)));
+}));
 analytics.get('/pipeline-value', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'pipeline-value'), ANALYTICS_TTL,
     () => analyticsSvc.pipelineValue(orgId(req), req.query.pipeline_id as string | undefined, clientId(req), unitFromReq(req))))));
