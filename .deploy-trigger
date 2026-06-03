@@ -1,1 +1,1 @@
-2026-06-03m: deploy #107 (bound getFunctionalKey org-API fetch with timeout — fixes AI hang).
+2026-06-03n: deploy #108 (null-city leads visible under hierarchy RBAC — fixes ~85% hidden leads).

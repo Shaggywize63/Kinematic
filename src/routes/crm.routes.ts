@@ -284,16 +284,22 @@ leads.get('/', wrap(async (req, res) => {
   // Every existing client keeps the flag off and skips this branch
   // entirely, so behaviour is unchanged for Tata Tiscon today.
   let visibleOwnerIds: string[] | null = null;
-  if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
+  const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
+  if (hierOn) {
     visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
   }
   // A rep always sees their own leads (selfOwnerId) even when the lead's
-  // city is outside their scope or absent; a tenant-wide admin
-  // (data_scope='all') additionally sees city-less leads. Both broaden the
-  // city filter without ever narrowing it — see listLeadsWithCount.
+  // city is outside their scope or absent. City-less leads (the bulk of the
+  // book: imported / web-form leads carry no geo tag) must not be hidden by
+  // the city filter — they're governed by the owner/hierarchy scope instead.
+  // So include them when the caller is a tenant-wide admin (data_scope='all')
+  // OR when hierarchy RBAC is active (the owner-subtree filter already bounds
+  // exposure, so a manager sees the null-city leads owned by their team
+  // rather than losing ~85% of them). Non-hierarchy city-restricted users are
+  // unchanged.
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
-  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all';
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
@@ -338,15 +344,16 @@ leads.get('/export', wrap(async (req, res) => {
   // Same hierarchy-RBAC guard as the list endpoint above. Without this,
   // a user could pull rows via /export that they can't see in the UI.
   let visibleOwnerIds: string[] | null = null;
-  if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
+  const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
+  if (hierOn) {
     visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
   }
   // Mirror the list endpoint's visibility so /export never returns more (or
-  // fewer) rows than the UI shows: own leads always, city-less leads for
-  // tenant-wide admins.
+  // fewer) rows than the UI shows: own leads always, and city-less leads for
+  // tenant-wide admins or whenever hierarchy RBAC bounds exposure by owner.
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
-  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all';
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
   // bounded.
@@ -1642,11 +1649,15 @@ async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope
   const me = (req as AuthRequest).user;
   const effectiveCities = rbac.getEffectiveCityNames(me);
   const selfOwnerId = me?.id ?? null;
-  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all';
   let visibleOwnerIds: string[] | null = null;
-  if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
+  const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
+  if (hierOn) {
     visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
   }
+  // City-less leads (most of the book) are scoped by owner/hierarchy, not
+  // geo — include them for tenant-wide admins and whenever hierarchy RBAC
+  // bounds exposure, so dashboard/analytics/map counts match the leads list.
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
   return { effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity };
 }
 // The scope signature MUST be part of the cache key, otherwise one user's
