@@ -325,6 +325,7 @@ export interface DashboardSummary {
   new_leads_30d: number;
   open_deals: number;
   open_deal_value: number;
+  open_deal_volume: number;
   won_deals_30d: number;
   won_revenue_30d: number;
   win_rate_30d: number;

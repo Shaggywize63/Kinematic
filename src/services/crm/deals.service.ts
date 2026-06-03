@@ -60,6 +60,52 @@ export async function listDealsWithCount(
   return { rows: (data ?? []) as Deal[], total: count ?? 0, page, limit };
 }
 
+/**
+ * Sum of value (amount) and volume (kg, from the weight view) across the
+ * ENTIRE filtered set — not just the current page — so the deals page can
+ * show an accurate total under pagination. Filters mirror listDealsWithCount.
+ */
+export async function dealsTotals(
+  org_id: string,
+  filters: Record<string, unknown> = {},
+  client_id: string | null = null,
+  options: { strictClient?: boolean; visibleOwnerIds?: string[] | null } = {},
+): Promise<{ total_value: number; total_volume_kg: number; count: number }> {
+  let q = supabaseAdmin.from('crm_deals')
+    .select('amount, weight:crm_v_deal_weight(total_kg)')
+    .eq('org_id', org_id).is('deleted_at', null);
+  if (client_id) {
+    q = options.strictClient
+      ? q.eq('client_id', client_id)
+      : q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  }
+  if (options.visibleOwnerIds !== undefined && options.visibleOwnerIds !== null) {
+    if (options.visibleOwnerIds.length === 0) return { total_value: 0, total_volume_kg: 0, count: 0 };
+    q = q.in('owner_id', options.visibleOwnerIds);
+  }
+  if (filters.pipeline_id) q = q.eq('pipeline_id', String(filters.pipeline_id));
+  if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));
+  if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
+  if (filters.account_id) q = q.eq('account_id', String(filters.account_id));
+  if (filters.status) q = q.eq('status', String(filters.status));
+  if (filters.q) q = q.ilike('name', `%${String(filters.q)}%`);
+  if (filters.from) q = q.gte('created_at', String(filters.from));
+  if (filters.to) q = q.lte('created_at', String(filters.to));
+  // Cap so a pathological org can't pull unbounded rows; totals on a set
+  // larger than this are still representative for the header stat.
+  q = q.limit(10000);
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  let total_value = 0;
+  let total_volume_kg = 0;
+  for (const r of (data ?? []) as Array<{ amount?: number | null; weight?: Array<{ total_kg?: number | string | null }> | { total_kg?: number | string | null } | null }>) {
+    total_value += Number(r.amount ?? 0);
+    const w = Array.isArray(r.weight) ? r.weight[0] : r.weight;
+    total_volume_kg += Number(w?.total_kg ?? 0);
+  }
+  return { total_value, total_volume_kg, count: (data ?? []).length };
+}
+
 export async function getDeal(org_id: string, id: string) {
   const { data, error } = await supabaseAdmin.from('crm_deals')
     .select('*, crm_deal_stages(name, stage_type, color, probability)')
