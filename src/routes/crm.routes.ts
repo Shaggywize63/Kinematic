@@ -597,13 +597,16 @@ const deals = express.Router();
 deals.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
   const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
-  const { rows, total, page, limit } = await dealsSvc.listDealsWithCount(
-    orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }
-  );
+  const [{ rows, total, page, limit }, totals] = await Promise.all([
+    dealsSvc.listDealsWithCount(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
+    dealsSvc.dealsTotals(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
+  ]);
   const stamped = await stampOwnerNames(rows);
   res.json({
     success: true,
     data: stamped,
+    // Value + volume summed across the whole filtered set (all pages).
+    totals: { value: totals.total_value, volume_kg: totals.total_volume_kg },
     pagination: {
       total, page, limit,
       totalPages: Math.max(1, Math.ceil(total / limit)),
