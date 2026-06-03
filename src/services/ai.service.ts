@@ -25,15 +25,23 @@ export class AIService {
     const adminKey = process.env.ANTHROPIC_ADMIN_KEY;
     const staticKey = process.env.ANTHROPIC_API_KEY;
 
-    // Phase 1: Try dynamic fetch if org credentials exist
+    // Phase 1: Try dynamic fetch if org credentials exist.
+    // IMPORTANT: bound this with an AbortController. Without a deadline a slow
+    // or hung Anthropic Org API pins the request indefinitely — every AI call
+    // resolves the key first, so a hang here freezes draft/score/chat with no
+    // error (the symptom we saw: requests stuck mid-flight, no usage recorded).
+    // On timeout/error we fall through to the static key below.
     if (orgKeyId && adminKey) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 8_000);
       try {
         const res = await fetch(`https://api.anthropic.com/v1/organizations/api_keys/${orgKeyId}`, {
           method: 'GET',
           headers: {
             'anthropic-version': '2023-06-01',
             'X-Api-Key': adminKey
-          }
+          },
+          signal: ac.signal,
         });
 
         if (res.ok) {
@@ -47,16 +55,24 @@ export class AIService {
           }
         }
       } catch (e) {
-        console.warn('AIService: Dynamic key fetch failed, falling back to static key.', e);
+        console.warn('AIService: Dynamic key fetch failed/timed out, falling back to static key.', (e as Error)?.message);
+      } finally {
+        clearTimeout(timer);
       }
     }
 
     // Phase 2: Fallback to static key
-    if (!staticKey) {
-      throw new AppError(500, 'AI authentication not configured. Set ANTHROPIC_ORG_KEY_ID or ANTHROPIC_API_KEY.', 'CONFIG_ERROR');
+    if (staticKey) return staticKey;
+
+    // Last resort: if the dynamic fetch failed but we still hold a previously
+    // minted key (now past its 1h cache window), use it rather than failing —
+    // a stale-but-valid key beats a hard outage when the Org API is flaky.
+    if (this.functionalKey) {
+      console.warn('AIService: using stale cached key — dynamic refresh unavailable.');
+      return this.functionalKey;
     }
 
-    return staticKey;
+    throw new AppError(500, 'AI authentication not configured. Set ANTHROPIC_ORG_KEY_ID or ANTHROPIC_API_KEY.', 'CONFIG_ERROR');
   }
 
   /**
