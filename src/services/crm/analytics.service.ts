@@ -54,13 +54,85 @@ function dealValue(d: DealWithWeight, unit: AnalyticsUnit): number {
   return unit === 'weight' ? dealWeightKg(d) : Number(d.amount ?? 0);
 }
 
+// Per-user visibility scope, mirroring the leads/deals list endpoints, so the
+// dashboard shows each user only their slice (assigned city + role hierarchy)
+// instead of org/client-wide totals. Undefined/null fields mean "no extra
+// restriction" (admins).
+export interface AnalyticsScope {
+  effectiveCities?: string[] | null;
+  visibleOwnerIds?: string[] | null;
+  selfOwnerId?: string | null;
+  includeNullCity?: boolean;
+}
+
+// A UUID that never matches a real row — used to force an empty result set
+// when the caller can see nothing (no cities, no visible owners).
+const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// Lead-visibility scope (city ∪ self ∪ null-city, then owner subtree) on a
+// crm_leads query — kept identical to listLeads so analytics match the list.
+function applyLeadScope(q: any, scope?: AnalyticsScope): any {
+  if (!scope) return q;
+  if (scope.effectiveCities !== undefined && scope.effectiveCities !== null) {
+    const orParts: string[] = [];
+    if (scope.effectiveCities.length > 0) {
+      const cityCsv = scope.effectiveCities.map((c) => `"${String(c).replace(/"/g, '')}"`).join(',');
+      orParts.push(`city.in.(${cityCsv})`);
+    }
+    if (scope.selfOwnerId) orParts.push(`owner_id.eq.${scope.selfOwnerId}`);
+    if (scope.includeNullCity) orParts.push('city.is.null');
+    if (orParts.length === 0) orParts.push(`owner_id.eq.${NO_MATCH_UUID}`);
+    q = q.or(orParts.join(','));
+  }
+  if (scope.visibleOwnerIds !== undefined && scope.visibleOwnerIds !== null) {
+    q = q.in('owner_id', scope.visibleOwnerIds.length ? scope.visibleOwnerIds : [NO_MATCH_UUID]);
+  }
+  return q;
+}
+
+// Owner-subtree scope on a crm_deals query (deals carry no city, so they are
+// scoped by ownership only — same as the deals list).
+function applyOwnerScope(q: any, scope?: AnalyticsScope): any {
+  if (!scope) return q;
+  if (scope.visibleOwnerIds !== undefined && scope.visibleOwnerIds !== null) {
+    q = q.in('owner_id', scope.visibleOwnerIds.length ? scope.visibleOwnerIds : [NO_MATCH_UUID]);
+  }
+  return q;
+}
+
+// Owner-subtree scope on a crm_activities query (owner_id OR assigned_to).
+function applyActivityScope(q: any, scope?: AnalyticsScope): any {
+  if (!scope) return q;
+  if (scope.visibleOwnerIds !== undefined && scope.visibleOwnerIds !== null) {
+    const ids = (scope.visibleOwnerIds.length ? scope.visibleOwnerIds : [NO_MATCH_UUID]).join(',');
+    q = q.or(`owner_id.in.(${ids}),assigned_to.in.(${ids})`);
+  }
+  return q;
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+// Stable signature for the analytics cache key so one user's scoped result is
+// never served to another. Hashed to keep the key bounded when a manager's
+// subtree contains many owner ids.
+export function analyticsScopeSig(scope?: AnalyticsScope): string {
+  if (!scope) return 'all';
+  const raw = JSON.stringify({
+    c: scope.effectiveCities ?? null,
+    o: scope.visibleOwnerIds ?? null,
+    s: scope.selfOwnerId ?? null,
+    n: scope.includeNullCity ?? null,
+  });
+  return require('crypto').createHash('sha1').update(raw).digest('hex').slice(0, 16);
+}
+
 function defaultWindow(range?: DateRange) {
   const fromIso = range?.from ?? new Date(Date.now() - 30 * 86400000).toISOString();
   const toIso = range?.to ?? new Date().toISOString();
   return { fromIso, toIso };
 }
 
-export async function dashboardSummary(org_id: string, range?: DateRange, client_id: string | null = null, unit: AnalyticsUnit = 'inr'): Promise<DashboardSummary> {
+export async function dashboardSummary(org_id: string, range?: DateRange, client_id: string | null = null, unit: AnalyticsUnit = 'inr', scope?: AnalyticsScope): Promise<DashboardSummary> {
   const { fromIso, toIso } = defaultWindow(range);
   const fromDate = fromIso.slice(0, 10);
   const toDate = toIso.slice(0, 10);
@@ -75,23 +147,23 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     { data: closedInWindow },
     { count: activities7d },
   ] = await Promise.all([
-    withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null), client_id),
-    withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), client_id),
-    withClient(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).eq('status', 'converted').gte('created_at', fromIso).lte('created_at', toIso), client_id),
+    withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null), scope), client_id),
+    withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), scope), client_id),
+    withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).eq('status', 'converted').gte('created_at', fromIso).lte('created_at', toIso), scope), client_id),
     // Live query for open pipeline — the MV (crm_mv_pipeline_value) doesn't
     // track client_id, so reading it here would leak the org-wide totals into
     // any per-client dashboard.
     withClient(
-      supabaseAdmin.from('crm_deals')
+      applyOwnerScope(supabaseAdmin.from('crm_deals')
         // Always join the weight view here (not just in weight mode) so the
         // Open Pipeline card can show total volume (kg) alongside value.
         .select(`amount, owner_id, crm_deal_stages!inner(name, stage_type)${weightJoin}`)
         .eq('org_id', org_id).is('deleted_at', null)
-        .eq('crm_deal_stages.stage_type', 'open'),
+        .eq('crm_deal_stages.stage_type', 'open'), scope),
       client_id,
     ),
-    withClient(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id),
-    withClient(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), client_id),
+    withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), scope), client_id),
+    withClient(applyActivityScope(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), scope), client_id),
   ]);
 
   // Aggregate live open-pipeline rows. Each row is one deal. In weight mode
@@ -133,10 +205,10 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   const avg_deal_size = wonCount > 0 ? won_revenue / wonCount : 0;
 
   // Avg sales cycle (days from created_at → actual_close_date) for won deals in window
-  const { data: cycleRows } = await withClient(supabaseAdmin.from('crm_deals')
+  const { data: cycleRows } = await withClient(applyOwnerScope(supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).is('deleted_at', null).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null)
-    .gte('actual_close_date', fromDate).lte('actual_close_date', toDate), client_id)
+    .gte('actual_close_date', fromDate).lte('actual_close_date', toDate), scope), client_id)
     .limit(200);
   const cycles = (cycleRows ?? []).map(r => (new Date(r.actual_close_date!).getTime() - new Date(r.created_at).getTime()) / 86400000);
   const avg_sales_cycle_days = cycles.length ? Math.round(cycles.reduce((a, b) => a + b, 0) / cycles.length) : 0;
@@ -167,7 +239,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   };
 }
 
-export async function pipelineValue(org_id: string, pipeline_id?: string, client_id: string | null = null, unit: AnalyticsUnit = 'inr') {
+export async function pipelineValue(org_id: string, pipeline_id?: string, client_id: string | null = null, unit: AnalyticsUnit = 'inr', scope?: AnalyticsScope) {
   // Live query — the MV (crm_mv_pipeline_value) doesn't track client_id, so it
   // cannot be filtered per client. Aggregate from crm_deals directly.
   const lines = unit === 'weight' ? weightJoin : '';
@@ -178,6 +250,7 @@ export async function pipelineValue(org_id: string, pipeline_id?: string, client
     .eq('crm_deal_stages.stage_type', 'open');
   if (pipeline_id) q = q.eq('pipeline_id', pipeline_id);
   q = withClient(q, client_id);
+  q = applyOwnerScope(q, scope);
   const { data } = await q;
   const map = new Map<string, { stage: string; value: number; count: number; position: number }>();
   for (const d of (data ?? []) as unknown as Array<DealWithWeight & { crm_deal_stages: { name: string; position: number } }>) {
@@ -190,7 +263,7 @@ export async function pipelineValue(org_id: string, pipeline_id?: string, client
   return Array.from(map.values()).sort((a, b) => a.position - b.position).map(({ stage, value, count }) => ({ stage, value, count }));
 }
 
-export async function funnel(org_id: string, days = 30, range?: DateRange, client_id: string | null = null) {
+export async function funnel(org_id: string, days = 30, range?: DateRange, client_id: string | null = null, scope?: AnalyticsScope) {
   // Live query — the MV (crm_mv_funnel_daily) doesn't track client_id.
   // Aggregate from crm_leads grouped by status within the window.
   const fromIso = range?.from ?? new Date(Date.now() - days * 86400000).toISOString();
@@ -199,6 +272,7 @@ export async function funnel(org_id: string, days = 30, range?: DateRange, clien
     .eq('org_id', org_id).is('deleted_at', null)
     .gte('created_at', fromIso).lte('created_at', toIso);
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   const { data } = await q;
   let n_new = 0, n_qual = 0, n_conv = 0;
   for (const r of (data ?? []) as Array<{ status: string }>) {
@@ -213,13 +287,14 @@ export async function funnel(org_id: string, days = 30, range?: DateRange, clien
   ];
 }
 
-export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', range?: DateRange, client_id: string | null = null) {
+export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', range?: DateRange, client_id: string | null = null, scope?: AnalyticsScope) {
   if (by === 'source') {
     // Live query — the MV (crm_mv_lead_source_roi) doesn't track client_id.
     let lq = supabaseAdmin.from('crm_leads')
       .select('status, source_id, crm_lead_sources(name)')
       .eq('org_id', org_id).is('deleted_at', null);
     lq = withClient(lq, client_id);
+    lq = applyLeadScope(lq, scope);
     const { data } = await lq;
     const map = new Map<string, { won: number; total: number }>();
     for (const r of (data ?? []) as unknown as Array<{ status: string; crm_lead_sources?: { name?: string } | null }>) {
@@ -238,6 +313,7 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
     .select('amount, owner_id, stage_id, created_at, crm_deal_stages!inner(name, stage_type)')
     .eq('org_id', org_id).is('deleted_at', null);
   q = withClient(q, client_id);
+  q = applyOwnerScope(q, scope);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
   const { data: deals } = await q;
@@ -278,7 +354,7 @@ export async function salesCycle(org_id: string, range?: DateRange, client_id: s
     .map(([month, days]) => ({ month, avg_days: Math.round(days.reduce((a, b) => a + b, 0) / days.length) }));
 }
 
-export async function forecast(org_id: string, period: 'month' | 'quarter' = 'quarter', range?: DateRange, client_id: string | null = null, unit: AnalyticsUnit = 'inr') {
+export async function forecast(org_id: string, period: 'month' | 'quarter' = 'quarter', range?: DateRange, client_id: string | null = null, unit: AnalyticsUnit = 'inr', scope?: AnalyticsScope) {
   let cutoff: string;
   let fromCutoff: string | null = null;
   if (range?.to) cutoff = range.to.slice(0, 10);
@@ -297,6 +373,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
     .eq('crm_deal_stages.stage_type', 'open')
     .lte('expected_close_date', cutoff).not('expected_close_date', 'is', null);
   openQ = withClient(openQ, client_id);
+  openQ = applyOwnerScope(openQ, scope);
   if (fromCutoff) openQ = openQ.gte('expected_close_date', fromCutoff);
 
   // Already-closed-won amounts in the same horizon (so the chart can plot a "closed" line)
@@ -307,6 +384,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
     .not('actual_close_date', 'is', null)
     .lte('actual_close_date', cutoff);
   wonQ = withClient(wonQ, client_id);
+  wonQ = applyOwnerScope(wonQ, scope);
   if (fromCutoff) wonQ = wonQ.gte('actual_close_date', fromCutoff);
 
   const [{ data: openData }, { data: wonData }] = await Promise.all([openQ, wonQ]);
@@ -415,9 +493,10 @@ export async function leadSourceRoi(org_id: string, client_id: string | null = n
   }));
 }
 
-export async function leadScoreDistribution(org_id: string, range?: DateRange, client_id: string | null = null) {
+export async function leadScoreDistribution(org_id: string, range?: DateRange, client_id: string | null = null, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_leads').select('score').eq('org_id', org_id).is('deleted_at', null);
   q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
   const { data } = await q;
@@ -442,14 +521,15 @@ export async function dashboardComplete(
   range?: DateRange,
   client_id: string | null = null,
   unit: AnalyticsUnit = 'inr',
+  scope?: AnalyticsScope,
 ) {
   const [summary, funnelData, pipelineValueData, winRateData, forecastData, scoreDist] = await Promise.all([
-    dashboardSummary(org_id, range, client_id, unit),
-    funnel(org_id, 30, range, client_id),
-    pipelineValue(org_id, undefined, client_id, unit),
-    winRate(org_id, 'rep', range, client_id),
-    forecast(org_id, 'quarter', range, client_id, unit),
-    leadScoreDistribution(org_id, range, client_id),
+    dashboardSummary(org_id, range, client_id, unit, scope),
+    funnel(org_id, 30, range, client_id, scope),
+    pipelineValue(org_id, undefined, client_id, unit, scope),
+    winRate(org_id, 'rep', range, client_id, scope),
+    forecast(org_id, 'quarter', range, client_id, unit, scope),
+    leadScoreDistribution(org_id, range, client_id, scope),
   ]);
   return {
     summary,
