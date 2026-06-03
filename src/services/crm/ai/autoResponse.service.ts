@@ -6,6 +6,15 @@ import { supabaseAdmin } from '../../../lib/supabase';
 import { complete as aiComplete } from './aiClient';
 import { AppError } from '../../../utils';
 
+// Default model for the email drafting/template flows. We deliberately fall
+// back to the same Haiku 4.5 model that every *working* CRM AI feature uses
+// (lead scoring, WhatsApp drafting, summaries, NBA). The previous default
+// `claude-sonnet-4-6` is not callable with this deployment's Anthropic key —
+// it 404'd as model_not_found, surfacing only as a generic "AI request
+// failed", which is why both the reply drafter and template generator
+// silently produced nothing. Override per-env with CRM_AUTO_RESPONSE_MODEL.
+const EMAIL_AI_MODEL = process.env.CRM_AUTO_RESPONSE_MODEL || 'claude-haiku-4-5-20251001';
+
 export interface DraftReplyInput {
   org_id: string;
   user_id?: string;
@@ -73,7 +82,7 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
 
   const response = await aiComplete({
     org_id,
-    model: process.env.CRM_AUTO_RESPONSE_MODEL || 'claude-sonnet-4-6',
+    model: EMAIL_AI_MODEL,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: JSON.stringify(ctx) }],
     max_tokens: 1200,
@@ -146,7 +155,7 @@ export async function draftEmailTemplate(input: DraftEmailTemplateInput): Promis
 
   const response = await aiComplete({
     org_id: input.org_id,
-    model: process.env.CRM_AUTO_RESPONSE_MODEL || 'claude-sonnet-4-6',
+    model: EMAIL_AI_MODEL,
     system: TEMPLATE_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: userMsg }],
     max_tokens: 1800,
