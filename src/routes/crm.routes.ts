@@ -1238,7 +1238,23 @@ settings.get('/', wrap(async (req, res) => {
   // on refresh.
   const cid = clientId(req);
   const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
-  res.json(r.data ?? { org_id: orgId(req), client_id: cid, config: {}, business_type: 'both' });
+  const base = r.data ?? { org_id: orgId(req), client_id: cid, config: {}, business_type: 'both' };
+
+  // Per-client overlay for vertical-specific lead-score-boost suggestions.
+  // crm_settings is keyed by org and can't distinguish two clients that share
+  // an org (e.g. Kinematic vs Tata Tiscon), so the enabled "boost signals"
+  // live on clients.settings.score_boost_signals. Resolve them for the scoped
+  // client and inject into the returned config — the dashboard reads this to
+  // show only the boost items relevant to the current client. Default empty
+  // (generic CRM items only) for clients that haven't opted in.
+  let scoreBoostSignals: string[] = [];
+  if (cid) {
+    const { data: client } = await supabaseAdmin.from('clients').select('settings').eq('id', cid).maybeSingle();
+    const sig = (client?.settings as Record<string, unknown> | null | undefined)?.score_boost_signals;
+    if (Array.isArray(sig)) scoreBoostSignals = sig.map(String);
+  }
+  const config = { ...((base as { config?: Record<string, unknown> }).config || {}), score_boost_signals: scoreBoostSignals };
+  res.json({ ...base, config });
 }));
 settings.patch('/', wrap(async (req, res) => {
   const body = parse(v.settingsUpdateSchema, req.body);

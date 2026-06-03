@@ -1,1 +1,1 @@
-2026-06-03k: deploy #105 (email AI model fix — use working Haiku 4.5, not sonnet-4-6).
+2026-06-03m: deploy #107 (bound getFunctionalKey org-API fetch with timeout — fixes AI hang).
