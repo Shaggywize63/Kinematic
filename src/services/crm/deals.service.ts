@@ -72,7 +72,7 @@ export async function dealsTotals(
   options: { strictClient?: boolean; visibleOwnerIds?: string[] | null } = {},
 ): Promise<{ total_value: number; total_volume_kg: number; count: number }> {
   let q = supabaseAdmin.from('crm_deals')
-    .select('amount, weight:crm_v_deal_weight(total_kg)')
+    .select('amount, custom_fields, weight:crm_v_deal_weight(total_kg)')
     .eq('org_id', org_id).is('deleted_at', null);
   if (client_id) {
     q = options.strictClient
@@ -98,10 +98,17 @@ export async function dealsTotals(
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   let total_value = 0;
   let total_volume_kg = 0;
-  for (const r of (data ?? []) as Array<{ amount?: number | null; weight?: Array<{ total_kg?: number | string | null }> | { total_kg?: number | string | null } | null }>) {
+  for (const r of (data ?? []) as Array<{ amount?: number | null; custom_fields?: Record<string, unknown> | null; weight?: Array<{ total_kg?: number | string | null }> | { total_kg?: number | string | null } | null }>) {
     total_value += Number(r.amount ?? 0);
-    const w = Array.isArray(r.weight) ? r.weight[0] : r.weight;
-    total_volume_kg += Number(w?.total_kg ?? 0);
+    // Volume captured on the deal (custom_fields.volume_kg) wins; fall back
+    // to the line-items weight view for deals created through that path.
+    const cfVol = r.custom_fields ? Number((r.custom_fields as Record<string, unknown>).volume_kg) : NaN;
+    if (Number.isFinite(cfVol) && cfVol > 0) {
+      total_volume_kg += cfVol;
+    } else {
+      const w = Array.isArray(r.weight) ? r.weight[0] : r.weight;
+      total_volume_kg += Number(w?.total_kg ?? 0);
+    }
   }
   return { total_value, total_volume_kg, count: (data ?? []).length };
 }

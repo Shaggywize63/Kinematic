@@ -39,9 +39,22 @@ function withClient<T>(q: T, client_id: string | null): T {
 const weightJoin = ', weight:crm_v_deal_weight(total_kg)';
 
 type WeightRow = { total_kg?: number | string | null };
-type DealWithWeight = { amount?: number | null; weight?: WeightRow[] | WeightRow | null };
+type DealWithWeight = {
+  amount?: number | null;
+  weight?: WeightRow[] | WeightRow | null;
+  // Deals capture their volume in the product-listing section, stored as
+  // custom_fields.volume_kg (sum of line-item kg). This is the canonical
+  // source; the crm_deal_line_items table / weight view is only populated
+  // for deals created through that path.
+  custom_fields?: Record<string, unknown> | null;
+};
 
 function dealWeightKg(d: DealWithWeight): number {
+  // Prefer the volume captured on the deal (custom_fields.volume_kg); fall
+  // back to the line-items weight view for deals that use that table.
+  const cf = d.custom_fields as Record<string, unknown> | null | undefined;
+  const cfVol = cf ? Number(cf.volume_kg) : NaN;
+  if (Number.isFinite(cfVol) && cfVol > 0) return cfVol;
   const w = d.weight;
   const row: WeightRow | undefined = Array.isArray(w) ? w[0] : (w ?? undefined);
   return Number(row?.total_kg ?? 0);
@@ -157,7 +170,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
       applyOwnerScope(supabaseAdmin.from('crm_deals')
         // Always join the weight view here (not just in weight mode) so the
         // Open Pipeline card can show total volume (kg) alongside value.
-        .select(`amount, owner_id, crm_deal_stages!inner(name, stage_type)${weightJoin}`)
+        .select(`amount, owner_id, custom_fields, crm_deal_stages!inner(name, stage_type)${weightJoin}`)
         .eq('org_id', org_id).is('deleted_at', null)
         .eq('crm_deal_stages.stage_type', 'open'), scope),
       client_id,
