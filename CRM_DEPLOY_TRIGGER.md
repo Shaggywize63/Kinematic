@@ -5,4 +5,4 @@ from GitHub when the auto-deploy webhook gets stuck on a cached commit.
 
 Touch this file (change the timestamp below) to trigger a redeploy.
 
-Last bumped: 2026-06-03T09:00Z — picks up #95 (lead scoring v3).
+Last bumped: 2026-06-03T10:00Z — picks up #97 (background full rescore).
