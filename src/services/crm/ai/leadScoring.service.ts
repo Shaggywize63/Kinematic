@@ -193,8 +193,9 @@ function scoreB2C(
   }
   if (lead.email) (b as any).email_present = w('email_present', 5);
   if (Array.isArray(L.alternate_mobiles) && (L.alternate_mobiles as unknown[]).length > 0) (b as any).alt_mobiles = w('alt_mobiles', 3);
-  if (L.whatsapp_consent) (b as any).whatsapp_consent = w('whatsapp_consent', 5);
-  else if (L.marketing_consent) (b as any).marketing_consent = w('marketing_consent', 3);
+  // WhatsApp consent intentionally excluded from scoring (per tenant request);
+  // marketing consent still contributes a small reachability signal.
+  if (L.marketing_consent) (b as any).marketing_consent = w('marketing_consent', 3);
 
   // ── Profile quality / field verification ──
   if (lead.first_name && lead.last_name) (b as any).full_name = w('full_name', 4);
