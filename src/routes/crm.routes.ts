@@ -235,18 +235,16 @@ async function activityScopeOpts(req: AuthRequest): Promise<{
 
 /**
  * Normalise an activity payload to the actual `crm_activities` columns.
- * The dashboard edit modal sends `description` (and historically `outcome`),
- * but the table's note column is `body` — writing `description` straight
- * through made every edit fail with "column description does not exist".
- * Fold `description` into `body` and drop any stray non-column keys.
+ * The dashboard edit modal sends `description`, but the table's note column is
+ * `body` — writing `description` straight through made every edit fail with
+ * "column description does not exist". Fold `description` into `body`.
+ * (`outcome` IS a real column now, so it's left to pass through.)
  */
 function normalizeActivityPayload(p: Record<string, unknown>): Record<string, unknown> {
   if ('description' in p) {
     if (p.body === undefined || p.body === null) p.body = (p as Record<string, unknown>).description;
     delete (p as Record<string, unknown>).description;
   }
-  // `outcome` has no column; Zod already strips it, but guard belt-and-braces.
-  delete (p as Record<string, unknown>).outcome;
   return p;
 }
 
