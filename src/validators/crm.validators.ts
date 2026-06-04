@@ -243,6 +243,9 @@ export const activitySchemaBase = z.object({
   subject: z.string().max(200).optional().nullable(),
   body: z.string().optional().nullable(),
   description: z.string().optional().nullable(),
+  // Free-text result of the activity (e.g. Connected, No answer, Interested),
+  // set from the CRM activity editor. Backed by crm_activities.outcome.
+  outcome: z.string().max(500).optional().nullable(),
   direction: z.enum(['inbound','outbound']).optional().nullable(),
   status: z.enum(['open','planned','in_progress','completed','done','cancelled']).default('completed'),
   priority: z.enum(['low','normal','medium','high','urgent']).optional().nullable(),
