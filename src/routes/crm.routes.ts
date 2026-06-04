@@ -234,6 +234,23 @@ async function activityScopeOpts(req: AuthRequest): Promise<{
 }
 
 /**
+ * Normalise an activity payload to the actual `crm_activities` columns.
+ * The dashboard edit modal sends `description` (and historically `outcome`),
+ * but the table's note column is `body` — writing `description` straight
+ * through made every edit fail with "column description does not exist".
+ * Fold `description` into `body` and drop any stray non-column keys.
+ */
+function normalizeActivityPayload(p: Record<string, unknown>): Record<string, unknown> {
+  if ('description' in p) {
+    if (p.body === undefined || p.body === null) p.body = (p as Record<string, unknown>).description;
+    delete (p as Record<string, unknown>).description;
+  }
+  // `outcome` has no column; Zod already strips it, but guard belt-and-braces.
+  delete (p as Record<string, unknown>).outcome;
+  return p;
+}
+
+/**
  * Single-row access check for activities (GET / PATCH / DELETE
  * /activities/:id). Under hierarchy mode the caller is allowed any
  * activity whose owner_id OR assigned_to is in their subtree; under the
@@ -1027,7 +1044,7 @@ activities.get('/export', wrap(async (req, res) => {
   res.send(csv);
 }));
 activities.post('/', wrap(async (req, res) => {
-  const parsed = parse(v.activitySchema, req.body);
+  const parsed = normalizeActivityPayload(parse(v.activitySchema, req.body));
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   // Default owner to the creating user when not specified. Otherwise
   // a non-admin user could create an activity they're then not allowed
@@ -1062,7 +1079,7 @@ activities.patch('/:id', wrap(async (req, res) => {
   const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
   const err = await activityAccessError(req as AuthRequest, existing);
   if (err) throw err;
-  const updated = await crud.update('crm_activities', orgId(req), req.params.id, parse(v.activitySchemaBase.partial(), req.body), userId(req)) as Record<string, unknown>;
+  const updated = await crud.update('crm_activities', orgId(req), req.params.id, normalizeActivityPayload(parse(v.activitySchemaBase.partial(), req.body)), userId(req)) as Record<string, unknown>;
   void (async () => {
     try {
       const { pushActivity } = await import('../services/integrations/googleCalendar.service');
