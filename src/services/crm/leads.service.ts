@@ -225,6 +225,28 @@ export async function listLeadsWithCount(
   }
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
+  // Sorting. An explicit `sort` query param wins; otherwise we fall back to
+  // the "latest-update first" default below so a rep typing in a note (or any
+  // backend event that bumps latest_update_at) bubbles the row to the top.
+  const sortKey = filters.sort ? String(filters.sort) : '';
+  const ascending = String(filters.order ?? '').toLowerCase() === 'asc';
+  // Whitelist sortable columns → real DB columns. Name maps to first_name
+  // with last_name as the tie-breaker so "by name" reads alphabetically.
+  const SORT_COLUMNS: Record<string, string> = {
+    name: 'first_name',
+    created: 'created_at',
+    created_at: 'created_at',
+    updated: 'updated_at',
+    updated_at: 'updated_at',
+    score: 'score',
+    company: 'company',
+    status: 'status',
+  };
+  if (sortKey && SORT_COLUMNS[sortKey]) {
+    q = q.order(SORT_COLUMNS[sortKey], { ascending, nullsFirst: false });
+    if (sortKey === 'name') q = q.order('last_name', { ascending, nullsFirst: false });
+    q = q.range((page - 1) * limit, page * limit - 1);
+  } else {
   // Default sort: latest-update first so a rep typing in a note (or any
   // backend event that bumps latest_update_at) bubbles the row to the
   // top. Falls back to updated_at then score so leads with no updates
@@ -234,6 +256,7 @@ export async function listLeadsWithCount(
        .order('updated_at', { ascending: false })
        .order('score', { ascending: false })
        .range((page - 1) * limit, page * limit - 1);
+  }
   const { data, error, count } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return { rows: (data ?? []) as Lead[], total: count ?? 0, page, limit };
