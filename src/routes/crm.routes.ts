@@ -541,12 +541,23 @@ leads.get('/export', wrap(async (req, res) => {
 // '/:id' so the literal path wins over the param route.
 leads.get('/geo', wrap(async (req, res) => {
   const scope = clientScope(req);
+  const me = (req as AuthRequest).user!;
   let q = supabaseAdmin.from('crm_leads')
     .select('id, first_name, last_name, city, state, status, latitude, longitude, score, score_grade')
     .eq('org_id', orgId(req)).is('deleted_at', null)
     .not('latitude', 'is', null).not('longitude', 'is', null);
   if (scope.id) {
     q = scope.strict ? q.eq('client_id', scope.id) : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+  }
+  // Ownership scope — mirror the list endpoint so the map never shows
+  // "universal" leads a rep can't see. Hierarchy on → self + subtree;
+  // otherwise a data_scope='own' role (e.g. Tata's Consumer Champion)
+  // sees only their own leads. Admins / data_scope='all' see everything.
+  const subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  if (subtreeIds !== null) {
+    q = q.in('owner_id', subtreeIds.length ? subtreeIds : [NO_MATCH_UUID]);
+  } else if ((me.org_role_data_scope ?? 'all') === 'own') {
+    q = q.eq('owner_id', me.id);
   }
   const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
   if (city) q = q.eq('city', city);
@@ -1426,12 +1437,19 @@ targets.get('/levels', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   res.json({ success: true, data: await targetsSvc.listTargetRoles(orgId(req), clientId(req)) });
 }));
 
-// Manager-facing: leaderboard analytics — leads per user vs target for the
-// window, plus top/lowest/average. ?period=today|week|month (default today).
-targets.get('/leaderboard', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+// Leaderboard analytics — leads per user vs target for the window, plus
+// top/lowest/average. ?period=today|week|month (default today). Open to any
+// authenticated user: managers see the configured role (or whole force), while
+// a non-manager (e.g. a Consumer Champion) is locked to their own role so the
+// board only ever lists their peers.
+targets.get('/leaderboard', wrap(async (req, res) => {
+  const u = (req as AuthRequest).user!;
   const p = String(req.query.period ?? 'today');
   const period = (['today', 'week', 'month'].includes(p) ? p : 'today') as targetsSvc.LeaderboardPeriod;
-  res.json({ success: true, data: await targetsSvc.targetsLeaderboard(orgId(req), clientId(req), period) });
+  res.json({ success: true, data: await targetsSvc.targetsLeaderboard(orgId(req), clientId(req), period, {
+    org_role_id: (u as any).org_role_id ?? null,
+    org_role_data_scope: (u as any).org_role_data_scope ?? null,
+  }) });
 }));
 
 // Manager-facing: which hierarchy role the leaderboard is scoped to (per client).
