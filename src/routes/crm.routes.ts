@@ -258,6 +258,39 @@ function activityOwnerFilter(v: unknown): string | null {
   return typeof v === 'string' && UUID_RE.test(v) ? v : null;
 }
 
+// A uuid that can never match a real row — used to force an empty result when
+// a location filter resolves to zero leads.
+const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
+const ACTIVITY_LOCATION_KEYS = ['city', 'state', 'district', 'block'] as const;
+/**
+ * crm_activities has no geo columns — it links to leads via lead_id. The
+ * dashboard's global location filter (and the leads filters) send
+ * city/state/district/block, so for activities we resolve the matching lead
+ * ids first and let the caller filter activities by `lead_id IN (...)`.
+ * Returns null when no location filter is present (no constraint), else the
+ * list of matching lead ids (possibly empty → caller should show nothing).
+ */
+async function activityLocationLeadIds(
+  query: Record<string, unknown>,
+  org_id: string,
+  scope: { id: string | null; strict: boolean },
+): Promise<string[] | null> {
+  const loc: Record<string, string> = {};
+  for (const k of ACTIVITY_LOCATION_KEYS) {
+    const v = query[k];
+    if (typeof v === 'string' && v.trim()) loc[k] = v.trim();
+  }
+  if (Object.keys(loc).length === 0) return null;
+  let lq = supabaseAdmin.from('crm_leads').select('id').eq('org_id', org_id).is('deleted_at', null);
+  if (scope.id) {
+    lq = scope.strict ? lq.eq('client_id', scope.id) : lq.or(`client_id.is.null,client_id.eq.${scope.id}`);
+  }
+  for (const [k, v] of Object.entries(loc)) lq = lq.eq(k, v);
+  const { data, error } = await lq.limit(20000);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return (data ?? []).map((r: { id: string }) => r.id);
+}
+
 /**
  * Single-row access check for activities (GET / PATCH / DELETE
  * /activities/:id). Under hierarchy mode the caller is allowed any
@@ -950,13 +983,17 @@ activities.get('/', wrap(async (req, res) => {
   // helper would apply) hides them all. Strip it from the generic query and
   // apply an OR here instead.
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
-  const { owner_id: _ownerOmit, ...listQuery } = req.query as Record<string, unknown>;
+  // Location filter (city/state/district/block) → resolve to lead ids, since
+  // crm_activities has no geo columns. null = no location filter.
+  const locLeadIds = await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
+  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, ...listQuery } = req.query as Record<string, unknown>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraFilters = (q: any) => {
     if (view === 'overdue')   q = q.not('due_at', 'is', null).lt('due_at', nowIso).is('completed_at', null);
     else if (view === 'upcoming')  q = q.not('due_at', 'is', null).gte('due_at', nowIso).is('completed_at', null);
     else if (view === 'completed') q = q.not('completed_at', 'is', null);
     if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
+    if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
     return q;
   };
   const { rows, total, page, limit } = await crud.clientScopedListWithCount(
@@ -1006,12 +1043,18 @@ activities.get('/export', wrap(async (req, res) => {
   const visibilityOpts = subtreeIds
     ? { visibleOwnerIds: subtreeIds, ownerColumns: ['owner_id', 'assigned_to'] }
     : { userScope };
-  // Match the list endpoint: ?owner_id= filters on owner_id OR assigned_to.
+  // Match the list endpoint: ?owner_id= filters on owner_id OR assigned_to,
+  // and city/state/district/block filter via the linked lead.
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
-  const { owner_id: _ownerOmit, ...exportQuery } = req.query as Record<string, unknown>;
+  const locLeadIds = await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
+  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, ...exportQuery } = req.query as Record<string, unknown>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ownerExtra = ownerFilter
-    ? (q: any) => q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`)
+  const ownerExtra = (ownerFilter || locLeadIds !== null)
+    ? (q: any) => {
+        if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
+        if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
+        return q;
+      }
     : undefined;
   const PAGE = 200;
   const MAX  = 10000;
