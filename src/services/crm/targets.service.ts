@@ -157,11 +157,14 @@ export async function targetsLeaderboard(
   client_id: string | null,
   period: LeaderboardPeriod = 'today',
 ) {
-  // 1. Users in scope (the field force for this tenant).
+  // 1. Users in scope (the field force for this tenant). `users` has no
+  // soft-delete column — it uses is_active; exclude only explicitly-disabled
+  // accounts (null/true kept). When a client is selected we scope to it; with
+  // no client picked (org-wide admin view) we show the whole org.
   let uq = supabaseAdmin.from('users')
     .select('id, name, email, city, org_role_id, hierarchy_level_id, role')
-    .eq('org_id', org_id).is('deleted_at', null);
-  uq = client_id ? uq.eq('client_id', client_id) : uq.is('client_id', null);
+    .eq('org_id', org_id).neq('is_active', false);
+  if (client_id) uq = uq.eq('client_id', client_id);
   const { data: uData, error: uErr } = await uq;
   if (uErr) throw new AppError(500, uErr.message, 'DB_ERROR');
   const users = (uData ?? []) as any[];
@@ -205,13 +208,17 @@ export async function targetsLeaderboard(
     if (by) counts.set(by, (counts.get(by) ?? 0) + 1);
   }
 
-  // 4. Build rows — keep the field force (anyone with a target) plus anyone who
-  // actually created a lead. Admins with no target and no leads drop out.
+  // 4. Build rows — keep the field force (anyone in the hierarchy, i.e. has an
+  // org role or level, or a target) plus anyone who actually created a lead.
+  // Showing zero-lead field staff is intentional: it's what makes "who's
+  // behind / entered the least" meaningful even before any target is set.
+  // Pure admins with no role, no target and no leads drop out.
   const days = daysInPeriod(period);
   const entries = users
     .map((u) => {
       const leads = counts.get(u.id) ?? 0;
       const target = dailyTarget(u) * days;
+      const isFieldForce = !!(u.org_role_id || u.hierarchy_level_id);
       return {
         user_id: u.id as string,
         name: (u.name || u.email || 'User') as string,
@@ -219,9 +226,11 @@ export async function targetsLeaderboard(
         leads,
         target,
         pct: target > 0 ? Math.round((leads / target) * 100) : null,
+        _keep: isFieldForce || leads > 0 || target > 0,
       };
     })
-    .filter((e) => e.leads > 0 || e.target > 0)
+    .filter((e) => e._keep)
+    .map(({ _keep, ...e }) => e)
     .sort((a, b) => b.leads - a.leads || a.name.localeCompare(b.name));
 
   // 5. Aggregate stats.
