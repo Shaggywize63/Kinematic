@@ -250,6 +250,15 @@ function normalizeActivityPayload(p: Record<string, unknown>): Record<string, un
 }
 
 /**
+ * Validate the activities ?owner_id= filter value. Returns the UUID when it's
+ * a well-formed id (safe to interpolate into a PostgREST .or()), else null.
+ * Used to filter activities by owner_id OR assigned_to.
+ */
+function activityOwnerFilter(v: unknown): string | null {
+  return typeof v === 'string' && UUID_RE.test(v) ? v : null;
+}
+
+/**
  * Single-row access check for activities (GET / PATCH / DELETE
  * /activities/:id). Under hierarchy mode the caller is allowed any
  * activity whose owner_id OR assigned_to is in their subtree; under the
@@ -935,15 +944,23 @@ activities.get('/', wrap(async (req, res) => {
   //   all       = no extra constraint (default)
   const view = String(req.query.view ?? 'all').toLowerCase();
   const nowIso = new Date().toISOString();
+  // The FE/owner filter (?owner_id=) must match either owner_id OR
+  // assigned_to: activities are almost always tracked via assigned_to with
+  // owner_id null, so a plain owner_id.eq filter (what the generic crud
+  // helper would apply) hides them all. Strip it from the generic query and
+  // apply an OR here instead.
+  const ownerFilter = activityOwnerFilter(req.query.owner_id);
+  const { owner_id: _ownerOmit, ...listQuery } = req.query as Record<string, unknown>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraFilters = (q: any) => {
-    if (view === 'overdue')   return q.not('due_at', 'is', null).lt('due_at', nowIso).is('completed_at', null);
-    if (view === 'upcoming')  return q.not('due_at', 'is', null).gte('due_at', nowIso).is('completed_at', null);
-    if (view === 'completed') return q.not('completed_at', 'is', null);
+    if (view === 'overdue')   q = q.not('due_at', 'is', null).lt('due_at', nowIso).is('completed_at', null);
+    else if (view === 'upcoming')  q = q.not('due_at', 'is', null).gte('due_at', nowIso).is('completed_at', null);
+    else if (view === 'completed') q = q.not('completed_at', 'is', null);
+    if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
     return q;
   };
   const { rows, total, page, limit } = await crud.clientScopedListWithCount(
-    'crm_activities', orgId(req), scope.id, req.query,
+    'crm_activities', orgId(req), scope.id, listQuery,
     {
       defaultSort: { column: 'completed_at', ascending: false },
       searchColumns: ['subject', 'body'],
@@ -989,6 +1006,13 @@ activities.get('/export', wrap(async (req, res) => {
   const visibilityOpts = subtreeIds
     ? { visibleOwnerIds: subtreeIds, ownerColumns: ['owner_id', 'assigned_to'] }
     : { userScope };
+  // Match the list endpoint: ?owner_id= filters on owner_id OR assigned_to.
+  const ownerFilter = activityOwnerFilter(req.query.owner_id);
+  const { owner_id: _ownerOmit, ...exportQuery } = req.query as Record<string, unknown>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ownerExtra = ownerFilter
+    ? (q: any) => q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`)
+    : undefined;
   const PAGE = 200;
   const MAX  = 10000;
   const rows: any[] = [];
@@ -997,8 +1021,8 @@ activities.get('/export', wrap(async (req, res) => {
       'crm_activities',
       orgId(req),
       scope.id,
-      { ...req.query, limit: PAGE, page },
-      { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: scope.strict, ...visibilityOpts },
+      { ...exportQuery, limit: PAGE, page },
+      { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: scope.strict, ...visibilityOpts, ...(ownerExtra ? { extraFilters: ownerExtra } : {}) },
     );
     rows.push(...(chunk as any[]));
     if ((chunk as any[]).length < PAGE) break;
