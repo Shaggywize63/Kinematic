@@ -1434,6 +1434,15 @@ targets.get('/leaderboard', requireRole(...MANAGER_ROLES), wrap(async (req, res)
   res.json({ success: true, data: await targetsSvc.targetsLeaderboard(orgId(req), clientId(req), period) });
 }));
 
+// Manager-facing: which hierarchy role the leaderboard is scoped to (per client).
+targets.get('/leaderboard-role', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  res.json({ success: true, data: { role_id: await targetsSvc.getLeaderboardRoleId(orgId(req), clientId(req)) } });
+}));
+targets.put('/leaderboard-role', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  const role_id = (req.body?.role_id ?? null) as string | null;
+  res.json({ success: true, data: await targetsSvc.setLeaderboardRoleId(orgId(req), clientId(req), role_id) });
+}));
+
 // Manager-facing: list current targets (default + per-FE overrides).
 targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   res.json(await targetsSvc.listTargets(orgId(req), clientId(req)));
