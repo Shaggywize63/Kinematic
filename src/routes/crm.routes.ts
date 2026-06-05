@@ -1330,6 +1330,12 @@ targets.get('/me', wrap(async (req, res) => {
   res.json(await targetsSvc.myTargetToday(orgId(req), user.id, clientId(req)));
 }));
 
+// Manager-facing: the hierarchy "levels" to set targets against — the org's
+// custom roles (org_roles), e.g. Tata's Consumer Champion / Area Sales Officer.
+targets.get('/levels', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  res.json({ success: true, data: await targetsSvc.listTargetRoles(orgId(req), clientId(req)) });
+}));
+
 // Manager-facing: list current targets (default + per-FE overrides).
 targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   res.json(await targetsSvc.listTargets(orgId(req), clientId(req)));
@@ -1339,11 +1345,11 @@ targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
 // hierarchy_level_id? } — user_id = per-FE override, hierarchy_level_id =
 // per-level (applies to everyone at that tier), all=true = org-wide default.
 targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
-  const { user_id, hierarchy_level_id, target_value, all } = req.body ?? {};
+  const { user_id, org_role_id, hierarchy_level_id, target_value, all } = req.body ?? {};
   if (target_value === undefined || target_value === null) throw new AppError(400, 'target_value is required', 'VALIDATION');
   const row = all
     ? await targetsSvc.setAllTargets(orgId(req), clientId(req), Number(target_value), userId(req))
-    : await targetsSvc.setTarget(orgId(req), clientId(req), { user_id: user_id ?? null, hierarchy_level_id: hierarchy_level_id ?? null, target_value: Number(target_value) }, userId(req));
+    : await targetsSvc.setTarget(orgId(req), clientId(req), { user_id: user_id ?? null, org_role_id: org_role_id ?? null, hierarchy_level_id: hierarchy_level_id ?? null, target_value: Number(target_value) }, userId(req));
   res.json(row);
 }));
 router.use('/targets', targets);
