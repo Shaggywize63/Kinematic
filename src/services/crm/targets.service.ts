@@ -122,6 +122,133 @@ function istDayStartUTC(): string {
   return new Date(nowIst.getTime() - IST_MIN * 60000).toISOString();
 }
 
+export type LeaderboardPeriod = 'today' | 'week' | 'month';
+const IST_MIN = 330;
+
+/** Start of the leaderboard window (IST midnight today / Monday / 1st), as UTC ISO. */
+function istPeriodStartUTC(period: LeaderboardPeriod): string {
+  const d = new Date(Date.now() + IST_MIN * 60000);
+  d.setUTCHours(0, 0, 0, 0);
+  if (period === 'week') {
+    const dow = d.getUTCDay();              // 0 Sun … 6 Sat
+    d.setUTCDate(d.getUTCDate() - ((dow + 6) % 7)); // back to Monday
+  } else if (period === 'month') {
+    d.setUTCDate(1);
+  }
+  return new Date(d.getTime() - IST_MIN * 60000).toISOString();
+}
+
+/** Whole IST days elapsed in the window so far (inclusive) — to scale daily targets. */
+function daysInPeriod(period: LeaderboardPeriod): number {
+  if (period === 'today') return 1;
+  const startIst = Date.parse(istPeriodStartUTC(period)) + IST_MIN * 60000;
+  const nowIst = Date.now() + IST_MIN * 60000;
+  return Math.max(1, Math.floor((nowIst - startIst) / 86400000) + 1);
+}
+
+/**
+ * Leaderboard analytics for the Targets module: per-user leads created in the
+ * window (today / this week / this month), each user's resolved target scaled
+ * by days elapsed, plus aggregate stats (top, lowest, average, % meeting
+ * target). Tenant-scoped via client_id. Sorted by leads desc.
+ */
+export async function targetsLeaderboard(
+  org_id: string,
+  client_id: string | null,
+  period: LeaderboardPeriod = 'today',
+) {
+  // 1. Users in scope (the field force for this tenant).
+  let uq = supabaseAdmin.from('users')
+    .select('id, name, email, city, org_role_id, hierarchy_level_id, role')
+    .eq('org_id', org_id).is('deleted_at', null);
+  uq = client_id ? uq.eq('client_id', client_id) : uq.is('client_id', null);
+  const { data: uData, error: uErr } = await uq;
+  if (uErr) throw new AppError(500, uErr.message, 'DB_ERROR');
+  const users = (uData ?? []) as any[];
+
+  // 2. Target rows, for resolving each user's daily target.
+  const { data: tData, error: tErr } = await supabaseAdmin.from('crm_targets')
+    .select('user_id, org_role_id, hierarchy_level_id, client_id, target_value')
+    .eq('org_id', org_id).eq('metric', DEFAULT_METRIC).eq('period', DEFAULT_PERIOD);
+  if (tErr) throw new AppError(500, tErr.message, 'DB_ERROR');
+  const targetRows = (tData ?? []) as any[];
+
+  // Same priority as myTargetToday: user > org_role > hierarchy_level > default,
+  // client-specific beats org-wide.
+  const dailyTarget = (u: any): number => {
+    let best: any = null, bestScore = -1;
+    for (const r of targetRows) {
+      const clientOk = (client_id && r.client_id === client_id) || r.client_id === null;
+      if (!clientOk) continue;
+      const bonus = (client_id && r.client_id === client_id) ? 0.5 : 0;
+      let s = -1;
+      if (r.user_id === u.id) s = 4 + bonus;
+      else if (r.user_id === null && r.org_role_id && r.org_role_id === u.org_role_id) s = 3 + bonus;
+      else if (r.user_id === null && r.hierarchy_level_id && r.hierarchy_level_id === u.hierarchy_level_id) s = 2 + bonus;
+      else if (r.user_id === null && r.org_role_id === null && r.hierarchy_level_id === null) s = 1 + bonus;
+      if (s > bestScore) { bestScore = s; best = r; }
+    }
+    return best?.target_value ?? 0;
+  };
+
+  // 3. Leads created in the window, counted per author.
+  const since = istPeriodStartUTC(period);
+  let lq = supabaseAdmin.from('crm_leads')
+    .select('created_by')
+    .eq('org_id', org_id).is('deleted_at', null).gte('created_at', since);
+  if (client_id) lq = lq.eq('client_id', client_id);
+  const { data: lData, error: lErr } = await lq;
+  if (lErr) throw new AppError(500, lErr.message, 'DB_ERROR');
+  const counts = new Map<string, number>();
+  for (const row of (lData ?? [])) {
+    const by = (row as any).created_by;
+    if (by) counts.set(by, (counts.get(by) ?? 0) + 1);
+  }
+
+  // 4. Build rows — keep the field force (anyone with a target) plus anyone who
+  // actually created a lead. Admins with no target and no leads drop out.
+  const days = daysInPeriod(period);
+  const entries = users
+    .map((u) => {
+      const leads = counts.get(u.id) ?? 0;
+      const target = dailyTarget(u) * days;
+      return {
+        user_id: u.id as string,
+        name: (u.name || u.email || 'User') as string,
+        city: (u.city ?? null) as string | null,
+        leads,
+        target,
+        pct: target > 0 ? Math.round((leads / target) * 100) : null,
+      };
+    })
+    .filter((e) => e.leads > 0 || e.target > 0)
+    .sort((a, b) => b.leads - a.leads || a.name.localeCompare(b.name));
+
+  // 5. Aggregate stats.
+  const n = entries.length;
+  const totalLeads = entries.reduce((s, e) => s + e.leads, 0);
+  const withTarget = entries.filter((e) => e.target > 0);
+  const meetingTarget = withTarget.filter((e) => e.leads >= e.target).length;
+  const top = entries[0] ?? null;
+  const bottom = n ? entries[entries.length - 1] : null;
+
+  return {
+    period,
+    days,
+    generated_at: new Date().toISOString(),
+    stats: {
+      participants: n,
+      total_leads: totalLeads,
+      average_leads: n ? Math.round((totalLeads / n) * 10) / 10 : 0,
+      meeting_target: meetingTarget,
+      target_participants: withTarget.length,
+      top_performer: top ? { name: top.name, leads: top.leads } : null,
+      lowest_performer: bottom ? { name: bottom.name, leads: bottom.leads } : null,
+    },
+    entries,
+  };
+}
+
 /**
  * Resolve a single user's target for today + how many leads they've created.
  * Priority: per-user override > their org role > their hierarchy level > org default.
