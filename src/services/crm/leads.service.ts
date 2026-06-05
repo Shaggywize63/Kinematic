@@ -221,7 +221,7 @@ export async function listLeadsWithCount(
   if (filters.is_converted !== undefined) q = q.eq('is_converted', String(filters.is_converted) === 'true');
   if (filters.q) {
     const s = sanitisePostgrestSearch(filters.q);
-    if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
+    if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`);
   }
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));

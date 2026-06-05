@@ -533,6 +533,29 @@ leads.get('/export', wrap(async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(csv);
 }));
+// Geo points for the dashboard map — every lead that carries real
+// coordinates, with just the fields the map needs. The list endpoint caps at
+// 200 rows; the map needs all of them, so this dedicated endpoint returns up
+// to 5000 minimal rows. Tenant + client scoped; honours the city/state filter
+// (so the map respects the global location scope). Must be declared before
+// '/:id' so the literal path wins over the param route.
+leads.get('/geo', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  let q = supabaseAdmin.from('crm_leads')
+    .select('id, first_name, last_name, city, state, status, latitude, longitude, score, score_grade')
+    .eq('org_id', orgId(req)).is('deleted_at', null)
+    .not('latitude', 'is', null).not('longitude', 'is', null);
+  if (scope.id) {
+    q = scope.strict ? q.eq('client_id', scope.id) : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+  }
+  const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+  if (city) q = q.eq('city', city);
+  const state = typeof req.query.state === 'string' ? req.query.state.trim() : '';
+  if (state) q = q.eq('state', state);
+  const { data, error } = await q.limit(5000);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json({ success: true, data: data ?? [] });
+}));
 leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))))));
 leads.patch('/:id', wrap(async (req, res) =>
   res.json(await stampSourceName(await stampOwnerName(await leadsSvc.updateLead(orgId(req), req.params.id, parse(v.leadUpdateSchema, req.body), userId(req)))))));
