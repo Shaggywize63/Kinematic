@@ -438,6 +438,9 @@ export const customFieldSchema = z.object({
   options: z.array(z.string()).optional().nullable(),
   required: z.boolean().optional(),
   position: z.number().int().optional(),
+  // Org roles that should see this field. Empty/null = all roles (universal).
+  // Lets clients give each hierarchy role its own set of custom fields.
+  org_role_ids: z.array(z.string().uuid()).optional().nullable(),
 });
 
 // Bulk-reorder payload for drag-and-drop on the custom-fields page.
