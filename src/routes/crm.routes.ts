@@ -8,7 +8,7 @@
 import express, { Request, Response, NextFunction, Router } from 'express';
 import multer from 'multer';
 import { z, ZodError } from 'zod';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, requireRole } from '../middleware/auth';
 import { requireModule } from '../middleware/rbac';
 import * as rbac from '../middleware/rbac';
 import { AppError } from '../utils';
@@ -37,6 +37,7 @@ import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
+import * as targetsSvc from '../services/crm/targets.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
@@ -1315,7 +1316,38 @@ settings.post('/seed-defaults', wrap(async (req, res) => {
 }));
 router.use('/settings', rbac.requireModuleAccess('crm_settings'), settings);
 
-// ---------- HIERARCHY (Phase 3 — client-admin org hierarchy) ---------
+// ---------- TARGETS (per-FE daily lead targets) ----------------------
+// Managers/admins set targets (per FE or "same for all"); every CRM user
+// can read their own resolved target + today's achievement for the
+// dashboard ticker and the lead-add "1/5" badge. Tenant-scoped via the
+// X-Client-Id scope, so Tata Tiscon gets its own targets.
+const targets = express.Router();
+const MANAGER_ROLES = ['supervisor', 'city_manager', 'sub_admin', 'admin', 'super_admin', 'main_admin', 'client'] as const;
+
+// FE-facing: my target + achievement for today. Any authenticated CRM user.
+targets.get('/me', wrap(async (req, res) => {
+  const user = (req as AuthRequest).user!;
+  res.json(await targetsSvc.myTargetToday(orgId(req), user.id, clientId(req)));
+}));
+
+// Manager-facing: list current targets (default + per-FE overrides).
+targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  res.json(await targetsSvc.listTargets(orgId(req), clientId(req)));
+}));
+
+// Manager-facing: set a target. Body { target_value, user_id? } — omit
+// user_id (or pass all=true) to set the same target for every FE.
+targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  const { user_id, target_value, all } = req.body ?? {};
+  if (target_value === undefined || target_value === null) throw new AppError(400, 'target_value is required', 'VALIDATION');
+  const row = all
+    ? await targetsSvc.setAllTargets(orgId(req), clientId(req), Number(target_value), userId(req))
+    : await targetsSvc.setTarget(orgId(req), clientId(req), { user_id: user_id ?? null, target_value: Number(target_value) }, userId(req));
+  res.json(row);
+}));
+router.use('/targets', targets);
+
+// ---------- HIERARCHY (Phase 3 — client-admin org hierarchy) ----------
 // Every endpoint here (except /enabled) 404s when the active client
 // hasn't opted in to hierarchy RBAC. Tata Tiscon therefore never sees
 // this surface — the dashboard hides the menu entry too, but the gate
