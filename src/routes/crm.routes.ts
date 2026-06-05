@@ -1336,6 +1336,14 @@ targets.get('/levels', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   res.json({ success: true, data: await targetsSvc.listTargetRoles(orgId(req), clientId(req)) });
 }));
 
+// Manager-facing: leaderboard analytics — leads per user vs target for the
+// window, plus top/lowest/average. ?period=today|week|month (default today).
+targets.get('/leaderboard', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  const p = String(req.query.period ?? 'today');
+  const period = (['today', 'week', 'month'].includes(p) ? p : 'today') as targetsSvc.LeaderboardPeriod;
+  res.json({ success: true, data: await targetsSvc.targetsLeaderboard(orgId(req), clientId(req), period) });
+}));
+
 // Manager-facing: list current targets (default + per-FE overrides).
 targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   res.json(await targetsSvc.listTargets(orgId(req), clientId(req)));
