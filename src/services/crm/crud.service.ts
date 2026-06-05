@@ -166,6 +166,12 @@ export async function clientScopedListWithCount(
     const orExpr = cols.map((c) => `${c}.in.(${ids})`).join(',');
     q = q.or(orExpr);
   }
+  // Apply caller-supplied predicate filters (e.g. the activities list's
+  // owner_id OR assigned_to, the view=overdue/upcoming/completed date
+  // logic, and the city→lead_id location filter). This was missing here
+  // while list() applied it — so every extraFilters-based filter on the
+  // paginated activities endpoint (owner, view, city) was silently dropped.
+  if (opts.extraFilters) q = opts.extraFilters(q);
   const dateCol = opts.dateRangeColumn ?? 'created_at';
   if (query.from) q = q.gte(dateCol, String(query.from));
   if (query.to) q = q.lte(dateCol, String(query.to));

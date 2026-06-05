@@ -156,6 +156,10 @@ export async function targetsLeaderboard(
   org_id: string,
   client_id: string | null,
   period: LeaderboardPeriod = 'today',
+  // The viewer — when a non-manager (data_scope='own', e.g. a Consumer
+  // Champion) opens the board, it is locked to *their own* role so they
+  // only ever see peers in their tier, never the whole field force.
+  viewer?: { org_role_id?: string | null; org_role_data_scope?: string | null } | null,
 ) {
   // 1. Users in scope (the field force for this tenant). `users` has no
   // soft-delete column — it uses is_active; exclude only explicitly-disabled
@@ -166,8 +170,12 @@ export async function targetsLeaderboard(
     .eq('org_id', org_id).neq('is_active', false);
   if (client_id) uq = uq.eq('client_id', client_id);
   // The leaderboard is scoped to one hierarchy role (e.g. Consumer Champion),
-  // configurable per client. When set, only that role's users compete.
-  const roleId = await getLeaderboardRoleId(org_id, client_id);
+  // configurable per client. When set, only that role's users compete. A
+  // non-manager viewer is always pinned to their own role regardless of the
+  // configured default.
+  const roleId = (viewer?.org_role_data_scope === 'own' && viewer.org_role_id)
+    ? viewer.org_role_id
+    : await getLeaderboardRoleId(org_id, client_id);
   if (roleId) uq = uq.eq('org_role_id', roleId);
   const { data: uData, error: uErr } = await uq;
   if (uErr) throw new AppError(500, uErr.message, 'DB_ERROR');
