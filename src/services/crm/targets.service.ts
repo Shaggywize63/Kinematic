@@ -165,6 +165,10 @@ export async function targetsLeaderboard(
     .select('id, name, email, city, org_role_id, hierarchy_level_id, role')
     .eq('org_id', org_id).neq('is_active', false);
   if (client_id) uq = uq.eq('client_id', client_id);
+  // The leaderboard is scoped to one hierarchy role (e.g. Consumer Champion),
+  // configurable per client. When set, only that role's users compete.
+  const roleId = await getLeaderboardRoleId(org_id, client_id);
+  if (roleId) uq = uq.eq('org_role_id', roleId);
   const { data: uData, error: uErr } = await uq;
   if (uErr) throw new AppError(500, uErr.message, 'DB_ERROR');
   const users = (uData ?? []) as any[];
@@ -255,7 +259,39 @@ export async function targetsLeaderboard(
       lowest_performer: bottom ? { name: bottom.name, leads: bottom.leads } : null,
     },
     entries,
+    role_id: roleId,
   };
+}
+
+/**
+ * The org role the leaderboard is scoped to, for the active client. Stored in
+ * crm_settings.config (per-org row): a per-client map plus an org-wide default.
+ * Returns null when unset (→ leaderboard shows the whole field force).
+ */
+export async function getLeaderboardRoleId(org_id: string, client_id: string | null): Promise<string | null> {
+  const { data } = await supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id).maybeSingle();
+  const cfg = ((data?.config ?? {}) as Record<string, any>);
+  const byClient = (cfg.leaderboard_role_by_client ?? {}) as Record<string, string>;
+  return (client_id && byClient[client_id]) || cfg.leaderboard_role_id || null;
+}
+
+/** Set (or clear, with null) the leaderboard role for the active client. */
+export async function setLeaderboardRoleId(org_id: string, client_id: string | null, role_id: string | null) {
+  const { data: existing } = await supabaseAdmin.from('crm_settings').select('id, config').eq('org_id', org_id).maybeSingle();
+  const cfg = ((existing?.config ?? {}) as Record<string, any>);
+  const byClient = { ...((cfg.leaderboard_role_by_client ?? {}) as Record<string, string>) };
+  if (client_id) {
+    if (role_id) byClient[client_id] = role_id; else delete byClient[client_id];
+    cfg.leaderboard_role_by_client = byClient;
+  } else {
+    if (role_id) cfg.leaderboard_role_id = role_id; else delete cfg.leaderboard_role_id;
+  }
+  if (existing?.id) {
+    await supabaseAdmin.from('crm_settings').update({ config: cfg }).eq('id', existing.id);
+  } else {
+    await supabaseAdmin.from('crm_settings').insert({ org_id, config: cfg });
+  }
+  return { role_id };
 }
 
 /**
