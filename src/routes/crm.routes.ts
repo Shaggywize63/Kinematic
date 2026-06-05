@@ -1247,17 +1247,17 @@ function attach(
   const r = express.Router();
   r.get('/', wrap(async (req, res) => {
     if (opts.clientScoped) {
+      // Route through the shared helper so query filters actually apply:
+      // `q` (via searchColumns), any non-reserved key as `.eq`, plus the
+      // client scope. Previously this branch built its own query and
+      // ignored req.query, so e.g. the products search box + category
+      // filter did nothing.
       const scope = clientScope(req);
-      let q = supabaseAdmin.from(table).select('*').eq('org_id', orgId(req));
-      if (opts.softDelete !== false) q = q.is('deleted_at', null);
-      if (scope.id) {
-        q = scope.strict
-          ? q.eq('client_id', scope.id)
-          : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
-      }
-      const { data, error } = await q.order(opts.defaultSort?.column ?? 'created_at', { ascending: opts.defaultSort?.ascending ?? false });
-      if (error) throw new AppError(500, error.message, 'DB_ERROR');
-      return res.json(data ?? []);
+      const data = await crud.clientScopedList(table, orgId(req), scope.id, req.query, {
+        ...opts,
+        strictClient: scope.strict,
+      });
+      return res.json(data);
     }
     res.json(await crud.list(table, orgId(req), req.query, opts));
   }));
