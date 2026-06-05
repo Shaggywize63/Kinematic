@@ -1335,14 +1335,15 @@ targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   res.json(await targetsSvc.listTargets(orgId(req), clientId(req)));
 }));
 
-// Manager-facing: set a target. Body { target_value, user_id? } — omit
-// user_id (or pass all=true) to set the same target for every FE.
+// Manager-facing: set a target. Body { target_value, user_id?,
+// hierarchy_level_id? } — user_id = per-FE override, hierarchy_level_id =
+// per-level (applies to everyone at that tier), all=true = org-wide default.
 targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
-  const { user_id, target_value, all } = req.body ?? {};
+  const { user_id, hierarchy_level_id, target_value, all } = req.body ?? {};
   if (target_value === undefined || target_value === null) throw new AppError(400, 'target_value is required', 'VALIDATION');
   const row = all
     ? await targetsSvc.setAllTargets(orgId(req), clientId(req), Number(target_value), userId(req))
-    : await targetsSvc.setTarget(orgId(req), clientId(req), { user_id: user_id ?? null, target_value: Number(target_value) }, userId(req));
+    : await targetsSvc.setTarget(orgId(req), clientId(req), { user_id: user_id ?? null, hierarchy_level_id: hierarchy_level_id ?? null, target_value: Number(target_value) }, userId(req));
   res.json(row);
 }));
 router.use('/targets', targets);
