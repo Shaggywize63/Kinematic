@@ -92,17 +92,29 @@ export async function stampSourceName<T extends SourceRow>(row: T | null | undef
 
 type CreatedByRow = { created_by?: string | null; created_by_name?: string | null };
 
+// Platform-admin display label. Rows imported / created by a super-admin
+// surface as "Kinematic Admin" in the UI instead of leaking the operator's
+// real name into the tenant's view — important for white-labelled clients
+// (e.g. Tata Tiscon) who don't need to know the Kinematic staff identity.
+const SUPER_ADMIN_LABEL = 'Kinematic Admin';
+
 export async function stampCreatedByNames<T extends CreatedByRow>(rows: T[]): Promise<T[]> {
   if (!rows || rows.length === 0) return rows;
   const ids = Array.from(new Set(rows.map((r) => r.created_by).filter(Boolean) as string[]));
   if (ids.length === 0) return rows;
   const { data: users } = await supabaseAdmin
     .from('users')
-    .select('id, name, email')
+    .select('id, name, email, role')
     .in('id', ids);
   const nameById = new Map<string, string>();
   for (const u of users ?? []) {
-    nameById.set((u as any).id, ((u as any).name as string) || ((u as any).email as string) || '');
+    const role = ((u as any).role as string | undefined)?.toLowerCase()?.trim()?.replace(/-/g, '_');
+    if (role === 'super_admin') {
+      // Mask the real name with the platform label.
+      nameById.set((u as any).id, SUPER_ADMIN_LABEL);
+    } else {
+      nameById.set((u as any).id, ((u as any).name as string) || ((u as any).email as string) || '');
+    }
   }
   return rows.map((r) => ({
     ...r,
