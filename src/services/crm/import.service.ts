@@ -224,7 +224,7 @@ async function runCommitInBackground(
   // Auto-create or fetch the single "Excel/CSV Import" lead source per org
   // so every import attributes its leads consistently. Reports and
   // assignment rules can then target this source by name.
-  const source_id = await getOrCreateImportSource(org_id, user_id);
+  const source_id = await getOrCreateImportSource(org_id, user_id, client_id);
 
   // Resolve the CSV's `owner_email` column to user ids up front. One query
   // for the whole org (tens of users, not thousands) → an email→id map,
@@ -374,19 +374,34 @@ async function buildOwnerEmailMap(org_id: string): Promise<Map<string, string>> 
   return map;
 }
 
-async function getOrCreateImportSource(org_id: string, user_id: string | null): Promise<string> {
-  const { data: existing } = await supabaseAdmin.from('crm_lead_sources')
-    .select('id').eq('org_id', org_id).eq('name', IMPORT_SOURCE_NAME).maybeSingle();
+async function getOrCreateImportSource(
+  org_id: string,
+  user_id: string | null,
+  client_id: string | null = null,
+): Promise<string> {
+  // The lead-sources router is clientScoped — so when a tenant-scoped
+  // rep queries /lead-sources, only sources matching their client_id
+  // come back. Stamp the import source with the same client_id as the
+  // leads being imported so the source appears in that tenant's
+  // dropdown filter (and reports, and the leads-list source column).
+  let q = supabaseAdmin.from('crm_lead_sources')
+    .select('id').eq('org_id', org_id).eq('name', IMPORT_SOURCE_NAME);
+  if (client_id) q = q.eq('client_id', client_id);
+  else q = q.is('client_id', null);
+  const { data: existing } = await q.maybeSingle();
   if (existing?.id) return existing.id as string;
 
   const { data: created, error } = await supabaseAdmin.from('crm_lead_sources')
-    .insert({ org_id, name: IMPORT_SOURCE_NAME, created_by: user_id })
+    .insert({ org_id, name: IMPORT_SOURCE_NAME, created_by: user_id, client_id })
     .select('id').single();
   if (error || !created) {
     // Lost a race or a unique constraint blew up — re-fetch.
-    const { data: again } = await supabaseAdmin.from('crm_lead_sources')
-      .select('id').eq('org_id', org_id).eq('name', IMPORT_SOURCE_NAME).maybeSingle();
-    if (again?.id) return again.id as string;
+    let again = supabaseAdmin.from('crm_lead_sources')
+      .select('id').eq('org_id', org_id).eq('name', IMPORT_SOURCE_NAME);
+    if (client_id) again = again.eq('client_id', client_id);
+    else again = again.is('client_id', null);
+    const { data: row } = await again.maybeSingle();
+    if (row?.id) return row.id as string;
     throw new AppError(500, `Failed to create import lead source: ${error?.message ?? 'unknown'}`, 'DB_ERROR');
   }
   return created.id as string;

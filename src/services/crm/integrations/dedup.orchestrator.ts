@@ -104,8 +104,14 @@ export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOr
       external_id:    normalized.external_id ?? null,
       raw_payload_id: raw_event_id ?? null,
     });
+    // If the caller resolved an explicit owner (e.g. import with
+    // owner_email column), reassign on merge. Lets a rep correct the
+    // owner mapping by re-importing without having to manually re-
+    // assign every row.
+    const updatePayload: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (owner_id) updatePayload.owner_id = owner_id;
     await supabaseAdmin.from('crm_leads')
-      .update({ updated_at: new Date().toISOString() })
+      .update(updatePayload)
       .eq('id', existing.id).eq('org_id', org_id);
 
     return { lead_id: existing.id, was_new: false, merged_into: existing.id };
