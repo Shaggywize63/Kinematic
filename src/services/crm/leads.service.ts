@@ -179,32 +179,45 @@ export async function listLeadsWithCount(
   //     so an admin should see them rather than have them vanish.
   // Expressed as a single PostgREST OR so pagination + exact count stay
   // correct in one round trip.
-  if (options.effectiveCities !== undefined && options.effectiveCities !== null) {
+  // Visibility scope — a lead is visible if ANY of these hold:
+  //   • its city is in the caller's effective city set (so a city-allocated
+  //     user like an Area Sales Officer sees every lead in their cities,
+  //     whoever created it — e.g. the Consumer Champions working there);
+  //   • the caller owns it (always);
+  //   • its owner is in the caller's hierarchy subtree (team scope);
+  //   • it has no city and there's no hierarchy owner bound (admin /
+  //     data_scope='all') — city-less leads aren't pinned to a region.
+  //
+  // Combined into a SINGLE PostgREST OR. Previously the city scope and the
+  // hierarchy owner scope were applied as two filters (i.e. AND-ed), which
+  // hid every city lead from an 'own'-scope ASO: their subtree is just
+  // themselves, and they own none of the leads their Consumer Champions
+  // create. OR-ing the two restores the intended "see my cities OR my team".
+  const hasCityScope = options.effectiveCities !== undefined && options.effectiveCities !== null;
+  const hasOwnerScope = options.visibleOwnerIds !== undefined && options.visibleOwnerIds !== null;
+  if (hasCityScope || hasOwnerScope) {
     const orParts: string[] = [];
-    if (options.effectiveCities.length > 0) {
+    if (hasCityScope && options.effectiveCities!.length > 0) {
       // Quote each city for the in.() list so names with spaces/commas
       // (e.g. "Vasco da Gama") parse correctly.
-      const cityCsv = options.effectiveCities
+      const cityCsv = options.effectiveCities!
         .map((c) => `"${String(c).replace(/[\\"]/g, (m) => '\\' + m)}"`)
         .join(',');
       orParts.push(`city.in.(${cityCsv})`);
     }
     if (options.selfOwnerId) orParts.push(`owner_id.eq.${options.selfOwnerId}`);
-    if (options.includeNullCity) orParts.push('city.is.null');
+    if (hasOwnerScope && options.visibleOwnerIds!.length > 0) {
+      orParts.push(`owner_id.in.(${options.visibleOwnerIds!.join(',')})`);
+    }
+    // Null-city leads: only surface broadly when there's NO hierarchy owner
+    // bound (admin / data_scope='all'). Under hierarchy they're already
+    // covered by the owner-subtree term, so we must not OR-in every
+    // city-less lead (that would leak other regions' leads to an ASO).
+    if (options.includeNullCity && !hasOwnerScope) orParts.push('city.is.null');
     if (orParts.length === 0) {
       return { rows: [], total: 0, page, limit };
     }
     q = q.or(orParts.join(','));
-  }
-  // Hierarchy-RBAC scope. The route handler passes the subtree owner
-  // ids only when the client has opted in via
-  // clients.settings.uses_hierarchy_rbac. For every other caller this
-  // is null and the existing role/city scope is the only restriction.
-  if (options.visibleOwnerIds !== undefined && options.visibleOwnerIds !== null) {
-    if (options.visibleOwnerIds.length === 0) {
-      return { rows: [], total: 0, page, limit };
-    }
-    q = q.in('owner_id', options.visibleOwnerIds);
   }
   if (filters.status) q = q.eq('status', String(filters.status));
   if (filters.lifecycle_stage) q = q.eq('lifecycle_stage', String(filters.lifecycle_stage));
