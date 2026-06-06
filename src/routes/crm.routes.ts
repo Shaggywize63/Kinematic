@@ -19,6 +19,7 @@ import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
 import * as leadsSvc from '../services/crm/leads.service';
+import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
@@ -1649,6 +1650,20 @@ locations.delete('/:id', wrap(async (req, res) => {
   res.status(204).end();
 }));
 router.use('/locations', locations);
+
+// Google Places (New) proxy — address autocomplete for the lead forms on
+// mobile (and a server-side option for the dashboard). Keyless requests
+// return empty so callers fall back to manual entry.
+const places = express.Router();
+places.get('/autocomplete', wrap(async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q : '';
+  res.json({ success: true, data: await placesSvc.autocomplete(q) });
+}));
+places.get('/details', wrap(async (req, res) => {
+  const id = typeof req.query.place_id === 'string' ? req.query.place_id : '';
+  res.json({ success: true, data: await placesSvc.details(id) });
+}));
+router.use('/places', places);
 
 const activityTypes = express.Router();
 const BUILTIN_TYPES = [
