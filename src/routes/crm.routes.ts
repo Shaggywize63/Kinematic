@@ -550,15 +550,26 @@ leads.get('/geo', wrap(async (req, res) => {
   if (scope.id) {
     q = scope.strict ? q.eq('client_id', scope.id) : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
   }
-  // Ownership scope — mirror the list endpoint so the map never shows
-  // "universal" leads a rep can't see. Hierarchy on → self + subtree;
-  // otherwise a data_scope='own' role (e.g. Tata's Consumer Champion)
-  // sees only their own leads. Admins / data_scope='all' see everything.
+  // Visibility scope — mirror the list endpoint so the map shows exactly the
+  // leads the rep can see in the list: leads in their effective cities (so a
+  // city-allocated Area Sales Officer sees their Consumer Champions' pins),
+  // OR owned by them / their hierarchy subtree. Admins / data_scope='all'
+  // see everything.
+  const effectiveCities = rbac.getEffectiveCityNames(me);
   const subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
-  if (subtreeIds !== null) {
-    q = q.in('owner_id', subtreeIds.length ? subtreeIds : [NO_MATCH_UUID]);
-  } else if ((me.org_role_data_scope ?? 'all') === 'own') {
-    q = q.eq('owner_id', me.id);
+  const hasCity = effectiveCities !== null;
+  const hasOwner = subtreeIds !== null;
+  // data_scope='own' on a non-hierarchy client still scopes to self.
+  const ownOnly = !hasOwner && (me.org_role_data_scope ?? 'all') === 'own';
+  if (hasCity || hasOwner || ownOnly) {
+    const orParts: string[] = [];
+    if (hasCity && effectiveCities!.length > 0) {
+      const cityCsv = effectiveCities!.map((c) => `"${String(c).replace(/[\\"]/g, (m) => '\\' + m)}"`).join(',');
+      orParts.push(`city.in.(${cityCsv})`);
+    }
+    if (me.id) orParts.push(`owner_id.eq.${me.id}`);
+    if (hasOwner && subtreeIds!.length > 0) orParts.push(`owner_id.in.(${subtreeIds!.join(',')})`);
+    q = orParts.length ? q.or(orParts.join(',')) : q.eq('owner_id', NO_MATCH_UUID);
   }
   const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
   if (city) q = q.eq('city', city);
