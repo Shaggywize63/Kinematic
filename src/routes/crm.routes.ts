@@ -39,6 +39,7 @@ import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as targetsSvc from '../services/crm/targets.service';
+import * as homeSvc from '../services/crm/home.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
@@ -669,6 +670,21 @@ leads.post('/:id/won', wrap(async (req, res) => {
     await leadsSvc.markLeadAsWon(orgId(req), req.params.id, body.reason ?? null, userId(req)),
   ));
 }));
+// Home aggregator — composes today's target + near-to-close leads +
+// next-best-actions (rules-based, no LLM round-trip) + today's activity
+// + productivity tips into one payload so the Home tab on web + mobile
+// is a single round-trip. See home.service.ts for the merge logic.
+router.get('/home', wrap(async (req, res) => {
+  const me = (req as AuthRequest).user;
+  if (!me?.id) throw new AppError(401, 'Auth required', 'AUTH_REQUIRED');
+  const payload = await homeSvc.homePayload({
+    org_id: orgId(req),
+    user_id: me.id,
+    client_id: clientId(req),
+  });
+  res.json({ success: true, data: payload });
+}));
+
 router.use('/leads', rbac.requireModuleAccess('crm_leads'), leads);
 
 // ---------- CONTACTS -------------------------------------------------
