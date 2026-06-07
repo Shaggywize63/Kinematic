@@ -1368,16 +1368,28 @@ router.get('/whatsapp-templates-supported-languages', wrap(async (_req, res) => 
 }));
 
 const settings = express.Router();
+// crm_settings is now keyed by (org_id, client_id) — one row per client
+// in an org, plus an optional org-default row where client_id IS NULL.
+// Reads prefer the per-client row and fall back to the org-default so a
+// super-admin viewing without a client picker still sees something useful.
+async function loadSettingsRow(orgIdValue: string, cid: string | null) {
+  if (cid) {
+    const own = await supabaseAdmin
+      .from('crm_settings').select('*')
+      .eq('org_id', orgIdValue).eq('client_id', cid)
+      .maybeSingle();
+    if (own.data) return own.data;
+  }
+  const fallback = await supabaseAdmin
+    .from('crm_settings').select('*')
+    .eq('org_id', orgIdValue).is('client_id', null)
+    .maybeSingle();
+  return fallback.data ?? null;
+}
 settings.get('/', wrap(async (req, res) => {
-  // crm_settings has UNIQUE(org_id) — exactly one row per org — so we
-  // look it up by org_id alone and let the row's own client_id be
-  // informational. Earlier code filtered by client_id, which silently
-  // returned an empty fallback when the dashboard's X-Client-Id didn't
-  // match the row's stored client_id and made saves appear to vanish
-  // on refresh.
   const cid = clientId(req);
-  const r = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
-  const base = r.data ?? { org_id: orgId(req), client_id: cid, config: {}, business_type: 'both' };
+  const row = await loadSettingsRow(orgId(req), cid);
+  const base = row ?? { org_id: orgId(req), client_id: cid, config: {}, business_type: 'both' };
 
   // Per-client overlay for vertical-specific lead-score-boost suggestions.
   // crm_settings is keyed by org and can't distinguish two clients that share
@@ -1398,18 +1410,19 @@ settings.get('/', wrap(async (req, res) => {
 settings.patch('/', wrap(async (req, res) => {
   const body = parse(v.settingsUpdateSchema, req.body);
   const cid = clientId(req);
-  // Same single-row-per-org rule on writes — look up by org_id alone,
-  // update in place. If no row exists yet, insert (the UNIQUE(org_id)
-  // constraint guarantees there's no duplicate to conflict with).
-  const { data: existing } = await supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req)).maybeSingle();
+  // Per-client row: look up by (org_id, client_id). With cid=null we
+  // upsert the org-default row. The new UNIQUE(org_id, client_id) NULLS
+  // NOT DISTINCT constraint guarantees there's exactly one row per
+  // (org, client) so we never collide and never leak across clients.
+  let existingQuery = supabaseAdmin.from('crm_settings').select('*').eq('org_id', orgId(req));
+  existingQuery = cid ? existingQuery.eq('client_id', cid) : existingQuery.is('client_id', null);
+  const { data: existing } = await existingQuery.maybeSingle();
   const mergedConfig = body.config !== undefined
     ? { ...(existing?.config || {}), ...body.config }
     : existing?.config ?? {};
   const update: Record<string, unknown> = {
     org_id: orgId(req),
-    // Preserve whatever client_id the row already has; only stamp the
-    // header value when creating a brand-new row.
-    client_id: existing?.client_id ?? cid,
+    client_id: cid,
     config: mergedConfig,
   };
   if (body.business_type !== undefined) update.business_type = body.business_type;
