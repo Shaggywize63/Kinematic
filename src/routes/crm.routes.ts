@@ -543,8 +543,11 @@ leads.get('/export', wrap(async (req, res) => {
 leads.get('/geo', wrap(async (req, res) => {
   const scope = clientScope(req);
   const me = (req as AuthRequest).user!;
+  // `phone` is included so the mobile "Nearest Leads" board can light up
+  // the Call / WhatsApp quick actions per row. Without it those buttons
+  // gated to disabled because the geo payload had no phone field.
   let q = supabaseAdmin.from('crm_leads')
-    .select('id, first_name, last_name, city, state, status, latitude, longitude, score, score_grade')
+    .select('id, first_name, last_name, phone, email, city, state, status, latitude, longitude, score, score_grade')
     .eq('org_id', orgId(req)).is('deleted_at', null)
     .not('latitude', 'is', null).not('longitude', 'is', null);
   if (scope.id) {
