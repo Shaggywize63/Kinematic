@@ -109,10 +109,19 @@ export async function getIcp(org_id: string, client_id: string | null = null): P
   });
 }
 
-// Settings → scoring config. Org-level (no client scoping) is enough for
-// scoring overrides today; per-client config can be added by adapting
-// the ICP cache pattern if it's ever needed.
-async function getScoringConfig(org_id: string): Promise<ScoringConfig> {
+// Settings → scoring config. Prefer the caller's per-client row, fall
+// back to the org-default row. Mirrors the (org, client) lookup pattern
+// `getIcp` and the settings GET handler use so a client picks up its
+// own scoring overrides — and otherwise inherits the org defaults —
+// without leaking writes across clients.
+async function getScoringConfig(org_id: string, client_id: string | null = null): Promise<ScoringConfig> {
+  if (client_id) {
+    const own = await supabaseAdmin
+      .from('crm_settings').select('config')
+      .eq('org_id', org_id).eq('client_id', client_id).maybeSingle();
+    const cfg = (own.data?.config as Record<string, unknown> | null | undefined)?.scoring as ScoringConfig | undefined;
+    if (cfg) return cfg;
+  }
   const { data } = await supabaseAdmin
     .from('crm_settings').select('config')
     .eq('org_id', org_id).is('client_id', null).maybeSingle();
@@ -386,7 +395,7 @@ export async function computeUnifiedScore(
   profile: 'b2c' | 'b2b';
 }> {
   const icp = opts.icp ?? await getIcp(org_id, client_id);
-  const config = opts.scoringConfig ?? await getScoringConfig(org_id);
+  const config = opts.scoringConfig ?? await getScoringConfig(org_id, client_id);
 
   // Profile selection — tenant override beats per-lead is_b2c.
   const force = config.active_profile;

@@ -53,16 +53,26 @@ async function getLocationPingIntervalSeconds(orgId: string | null | undefined):
 }
 
 // Resolves the org's B2B/B2C mode so mobile + dashboard can hide irrelevant
-// input fields. Defaults to 'both' when no crm_settings row exists yet —
-// preserves today's "show everything" behaviour for orgs that haven't
-// configured the picker.
+// input fields. crm_settings is now keyed by (org_id, client_id) — prefer
+// the user's own per-client row, fall back to the org-default row, then to
+// 'both' when neither exists. Without this fallback chain, a user pinned
+// to a client whose row hasn't been saved yet would always see 'both'.
 type BusinessType = 'b2b' | 'b2c' | 'both';
-async function getCrmBusinessType(orgId: string | null | undefined): Promise<BusinessType> {
+async function getCrmBusinessType(orgId: string | null | undefined, clientId: string | null | undefined): Promise<BusinessType> {
   if (!orgId) return 'both';
+  if (clientId) {
+    const { data } = await supabaseAdmin
+      .from('crm_settings')
+      .select('business_type')
+      .eq('org_id', orgId).eq('client_id', clientId)
+      .maybeSingle();
+    const v = (data as any)?.business_type;
+    if (v === 'b2b' || v === 'b2c' || v === 'both') return v;
+  }
   const { data } = await supabaseAdmin
     .from('crm_settings')
     .select('business_type')
-    .eq('org_id', orgId)
+    .eq('org_id', orgId).is('client_id', null)
     .maybeSingle();
   const v = (data as any)?.business_type;
   return v === 'b2b' || v === 'b2c' || v === 'both' ? v : 'both';
@@ -298,7 +308,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
   }
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds(userProfile.org_id);
-  const businessType = await getCrmBusinessType(userProfile.org_id);
+  const businessType = await getCrmBusinessType(userProfile.org_id, userProfile.client_id);
 
   return ok(res, {
     access_token: session.session.access_token,
@@ -409,7 +419,7 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
   });
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds((data as any)?.org_id);
-  const businessType = await getCrmBusinessType((data as any)?.org_id);
+  const businessType = await getCrmBusinessType((data as any)?.org_id, (data as any)?.client_id);
 
   const result = {
     ...data,
