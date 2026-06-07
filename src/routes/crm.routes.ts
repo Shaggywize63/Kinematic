@@ -242,6 +242,37 @@ async function activityScopeOpts(req: AuthRequest): Promise<{
  * "column description does not exist". Fold `description` into `body`.
  * (`outcome` IS a real column now, so it's left to pass through.)
  */
+/**
+ * Look up the linked record (lead → contact → account → deal, in that
+ * order) and return its `client_id`. Used by the activity POST so the
+ * activity inherits its parent's tenant scope instead of the request's
+ * X-Client-Id header — that header can be wrong (e.g. NBA suggestions
+ * triggered while the picker is on a different client) and would
+ * otherwise scribble cross-tenant activities. Returns null when none
+ * of the linked-id fields are present or none of the lookups hit.
+ */
+async function resolveLinkedClientId(
+  org_id: string,
+  parsed: Record<string, unknown>,
+): Promise<string | null> {
+  const probes: Array<[string, string]> = [
+    ['lead_id', 'crm_leads'],
+    ['contact_id', 'crm_contacts'],
+    ['account_id', 'crm_accounts'],
+    ['deal_id', 'crm_deals'],
+  ];
+  for (const [key, table] of probes) {
+    const id = parsed[key];
+    if (typeof id !== 'string' || !UUID_RE.test(id)) continue;
+    const { data } = await supabaseAdmin
+      .from(table).select('client_id').eq('org_id', org_id).eq('id', id)
+      .maybeSingle();
+    const cid = (data as { client_id: string | null } | null)?.client_id;
+    if (cid) return cid;
+  }
+  return null;
+}
+
 function normalizeActivityPayload(p: Record<string, unknown>): Record<string, unknown> {
   if ('description' in p) {
     if (p.body === undefined || p.body === null) p.body = (p as Record<string, unknown>).description;
@@ -595,8 +626,16 @@ leads.post('/:id/reopen', wrap(async (req, res) =>
 leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc.listScoreHistory(orgId(req), req.params.id))));
 leads.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  // The dashboard auto-attaches the global geo scope (?city/&state/...)
+  // to every /api/v1/crm/leads/* GET. crm_activities has no geo columns,
+  // so passing those through to crud.list runs `.eq('city', …)` against
+  // a non-existent column and PostgREST 400s — the activities tab on
+  // the lead detail page then renders empty even though rows exist.
+  // The lead-id filter already scopes the result to a single lead, so
+  // any global geo filter would be redundant anyway; strip them.
+  const { city: _c, state: _s, district: _d, block: _b, ...rest } = req.query as Record<string, unknown>;
   return res.json(
-    await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...req.query }, {
+    await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...rest }, {
       defaultSort: { column: 'completed_at', ascending: false },
       ...visibilityOpts,
     }),
@@ -1160,7 +1199,21 @@ activities.get('/export', wrap(async (req, res) => {
 }));
 activities.post('/', wrap(async (req, res) => {
   const parsed = normalizeActivityPayload(parse(v.activitySchema, req.body));
-  const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
+  // Derive client_id from the linked lead / contact / account / deal
+  // when one is present, instead of blindly stamping clientId(req) from
+  // the X-Client-Id header. NBA "Call the lead" / "Follow up" flows
+  // surface from any list view — if the user's picker happens to be
+  // on a different tenant when the suggestion fires, the activity
+  // would otherwise land on the wrong client and become invisible on
+  // the lead's detail page (the activities tab is scoped to the lead's
+  // client). The header value stays the fallback for orphan-style
+  // creates (no linked record, currently blocked by activitySchema but
+  // kept defensively).
+  const linkedClientId = await resolveLinkedClientId(orgId(req), parsed);
+  const payload: Record<string, unknown> = {
+    ...parsed,
+    client_id: linkedClientId ?? clientId(req),
+  };
   // Default owner to the creating user when not specified. Otherwise
   // a non-admin user could create an activity they're then not allowed
   // to see (because activityVisibilityScope filters on owner_id /
