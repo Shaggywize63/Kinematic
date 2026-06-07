@@ -421,19 +421,19 @@ export const customFieldSchema = z.object({
   entity_type: z.enum(['lead','contact','account','deal']),
   field_key: z.string().min(1).max(80).regex(/^[a-z][a-z0-9_]*$/),
   label: z.string().min(1).max(120),
-  // Full set of supported field types. New additions beyond the
-  // originals: `longtext` (textarea), `radio` (single-select rendered
-  // as radio buttons; same shape as `select`), `image` (URL after
-  // upload via /api/v1/upload/photo), `file` (URL after upload via
-  // /api/v1/upload/material), `phone` (10-digit Indian mobile), and
-  // `currency` (number with ₹ prefix on the form). Storage is still
-  // the same JSON shape — only the renderer changes.
+  // Full set of supported field types. Beyond the originals we now also
+  // include `lookup` — a Salesforce-style "linked record" field that
+  // points at another table (lead/contact/account/deal/people_directory)
+  // and stores the picked row's UUID in custom_fields. Configured via
+  // the `target_table` + `lookup_filter` columns; the picker UI is
+  // wired in the dashboard's custom-field editor.
   field_type: z.enum([
     'text', 'longtext', 'number', 'currency', 'boolean',
     'date', 'datetime',
     'select', 'multiselect', 'radio',
     'url', 'email', 'phone',
     'image', 'file',
+    'lookup',
   ]),
   options: z.array(z.string()).optional().nullable(),
   required: z.boolean().optional(),
@@ -441,6 +441,21 @@ export const customFieldSchema = z.object({
   // Org roles that should see this field. Empty/null = all roles (universal).
   // Lets clients give each hierarchy role its own set of custom fields.
   org_role_ids: z.array(z.string().uuid()).optional().nullable(),
+  // Lookup-only — which table the picker should search and the optional
+  // filter that narrows the rows. The allowlist below is enforced server-
+  // side too; we don't let admins point lookups at random tables.
+  target_table: z.enum([
+    'crm_leads', 'crm_contacts', 'crm_accounts', 'crm_deals', 'people_directory',
+  ]).optional().nullable(),
+  // Simple condition list — every clause is ANDed. `field` is a column
+  // on the target table; `op` is one of {eq, ne, contains, gte, lte};
+  // `value` is the raw value to match. Salesforce-style OR groups and
+  // per-type operator universes are intentionally out of scope for v1.
+  lookup_filter: z.array(z.object({
+    field: z.string().min(1).max(80),
+    op: z.enum(['eq', 'ne', 'contains', 'gte', 'lte']),
+    value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
+  })).optional().nullable(),
 });
 
 // Bulk-reorder payload for drag-and-drop on the custom-fields page.
@@ -594,4 +609,37 @@ export const sendWhatsappSchema = z.object({
 }).refine((b) => Boolean(b.body_text || b.template_id || b.media_url), {
   message: 'One of body_text, template_id, or media_url is required',
   path: ['body_text'],
+});
+
+// People Directory — per-client address book of dealers / influencers /
+// referrers that aren't pipelined leads. At least one of first_name,
+// last_name, mobile or email must be present so we don't accept an
+// entirely empty row (the bulk-import flow skips blanks too). Base object
+// is exported separately so PATCH handlers can use `.partial()` on it
+// (`refine()` returns ZodEffects, which doesn't expose .partial()).
+export const peopleDirectoryBase = z.object({
+  first_name: z.string().max(120).optional().nullable(),
+  last_name:  z.string().max(120).optional().nullable(),
+  mobile:     z.string().max(40).optional().nullable(),
+  email:      z.string().email().max(200).optional().nullable(),
+  address:    z.string().max(1000).optional().nullable(),
+});
+export const peopleDirectorySchema = peopleDirectoryBase.refine(
+  (p) => Boolean(p.first_name?.trim() || p.last_name?.trim() || p.mobile?.trim() || p.email?.trim()),
+  { message: 'At least one of first name, last name, mobile or email is required', path: ['first_name'] },
+);
+
+// Bulk-import payload: an array of mapped rows the operator confirmed on
+// the dashboard mapping screen, plus a flag deciding what to do with
+// duplicates (by mobile or email). Server returns counts so the FE can
+// display "added X, updated Y, skipped Z".
+export const peopleDirectoryBulkImportSchema = z.object({
+  rows: z.array(z.object({
+    first_name: z.string().max(120).optional().nullable(),
+    last_name:  z.string().max(120).optional().nullable(),
+    mobile:     z.string().max(40).optional().nullable(),
+    email:      z.string().max(200).optional().nullable(),
+    address:    z.string().max(1000).optional().nullable(),
+  })).min(1).max(5000),
+  on_duplicate: z.enum(['skip', 'update']).default('skip'),
 });
