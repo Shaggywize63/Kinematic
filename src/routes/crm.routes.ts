@@ -1074,7 +1074,16 @@ activities.get('/', wrap(async (req, res) => {
   // Location filter (city/state/district/block) → resolve to lead ids, since
   // crm_activities has no geo columns. null = no location filter.
   const locLeadIds = await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
-  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, ...listQuery } = req.query as Record<string, unknown>;
+  // Pull from/to out of the query and apply them ourselves below — the
+  // generic crud helper filters on a single column (completed_at by
+  // default), which silently hides every planned/upcoming activity
+  // because completed_at IS NULL until the row is marked done. Reps
+  // logging "Followup tomorrow" against a lead would then see nothing
+  // in the activity list whenever the dashboard's date range picker
+  // was set to anything but "All time".
+  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, ...listQuery } = req.query as Record<string, unknown>;
+  const from = typeof fromQ === 'string' && fromQ ? fromQ : null;
+  const to = typeof toQ === 'string' && toQ ? toQ : null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraFilters = (q: any) => {
     if (view === 'overdue')   q = q.not('due_at', 'is', null).lt('due_at', nowIso).is('completed_at', null);
@@ -1082,14 +1091,44 @@ activities.get('/', wrap(async (req, res) => {
     else if (view === 'completed') q = q.not('completed_at', 'is', null);
     if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
     if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
+    // View-aware date-range filter so planned activities don't vanish
+    // whenever a date range is picked:
+    //   completed view → filter by completed_at
+    //   overdue / upcoming view → due_at (the natural axis there)
+    //   all view → row qualifies if ANY of completed_at / due_at /
+    //              created_at falls inside the window, expressed as a
+    //              PostgREST .or() of three and-conditions.
+    if (from || to) {
+      if (view === 'completed') {
+        if (from) q = q.gte('completed_at', from);
+        if (to) q = q.lte('completed_at', to);
+      } else if (view === 'overdue' || view === 'upcoming') {
+        if (from) q = q.gte('due_at', from);
+        if (to) q = q.lte('due_at', to);
+      } else {
+        const lo = from ?? '0001-01-01';
+        const hi = to ?? '9999-12-31';
+        q = q.or(
+          [
+            `and(completed_at.gte.${lo},completed_at.lte.${hi})`,
+            `and(due_at.gte.${lo},due_at.lte.${hi})`,
+            `and(created_at.gte.${lo},created_at.lte.${hi})`,
+          ].join(','),
+        );
+      }
+    }
     return q;
   };
   const { rows, total, page, limit } = await crud.clientScopedListWithCount(
     'crm_activities', orgId(req), scope.id, listQuery,
     {
-      defaultSort: { column: 'completed_at', ascending: false },
+      // Sort newest-first so today's freshly logged activities sit at
+      // the top regardless of whether they're completed or planned.
+      // (NULL completed_at sorts after a real timestamp under
+      // PostgREST's default, but most reps look at "what did I log
+      // recently" — created_at is the right axis for that.)
+      defaultSort: { column: 'created_at', ascending: false },
       searchColumns: ['subject', 'body'],
-      dateRangeColumn: 'completed_at',
       strictClient: scope.strict,
       // Hierarchy gate on → caller sees self + subtree across
       // owner_id and assigned_to. Gate off → fall back to the legacy
@@ -1135,12 +1174,38 @@ activities.get('/export', wrap(async (req, res) => {
   // and city/state/district/block filter via the linked lead.
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
   const locLeadIds = await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
-  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, ...exportQuery } = req.query as Record<string, unknown>;
+  const exportView = String(req.query.view ?? 'all').toLowerCase();
+  // Strip from/to here too — same reasoning as the list endpoint above:
+  // the single-column dateRangeColumn filter on completed_at would
+  // hide every planned activity from the export the moment a range
+  // is set, leaving the two surfaces out of sync.
+  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, ...exportQuery } = req.query as Record<string, unknown>;
+  const fromExp = typeof fromQ === 'string' && fromQ ? fromQ : null;
+  const toExp = typeof toQ === 'string' && toQ ? toQ : null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ownerExtra = (ownerFilter || locLeadIds !== null)
+  const ownerExtra = (ownerFilter || locLeadIds !== null || fromExp || toExp)
     ? (q: any) => {
         if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
         if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
+        if (fromExp || toExp) {
+          if (exportView === 'completed') {
+            if (fromExp) q = q.gte('completed_at', fromExp);
+            if (toExp) q = q.lte('completed_at', toExp);
+          } else if (exportView === 'overdue' || exportView === 'upcoming') {
+            if (fromExp) q = q.gte('due_at', fromExp);
+            if (toExp) q = q.lte('due_at', toExp);
+          } else {
+            const lo = fromExp ?? '0001-01-01';
+            const hi = toExp ?? '9999-12-31';
+            q = q.or(
+              [
+                `and(completed_at.gte.${lo},completed_at.lte.${hi})`,
+                `and(due_at.gte.${lo},due_at.lte.${hi})`,
+                `and(created_at.gte.${lo},created_at.lte.${hi})`,
+              ].join(','),
+            );
+          }
+        }
         return q;
       }
     : undefined;
@@ -1153,7 +1218,7 @@ activities.get('/export', wrap(async (req, res) => {
       orgId(req),
       scope.id,
       { ...exportQuery, limit: PAGE, page },
-      { defaultSort: { column: 'completed_at', ascending: false }, searchColumns: ['subject','body'], dateRangeColumn: 'completed_at', strictClient: scope.strict, ...visibilityOpts, ...(ownerExtra ? { extraFilters: ownerExtra } : {}) },
+      { defaultSort: { column: 'created_at', ascending: false }, searchColumns: ['subject','body'], strictClient: scope.strict, ...visibilityOpts, ...(ownerExtra ? { extraFilters: ownerExtra } : {}) },
     );
     rows.push(...(chunk as any[]));
     if ((chunk as any[]).length < PAGE) break;
