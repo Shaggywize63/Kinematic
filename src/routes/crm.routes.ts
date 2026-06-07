@@ -636,7 +636,10 @@ leads.get('/:id/activities', wrap(async (req, res) => {
   const { city: _c, state: _s, district: _d, block: _b, ...rest } = req.query as Record<string, unknown>;
   return res.json(
     await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...rest }, {
-      defaultSort: { column: 'completed_at', ascending: false },
+      // Sort by the generated activity_date column (COALESCE of
+      // completed_at, due_at, created_at) so the tab reads as a real
+      // timeline regardless of whether rows are done or planned.
+      defaultSort: { column: 'activity_date', ascending: false },
       ...visibilityOpts,
     }),
   );
@@ -691,7 +694,10 @@ contacts.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
   return res.json(
     await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, {
-      defaultSort: { column: 'completed_at', ascending: false },
+      // Sort by the generated activity_date column (COALESCE of
+      // completed_at, due_at, created_at) so the tab reads as a real
+      // timeline regardless of whether rows are done or planned.
+      defaultSort: { column: 'activity_date', ascending: false },
       ...visibilityOpts,
     }),
   );
@@ -733,7 +739,10 @@ accounts.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
   return res.json(
     await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, {
-      defaultSort: { column: 'completed_at', ascending: false },
+      // Sort by the generated activity_date column (COALESCE of
+      // completed_at, due_at, created_at) so the tab reads as a real
+      // timeline regardless of whether rows are done or planned.
+      defaultSort: { column: 'activity_date', ascending: false },
       ...visibilityOpts,
     }),
   );
@@ -896,7 +905,10 @@ deals.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
   return res.json(
     await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, {
-      defaultSort: { column: 'completed_at', ascending: false },
+      // Sort by the generated activity_date column (COALESCE of
+      // completed_at, due_at, created_at) so the tab reads as a real
+      // timeline regardless of whether rows are done or planned.
+      defaultSort: { column: 'activity_date', ascending: false },
       ...visibilityOpts,
     }),
   );
@@ -1122,12 +1134,12 @@ activities.get('/', wrap(async (req, res) => {
   const { rows, total, page, limit } = await crud.clientScopedListWithCount(
     'crm_activities', orgId(req), scope.id, listQuery,
     {
-      // Sort newest-first so today's freshly logged activities sit at
-      // the top regardless of whether they're completed or planned.
-      // (NULL completed_at sorts after a real timestamp under
-      // PostgREST's default, but most reps look at "what did I log
-      // recently" — created_at is the right axis for that.)
-      defaultSort: { column: 'created_at', ascending: false },
+      // Sort by `activity_date` — a generated column on crm_activities
+      // that is COALESCE(completed_at, due_at, created_at), so the list
+      // reads chronologically: completed rows by when they were done,
+      // planned rows by when they're due, orphans by when they were
+      // logged. Indexed on (org_id, client_id, activity_date DESC).
+      defaultSort: { column: 'activity_date', ascending: false },
       searchColumns: ['subject', 'body'],
       strictClient: scope.strict,
       // Hierarchy gate on → caller sees self + subtree across
@@ -1218,7 +1230,7 @@ activities.get('/export', wrap(async (req, res) => {
       orgId(req),
       scope.id,
       { ...exportQuery, limit: PAGE, page },
-      { defaultSort: { column: 'created_at', ascending: false }, searchColumns: ['subject','body'], strictClient: scope.strict, ...visibilityOpts, ...(ownerExtra ? { extraFilters: ownerExtra } : {}) },
+      { defaultSort: { column: 'activity_date', ascending: false }, searchColumns: ['subject','body'], strictClient: scope.strict, ...visibilityOpts, ...(ownerExtra ? { extraFilters: ownerExtra } : {}) },
     );
     rows.push(...(chunk as any[]));
     if ((chunk as any[]).length < PAGE) break;
