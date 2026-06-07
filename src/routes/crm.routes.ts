@@ -1460,6 +1460,157 @@ attach('/assignment-rules', 'crm_lead_assignment_rules', v.assignmentRuleSchema,
 attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false, clientScoped: true });
 attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false, clientScoped: true });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
+
+// People Directory — per-client address book (dealers / influencers /
+// referrers) that sits alongside contacts. Strict client scope so Tata
+// Tiscon's roster never leaks into Kinematic and vice-versa. RBAC gate:
+// only roles with `crm_settings` can manage entries (CRM Admin /
+// Business Head / Distributor GM), matching the user's request that
+// CRM Admin and above own this surface.
+const peopleDir = express.Router();
+peopleDir.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  res.json(await crud.clientScopedList(
+    'people_directory', orgId(req), scope.id, req.query,
+    {
+      defaultSort: { column: 'created_at', ascending: false },
+      searchColumns: ['first_name', 'last_name', 'mobile', 'email'],
+      strictClient: true,
+    },
+  ));
+}));
+peopleDir.get('/:id', wrap(async (req, res) =>
+  res.json(await crud.get('people_directory', orgId(req), req.params.id))));
+peopleDir.post('/', wrap(async (req, res) => {
+  const parsed = parse(v.peopleDirectorySchema, req.body);
+  const cid = clientId(req);
+  if (!cid) throw new AppError(400, 'A client must be selected to add to the People Directory', 'CLIENT_REQUIRED');
+  const payload: Record<string, unknown> = { ...parsed, client_id: cid };
+  res.status(201).json(await crud.create('people_directory', orgId(req), payload, userId(req)));
+}));
+peopleDir.patch('/:id', wrap(async (req, res) =>
+  res.json(await crud.update('people_directory', orgId(req), req.params.id, parse(v.peopleDirectoryBase.partial(), req.body), userId(req)))));
+peopleDir.delete('/:id', wrap(async (req, res) => {
+  await crud.softDelete('people_directory', orgId(req), req.params.id);
+  res.status(204).end();
+}));
+
+// Bulk-import endpoint. Takes mapped rows from the dashboard mapping UI
+// and writes them with simple mobile/email-based dedup. `on_duplicate`
+// switches between skip (default) and update — both modes report counts
+// back so the FE can show "added X, updated Y, skipped Z".
+peopleDir.post('/bulk-import', wrap(async (req, res) => {
+  const body = parse(v.peopleDirectoryBulkImportSchema, req.body);
+  const cid = clientId(req);
+  if (!cid) throw new AppError(400, 'A client must be selected to import People Directory rows', 'CLIENT_REQUIRED');
+  const org_id = orgId(req);
+  let added = 0, updated = 0, skipped = 0;
+  for (const row of body.rows) {
+    const first_name = row.first_name?.trim() || null;
+    const last_name  = row.last_name?.trim()  || null;
+    const mobile     = row.mobile?.trim()     || null;
+    const email      = row.email?.trim()      || null;
+    const address    = row.address?.trim()    || null;
+    if (!first_name && !last_name && !mobile && !email) { skipped++; continue; }
+
+    // Look up an existing row by mobile then email — both are
+    // independently indexed so the probe stays O(log n).
+    let existingId: string | null = null;
+    if (mobile) {
+      const r = await supabaseAdmin.from('people_directory').select('id')
+        .eq('org_id', org_id).eq('client_id', cid).eq('mobile', mobile)
+        .is('deleted_at', null).limit(1).maybeSingle();
+      existingId = (r.data?.id as string) ?? null;
+    }
+    if (!existingId && email) {
+      const r = await supabaseAdmin.from('people_directory').select('id')
+        .eq('org_id', org_id).eq('client_id', cid)
+        .ilike('email', email).is('deleted_at', null).limit(1).maybeSingle();
+      existingId = (r.data?.id as string) ?? null;
+    }
+
+    if (existingId) {
+      if (body.on_duplicate === 'skip') { skipped++; continue; }
+      await supabaseAdmin.from('people_directory').update({
+        first_name, last_name, mobile, email, address,
+        updated_at: new Date().toISOString(),
+        updated_by: userId(req) ?? null,
+      }).eq('id', existingId);
+      updated++;
+    } else {
+      await supabaseAdmin.from('people_directory').insert({
+        org_id, client_id: cid,
+        first_name, last_name, mobile, email, address,
+        created_by: userId(req) ?? null,
+      });
+      added++;
+    }
+  }
+  res.json({ added, updated, skipped, total: body.rows.length });
+}));
+router.use('/people-directory', rbac.requireModuleAccess('crm_settings'), peopleDir);
+
+// Generic lookup search — powers the "linked record" picker for the new
+// lookup custom-field type. Takes a target table (allowlisted on the FE
+// + here in case the FE forgets), an optional `q` for case-insensitive
+// substring search on the display columns, and an optional `filter` query
+// param that the lookup field carries (encoded JSON list of conditions
+// the admin configured when authoring the lookup field). Returns up to
+// 50 rows so the picker dropdown stays responsive.
+const LOOKUP_TABLES: Record<string, { search: string[]; display: (r: Record<string, unknown>) => string }> = {
+  crm_leads: { search: ['first_name','last_name','email','phone','company'], display: (r) =>
+    [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || (r.email as string) || (r.phone as string) || 'Lead' },
+  crm_contacts: { search: ['first_name','last_name','email','mobile'], display: (r) =>
+    [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || (r.email as string) || (r.mobile as string) || 'Contact' },
+  crm_accounts: { search: ['name','domain','industry'], display: (r) => (r.name as string) || 'Account' },
+  crm_deals: { search: ['title','name'], display: (r) => (r.title as string) || (r.name as string) || 'Deal' },
+  people_directory: { search: ['first_name','last_name','mobile','email'], display: (r) =>
+    [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || (r.email as string) || (r.mobile as string) || 'Person' },
+};
+router.get('/lookup/search', wrap(async (req, res) => {
+  const target = String(req.query.target ?? '');
+  const meta = LOOKUP_TABLES[target];
+  if (!meta) throw new AppError(400, `Unknown lookup target: ${target}`, 'BAD_TARGET');
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const scope = clientScope(req);
+  let query = supabaseAdmin.from(target).select('*').eq('org_id', orgId(req));
+  // Soft-delete column exists on every lookup-eligible table.
+  query = query.is('deleted_at', null);
+  // Client scope: tenant-isolated for the real CRM tables, also strict
+  // on people_directory.
+  if (scope.id) query = query.eq('client_id', scope.id);
+  if (q) {
+    const sanitized = q.replace(/[%,]/g, ' ').slice(0, 80);
+    const orExpr = meta.search.map((c) => `${c}.ilike.%${sanitized}%`).join(',');
+    query = query.or(orExpr);
+  }
+  // Apply the admin-configured filter, if the picker forwards one. Each
+  // clause is ANDed; the FE has already converted the clause list to a
+  // shape we can iterate directly. UUIDs are not interpolated — values
+  // go through supabase-js's parameterised API.
+  const filterRaw = typeof req.query.filter === 'string' ? req.query.filter : '';
+  if (filterRaw) {
+    try {
+      const clauses = JSON.parse(filterRaw) as Array<{ field: string; op: string; value: unknown }>;
+      for (const c of Array.isArray(clauses) ? clauses : []) {
+        if (typeof c.field !== 'string' || !/^[a-z_][a-z0-9_]*$/i.test(c.field)) continue;
+        switch (c.op) {
+          case 'eq':       query = query.eq(c.field, c.value as never); break;
+          case 'ne':       query = query.neq(c.field, c.value as never); break;
+          case 'contains': query = query.ilike(c.field, `%${String(c.value ?? '').replace(/[%]/g,'')}%`); break;
+          case 'gte':      query = query.gte(c.field, c.value as never); break;
+          case 'lte':      query = query.lte(c.field, c.value as never); break;
+        }
+      }
+    } catch { /* ignore bad filter JSON, fall through to unfiltered */ }
+  }
+  const { data, error } = await query.limit(50);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  // Slim down to (id, label) the picker can render directly without
+  // every column over the wire.
+  const items = (data ?? []).map((r) => ({ id: r.id as string, label: meta.display(r), raw: r }));
+  res.json({ success: true, data: items });
+}));
 // Drag-and-drop reordering. Frontend sends the new (id, position)
 // tuples after a drop; we apply them in a single batch within the
 // tenant's scope. No-op if any row doesn't belong to the caller's
