@@ -59,6 +59,22 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
 
   const p = asRow(payload);
   const nowIso = new Date().toISOString();
+  // Safety net: when the tenant's crm_settings has business_type='b2c' (or
+  // 'b2b'), force is_b2c on insert. Otherwise an older mobile build / API
+  // integration that doesn't send is_b2c lands on the DB default (false)
+  // and the tenant's B2C-only leads show up as B2B — exactly the
+  // regression that bit Tata Tiscon after the B2B→B2C backfill.
+  let tenantIsB2c: boolean | undefined;
+  if (payload.client_id) {
+    const { data: cs } = await supabaseAdmin
+      .from('crm_settings')
+      .select('business_type')
+      .eq('org_id', org_id).eq('client_id', payload.client_id)
+      .maybeSingle();
+    const bt = (cs as { business_type?: string } | null)?.business_type;
+    if (bt === 'b2c') tenantIsB2c = true;
+    else if (bt === 'b2b') tenantIsB2c = false;
+  }
   const insertRow = {
     org_id,
     client_id: payload.client_id ?? null,
@@ -84,6 +100,23 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
     stage_changed_at: nowIso,
     country: payload.country ?? null,
     city: payload.city ?? null,
+    // B2C + address fields. Previously only `city` survived the create
+    // call — `is_b2c`, address_line1, state, postal_code, consents, DOB,
+    // gender etc. were validated by leadCreateSchema and then silently
+    // dropped before insert, so every new Tata-Tiscon lead landed as
+    // is_b2c=false (DB default) with a blank address. Persist them all.
+    is_b2c:                   tenantIsB2c ?? (p.is_b2c as boolean | undefined) ?? undefined,
+    date_of_birth:            (p.date_of_birth            as string  | undefined) ?? null,
+    gender:                   (p.gender                   as string  | undefined) ?? null,
+    address_line1:            (p.address_line1            as string  | undefined) ?? null,
+    address_line2:            (p.address_line2            as string  | undefined) ?? null,
+    state:                    (p.state                    as string  | undefined) ?? null,
+    postal_code:              (p.postal_code              as string  | undefined) ?? null,
+    preferred_contact_method: (p.preferred_contact_method as string  | undefined) ?? null,
+    marketing_consent:        (p.marketing_consent        as boolean | undefined) ?? undefined,
+    whatsapp_consent:         (p.whatsapp_consent         as boolean | undefined) ?? undefined,
+    interests:                (p.interests                as string[] | undefined) ?? undefined,
+    alternate_mobiles:        (p.alternate_mobiles        as string[] | undefined) ?? undefined,
     // Geo coordinates captured on add (device GPS / manual). Optional — the
     // map falls back to the city centroid when absent.
     latitude:  (p.latitude  as number | undefined) ?? null,
