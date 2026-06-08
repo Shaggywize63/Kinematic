@@ -1599,9 +1599,14 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
     const tokenUsage = (out as { usage?: { input?: number; output?: number } }).usage;
     void kiniQuota.recordQuery(actor, tokenUsage, platform);
     const after = await kiniQuota.getUsage(actor);
-    res.json({ success: true, data: { text: out.reply, cards: out.cards, tool_calls: out.tool_calls, usage: after } });
+    // Guard against empty reply when the last turn was tool-use-only: prefer
+    // a card summary over a blank bubble, then a safe fallback as last resort.
+    const replyText = out.reply
+      || (out.tool_calls?.length ? 'Done — see the results above.' : "I couldn't generate a response for that. Could you rephrase?");
+    res.json({ success: true, data: { text: replyText, cards: out.cards, tool_calls: out.tool_calls, usage: after } });
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code;
+    const msg = (e as { message?: string })?.message ?? '';
     if (code === 'CONFIG_ERROR') {
       res.json({
         success: true,
@@ -1613,7 +1618,20 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
       });
       return;
     }
-    throw e;
+    // All other errors (Anthropic API errors, network failures, tool crashes,
+    // etc.) must NOT re-throw — the outer CRM error handler returns a plain
+    // { success: false } envelope with no data.text, which the dashboard and
+    // mobile clients interpret as the generic "I apologize" fallback. Return
+    // a 200 with a user-facing message so the chat stays alive.
+    console.error('[kini.chat] unexpected error:', msg, e);
+    res.json({
+      success: true,
+      data: {
+        text: "I ran into a problem on my end — please try again. If this keeps happening, the team has been notified.",
+        cards: [],
+        tool_calls: [],
+      },
+    });
   }
 }));
 router.use('/ai', ai);
