@@ -13,13 +13,21 @@ router.post('/chat', requireAuth, asyncHandler(async (req: Request, res: Respons
     throw new AppError(400, 'messages array is required', 'VALIDATION_ERROR');
   }
 
-  const text = await AIService.callKiniAI({
-    system: system || 'You are Kini AI, an operations assistant for a field force management platform.',
-    messages,
-    max_tokens: 1000
-  });
-
-  res.json({ success: true, data: { text } });
+  try {
+    const text = await AIService.callKiniAI({
+      system: system || 'You are Kini AI, an operations assistant for a field force management platform.',
+      messages,
+      max_tokens: 1000
+    });
+    res.json({ success: true, data: { text } });
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code;
+    if (code === 'CONFIG_ERROR') {
+      return res.json({ success: true, data: { text: 'KINI is offline — the backend has no Anthropic API key configured. Ask an admin to set ANTHROPIC_API_KEY.' } });
+    }
+    console.error('[ai.chat] error:', (e as Error)?.message ?? e);
+    res.json({ success: true, data: { text: "I ran into a problem on my end — please try again." } });
+  }
 }));
 
 // --- AI FORM GENERATION ---
