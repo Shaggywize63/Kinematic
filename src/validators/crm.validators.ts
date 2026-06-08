@@ -623,6 +623,12 @@ export const peopleDirectoryBase = z.object({
   mobile:     z.string().max(40).optional().nullable(),
   email:      z.string().email().max(200).optional().nullable(),
   address:    z.string().max(1000).optional().nullable(),
+  // Free-text categorisation managed by the admin via the
+  // people_directory_types table — common values are Dealer / Engineer /
+  // Architect, but the type list is per-tenant so we accept any string
+  // the admin has seeded (no enum lock-in here).
+  type:       z.string().max(80).optional().nullable(),
+  city:       z.string().max(120).optional().nullable(),
 });
 export const peopleDirectorySchema = peopleDirectoryBase.refine(
   (p) => Boolean(p.first_name?.trim() || p.last_name?.trim() || p.mobile?.trim() || p.email?.trim()),
@@ -640,6 +646,18 @@ export const peopleDirectoryBulkImportSchema = z.object({
     mobile:     z.string().max(40).optional().nullable(),
     email:      z.string().max(200).optional().nullable(),
     address:    z.string().max(1000).optional().nullable(),
+    type:       z.string().max(80).optional().nullable(),
+    city:       z.string().max(120).optional().nullable(),
   })).min(1).max(5000),
   on_duplicate: z.enum(['skip', 'update']).default('skip'),
+});
+
+// Type catalogue managed per (org, client). The admin-facing UI lets
+// users add / rename / deactivate / reorder entries. We don't constrain
+// the name beyond non-empty + length so localised labels (e.g. Hindi
+// transliterations) work without backend changes.
+export const peopleDirectoryTypeSchema = z.object({
+  name: z.string().min(1).max(80),
+  is_active: z.boolean().optional(),
+  position: z.number().int().min(0).optional(),
 });

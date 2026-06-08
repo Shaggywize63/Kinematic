@@ -1527,6 +1527,8 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     const mobile     = row.mobile?.trim()     || null;
     const email      = row.email?.trim()      || null;
     const address    = row.address?.trim()    || null;
+    const personType = row.type?.trim()       || null;
+    const city       = row.city?.trim()       || null;
     if (!first_name && !last_name && !mobile && !email) { skipped++; continue; }
 
     // Look up an existing row by mobile then email — both are
@@ -1548,7 +1550,7 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     if (existingId) {
       if (body.on_duplicate === 'skip') { skipped++; continue; }
       await supabaseAdmin.from('people_directory').update({
-        first_name, last_name, mobile, email, address,
+        first_name, last_name, mobile, email, address, type: personType, city,
         updated_at: new Date().toISOString(),
         updated_by: userId(req) ?? null,
       }).eq('id', existingId);
@@ -1556,7 +1558,7 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     } else {
       await supabaseAdmin.from('people_directory').insert({
         org_id, client_id: cid,
-        first_name, last_name, mobile, email, address,
+        first_name, last_name, mobile, email, address, type: personType, city,
         created_by: userId(req) ?? null,
       });
       added++;
@@ -1564,7 +1566,68 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
   }
   res.json({ added, updated, skipped, total: body.rows.length });
 }));
+
+// CSV export — same client + soft-delete scope as the list endpoint, with
+// the dashboard's optional ?type=… / ?city=… filter forwarded through. The
+// generic list path applies any non-reserved query key as `.eq(...)`, so
+// the same filters the FE uses on the list page also narrow the export.
+peopleDir.get('/export', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const rows = await crud.clientScopedList('people_directory', orgId(req), scope.id, req.query, {
+    defaultSort: { column: 'created_at', ascending: false },
+    searchColumns: ['first_name', 'last_name', 'mobile', 'email', 'type', 'city'],
+    strictClient: true,
+  }) as Array<Record<string, unknown>>;
+  const esc = (v: unknown): string => {
+    if (v == null) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = ['first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'address', 'created_at'];
+  const body = rows.map((r) => header.map((k) => esc(r[k])).join(',')).join('\n');
+  const csv = `${header.join(',')}\n${body}\n`;
+  const filename = `people-directory-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}));
 router.use('/people-directory', rbac.requireModuleAccess('crm_settings'), peopleDir);
+
+// People Directory Type catalogue — per (org, client) admin-managed list
+// of role labels (Dealer / Engineer / Architect + whatever the tenant
+// adds). Shares the same RBAC gate as the directory itself so only roles
+// with crm_settings can curate it.
+const peopleDirTypes = express.Router();
+peopleDirTypes.get('/', wrap(async (req, res) => {
+  res.json(await crud.clientScopedList(
+    'people_directory_types', orgId(req), clientScope(req).id, req.query,
+    {
+      defaultSort: { column: 'position', ascending: true },
+      searchColumns: ['name'],
+      strictClient: true,
+    },
+  ));
+}));
+peopleDirTypes.post('/', wrap(async (req, res) => {
+  const parsed = parse(v.peopleDirectoryTypeSchema, req.body);
+  const cid = clientId(req);
+  if (!cid) throw new AppError(400, 'A client must be selected to add a People Directory type', 'CLIENT_REQUIRED');
+  // Default position = current max + 1 so new entries land at the end of
+  // the dropdown rather than at the top.
+  const { data: maxRow } = await supabaseAdmin.from('people_directory_types')
+    .select('position').eq('org_id', orgId(req)).eq('client_id', cid).is('deleted_at', null)
+    .order('position', { ascending: false }).limit(1).maybeSingle();
+  const nextPos = ((maxRow?.position as number | undefined) ?? -1) + 1;
+  const payload = { ...parsed, client_id: cid, position: parsed.position ?? nextPos };
+  res.status(201).json(await crud.create('people_directory_types', orgId(req), payload, userId(req)));
+}));
+peopleDirTypes.patch('/:id', wrap(async (req, res) =>
+  res.json(await crud.update('people_directory_types', orgId(req), req.params.id, parse(v.peopleDirectoryTypeSchema.partial(), req.body), userId(req)))));
+peopleDirTypes.delete('/:id', wrap(async (req, res) => {
+  await crud.softDelete('people_directory_types', orgId(req), req.params.id);
+  res.status(204).end();
+}));
+router.use('/people-directory-types', rbac.requireModuleAccess('crm_settings'), peopleDirTypes);
 
 // Generic lookup search — powers the "linked record" picker for the new
 // lookup custom-field type. Takes a target table (allowlisted on the FE
