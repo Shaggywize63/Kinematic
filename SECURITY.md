@@ -151,7 +151,7 @@ issues for security reports.
 
 ```
 Scope:
-  - https://kinematic-production.up.railway.app/api/v1/*    (backend)
+  - https://api.kinematicapp.com/api/v1/*    (backend)
   - https://kinematic-dashboard.vercel.app                   (web)
   - Android + iOS apps (current Play / TestFlight builds)
 
