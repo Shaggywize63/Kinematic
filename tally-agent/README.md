@@ -51,8 +51,8 @@ The file looks like:
 {
   "integration_id":        "abc-...",
   "agent_secret":          "...",
-  "polling_endpoint":      "https://kinematic-production.up.railway.app/api/v1/integrations/tally/jobs/.../?key=...",
-  "report_endpoint":       "https://kinematic-production.up.railway.app/api/v1/integrations/tally/jobs/.../result?key=...",
+  "polling_endpoint":      "https://api.kinematicapp.com/api/v1/integrations/tally/jobs/.../?key=...",
+  "report_endpoint":       "https://api.kinematicapp.com/api/v1/integrations/tally/jobs/.../result?key=...",
   "tally_url":             "http://localhost:9000",
   "poll_interval_seconds": 30
 }
