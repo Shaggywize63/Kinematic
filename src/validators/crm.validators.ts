@@ -437,6 +437,10 @@ export const customFieldSchema = z.object({
   ]),
   options: z.array(z.string()).optional().nullable(),
   required: z.boolean().optional(),
+  // Hides the field from create / edit forms without deleting stored
+  // values. Admin toggles it under CRM Settings → Custom Fields.
+  // Backend column added by migration_custom_field_hidden.sql.
+  hidden: z.boolean().optional(),
   position: z.number().int().optional(),
   // Org roles that should see this field. Empty/null = all roles (universal).
   // Lets clients give each hierarchy role its own set of custom fields.
