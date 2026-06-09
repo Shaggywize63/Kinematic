@@ -21,7 +21,7 @@ import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
 const SHARED_SECRET = Deno.env.get('SUPABASE_EDGE_SECRET') || '';
 const NODE_SECRET   = Deno.env.get('KINEMATIC_EDGE_SECRET') || '';
-const BASE_URL      = Deno.env.get('KINEMATIC_BASE_URL') || 'https://kinematic-production.up.railway.app';
+const BASE_URL      = Deno.env.get('KINEMATIC_BASE_URL') || 'https://api.kinematicapp.com';
 
 serve(async (req) => {
   if (SHARED_SECRET) {
