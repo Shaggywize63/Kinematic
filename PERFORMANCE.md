@@ -63,13 +63,13 @@ Three places, listed by impact on perceived latency:
 ```bash
 # 1. Time a check-in round-trip end-to-end
 curl -s -o /dev/null -w "Total: %{time_total}s · TTFB: %{time_starttransfer}s\n" \
-     -X POST https://kinematic-production.up.railway.app/api/v1/attendance/checkin \
+     -X POST https://api.kinematicapp.com/api/v1/attendance/checkin \
      -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
      -d '{"latitude":19.13,"longitude":72.83}'
 
 # 2. Compare with caching (second call should 304)
 curl -i -H "Authorization: Bearer $TOKEN" \
-     https://kinematic-production.up.railway.app/api/v1/attendance/today | grep -E "HTTP|ETag|Cache"
+     https://api.kinematicapp.com/api/v1/attendance/today | grep -E "HTTP|ETag|Cache"
 
 # 3. EXPLAIN ANALYZE a slow query in Supabase SQL editor
 EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM attendance WHERE user_id = '...' AND date = '...';
