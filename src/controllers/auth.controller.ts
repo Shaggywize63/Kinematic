@@ -135,7 +135,10 @@ export const login = asyncHandler<Request>(async (req, res) => {
           'crm', 'distribution', 'planograms', 'route_plans', 'visit_logs',
           'campaigns', 'leaderboard', 'notifications', 'sos', 'candidates',
           'learning', 'manpower', 'work_activity', 'audit', 'integrations',
-          'hr'
+          'hr',
+          // FFM Reports hub — new module so the dashboard nav surfaces
+          // /dashboard/ffm-reports for the demo account.
+          'ffm_reports',
         ]
       },
     });
