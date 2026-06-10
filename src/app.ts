@@ -79,6 +79,12 @@ import distLedgerRoutes        from './routes/distribution/ledger.routes';
 import distSchemesRoutes       from './routes/distribution/schemes.routes';
 import distReturnsRoutes       from './routes/distribution/returns.routes';
 import distSecondaryRoutes     from './routes/distribution/secondary-sales.routes';
+// Last-mile distribution: tertiary sales (retailer → consumer) + consumer
+// registrations (which auto-create CRM leads). Closes the visibility gap
+// where brand owners track product all the way to the distributor but
+// lose sight after that.
+import distTertiaryRoutes      from './routes/distribution/tertiary-sales.routes';
+import distConsumerRegRoutes   from './routes/distribution/consumer-registrations.routes';
 import distGstinRoutes         from './routes/distribution/gstin.routes';
 import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
@@ -384,6 +390,11 @@ app.use(`${V1}/distribution/ledger`,         requireAuth, requireModule('distrib
 app.use(`${V1}/distribution/schemes`,        requireAuth, requireModule('distribution_schemes'),      distSchemesRoutes);
 app.use(`${V1}/distribution/returns`,        requireAuth, requireModule('distribution_returns'),      distReturnsRoutes);
 app.use(`${V1}/distribution/secondary-sales`,requireAuth, requireModule('distribution_consumer'),     distSecondaryRoutes);
+// Tertiary sales + consumer registrations gate on the same SKU as
+// secondary sales (distribution_consumer) — the brand owner's customer-
+// facing surface always travels as a single module purchase.
+app.use(`${V1}/distribution/tertiary-sales`,         requireAuth, requireModule('distribution_consumer'), distTertiaryRoutes);
+app.use(`${V1}/distribution/consumer-registrations`, requireAuth, requireModule('distribution_consumer'), distConsumerRegRoutes);
 // External-facing / abuse-prone endpoints get tighter per-route limits.
 app.use(`${V1}/distribution/gstin`,          requireAuth, perRouteLimit({ windowMs: 60_000, max: 30 }),  distGstinRoutes);
 app.use(`${V1}/organisations`,               requireAuth,                                                organisationsRoutes);
