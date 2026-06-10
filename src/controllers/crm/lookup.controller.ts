@@ -68,10 +68,15 @@ export const assignmentRules = {
 export const customFields = {
   list: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
-    const { entity } = req.query as Record<string, string>;
+    // Accept either `entity` (legacy clients) or `entity_type` (current).
+    // The underlying column is `entity_type`; the param was named `entity`
+    // historically and the mobile clients still send that. Translating here
+    // means we don't have to ship a coordinated client + server bump.
+    const { entity, entity_type } = req.query as Record<string, string | undefined>;
+    const entityFilter = entity_type ?? entity;
     let q = supabaseAdmin.from('crm_custom_field_defs').select('*')
       .eq('org_id', org_id).eq('is_active', true);
-    if (entity) q = q.eq('entity', entity);
+    if (entityFilter) q = q.eq('entity_type', entityFilter);
     q = q.order('position').order('created_at');
     const { data, error } = await q;
     if (error) return badRequest(res, error.message);
@@ -79,12 +84,15 @@ export const customFields = {
   }),
   create: asyncHandler(async (req: AuthRequest, res: Response) => {
     const { org_id } = req.user!;
-    const { entity, field_key, label, field_type, options, required = false, position = 0 } = req.body;
-    if (!entity || !field_key?.trim() || !label?.trim() || !field_type) {
-      return badRequest(res, 'entity, field_key, label, and field_type are required');
+    // Mirror the list endpoint: accept either `entity` or `entity_type`
+    // from clients; the column is `entity_type`.
+    const { entity, entity_type, field_key, label, field_type, options, required = false, position = 0 } = req.body;
+    const entityValue = entity_type ?? entity;
+    if (!entityValue || !field_key?.trim() || !label?.trim() || !field_type) {
+      return badRequest(res, 'entity_type, field_key, label, and field_type are required');
     }
     const payload: Record<string, unknown> = {
-      org_id, entity, field_key: field_key.trim(), label: label.trim(),
+      org_id, entity_type: entityValue, field_key: field_key.trim(), label: label.trim(),
       field_type, required, position, is_active: true,
     };
     if (options && options.length > 0) payload.options = options;
