@@ -346,6 +346,148 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
   }));
 }
 
+// ─── Team Performance ─────────────────────────────────────────────
+//
+// Per-rep aggregate KPIs for the caller's hierarchy subtree. Drives
+// the "Team Wise" report a Consumer Champion Manager / Area Sales
+// Manager opens to see how their direct + transitive reports are doing
+// in one place — won volume, conversion rate, lead ageing, and new
+// leads this period.
+//
+// One round trip per dataset: deals (won/lost), leads (new), open leads
+// (ageing). Grouped client-side by owner. User names resolved in a
+// single batched lookup. Returns a `total` row at the front so the UI
+// can render it as a sticky header.
+
+export interface TeamPerformanceRow {
+  user_id: string | null;
+  name: string;
+  won_count: number;
+  won_value: number;
+  lost_count: number;
+  conversion_rate: number;     // 0..1; the UI renders as %
+  avg_ageing_days: number;     // mean (NOW - created_at) for open leads
+  new_leads_period: number;    // leads.created_at in [from,to]
+}
+
+export async function teamPerformance(
+  org_id: string,
+  range?: DateRange,
+  client_id: string | null = null,
+  scope?: AnalyticsScope,
+): Promise<{ total: TeamPerformanceRow; rows: TeamPerformanceRow[] }> {
+  // 1) Deals: won/lost grouped by owner. Stage_type drives won/lost
+  //    so custom pipeline stage names still classify correctly.
+  let dq = supabaseAdmin.from('crm_deals')
+    .select('amount, owner_id, crm_deal_stages!inner(stage_type)')
+    .eq('org_id', org_id).is('deleted_at', null);
+  dq = withClient(dq, client_id);
+  dq = applyOwnerScope(dq, scope);
+  if (range?.from) dq = dq.gte('created_at', range.from);
+  if (range?.to)   dq = dq.lte('created_at', range.to);
+  const { data: deals } = await dq;
+
+  // 2) New leads in period grouped by owner.
+  let lq = supabaseAdmin.from('crm_leads')
+    .select('owner_id, created_at, status')
+    .eq('org_id', org_id).is('deleted_at', null);
+  lq = withClient(lq, client_id);
+  lq = applyLeadScope(lq, scope);
+  if (range?.from) lq = lq.gte('created_at', range.from);
+  if (range?.to)   lq = lq.lte('created_at', range.to);
+  const { data: newLeads } = await lq;
+
+  // 3) Open leads → ageing. Open means status NOT IN (converted,
+  //    unqualified, lost) — same closure logic the leads list uses.
+  let aq = supabaseAdmin.from('crm_leads')
+    .select('owner_id, created_at, status')
+    .eq('org_id', org_id).is('deleted_at', null)
+    .not('status', 'in', '(converted,unqualified,lost)');
+  aq = withClient(aq, client_id);
+  aq = applyLeadScope(aq, scope);
+  const { data: openLeads } = await aq;
+
+  // Per-owner aggregates.
+  type Agg = {
+    won_count: number; won_value: number;
+    lost_count: number;
+    new_leads_period: number;
+    ageing_sum_days: number; ageing_n: number;
+  };
+  const blank = (): Agg => ({ won_count: 0, won_value: 0, lost_count: 0, new_leads_period: 0, ageing_sum_days: 0, ageing_n: 0 });
+  const byOwner = new Map<string | null, Agg>();
+  const bump = (id: string | null | undefined): Agg => {
+    const k = id ?? null;
+    let v = byOwner.get(k);
+    if (!v) { v = blank(); byOwner.set(k, v); }
+    return v;
+  };
+
+  for (const d of (deals ?? []) as unknown as Array<{ amount?: number | null; owner_id?: string | null; crm_deal_stages: { stage_type: string } }>) {
+    const a = bump(d.owner_id);
+    if (d.crm_deal_stages?.stage_type === 'won') {
+      a.won_count += 1;
+      a.won_value += Number(d.amount ?? 0);
+    } else if (d.crm_deal_stages?.stage_type === 'lost') {
+      a.lost_count += 1;
+    }
+  }
+  for (const l of (newLeads ?? []) as Array<{ owner_id?: string | null }>) {
+    bump(l.owner_id).new_leads_period += 1;
+  }
+  const now = Date.now();
+  const MS_PER_DAY = 86_400_000;
+  for (const l of (openLeads ?? []) as Array<{ owner_id?: string | null; created_at: string }>) {
+    const created = new Date(l.created_at).getTime();
+    if (!Number.isFinite(created)) continue;
+    const days = Math.max(0, (now - created) / MS_PER_DAY);
+    const a = bump(l.owner_id);
+    a.ageing_sum_days += days;
+    a.ageing_n += 1;
+  }
+
+  // Resolve names for the owners we ended up with.
+  const ownerIds = Array.from(byOwner.keys()).filter((x): x is string => !!x);
+  let nameById = new Map<string, string>();
+  if (ownerIds.length > 0) {
+    const { data: users } = await supabaseAdmin.from('users')
+      .select('id, name, full_name, email')
+      .in('id', ownerIds);
+    for (const u of (users ?? []) as Array<{ id: string; name?: string | null; full_name?: string | null; email?: string | null }>) {
+      nameById.set(u.id, (u.name?.trim() || u.full_name?.trim() || u.email?.trim() || 'User'));
+    }
+  }
+
+  const rowFromAgg = (id: string | null, name: string, a: Agg): TeamPerformanceRow => ({
+    user_id: id,
+    name,
+    won_count: a.won_count,
+    won_value: a.won_value,
+    lost_count: a.lost_count,
+    conversion_rate: (a.won_count + a.lost_count) > 0 ? a.won_count / (a.won_count + a.lost_count) : 0,
+    avg_ageing_days: a.ageing_n > 0 ? a.ageing_sum_days / a.ageing_n : 0,
+    new_leads_period: a.new_leads_period,
+  });
+
+  const rows: TeamPerformanceRow[] = Array.from(byOwner.entries())
+    .map(([id, agg]) => rowFromAgg(id, id ? (nameById.get(id) ?? 'User') : 'Unassigned', agg))
+    .sort((a, b) => b.won_value - a.won_value || b.won_count - a.won_count || a.name.localeCompare(b.name));
+
+  // Total row aggregated across the visible subtree.
+  const totalAgg = blank();
+  for (const a of byOwner.values()) {
+    totalAgg.won_count        += a.won_count;
+    totalAgg.won_value        += a.won_value;
+    totalAgg.lost_count       += a.lost_count;
+    totalAgg.new_leads_period += a.new_leads_period;
+    totalAgg.ageing_sum_days  += a.ageing_sum_days;
+    totalAgg.ageing_n         += a.ageing_n;
+  }
+  const total = rowFromAgg(null, 'Total', totalAgg);
+
+  return { total, rows };
+}
+
 export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')

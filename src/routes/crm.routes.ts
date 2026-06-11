@@ -2323,6 +2323,12 @@ analytics.get('/funnel', wrap(async (req, res) => res.json(
 analytics.get('/win-rate', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'win-rate'), ANALYTICS_TTL,
     () => analyticsSvc.winRate(orgId(req), (req.query.by as 'rep'|'source'|'stage') ?? 'rep', dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
+// Team Performance — per-rep KPI roll-up across the caller's hierarchy
+// subtree. Surfaces won volume, conversion rate, lead ageing, and new
+// leads this period as one consolidated report for managers.
+analytics.get('/team-performance', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'team-performance'), ANALYTICS_TTL,
+    () => analyticsSvc.teamPerformance(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/sales-cycle', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'sales-cycle'), ANALYTICS_TTL,
     () => analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req))))));
