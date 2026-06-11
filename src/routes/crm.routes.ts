@@ -2335,6 +2335,12 @@ analytics.get('/team-performance', wrap(async (req, res) => res.json(
 analytics.get('/lead-tracker', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lead-tracker'), ANALYTICS_TTL,
     () => analyticsSvc.leadTracker(orgId(req), Number(req.query.months ?? 6), clientId(req), (req as AuthRequest).analyticsScope)))));
+// Team Daily Activity — one card per rep in the subtree for a given
+// calendar day. Attendance check-in (time + location), today's visits
+// achieved vs scheduled, and leads added.
+analytics.get('/team-daily', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'team-daily'), ANALYTICS_TTL,
+    () => analyticsSvc.teamDaily(orgId(req), String(req.query.date ?? ''), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/sales-cycle', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'sales-cycle'), ANALYTICS_TTL,
     () => analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req))))));
