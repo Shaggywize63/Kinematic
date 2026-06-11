@@ -362,12 +362,35 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
 export interface TeamPerformanceRow {
   user_id: string | null;
   name: string;
+  // ── Lead funnel
+  total_leads_owned: number;
+  new_leads_today: number;
+  new_leads_week: number;
+  new_leads_month: number;
+  new_leads_period: number;
+  qualified_count: number;
+  converted_count: number;
+  unqualified_count: number;
+  lost_leads_count: number;
+  qualified_rate: number;            // qualified / total_leads_owned
+  converted_rate: number;            // converted / total_leads_owned
+  // ── Deal performance
   won_count: number;
   won_value: number;
   lost_count: number;
-  conversion_rate: number;     // 0..1; the UI renders as %
-  avg_ageing_days: number;     // mean (NOW - created_at) for open leads
-  new_leads_period: number;    // leads.created_at in [from,to]
+  open_count: number;
+  open_pipeline_value: number;
+  conversion_rate: number;           // won / (won + lost) — deals
+  avg_deal_size: number;             // won_value / won_count
+  avg_sales_cycle_days: number;      // avg (won_at - created_at) for won deals
+  // ── Operational health
+  avg_ageing_days: number;           // mean age of open leads (days)
+  oldest_open_lead_days: number;     // max age of open leads (days)
+  activities_completed_period: number;
+  activities_total_period: number;
+  last_activity_at: string | null;   // ISO; most recent owned/assigned activity
+  // ── Quality
+  avg_lead_score: number;
 }
 
 export async function teamPerformance(
@@ -376,116 +399,262 @@ export async function teamPerformance(
   client_id: string | null = null,
   scope?: AnalyticsScope,
 ): Promise<{ total: TeamPerformanceRow; rows: TeamPerformanceRow[] }> {
-  // 1) Deals: won/lost grouped by owner. Stage_type drives won/lost
-  //    so custom pipeline stage names still classify correctly.
-  let dq = supabaseAdmin.from('crm_deals')
-    .select('amount, owner_id, crm_deal_stages!inner(stage_type)')
+  // ── Resolve hierarchy subtree up-front. Same pattern as teamDaily.
+  const subtree = scope?.visibleOwnerIds ?? null;
+  let userQ = supabaseAdmin.from('users')
+    .select('id, name, full_name, email')
+    .eq('org_id', org_id);
+  if (client_id) userQ = userQ.eq('client_id', client_id);
+  if (subtree && subtree.length > 0) userQ = userQ.in('id', subtree);
+  else if (subtree && subtree.length === 0) {
+    return { total: blankRow('Total'), rows: [] };
+  }
+  const { data: users } = await userQ;
+  const userIds = ((users ?? []) as Array<{ id: string }>).map((u) => u.id);
+
+  // Window boundaries (used by period rollups regardless of `range`).
+  const now = new Date();
+  const todayStart = new Date(now); todayStart.setUTCHours(0, 0, 0, 0);
+  const day = todayStart.getUTCDay() || 7;
+  const weekStart = new Date(todayStart); weekStart.setUTCDate(weekStart.getUTCDate() - (day - 1));
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const rangeFrom = range?.from ? new Date(range.from).toISOString() : null;
+  const rangeTo   = range?.to   ? new Date(range.to).toISOString()   : null;
+
+  // ── 1) All leads for the subtree (lifetime). We post-filter for
+  //    period counts client-side to avoid 5 separate queries.
+  let leadQ = supabaseAdmin.from('crm_leads')
+    .select('owner_id, status, created_at, score, converted_at')
     .eq('org_id', org_id).is('deleted_at', null);
-  dq = withClient(dq, client_id);
-  dq = applyOwnerScope(dq, scope);
-  if (range?.from) dq = dq.gte('created_at', range.from);
-  if (range?.to)   dq = dq.lte('created_at', range.to);
-  const { data: deals } = await dq;
+  leadQ = withClient(leadQ, client_id);
+  leadQ = applyLeadScope(leadQ, scope);
+  const { data: leads } = await leadQ;
 
-  // 2) New leads in period grouped by owner.
-  let lq = supabaseAdmin.from('crm_leads')
-    .select('owner_id, created_at, status')
+  // ── 2) All deals for the subtree (open + closed). Period-bound for
+  //    won/lost; lifetime for open pipeline.
+  let dealQ = supabaseAdmin.from('crm_deals')
+    .select('owner_id, amount, status, created_at, won_at, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).is('deleted_at', null);
-  lq = withClient(lq, client_id);
-  lq = applyLeadScope(lq, scope);
-  if (range?.from) lq = lq.gte('created_at', range.from);
-  if (range?.to)   lq = lq.lte('created_at', range.to);
-  const { data: newLeads } = await lq;
+  dealQ = withClient(dealQ, client_id);
+  dealQ = applyOwnerScope(dealQ, scope);
+  const { data: deals } = await dealQ;
 
-  // 3) Open leads → ageing. Open means status NOT IN (converted,
-  //    unqualified, lost) — same closure logic the leads list uses.
-  let aq = supabaseAdmin.from('crm_leads')
-    .select('owner_id, created_at, status')
-    .eq('org_id', org_id).is('deleted_at', null)
-    .not('status', 'in', '(converted,unqualified,lost)');
-  aq = withClient(aq, client_id);
-  aq = applyLeadScope(aq, scope);
-  const { data: openLeads } = await aq;
+  // ── 3) Activities in window (period scoped if range, else lifetime).
+  let actQ = supabaseAdmin.from('crm_activities')
+    .select('owner_id, assigned_to, status, completed_at, activity_date, created_at')
+    .eq('org_id', org_id).is('deleted_at', null);
+  actQ = withClient(actQ, client_id);
+  actQ = applyActivityScope(actQ, scope);
+  if (rangeFrom) actQ = actQ.gte('created_at', rangeFrom);
+  if (rangeTo)   actQ = actQ.lte('created_at', rangeTo);
+  const { data: acts } = await actQ;
 
-  // Per-owner aggregates.
-  type Agg = {
-    won_count: number; won_value: number;
-    lost_count: number;
-    new_leads_period: number;
-    ageing_sum_days: number; ageing_n: number;
-  };
-  const blank = (): Agg => ({ won_count: 0, won_value: 0, lost_count: 0, new_leads_period: 0, ageing_sum_days: 0, ageing_n: 0 });
-  const byOwner = new Map<string | null, Agg>();
-  const bump = (id: string | null | undefined): Agg => {
-    const k = id ?? null;
-    let v = byOwner.get(k);
-    if (!v) { v = blank(); byOwner.set(k, v); }
-    return v;
-  };
+  // Latest activity timestamp per owner — lifetime (drives the "last
+  // touched" signal on the card, regardless of date range).
+  let lastActQ = supabaseAdmin.from('crm_activities')
+    .select('owner_id, assigned_to, activity_date, completed_at, created_at')
+    .eq('org_id', org_id).is('deleted_at', null);
+  lastActQ = withClient(lastActQ, client_id);
+  lastActQ = applyActivityScope(lastActQ, scope);
+  lastActQ = lastActQ.order('created_at', { ascending: false }).limit(2000);
+  const { data: latestActs } = await lastActQ;
 
-  for (const d of (deals ?? []) as unknown as Array<{ amount?: number | null; owner_id?: string | null; crm_deal_stages: { stage_type: string } }>) {
-    const a = bump(d.owner_id);
-    if (d.crm_deal_stages?.stage_type === 'won') {
-      a.won_count += 1;
-      a.won_value += Number(d.amount ?? 0);
-    } else if (d.crm_deal_stages?.stage_type === 'lost') {
+  // ── Aggregate per-owner. Initialise from the users list so an idle
+  //    rep still gets a row of zeros.
+  type Acc = ReturnType<typeof blankAcc>;
+  const byOwner = new Map<string, Acc>();
+  for (const u of (users ?? []) as Array<{ id: string }>) byOwner.set(u.id, blankAcc());
+
+  // Leads.
+  for (const l of (leads ?? []) as Array<{
+    owner_id: string | null; status: string | null; created_at: string;
+    score: number | null; converted_at: string | null;
+  }>) {
+    if (!l.owner_id || !byOwner.has(l.owner_id)) continue;
+    const a = byOwner.get(l.owner_id)!;
+    a.total_leads_owned += 1;
+    if (typeof l.score === 'number' && Number.isFinite(l.score)) {
+      a.score_sum += l.score; a.score_n += 1;
+    }
+    const created = new Date(l.created_at);
+    const status = l.status ?? '';
+    if (status === 'qualified')   a.qualified_count   += 1;
+    if (status === 'converted')   a.converted_count   += 1;
+    if (status === 'unqualified') a.unqualified_count += 1;
+    if (status === 'lost')        a.lost_leads_count  += 1;
+    const isOpen = !['converted', 'unqualified', 'lost'].includes(status);
+    if (isOpen) {
+      const ageDays = Math.max(0, (now.getTime() - created.getTime()) / 86_400_000);
+      a.open_lead_age_sum += ageDays; a.open_lead_age_n += 1;
+      if (ageDays > a.oldest_open_lead_days) a.oldest_open_lead_days = ageDays;
+    }
+    if (created >= todayStart)  a.new_leads_today += 1;
+    if (created >= weekStart)   a.new_leads_week  += 1;
+    if (created >= monthStart)  a.new_leads_month += 1;
+    if ((!rangeFrom || created >= new Date(rangeFrom)) &&
+        (!rangeTo   || created <= new Date(rangeTo))) {
+      a.new_leads_period += 1;
+    }
+  }
+
+  // Deals.
+  for (const d of (deals ?? []) as unknown as Array<{
+    owner_id: string | null; amount: number | null; status: string | null;
+    created_at: string; won_at: string | null;
+    crm_deal_stages: { stage_type: string };
+  }>) {
+    if (!d.owner_id || !byOwner.has(d.owner_id)) continue;
+    const a = byOwner.get(d.owner_id)!;
+    const stageType = d.crm_deal_stages?.stage_type ?? '';
+    const amount = Number(d.amount ?? 0);
+    if (stageType === 'won') {
+      // Period-bound when range is supplied; else lifetime.
+      const matchesRange =
+        (!rangeFrom || (d.won_at ? new Date(d.won_at) >= new Date(rangeFrom) : false)) &&
+        (!rangeTo   || (d.won_at ? new Date(d.won_at) <= new Date(rangeTo)   : false));
+      if (rangeFrom || rangeTo) {
+        if (matchesRange) {
+          a.won_count += 1; a.won_value += amount;
+          if (d.won_at) {
+            const cycle = (new Date(d.won_at).getTime() - new Date(d.created_at).getTime()) / 86_400_000;
+            if (Number.isFinite(cycle) && cycle >= 0) { a.cycle_sum += cycle; a.cycle_n += 1; }
+          }
+        }
+      } else {
+        a.won_count += 1; a.won_value += amount;
+        if (d.won_at) {
+          const cycle = (new Date(d.won_at).getTime() - new Date(d.created_at).getTime()) / 86_400_000;
+          if (Number.isFinite(cycle) && cycle >= 0) { a.cycle_sum += cycle; a.cycle_n += 1; }
+        }
+      }
+    } else if (stageType === 'lost') {
       a.lost_count += 1;
-    }
-  }
-  for (const l of (newLeads ?? []) as Array<{ owner_id?: string | null }>) {
-    bump(l.owner_id).new_leads_period += 1;
-  }
-  const now = Date.now();
-  const MS_PER_DAY = 86_400_000;
-  for (const l of (openLeads ?? []) as Array<{ owner_id?: string | null; created_at: string }>) {
-    const created = new Date(l.created_at).getTime();
-    if (!Number.isFinite(created)) continue;
-    const days = Math.max(0, (now - created) / MS_PER_DAY);
-    const a = bump(l.owner_id);
-    a.ageing_sum_days += days;
-    a.ageing_n += 1;
-  }
-
-  // Resolve names for the owners we ended up with.
-  const ownerIds = Array.from(byOwner.keys()).filter((x): x is string => !!x);
-  let nameById = new Map<string, string>();
-  if (ownerIds.length > 0) {
-    const { data: users } = await supabaseAdmin.from('users')
-      .select('id, name, full_name, email')
-      .in('id', ownerIds);
-    for (const u of (users ?? []) as Array<{ id: string; name?: string | null; full_name?: string | null; email?: string | null }>) {
-      nameById.set(u.id, (u.name?.trim() || u.full_name?.trim() || u.email?.trim() || 'User'));
+    } else {
+      // Open / pipeline.
+      a.open_count += 1;
+      a.open_pipeline_value += amount;
     }
   }
 
-  const rowFromAgg = (id: string | null, name: string, a: Agg): TeamPerformanceRow => ({
+  // Activities — completed + total counts in the period.
+  for (const act of (acts ?? []) as Array<{
+    owner_id: string | null; assigned_to: string | null; status: string | null;
+  }>) {
+    const owner = act.assigned_to || act.owner_id;
+    if (!owner || !byOwner.has(owner)) continue;
+    const a = byOwner.get(owner)!;
+    a.activities_total_period += 1;
+    if (act.status === 'completed') a.activities_completed_period += 1;
+  }
+
+  // Latest activity per owner (lifetime).
+  const lastTouchByOwner = new Map<string, string>();
+  for (const act of (latestActs ?? []) as Array<{
+    owner_id: string | null; assigned_to: string | null;
+    activity_date: string | null; completed_at: string | null; created_at: string;
+  }>) {
+    const owner = act.assigned_to || act.owner_id;
+    if (!owner || !byOwner.has(owner)) continue;
+    if (lastTouchByOwner.has(owner)) continue;
+    const ts = act.completed_at || act.activity_date || act.created_at;
+    if (ts) lastTouchByOwner.set(owner, ts);
+  }
+
+  const nameById = new Map<string, string>();
+  for (const u of (users ?? []) as Array<{ id: string; name?: string | null; full_name?: string | null; email?: string | null }>) {
+    nameById.set(u.id, u.name?.trim() || u.full_name?.trim() || u.email?.trim() || 'User');
+  }
+
+  const rowFromAgg = (id: string | null, name: string, a: Acc): TeamPerformanceRow => ({
     user_id: id,
     name,
-    won_count: a.won_count,
-    won_value: a.won_value,
-    lost_count: a.lost_count,
-    conversion_rate: (a.won_count + a.lost_count) > 0 ? a.won_count / (a.won_count + a.lost_count) : 0,
-    avg_ageing_days: a.ageing_n > 0 ? a.ageing_sum_days / a.ageing_n : 0,
-    new_leads_period: a.new_leads_period,
+    total_leads_owned: a.total_leads_owned,
+    new_leads_today:   a.new_leads_today,
+    new_leads_week:    a.new_leads_week,
+    new_leads_month:   a.new_leads_month,
+    new_leads_period:  a.new_leads_period,
+    qualified_count:   a.qualified_count,
+    converted_count:   a.converted_count,
+    unqualified_count: a.unqualified_count,
+    lost_leads_count:  a.lost_leads_count,
+    qualified_rate:    a.total_leads_owned > 0 ? a.qualified_count / a.total_leads_owned : 0,
+    converted_rate:    a.total_leads_owned > 0 ? a.converted_count / a.total_leads_owned : 0,
+    won_count:           a.won_count,
+    won_value:           a.won_value,
+    lost_count:          a.lost_count,
+    open_count:          a.open_count,
+    open_pipeline_value: a.open_pipeline_value,
+    conversion_rate:     (a.won_count + a.lost_count) > 0 ? a.won_count / (a.won_count + a.lost_count) : 0,
+    avg_deal_size:       a.won_count > 0 ? a.won_value / a.won_count : 0,
+    avg_sales_cycle_days: a.cycle_n > 0 ? a.cycle_sum / a.cycle_n : 0,
+    avg_ageing_days:     a.open_lead_age_n > 0 ? a.open_lead_age_sum / a.open_lead_age_n : 0,
+    oldest_open_lead_days: a.oldest_open_lead_days,
+    activities_completed_period: a.activities_completed_period,
+    activities_total_period:     a.activities_total_period,
+    last_activity_at:    id ? (lastTouchByOwner.get(id) ?? null) : null,
+    avg_lead_score:      a.score_n > 0 ? a.score_sum / a.score_n : 0,
   });
 
-  const rows: TeamPerformanceRow[] = Array.from(byOwner.entries())
-    .map(([id, agg]) => rowFromAgg(id, id ? (nameById.get(id) ?? 'User') : 'Unassigned', agg))
-    .sort((a, b) => b.won_value - a.won_value || b.won_count - a.won_count || a.name.localeCompare(b.name));
-
-  // Total row aggregated across the visible subtree.
-  const totalAgg = blank();
-  for (const a of byOwner.values()) {
-    totalAgg.won_count        += a.won_count;
-    totalAgg.won_value        += a.won_value;
-    totalAgg.lost_count       += a.lost_count;
-    totalAgg.new_leads_period += a.new_leads_period;
-    totalAgg.ageing_sum_days  += a.ageing_sum_days;
-    totalAgg.ageing_n         += a.ageing_n;
+  const rows: TeamPerformanceRow[] = [];
+  for (const [id, agg] of byOwner.entries()) {
+    rows.push(rowFromAgg(id, nameById.get(id) ?? 'User', agg));
   }
-  const total = rowFromAgg(null, 'Total', totalAgg);
+  rows.sort((a, b) => b.won_value - a.won_value || b.won_count - a.won_count || a.name.localeCompare(b.name));
 
+  // Total = sum-of-rows (re-derived ratios at the aggregate, not the mean of per-rep ratios).
+  const tot = blankAcc();
+  for (const a of byOwner.values()) {
+    tot.total_leads_owned += a.total_leads_owned;
+    tot.new_leads_today   += a.new_leads_today;
+    tot.new_leads_week    += a.new_leads_week;
+    tot.new_leads_month   += a.new_leads_month;
+    tot.new_leads_period  += a.new_leads_period;
+    tot.qualified_count   += a.qualified_count;
+    tot.converted_count   += a.converted_count;
+    tot.unqualified_count += a.unqualified_count;
+    tot.lost_leads_count  += a.lost_leads_count;
+    tot.won_count         += a.won_count;
+    tot.won_value         += a.won_value;
+    tot.lost_count        += a.lost_count;
+    tot.open_count        += a.open_count;
+    tot.open_pipeline_value += a.open_pipeline_value;
+    tot.activities_completed_period += a.activities_completed_period;
+    tot.activities_total_period     += a.activities_total_period;
+    tot.cycle_sum        += a.cycle_sum;        tot.cycle_n        += a.cycle_n;
+    tot.open_lead_age_sum += a.open_lead_age_sum; tot.open_lead_age_n += a.open_lead_age_n;
+    tot.score_sum        += a.score_sum;        tot.score_n        += a.score_n;
+    if (a.oldest_open_lead_days > tot.oldest_open_lead_days) tot.oldest_open_lead_days = a.oldest_open_lead_days;
+  }
+  const total = rowFromAgg(null, 'Total', tot);
   return { total, rows };
+}
+
+// blank accumulator + blank row helpers
+function blankAcc() {
+  return {
+    total_leads_owned: 0,
+    new_leads_today: 0, new_leads_week: 0, new_leads_month: 0, new_leads_period: 0,
+    qualified_count: 0, converted_count: 0, unqualified_count: 0, lost_leads_count: 0,
+    won_count: 0, won_value: 0, lost_count: 0, open_count: 0, open_pipeline_value: 0,
+    cycle_sum: 0, cycle_n: 0,
+    open_lead_age_sum: 0, open_lead_age_n: 0, oldest_open_lead_days: 0,
+    activities_completed_period: 0, activities_total_period: 0,
+    score_sum: 0, score_n: 0,
+  };
+}
+function blankRow(name: string): TeamPerformanceRow {
+  return {
+    user_id: null, name,
+    total_leads_owned: 0,
+    new_leads_today: 0, new_leads_week: 0, new_leads_month: 0, new_leads_period: 0,
+    qualified_count: 0, converted_count: 0, unqualified_count: 0, lost_leads_count: 0,
+    qualified_rate: 0, converted_rate: 0,
+    won_count: 0, won_value: 0, lost_count: 0, open_count: 0, open_pipeline_value: 0,
+    conversion_rate: 0, avg_deal_size: 0, avg_sales_cycle_days: 0,
+    avg_ageing_days: 0, oldest_open_lead_days: 0,
+    activities_completed_period: 0, activities_total_period: 0,
+    last_activity_at: null, avg_lead_score: 0,
+  };
 }
 
 // ─── Lead Tracker ─────────────────────────────────────────────────
@@ -498,23 +667,31 @@ export async function teamPerformance(
 // month so far) so the rep can read recent volume at a glance without
 // pulling extra endpoints.
 
-export interface LeadTrackerMonthlyPoint {
-  month: string;   // YYYY-MM (UTC)
-  count: number;
-}
-
+export interface LeadTrackerBucket { key: string; count: number; }
 export interface LeadTrackerPeriodSummary {
   label: string;
-  from: string;    // ISO
-  to: string;      // ISO
-  count: number;
+  from: string;
+  to: string;
+  new_leads: number;
+  converted: number;
+  conversion_rate: number;   // converted / new_leads
 }
+export interface LeadTrackerBreakdown { name: string; count: number; }
 
 export interface LeadTrackerPayload {
-  monthly: LeadTrackerMonthlyPoint[];
+  monthly: LeadTrackerBucket[];      // last N months — bar chart
+  weekly: LeadTrackerBucket[];       // last 12 weeks — sparkline
+  daily: LeadTrackerBucket[];        // last 30 days  — sparkline
   period_today: LeadTrackerPeriodSummary;
   period_week: LeadTrackerPeriodSummary;
   period_month: LeadTrackerPeriodSummary;
+  // Status mix across the visible subtree (lifetime).
+  status_breakdown: { new: number; working: number; qualified: number; converted: number; unqualified: number; lost: number };
+  // Top 5 sources + top 5 cities (lifetime).
+  source_breakdown: LeadTrackerBreakdown[];
+  city_breakdown: LeadTrackerBreakdown[];
+  // Distribution of open-lead ageing — for the heatmap card.
+  ageing_distribution: { bucket: string; count: number }[];
 }
 
 export async function leadTracker(
@@ -524,57 +701,118 @@ export async function leadTracker(
   scope?: AnalyticsScope,
 ): Promise<LeadTrackerPayload> {
   const safeMonths = Math.max(1, Math.min(24, Math.floor(months)));
-
-  // Build the inclusive window. We want the last `safeMonths` calendar
-  // months ending with the current month.
   const now = new Date();
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (safeMonths - 1), 1));
-  const startIso = start.toISOString();
 
+  // Lifetime status / source / city aggregates need every lead; cap the
+  // chart aggregations at the last N months for chart performance.
   let q = supabaseAdmin.from('crm_leads')
-    .select('created_at, owner_id')
-    .eq('org_id', org_id).is('deleted_at', null)
-    .gte('created_at', startIso);
+    .select('created_at, owner_id, status, source_id, city, crm_lead_sources(name)')
+    .eq('org_id', org_id).is('deleted_at', null);
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
   const { data: leads } = await q;
 
-  // Initialise monthly buckets so empty months render as zero.
-  const monthly: Record<string, number> = {};
+  // Initialise monthly / weekly / daily buckets so empty windows render zero.
+  const monthlyBuckets: Record<string, number> = {};
   for (let i = 0; i < safeMonths; i++) {
     const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (safeMonths - 1 - i), 1));
-    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-    monthly[key] = 0;
+    monthlyBuckets[`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`] = 0;
+  }
+  const weeklyBuckets: Record<string, number> = {};
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(now); d.setUTCDate(d.getUTCDate() - i * 7);
+    const year = d.getUTCFullYear();
+    const onejan = new Date(Date.UTC(year, 0, 1));
+    const week = Math.ceil((((d.getTime() - onejan.getTime()) / 86_400_000) + onejan.getUTCDay() + 1) / 7);
+    weeklyBuckets[`${year}-W${String(week).padStart(2, '0')}`] = 0;
+  }
+  const dailyBuckets: Record<string, number> = {};
+  for (let i = 0; i < 30; i++) {
+    const d = new Date(now); d.setUTCDate(d.getUTCDate() - i);
+    dailyBuckets[d.toISOString().slice(0, 10)] = 0;
   }
 
-  // Period boundaries for summaries.
   const todayStart = new Date(now); todayStart.setUTCHours(0, 0, 0, 0);
-  const weekStart = new Date(todayStart);
-  // Treat Monday as week start to match the leaderboard window logic.
-  const day = weekStart.getUTCDay() || 7; // Sun=0 → 7 so Monday is 1
-  weekStart.setUTCDate(weekStart.getUTCDate() - (day - 1));
+  const day = todayStart.getUTCDay() || 7;
+  const weekStart = new Date(todayStart); weekStart.setUTCDate(weekStart.getUTCDate() - (day - 1));
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
-  let today = 0, week = 0, month = 0;
-  for (const l of (leads ?? []) as Array<{ created_at: string }>) {
+  const status = { new: 0, working: 0, qualified: 0, converted: 0, unqualified: 0, lost: 0 };
+  const sourceCounts = new Map<string, number>();
+  const cityCounts = new Map<string, number>();
+  const ageingBuckets: Record<string, number> = { '0-7d': 0, '8-30d': 0, '31-90d': 0, '90+d': 0 };
+  const periodCounts = { today: { new: 0, conv: 0 }, week: { new: 0, conv: 0 }, month: { new: 0, conv: 0 } };
+
+  for (const l of (leads ?? []) as Array<{
+    created_at: string; status: string | null;
+    crm_lead_sources?: { name?: string } | null; city: string | null;
+  }>) {
     const t = new Date(l.created_at);
     if (!Number.isFinite(t.getTime())) continue;
-    const key = `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}`;
-    if (key in monthly) monthly[key] += 1;
-    if (t >= todayStart) today += 1;
-    if (t >= weekStart)  week  += 1;
-    if (t >= monthStart) month += 1;
+
+    // Chart buckets.
+    const mkey = `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (mkey in monthlyBuckets) monthlyBuckets[mkey] += 1;
+    const dkey = t.toISOString().slice(0, 10);
+    if (dkey in dailyBuckets) dailyBuckets[dkey] += 1;
+
+    // Status.
+    const s = (l.status ?? '').toLowerCase();
+    if (s in status) status[s as keyof typeof status] += 1;
+
+    // Period rollups.
+    const isConv = s === 'converted';
+    if (t >= todayStart) { periodCounts.today.new  += 1; if (isConv) periodCounts.today.conv += 1; }
+    if (t >= weekStart)  { periodCounts.week.new   += 1; if (isConv) periodCounts.week.conv  += 1; }
+    if (t >= monthStart) { periodCounts.month.new  += 1; if (isConv) periodCounts.month.conv += 1; }
+
+    // Source / city breakdowns.
+    const srcName = l.crm_lead_sources?.name?.trim() || 'Unspecified';
+    sourceCounts.set(srcName, (sourceCounts.get(srcName) ?? 0) + 1);
+    if (l.city) cityCounts.set(l.city, (cityCounts.get(l.city) ?? 0) + 1);
+
+    // Ageing distribution for open leads.
+    if (!['converted', 'unqualified', 'lost'].includes(s)) {
+      const ageDays = (now.getTime() - t.getTime()) / 86_400_000;
+      if      (ageDays <= 7)   ageingBuckets['0-7d']   += 1;
+      else if (ageDays <= 30)  ageingBuckets['8-30d']  += 1;
+      else if (ageDays <= 90)  ageingBuckets['31-90d'] += 1;
+      else                     ageingBuckets['90+d']   += 1;
+    }
   }
 
-  const points: LeadTrackerMonthlyPoint[] = Object.entries(monthly)
-    .map(([m, c]) => ({ month: m, count: c }))
-    .sort((a, b) => a.month.localeCompare(b.month));
+  const monthly: LeadTrackerBucket[] = Object.entries(monthlyBuckets)
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+  const weekly: LeadTrackerBucket[] = Object.entries(weeklyBuckets)
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+  const daily: LeadTrackerBucket[] = Object.entries(dailyBuckets)
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+
+  const topN = (m: Map<string, number>): LeadTrackerBreakdown[] =>
+    Array.from(m.entries()).map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count).slice(0, 5);
+
+  const period = (label: string, from: Date, to: Date, p: { new: number; conv: number }): LeadTrackerPeriodSummary => ({
+    label,
+    from: from.toISOString(),
+    to:   to.toISOString(),
+    new_leads: p.new,
+    converted: p.conv,
+    conversion_rate: p.new > 0 ? p.conv / p.new : 0,
+  });
 
   return {
-    monthly: points,
-    period_today: { label: 'Today',      from: todayStart.toISOString(), to: now.toISOString(), count: today },
-    period_week:  { label: 'This week',  from: weekStart.toISOString(),  to: now.toISOString(), count: week },
-    period_month: { label: 'This month', from: monthStart.toISOString(), to: now.toISOString(), count: month },
+    monthly, weekly, daily,
+    period_today: period('Today',     todayStart, now, periodCounts.today),
+    period_week:  period('This week', weekStart,  now, periodCounts.week),
+    period_month: period('This month', monthStart, now, periodCounts.month),
+    status_breakdown: status,
+    source_breakdown: topN(sourceCounts),
+    city_breakdown:   topN(cityCounts),
+    ageing_distribution: Object.entries(ageingBuckets).map(([bucket, count]) => ({ bucket, count })),
   };
 }
 
@@ -592,15 +830,37 @@ export async function leadTracker(
 export interface TeamDailyCard {
   user_id: string;
   name: string;
-  attendance: {
-    status: 'present' | 'absent';
-    checkin_at: string | null;
-    checkin_address: string | null;
-    checkin_lat: number | null;
-    checkin_lng: number | null;
+  // CRM-derived signal of "where they are right now" — the lat/lng on
+  // the most recent lead they created (today or earlier). No attendance
+  // dependency.
+  last_known_location: {
+    captured_at: string | null;
+    source: 'lead_created' | null;
+    latitude: number | null;
+    longitude: number | null;
+    address: string | null;
   };
-  visits: { achieved: number; scheduled: number };
-  lead_tracker: number;
+  last_activity_at: string | null;
+  // What they did on the chosen day, broken out by activity type so the
+  // supervisor can tell "is this rep on the phone or in the field?"
+  activities_today: {
+    total: number;
+    completed: number;
+    calls: number;
+    emails: number;
+    meetings: number;
+    site_visits: number;
+    tasks: number;
+    other: number;
+  };
+  leads_today: number;
+  leads_today_qualified: number;
+  leads_today_converted: number;
+  deals_open_count: number;
+  deals_won_today_count: number;
+  deals_won_today_value: number;
+  pipeline_value: number;
+  status: 'active' | 'idle' | 'inactive';
 }
 
 export async function teamDaily(
@@ -609,118 +869,174 @@ export async function teamDaily(
   client_id: string | null = null,
   scope?: AnalyticsScope,
 ): Promise<TeamDailyCard[]> {
-  // Day boundaries.
   const ymd = /^\d{4}-\d{2}-\d{2}$/.test(date)
     ? date
     : new Date().toISOString().slice(0, 10);
   const dayStart = `${ymd}T00:00:00.000Z`;
   const dayEnd   = `${ymd}T23:59:59.999Z`;
 
-  // The set of users we'll surface cards for — the caller's hierarchy
-  // subtree. Without a scope (super-admin) we cover every user in the
-  // org's relevant client.
+  // Resolve the subtree.
   const subtree = scope?.visibleOwnerIds ?? null;
   let userQ = supabaseAdmin.from('users')
     .select('id, name, full_name, email, client_id')
     .eq('org_id', org_id);
   if (client_id) userQ = userQ.eq('client_id', client_id);
   if (subtree && subtree.length > 0) userQ = userQ.in('id', subtree);
-  else if (subtree && subtree.length === 0) {
-    // No visible owners — return empty up-front rather than fetch every
-    // org user and discard.
-    return [];
-  }
+  else if (subtree && subtree.length === 0) return [];
   const { data: users } = await userQ;
   const userIds = (users ?? []).map((u: { id: string }) => u.id);
   if (userIds.length === 0) return [];
 
-  // Fan-out three queries in parallel.
-  const [attRes, actRes, leadRes] = await Promise.all([
-    supabaseAdmin.from('attendance')
-      .select('user_id, checkin_at, checkin_address, checkin_lat, checkin_lng, status')
-      .eq('org_id', org_id).eq('date', ymd)
-      .in('user_id', userIds),
+  // Fan-out parallel queries.
+  const [actRes, leadsTodayRes, latestLeadRes, dealsRes, lastActRes] = await Promise.all([
+    // Activities owned/assigned on the chosen day, with type for the
+    // breakdown.
     supabaseAdmin.from('crm_activities')
-      .select('owner_id, assigned_to, status, type, activity_date, completed_at')
+      .select('owner_id, assigned_to, status, type')
       .eq('org_id', org_id).is('deleted_at', null)
       .or(`owner_id.in.(${userIds.join(',')}),assigned_to.in.(${userIds.join(',')})`)
       .gte('activity_date', dayStart).lte('activity_date', dayEnd),
+    // Leads created on the chosen day, with status for qualified/converted counts.
     supabaseAdmin.from('crm_leads')
-      .select('owner_id')
+      .select('owner_id, status')
       .eq('org_id', org_id).is('deleted_at', null)
       .in('owner_id', userIds)
       .gte('created_at', dayStart).lte('created_at', dayEnd),
+    // Latest lead per rep (lifetime) — drives the "last known location"
+    // since we no longer use attendance. Cap response to avoid pulling
+    // every lead; we only need the most recent N per rep.
+    supabaseAdmin.from('crm_leads')
+      .select('owner_id, latitude, longitude, address_line1, city, created_at')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .in('owner_id', userIds)
+      .not('latitude', 'is', null).not('longitude', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(2000),
+    // Deals — open + won-on-day rollups.
+    supabaseAdmin.from('crm_deals')
+      .select('owner_id, amount, status, won_at, crm_deal_stages!inner(stage_type)')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .in('owner_id', userIds),
+    // Latest activity per rep (lifetime).
+    supabaseAdmin.from('crm_activities')
+      .select('owner_id, assigned_to, completed_at, activity_date, created_at')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .or(`owner_id.in.(${userIds.join(',')}),assigned_to.in.(${userIds.join(',')})`)
+      .order('created_at', { ascending: false })
+      .limit(2000),
   ]);
 
-  // Index attendance per user (one row per day max).
-  const attByUser = new Map<string, {
-    checkin_at: string | null; checkin_address: string | null;
-    checkin_lat: number | null; checkin_lng: number | null; status: string | null;
-  }>();
-  for (const a of (attRes.data ?? []) as Array<{
-    user_id: string; checkin_at: string | null; checkin_address: string | null;
-    checkin_lat: number | null; checkin_lng: number | null; status: string | null;
-  }>) {
-    attByUser.set(a.user_id, a);
-  }
-
-  // Aggregate visits per user.
-  type V = { achieved: number; scheduled: number };
-  const visitsByUser = new Map<string, V>();
+  type ActBreak = { total: number; completed: number; calls: number; emails: number; meetings: number; site_visits: number; tasks: number; other: number };
+  const blankAct = (): ActBreak => ({ total: 0, completed: 0, calls: 0, emails: 0, meetings: 0, site_visits: 0, tasks: 0, other: 0 });
+  const actByUser = new Map<string, ActBreak>();
   for (const act of (actRes.data ?? []) as Array<{
-    owner_id?: string | null; assigned_to?: string | null;
-    status: string | null; type: string | null;
+    owner_id: string | null; assigned_to: string | null; status: string | null; type: string | null;
   }>) {
     const user = act.assigned_to || act.owner_id;
     if (!user || !userIds.includes(user)) continue;
-    // Activity types: site_visit (Tata) + plain visit, both count as
-    // visits. Anything else is treated as scheduled "other" — we only
-    // count visit-shaped activities on this report.
-    const isVisit = act.type === 'site_visit' || act.type === 'visit';
-    if (!isVisit) continue;
-    let v = visitsByUser.get(user);
-    if (!v) { v = { achieved: 0, scheduled: 0 }; visitsByUser.set(user, v); }
-    if (act.status === 'completed') v.achieved += 1;
-    else v.scheduled += 1;
+    let a = actByUser.get(user);
+    if (!a) { a = blankAct(); actByUser.set(user, a); }
+    a.total += 1;
+    if (act.status === 'completed') a.completed += 1;
+    const t = (act.type ?? 'other').toLowerCase();
+    if      (t === 'call')                          a.calls       += 1;
+    else if (t === 'email')                         a.emails      += 1;
+    else if (t === 'meeting')                       a.meetings    += 1;
+    else if (t === 'site_visit' || t === 'visit')   a.site_visits += 1;
+    else if (t === 'task')                          a.tasks       += 1;
+    else                                            a.other       += 1;
   }
 
-  // Aggregate leads.
-  const leadsByUser = new Map<string, number>();
-  for (const l of (leadRes.data ?? []) as Array<{ owner_id: string | null }>) {
+  // Leads today + status counts.
+  const leadsByUser = new Map<string, { total: number; qualified: number; converted: number }>();
+  for (const l of (leadsTodayRes.data ?? []) as Array<{ owner_id: string | null; status: string | null }>) {
     if (!l.owner_id) continue;
-    leadsByUser.set(l.owner_id, (leadsByUser.get(l.owner_id) ?? 0) + 1);
+    let r = leadsByUser.get(l.owner_id);
+    if (!r) { r = { total: 0, qualified: 0, converted: 0 }; leadsByUser.set(l.owner_id, r); }
+    r.total += 1;
+    if (l.status === 'qualified') r.qualified += 1;
+    if (l.status === 'converted') r.converted += 1;
   }
 
+  // Last known location — take the first lead row per rep (already ordered DESC).
+  const locByUser = new Map<string, { captured_at: string; latitude: number | null; longitude: number | null; address: string | null }>();
+  for (const l of (latestLeadRes.data ?? []) as Array<{
+    owner_id: string | null; latitude: number | null; longitude: number | null;
+    address_line1: string | null; city: string | null; created_at: string;
+  }>) {
+    if (!l.owner_id || locByUser.has(l.owner_id)) continue;
+    const addr = [l.address_line1, l.city].filter(Boolean).join(', ') || null;
+    locByUser.set(l.owner_id, {
+      captured_at: l.created_at,
+      latitude: l.latitude, longitude: l.longitude, address: addr,
+    });
+  }
+
+  // Deals.
+  const dealsByUser = new Map<string, { open: number; pipeline: number; won_today_count: number; won_today_value: number }>();
+  for (const d of (dealsRes.data ?? []) as unknown as Array<{
+    owner_id: string | null; amount: number | null; status: string | null;
+    won_at: string | null; crm_deal_stages: { stage_type: string };
+  }>) {
+    if (!d.owner_id) continue;
+    let r = dealsByUser.get(d.owner_id);
+    if (!r) { r = { open: 0, pipeline: 0, won_today_count: 0, won_today_value: 0 }; dealsByUser.set(d.owner_id, r); }
+    const stage = d.crm_deal_stages?.stage_type ?? '';
+    if (stage !== 'won' && stage !== 'lost') {
+      r.open += 1;
+      r.pipeline += Number(d.amount ?? 0);
+    }
+    if (stage === 'won' && d.won_at && d.won_at >= dayStart && d.won_at <= dayEnd) {
+      r.won_today_count += 1;
+      r.won_today_value += Number(d.amount ?? 0);
+    }
+  }
+
+  // Last activity per rep (lifetime).
+  const lastActByUser = new Map<string, string>();
+  for (const act of (lastActRes.data ?? []) as Array<{
+    owner_id: string | null; assigned_to: string | null;
+    completed_at: string | null; activity_date: string | null; created_at: string;
+  }>) {
+    const user = act.assigned_to || act.owner_id;
+    if (!user || lastActByUser.has(user)) continue;
+    const ts = act.completed_at || act.activity_date || act.created_at;
+    if (ts) lastActByUser.set(user, ts);
+  }
+
+  // Build cards.
   const cards: TeamDailyCard[] = (users ?? []).map((u: {
     id: string; name?: string | null; full_name?: string | null; email?: string | null;
   }) => {
-    const att = attByUser.get(u.id);
-    const present = att?.status === 'present' || !!att?.checkin_at;
-    const v = visitsByUser.get(u.id) ?? { achieved: 0, scheduled: 0 };
+    const act = actByUser.get(u.id) ?? blankAct();
+    const leadsR = leadsByUser.get(u.id) ?? { total: 0, qualified: 0, converted: 0 };
+    const loc = locByUser.get(u.id) ?? null;
+    const deals = dealsByUser.get(u.id) ?? { open: 0, pipeline: 0, won_today_count: 0, won_today_value: 0 };
+    const lastAct = lastActByUser.get(u.id) ?? null;
+    const didSomething = act.total > 0 || leadsR.total > 0 || deals.won_today_count > 0;
+    const recent = lastAct && (new Date(lastAct).getTime() >= new Date(dayStart).getTime());
+    const status: TeamDailyCard['status'] = didSomething ? 'active' : (recent ? 'idle' : 'inactive');
     return {
       user_id: u.id,
       name: u.name?.trim() || u.full_name?.trim() || u.email?.trim() || 'User',
-      attendance: {
-        status: present ? 'present' : 'absent',
-        checkin_at: att?.checkin_at ?? null,
-        checkin_address: att?.checkin_address ?? null,
-        checkin_lat: att?.checkin_lat ?? null,
-        checkin_lng: att?.checkin_lng ?? null,
-      },
-      visits: v,
-      lead_tracker: leadsByUser.get(u.id) ?? 0,
+      last_known_location: loc
+        ? { captured_at: loc.captured_at, source: 'lead_created', latitude: loc.latitude, longitude: loc.longitude, address: loc.address }
+        : { captured_at: null, source: null, latitude: null, longitude: null, address: null },
+      last_activity_at: lastAct,
+      activities_today: act,
+      leads_today: leadsR.total,
+      leads_today_qualified: leadsR.qualified,
+      leads_today_converted: leadsR.converted,
+      deals_open_count: deals.open,
+      deals_won_today_count: deals.won_today_count,
+      deals_won_today_value: deals.won_today_value,
+      pipeline_value: deals.pipeline,
+      status,
     };
   });
 
-  // Sort: active reps (present + did something) first, then present-
-  // but-idle, absent last. Within each group, by name.
-  const rank = (c: TeamDailyCard): number => {
-    if (c.attendance.status === 'present' && (c.visits.achieved + c.lead_tracker) > 0) return 0;
-    if (c.attendance.status === 'present') return 1;
-    return 2;
-  };
+  const rank = (c: TeamDailyCard): number => c.status === 'active' ? 0 : (c.status === 'idle' ? 1 : 2);
   cards.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
-
   return cards;
 }
 
