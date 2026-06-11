@@ -433,6 +433,7 @@ leads.post('/', wrap(async (req, res) => {
   // fail the lead create (the rep still gets the lead back in the 201).
   if (autoLogSiteVisit && lead?.id) {
     try {
+      const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
       await supabaseAdmin.from('crm_activities').insert({
         org_id: orgId(req),
         client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
@@ -444,6 +445,10 @@ leads.post('/', wrap(async (req, res) => {
         lead_id: lead.id,
         owner_id: userId(req),
         assigned_to: userId(req),
+        // Propagate the lead's photo onto the activity so the FE's
+        // site-visit evidence is visible from the Activities timeline
+        // without the rep having to upload the same image twice.
+        image_url: photoUrl,
         created_by: userId(req),
       });
     } catch { /* non-fatal — the lead create itself succeeded */ }
