@@ -2288,23 +2288,24 @@ const { cached: cachedAnalytics } = require('../utils/analyticsCache') as typeof
 // hierarchy). null fields = no extra restriction (admins see everything).
 async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope> {
   const me = (req as AuthRequest).user;
-  const dataScope = me?.org_role_data_scope ?? 'all';
-  // Cities filter only applies to OWN-scope reps (frontline reps tied to
-  // their territory). Team-scope managers (Consumer Champion Manager,
-  // Area Sales Manager, …) and tenant-wide admins see every owner in
-  // their subtree REGARDLESS of which city the lead sits in — managing
-  // someone means seeing all their work, not just their work that
-  // happens in the manager's assigned cities. This was the cause of
-  // empty analytics dashboards for managers whose role had cities set:
-  // their own city list capped the owner-subtree on the AND side.
-  const effectiveCities = dataScope === 'own' ? rbac.getEffectiveCityNames(me) : null;
+  // Visibility is the intersection of: (a) the hierarchy subtree the caller
+  // can see and (b) the geography (assigned_cities) they're tied to. A
+  // Consumer Champion Manager with assigned cities still only sees their
+  // team's work within their geography — managing someone doesn't extend
+  // their geographic remit. (Per the latest direction.) Cities filter
+  // applies to every scope; only the platform-admin tier returns null
+  // from `getEffectiveCityNames` which bypasses it entirely.
+  const effectiveCities = rbac.getEffectiveCityNames(me);
   const selfOwnerId = me?.id ?? null;
   let visibleOwnerIds: string[] | null = null;
   const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
   if (hierOn) {
     visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
   }
-  const includeNullCity = dataScope === 'all' || hierOn;
+  // City-less leads (most of the book) are scoped by owner/hierarchy, not
+  // geo — include them for tenant-wide admins and whenever hierarchy RBAC
+  // bounds exposure, so dashboard counts match the leads list.
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
   return { effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity };
 }
 // The scope signature MUST be part of the cache key, otherwise one user's
