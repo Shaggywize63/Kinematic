@@ -2329,6 +2329,12 @@ analytics.get('/win-rate', wrap(async (req, res) => res.json(
 analytics.get('/team-performance', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'team-performance'), ANALYTICS_TTL,
     () => analyticsSvc.teamPerformance(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
+// Lead Tracker — monthly new-lead counts (default 6 months) + today /
+// week / month summary roll-ups for the caller's subtree. Drives the
+// bar-chart report and the period cards underneath it.
+analytics.get('/lead-tracker', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'lead-tracker'), ANALYTICS_TTL,
+    () => analyticsSvc.leadTracker(orgId(req), Number(req.query.months ?? 6), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/sales-cycle', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'sales-cycle'), ANALYTICS_TTL,
     () => analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req))))));
