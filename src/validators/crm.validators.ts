@@ -96,6 +96,12 @@ export const leadCreateSchema = z.object({
   // map. Optional + nullable so non-geo creation paths are unaffected.
   latitude:  z.coerce.number().min(-90).max(90).optional().nullable(),
   longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
+  // Tata Tiscon affordance: tick a "Also log as Site Visit" checkbox in
+  // the create form to atomically spawn a `crm_activities` row of type
+  // 'site_visit' tied to the new lead in one round-trip. The backend
+  // pops this key before persisting (it isn't a column) and only honours
+  // it for clients that have the matching activity type configured.
+  _auto_log_site_visit: z.boolean().optional(),
   ...utmFields,
   ...b2cBase,
 });

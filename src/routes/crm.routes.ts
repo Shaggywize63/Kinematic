@@ -421,8 +421,35 @@ leads.get('/', wrap(async (req, res) => {
 }));
 leads.post('/', wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
-  const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
-  res.status(201).json(await stampSourceName(await stampOwnerName(await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload }))));
+  // Tata Tiscon "Also log as Site Visit" checkbox — pop the meta flag
+  // off before the lead insert (it's not a column on crm_leads), use it
+  // after to spawn a sibling crm_activities row.
+  const autoLogSiteVisit = parsed._auto_log_site_visit === true;
+  const { _auto_log_site_visit: _drop, ...rest } = parsed;
+  const payload = { ...rest, client_id: rest.client_id ?? clientId(req) };
+  const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
+
+  // Spawn the site-visit activity. Best-effort — failures here don't
+  // fail the lead create (the rep still gets the lead back in the 201).
+  if (autoLogSiteVisit && lead?.id) {
+    try {
+      await supabaseAdmin.from('crm_activities').insert({
+        org_id: orgId(req),
+        client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
+        type: 'site_visit',
+        subject: 'Site visit',
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        activity_date: new Date().toISOString(),
+        lead_id: lead.id,
+        owner_id: userId(req),
+        assigned_to: userId(req),
+        created_by: userId(req),
+      });
+    } catch { /* non-fatal — the lead create itself succeeded */ }
+  }
+
+  res.status(201).json(await stampSourceName(await stampOwnerName(lead)));
 }));
 // CSV export — same filters as the list endpoint (status, owner, source,
 // state/city/district/block, score_gte, q, from, to, etc.) but caps at
