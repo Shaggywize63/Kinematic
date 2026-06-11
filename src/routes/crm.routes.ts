@@ -647,8 +647,36 @@ leads.get('/geo', wrap(async (req, res) => {
   res.json({ success: true, data: data ?? [] });
 }));
 leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))))));
-leads.patch('/:id', wrap(async (req, res) =>
-  res.json(await stampSourceName(await stampOwnerName(await leadsSvc.updateLead(orgId(req), req.params.id, parse(v.leadUpdateSchema, req.body), userId(req)))))));
+leads.patch('/:id', wrap(async (req, res) => {
+  const parsed = parse(v.leadUpdateSchema, req.body);
+  // Mirror the POST path: the rep can tick "Also log as Site Visit" on
+  // the edit form too, e.g. for a follow-up visit on a lead they
+  // created earlier without ticking the box. Pop the flag off — it's
+  // not a column — and best-effort spawn the activity after the update.
+  const autoLogSiteVisit = parsed._auto_log_site_visit === true;
+  const { _auto_log_site_visit: _drop, ...rest } = parsed;
+  const lead = await leadsSvc.updateLead(orgId(req), req.params.id, rest, userId(req));
+  if (autoLogSiteVisit && lead?.id) {
+    try {
+      const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
+      await supabaseAdmin.from('crm_activities').insert({
+        org_id: orgId(req),
+        client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
+        type: 'site_visit',
+        subject: 'Site visit',
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        activity_date: new Date().toISOString(),
+        lead_id: lead.id,
+        owner_id: userId(req),
+        assigned_to: userId(req),
+        image_url: photoUrl,
+        created_by: userId(req),
+      });
+    } catch { /* non-fatal — the lead update itself succeeded */ }
+  }
+  res.json(await stampSourceName(await stampOwnerName(lead)));
+}));
 leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(req), req.params.id); res.status(204).end(); }));
 leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
 leads.post('/:id/convert', wrap(async (req, res) =>
