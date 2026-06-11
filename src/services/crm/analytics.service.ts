@@ -578,6 +578,152 @@ export async function leadTracker(
   };
 }
 
+// ─── Team Daily Activity ──────────────────────────────────────────
+//
+// One card per rep in the caller's subtree for a given calendar day.
+// Each card carries:
+//   - attendance: check-in time + address + lat/lng (or null = absent)
+//   - visits: achieved (today's site_visit activities, status=completed)
+//             vs scheduled (open activities with activity_date = day)
+//   - lead_tracker: count of leads owned by this rep created that day
+// Sorted with present-and-active reps first, absent last, so the
+// supervisor's eye lands on the cards that need attention.
+
+export interface TeamDailyCard {
+  user_id: string;
+  name: string;
+  attendance: {
+    status: 'present' | 'absent';
+    checkin_at: string | null;
+    checkin_address: string | null;
+    checkin_lat: number | null;
+    checkin_lng: number | null;
+  };
+  visits: { achieved: number; scheduled: number };
+  lead_tracker: number;
+}
+
+export async function teamDaily(
+  org_id: string,
+  date: string,                 // YYYY-MM-DD; defaults to today
+  client_id: string | null = null,
+  scope?: AnalyticsScope,
+): Promise<TeamDailyCard[]> {
+  // Day boundaries.
+  const ymd = /^\d{4}-\d{2}-\d{2}$/.test(date)
+    ? date
+    : new Date().toISOString().slice(0, 10);
+  const dayStart = `${ymd}T00:00:00.000Z`;
+  const dayEnd   = `${ymd}T23:59:59.999Z`;
+
+  // The set of users we'll surface cards for — the caller's hierarchy
+  // subtree. Without a scope (super-admin) we cover every user in the
+  // org's relevant client.
+  const subtree = scope?.visibleOwnerIds ?? null;
+  let userQ = supabaseAdmin.from('users')
+    .select('id, name, full_name, email, client_id')
+    .eq('org_id', org_id);
+  if (client_id) userQ = userQ.eq('client_id', client_id);
+  if (subtree && subtree.length > 0) userQ = userQ.in('id', subtree);
+  else if (subtree && subtree.length === 0) {
+    // No visible owners — return empty up-front rather than fetch every
+    // org user and discard.
+    return [];
+  }
+  const { data: users } = await userQ;
+  const userIds = (users ?? []).map((u: { id: string }) => u.id);
+  if (userIds.length === 0) return [];
+
+  // Fan-out three queries in parallel.
+  const [attRes, actRes, leadRes] = await Promise.all([
+    supabaseAdmin.from('attendance')
+      .select('user_id, checkin_at, checkin_address, checkin_lat, checkin_lng, status')
+      .eq('org_id', org_id).eq('date', ymd)
+      .in('user_id', userIds),
+    supabaseAdmin.from('crm_activities')
+      .select('owner_id, assigned_to, status, type, activity_date, completed_at')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .or(`owner_id.in.(${userIds.join(',')}),assigned_to.in.(${userIds.join(',')})`)
+      .gte('activity_date', dayStart).lte('activity_date', dayEnd),
+    supabaseAdmin.from('crm_leads')
+      .select('owner_id')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .in('owner_id', userIds)
+      .gte('created_at', dayStart).lte('created_at', dayEnd),
+  ]);
+
+  // Index attendance per user (one row per day max).
+  const attByUser = new Map<string, {
+    checkin_at: string | null; checkin_address: string | null;
+    checkin_lat: number | null; checkin_lng: number | null; status: string | null;
+  }>();
+  for (const a of (attRes.data ?? []) as Array<{
+    user_id: string; checkin_at: string | null; checkin_address: string | null;
+    checkin_lat: number | null; checkin_lng: number | null; status: string | null;
+  }>) {
+    attByUser.set(a.user_id, a);
+  }
+
+  // Aggregate visits per user.
+  type V = { achieved: number; scheduled: number };
+  const visitsByUser = new Map<string, V>();
+  for (const act of (actRes.data ?? []) as Array<{
+    owner_id?: string | null; assigned_to?: string | null;
+    status: string | null; type: string | null;
+  }>) {
+    const user = act.assigned_to || act.owner_id;
+    if (!user || !userIds.includes(user)) continue;
+    // Activity types: site_visit (Tata) + plain visit, both count as
+    // visits. Anything else is treated as scheduled "other" — we only
+    // count visit-shaped activities on this report.
+    const isVisit = act.type === 'site_visit' || act.type === 'visit';
+    if (!isVisit) continue;
+    let v = visitsByUser.get(user);
+    if (!v) { v = { achieved: 0, scheduled: 0 }; visitsByUser.set(user, v); }
+    if (act.status === 'completed') v.achieved += 1;
+    else v.scheduled += 1;
+  }
+
+  // Aggregate leads.
+  const leadsByUser = new Map<string, number>();
+  for (const l of (leadRes.data ?? []) as Array<{ owner_id: string | null }>) {
+    if (!l.owner_id) continue;
+    leadsByUser.set(l.owner_id, (leadsByUser.get(l.owner_id) ?? 0) + 1);
+  }
+
+  const cards: TeamDailyCard[] = (users ?? []).map((u: {
+    id: string; name?: string | null; full_name?: string | null; email?: string | null;
+  }) => {
+    const att = attByUser.get(u.id);
+    const present = att?.status === 'present' || !!att?.checkin_at;
+    const v = visitsByUser.get(u.id) ?? { achieved: 0, scheduled: 0 };
+    return {
+      user_id: u.id,
+      name: u.name?.trim() || u.full_name?.trim() || u.email?.trim() || 'User',
+      attendance: {
+        status: present ? 'present' : 'absent',
+        checkin_at: att?.checkin_at ?? null,
+        checkin_address: att?.checkin_address ?? null,
+        checkin_lat: att?.checkin_lat ?? null,
+        checkin_lng: att?.checkin_lng ?? null,
+      },
+      visits: v,
+      lead_tracker: leadsByUser.get(u.id) ?? 0,
+    };
+  });
+
+  // Sort: active reps (present + did something) first, then present-
+  // but-idle, absent last. Within each group, by name.
+  const rank = (c: TeamDailyCard): number => {
+    if (c.attendance.status === 'present' && (c.visits.achieved + c.lead_tracker) > 0) return 0;
+    if (c.attendance.status === 'present') return 1;
+    return 2;
+  };
+  cards.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+
+  return cards;
+}
+
 export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
