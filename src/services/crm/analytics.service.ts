@@ -488,6 +488,96 @@ export async function teamPerformance(
   return { total, rows };
 }
 
+// ─── Lead Tracker ─────────────────────────────────────────────────
+//
+// Monthly count of new leads created across the caller's hierarchy
+// subtree, for the last N months. Drives the bar chart on the
+// Lead Tracker report.
+//
+// Plus three "period summary" rollups (today, this week so far, this
+// month so far) so the rep can read recent volume at a glance without
+// pulling extra endpoints.
+
+export interface LeadTrackerMonthlyPoint {
+  month: string;   // YYYY-MM (UTC)
+  count: number;
+}
+
+export interface LeadTrackerPeriodSummary {
+  label: string;
+  from: string;    // ISO
+  to: string;      // ISO
+  count: number;
+}
+
+export interface LeadTrackerPayload {
+  monthly: LeadTrackerMonthlyPoint[];
+  period_today: LeadTrackerPeriodSummary;
+  period_week: LeadTrackerPeriodSummary;
+  period_month: LeadTrackerPeriodSummary;
+}
+
+export async function leadTracker(
+  org_id: string,
+  months = 6,
+  client_id: string | null = null,
+  scope?: AnalyticsScope,
+): Promise<LeadTrackerPayload> {
+  const safeMonths = Math.max(1, Math.min(24, Math.floor(months)));
+
+  // Build the inclusive window. We want the last `safeMonths` calendar
+  // months ending with the current month.
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (safeMonths - 1), 1));
+  const startIso = start.toISOString();
+
+  let q = supabaseAdmin.from('crm_leads')
+    .select('created_at, owner_id')
+    .eq('org_id', org_id).is('deleted_at', null)
+    .gte('created_at', startIso);
+  q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
+  const { data: leads } = await q;
+
+  // Initialise monthly buckets so empty months render as zero.
+  const monthly: Record<string, number> = {};
+  for (let i = 0; i < safeMonths; i++) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (safeMonths - 1 - i), 1));
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    monthly[key] = 0;
+  }
+
+  // Period boundaries for summaries.
+  const todayStart = new Date(now); todayStart.setUTCHours(0, 0, 0, 0);
+  const weekStart = new Date(todayStart);
+  // Treat Monday as week start to match the leaderboard window logic.
+  const day = weekStart.getUTCDay() || 7; // Sun=0 → 7 so Monday is 1
+  weekStart.setUTCDate(weekStart.getUTCDate() - (day - 1));
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+
+  let today = 0, week = 0, month = 0;
+  for (const l of (leads ?? []) as Array<{ created_at: string }>) {
+    const t = new Date(l.created_at);
+    if (!Number.isFinite(t.getTime())) continue;
+    const key = `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (key in monthly) monthly[key] += 1;
+    if (t >= todayStart) today += 1;
+    if (t >= weekStart)  week  += 1;
+    if (t >= monthStart) month += 1;
+  }
+
+  const points: LeadTrackerMonthlyPoint[] = Object.entries(monthly)
+    .map(([m, c]) => ({ month: m, count: c }))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
+  return {
+    monthly: points,
+    period_today: { label: 'Today',      from: todayStart.toISOString(), to: now.toISOString(), count: today },
+    period_week:  { label: 'This week',  from: weekStart.toISOString(),  to: now.toISOString(), count: week },
+    period_month: { label: 'This month', from: monthStart.toISOString(), to: now.toISOString(), count: month },
+  };
+}
+
 export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
