@@ -2342,6 +2342,11 @@ analytics.get('/team-performance', wrap(async (req, res) => res.json(
 analytics.get('/lead-tracker', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lead-tracker'), ANALYTICS_TTL,
     () => analyticsSvc.leadTracker(orgId(req), Number(req.query.months ?? 6), clientId(req), (req as AuthRequest).analyticsScope)))));
+// Widget Summary — small payload for iOS/Android home-screen widgets.
+// Total leads, total conversions, conversion rate, 7-day trend.
+analytics.get('/widget-summary', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'widget-summary'), ANALYTICS_TTL,
+    () => analyticsSvc.widgetSummary(orgId(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 // Team Daily Activity — one card per rep in the subtree for a given
 // calendar day. Attendance check-in (time + location), today's visits
 // achieved vs scheduled, and leads added.
