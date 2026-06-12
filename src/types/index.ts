@@ -30,6 +30,11 @@ export interface AuthUser {
   // supervisor-of-direct-reports pattern (treated as 'all' today);
   // 'all' = visibility within the org/client tenant scope.
   org_role_data_scope?: 'own' | 'team' | 'all';
+  // Human-readable name of the user's hierarchy role (e.g. "Consumer
+  // Champion", "Area Sales Officer"). Used by the leads list to apply
+  // role-specific visibility — Champions are own-only even though other
+  // 'own' scope roles (ASO) still see their city's leads.
+  org_role_name?: string;
   // Granular module grants resolved from the user's org_role (org_roles.permissions
   // / permissions_write). These are the source of truth the Roles UI configures —
   // `permissions` above (user_module_permissions) is the legacy per-user fallback

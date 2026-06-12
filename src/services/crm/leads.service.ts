@@ -172,7 +172,7 @@ export async function listLeads(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean; ownOnly?: boolean } = {},
 ) {
   const { rows } = await listLeadsWithCount(org_id, filters, client_id, options);
   return rows;
@@ -189,7 +189,7 @@ export async function listLeadsWithCount(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean; ownOnly?: boolean } = {},
 ): Promise<{ rows: Lead[]; total: number; page: number; limit: number }> {
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
@@ -228,7 +228,22 @@ export async function listLeadsWithCount(
   // create. OR-ing the two restores the intended "see my cities OR my team".
   const hasCityScope = options.effectiveCities !== undefined && options.effectiveCities !== null;
   const hasOwnerScope = options.visibleOwnerIds !== undefined && options.visibleOwnerIds !== null;
-  if (hasCityScope || hasOwnerScope) {
+  // ownOnly short-circuits the city / null-city OR-terms — used for users
+  // whose designation has data_scope='own' (e.g. Consumer Champion). They
+  // only ever see leads they personally own; city allocation does NOT
+  // expand visibility for them. A new Champion with no assigned leads
+  // should land on an empty list, not on every lead in their city.
+  if (options.ownOnly) {
+    const orParts: string[] = [];
+    if (options.selfOwnerId) orParts.push(`owner_id.eq.${options.selfOwnerId}`);
+    if (hasOwnerScope && options.visibleOwnerIds!.length > 0) {
+      orParts.push(`owner_id.in.(${options.visibleOwnerIds!.join(',')})`);
+    }
+    if (orParts.length === 0) {
+      return { rows: [], total: 0, page, limit };
+    }
+    q = q.or(orParts.join(','));
+  } else if (hasCityScope || hasOwnerScope) {
     const orParts: string[] = [];
     if (hasCityScope && options.effectiveCities!.length > 0) {
       // Quote each city for the in.() list so names with spaces/commas

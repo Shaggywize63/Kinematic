@@ -391,12 +391,17 @@ leads.get('/', wrap(async (req, res) => {
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
   const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
+  // Consumer Champion is strictly own-only: they see ONLY leads where
+  // owner_id = self (plus their hierarchy subtree if applicable). Their
+  // city allocation does NOT broaden visibility — a new Champion lands
+  // on an empty list until leads are assigned to them.
+  const ownOnly = (me?.org_role_name ?? '').toLowerCase() === 'consumer champion';
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
   // additive — old callers ignore it.
   const { rows, total, page, limit } = await leadsSvc.listLeadsWithCount(
-    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity }
+    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity, ownOnly }
   );
   // Owner UUIDs → owner_name; source UUIDs → source_name; created_by
   // UUIDs → created_by_name. The created_by stamp lets the leads list
@@ -477,6 +482,7 @@ leads.get('/export', wrap(async (req, res) => {
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
   const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
+  const ownOnly = (me?.org_role_name ?? '').toLowerCase() === 'consumer champion';
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
   // bounded.
@@ -488,7 +494,7 @@ leads.get('/export', wrap(async (req, res) => {
       orgId(req),
       { ...req.query, limit: PAGE, page },
       scope.id,
-      { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity },
+      { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity, ownOnly },
     );
     rows.push(...chunk);
     if (chunk.length < PAGE) break;
@@ -628,7 +634,16 @@ leads.get('/geo', wrap(async (req, res) => {
   const hasOwner = subtreeIds !== null;
   // data_scope='own' on a non-hierarchy client still scopes to self.
   const ownOnly = !hasOwner && (me.org_role_data_scope ?? 'all') === 'own';
-  if (hasCity || hasOwner || ownOnly) {
+  // Consumer Champion: own-only regardless of city allocation. Drops the
+  // city.in.() term so an unassigned Champion's map is empty rather than
+  // showing every pin in their city.
+  const isChampion = (me.org_role_name ?? '').toLowerCase() === 'consumer champion';
+  if (isChampion) {
+    const orParts: string[] = [];
+    if (me.id) orParts.push(`owner_id.eq.${me.id}`);
+    if (hasOwner && subtreeIds!.length > 0) orParts.push(`owner_id.in.(${subtreeIds!.join(',')})`);
+    q = orParts.length ? q.or(orParts.join(',')) : q.eq('owner_id', NO_MATCH_UUID);
+  } else if (hasCity || hasOwner || ownOnly) {
     const orParts: string[] = [];
     if (hasCity && effectiveCities!.length > 0) {
       const cityCsv = effectiveCities!.map((c) => `"${String(c).replace(/[\\"]/g, (m) => '\\' + m)}"`).join(',');
@@ -1117,7 +1132,14 @@ activities.get('/calendar', wrap(async (req, res) => {
   const from = String(req.query.from ?? new Date(Date.now() - 7 * 86400000).toISOString());
   const to = String(req.query.to ?? new Date(Date.now() + 30 * 86400000).toISOString());
   const scope = clientScope(req);
-  const subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  let subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  // Consumer Champion: own activities only — see /activities GET for the
+  // matching restriction. Force the subtree to just self so the calendar
+  // never surfaces another rep's planned or completed activities.
+  const meCal = (req as AuthRequest).user;
+  if ((meCal?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meCal?.id) {
+    subtreeIds = [meCal.id];
+  }
   // Hierarchy mode supersedes the per-user scope (the caller's id is
   // always in their subtree, so the new filter is a strict superset of
   // the old "own activities only" filter). When the gate is off we
@@ -1143,7 +1165,15 @@ activities.get('/calendar', wrap(async (req, res) => {
 }));
 activities.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  let subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  // Consumer Champion: own activities only. Force the subtree (or the
+  // synthetic non-hierarchy scope) to just this user so they never see
+  // other reps' activities even if hierarchy RBAC would otherwise widen
+  // visibility.
+  const meAct = (req as AuthRequest).user;
+  if ((meAct?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meAct?.id) {
+    subtreeIds = [meAct.id];
+  }
   // `view` is the dashboard's KPI-tile-as-filter: clicking the
   // Overdue / Upcoming / Completed tile sends ?view=<x>, and we
   // translate that into the right date predicates here.
@@ -1257,7 +1287,13 @@ activities.get('/export', wrap(async (req, res) => {
   const scope = clientScope(req);
   // Same hierarchy/userScope split as the list endpoint — without it
   // the export would leak rows the user can't see in the UI.
-  const subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  let subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  // Consumer Champion: own activities only — mirror the /activities GET
+  // restriction so the CSV never leaks other reps' rows.
+  const meExp = (req as AuthRequest).user;
+  if ((meExp?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meExp?.id) {
+    subtreeIds = [meExp.id];
+  }
   const userScope = subtreeIds ? undefined : activityVisibilityScope(req);
   const visibilityOpts = subtreeIds
     ? { visibleOwnerIds: subtreeIds, ownerColumns: ['owner_id', 'assigned_to'] }
