@@ -441,7 +441,7 @@ export async function teamPerformance(
 
   // ── 3) Activities in window (period scoped if range, else lifetime).
   let actQ = supabaseAdmin.from('crm_activities')
-    .select('owner_id, assigned_to, status, completed_at, activity_date, created_at')
+    .select('owner_id, assigned_to, completed_at, activity_date, created_at')
     .eq('org_id', org_id).is('deleted_at', null);
   actQ = withClient(actQ, client_id);
   actQ = applyActivityScope(actQ, scope);
@@ -538,13 +538,15 @@ export async function teamPerformance(
 
   // Activities — completed + total counts in the period.
   for (const act of (acts ?? []) as Array<{
-    owner_id: string | null; assigned_to: string | null; status: string | null;
+    owner_id: string | null; assigned_to: string | null; completed_at: string | null;
   }>) {
     const owner = act.assigned_to || act.owner_id;
     if (!owner || !byOwner.has(owner)) continue;
     const a = byOwner.get(owner)!;
     a.activities_total_period += 1;
-    if (act.status === 'completed') a.activities_completed_period += 1;
+    // Use completed_at (the authoritative completion signal) rather than
+    // the status field, which may lag or be absent on older rows.
+    if (act.completed_at) a.activities_completed_period += 1;
   }
 
   // Latest activity per owner (lifetime).
