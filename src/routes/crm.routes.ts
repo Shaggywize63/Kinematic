@@ -1161,7 +1161,11 @@ activities.get('/', wrap(async (req, res) => {
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
   // Location filter (city/state/district/block) → resolve to lead ids, since
   // crm_activities has no geo columns. null = no location filter.
-  const locLeadIds = await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
+  // When an explicit lead_id is provided, location filter is redundant (we're already
+  // scoping to a single lead) and would conflict if the lead is from a different city.
+  const locLeadIds = req.query.lead_id
+    ? null
+    : await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
   // Pull from/to out of the query and apply them ourselves below — the
   // generic crud helper filters on a single column (completed_at by
   // default), which silently hides every planned/upcoming activity
@@ -1261,7 +1265,11 @@ activities.get('/export', wrap(async (req, res) => {
   // Match the list endpoint: ?owner_id= filters on owner_id OR assigned_to,
   // and city/state/district/block filter via the linked lead.
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
-  const locLeadIds = await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
+  // When an explicit lead_id is provided, location filter is redundant (we're already
+  // scoping to a single lead) and would conflict if the lead is from a different city.
+  const locLeadIds = req.query.lead_id
+    ? null
+    : await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
   const exportView = String(req.query.view ?? 'all').toLowerCase();
   // Strip from/to here too — same reasoning as the list endpoint above:
   // the single-column dateRangeColumn filter on completed_at would
