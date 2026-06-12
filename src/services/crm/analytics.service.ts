@@ -1040,6 +1040,80 @@ export async function teamDaily(
   return cards;
 }
 
+// ─── Widget Summary ───────────────────────────────────────────────
+//
+// Tiny payload sized for iOS WidgetKit / Android AppWidget refresh
+// loops. Polled by mobile widget extensions every 15–30 minutes; kept
+// small so the round-trip is cheap on cellular and so the response
+// fits comfortably under the 16KB shared-data quota a widget extension
+// gets to write back to the parent app.
+
+export interface WidgetSummary {
+  total_leads: number;
+  total_conversions: number;
+  conversion_rate: number;        // 0..1
+  leads_today: number;
+  leads_week: number;
+  trend_7d: number[];             // 7 daily counts, oldest → newest
+  refreshed_at: string;           // ISO; the widget shows "Updated X ago"
+}
+
+export async function widgetSummary(
+  org_id: string,
+  client_id: string | null = null,
+  scope?: AnalyticsScope,
+): Promise<WidgetSummary> {
+  const now = new Date();
+  const todayStart = new Date(now); todayStart.setUTCHours(0, 0, 0, 0);
+  const day = todayStart.getUTCDay() || 7;
+  const weekStart = new Date(todayStart); weekStart.setUTCDate(weekStart.getUTCDate() - (day - 1));
+  // 7-day trend window: last 7 days inclusive (oldest day is 6 days ago).
+  const trendStart = new Date(todayStart); trendStart.setUTCDate(trendStart.getUTCDate() - 6);
+
+  let q = supabaseAdmin.from('crm_leads')
+    .select('created_at, status')
+    .eq('org_id', org_id).is('deleted_at', null);
+  q = withClient(q, client_id);
+  q = applyLeadScope(q, scope);
+  const { data: leads } = await q;
+
+  // Initialise the 7-day buckets so empty days render at zero.
+  const dayBuckets: Record<string, number> = {};
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(trendStart); d.setUTCDate(d.getUTCDate() + i);
+    dayBuckets[d.toISOString().slice(0, 10)] = 0;
+  }
+
+  let total_leads = 0;
+  let total_conversions = 0;
+  let leads_today = 0;
+  let leads_week = 0;
+  for (const l of (leads ?? []) as Array<{ created_at: string; status: string | null }>) {
+    total_leads += 1;
+    if (l.status === 'converted') total_conversions += 1;
+    const t = new Date(l.created_at);
+    if (!Number.isFinite(t.getTime())) continue;
+    if (t >= todayStart) leads_today += 1;
+    if (t >= weekStart)  leads_week  += 1;
+    const dkey = t.toISOString().slice(0, 10);
+    if (dkey in dayBuckets) dayBuckets[dkey] += 1;
+  }
+
+  const trend_7d = Object.entries(dayBuckets)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([, v]) => v);
+
+  return {
+    total_leads,
+    total_conversions,
+    conversion_rate: total_leads > 0 ? total_conversions / total_leads : 0,
+    leads_today,
+    leads_week,
+    trend_7d,
+    refreshed_at: now.toISOString(),
+  };
+}
+
 export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null) {
   let q = supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
