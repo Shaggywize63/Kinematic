@@ -440,6 +440,13 @@ export const customFieldSchema = z.object({
     'url', 'email', 'phone',
     'image', 'file',
     'lookup',
+    // Read-only computed field — value is derived from a `formula`
+    // expression that references other custom fields via {field_key}.
+    // Supports + - * / parentheses + the small function set
+    // IF / MIN / MAX / ROUND. Stored as the expression string in
+    // `formula`; the computed value is stamped into `custom_fields`
+    // server-side on every read of the parent row.
+    'formula',
   ]),
   options: z.array(z.string()).optional().nullable(),
   required: z.boolean().optional(),
@@ -466,6 +473,9 @@ export const customFieldSchema = z.object({
     op: z.enum(['eq', 'ne', 'contains', 'gte', 'lte']),
     value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
   })).optional().nullable(),
+  // Formula expression for field_type='formula'. Sanity-capped to keep
+  // pathological inputs from running away in the evaluator.
+  formula: z.string().min(1).max(500).optional().nullable(),
 });
 
 // Bulk-reorder payload for drag-and-drop on the custom-fields page.
