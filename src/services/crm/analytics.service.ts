@@ -76,6 +76,9 @@ export interface AnalyticsScope {
   visibleOwnerIds?: string[] | null;
   selfOwnerId?: string | null;
   includeNullCity?: boolean;
+  /** When true (Consumer Champions), skip city broadening and only expose the
+   *  caller's own leads — mirrors the ownOnly flag in listLeadsWithCount. */
+  ownOnly?: boolean;
 }
 
 // A UUID that never matches a real row — used to force an empty result set
@@ -87,6 +90,12 @@ const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
 // crm_leads query — kept identical to listLeads so analytics match the list.
 export function applyLeadScope(q: any, scope?: AnalyticsScope): any {
   if (!scope) return q;
+  // Consumer Champion own-only: bypass city broadening entirely.
+  if (scope.ownOnly) {
+    return scope.selfOwnerId
+      ? q.or(`owner_id.eq.${scope.selfOwnerId}`)
+      : q.eq('owner_id', NO_MATCH_UUID);
+  }
   if (scope.effectiveCities !== undefined && scope.effectiveCities !== null) {
     const orParts: string[] = [];
     if (scope.effectiveCities.length > 0) {
