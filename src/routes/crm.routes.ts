@@ -1961,7 +1961,13 @@ targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
 // Manager-facing: set a target. Body { target_value, user_id?,
 // hierarchy_level_id? } — user_id = per-FE override, hierarchy_level_id =
 // per-level (applies to everyone at that tier), all=true = org-wide default.
+// Consumer Champions are explicitly blocked even when their system role
+// would otherwise pass requireRole — they are view-only on targets.
 targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  const me = (req as AuthRequest).user;
+  if ((me?.org_role_name ?? '').toLowerCase() === 'consumer champion') {
+    throw new AppError(403, 'Consumer Champions cannot set targets', 'FORBIDDEN');
+  }
   const { user_id, org_role_id, hierarchy_level_id, target_value, all } = req.body ?? {};
   if (target_value === undefined || target_value === null) throw new AppError(400, 'target_value is required', 'VALIDATION');
   const row = all
