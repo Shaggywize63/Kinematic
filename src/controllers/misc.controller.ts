@@ -884,9 +884,28 @@ export const resolveSOS = asyncHandler<AuthRequest>(async (req, res) => {
 })
 
 // CLIENTS
+// Tenants opted out of continuous live-location tracking — pings from
+// these clients are silently no-op'd so reps don't see errors but the
+// device's battery isn't hit by background GPS. Tata Tiscon flagged
+// battery-drain complaints; their reps use one-shot lead-create geo
+// capture instead. New tenants can be added here without a schema
+// change; longer-term move this to clients.settings.disable_live_tracking.
+const LIVE_TRACKING_DISABLED_CLIENT_IDS = new Set<string>([
+  'a1f67468-526e-4734-be3a-2cb132cc2804', // Tata Tiscon
+]);
+
 export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version } = req.body;
   const user = req.user!;
+
+  // Defence-in-depth kill switch — even if a stale build keeps pinging,
+  // we don't persist the row. 204 (no content) so the client stops
+  // retrying. App-side gating in iOS + Android stops the pings at the
+  // source.
+  if (user.client_id && LIVE_TRACKING_DISABLED_CLIENT_IDS.has(user.client_id)) {
+    res.status(204).end();
+    return;
+  }
 
   // Bug Fix: 0.0 is a valid coordinate but falsy in JS.
   if (latitude === undefined || longitude === undefined) {
