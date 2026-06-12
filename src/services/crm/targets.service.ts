@@ -226,10 +226,13 @@ export async function targetsLeaderboard(
   // behind / entered the least" meaningful even before any target is set.
   // Pure admins with no role, no target and no leads drop out.
   const days = daysInPeriod(period);
+  // Stored targets are now weekly figures (admin enters X leads / week).
+  // Pro-rate by days elapsed in the window so "today" shows the day's
+  // share of the weekly goal and "month" extrapolates roughly 4.33×.
   const entries = users
     .map((u) => {
       const leads = counts.get(u.id) ?? 0;
-      const target = dailyTarget(u) * days;
+      const target = Math.round((dailyTarget(u) / 7) * days);
       const isFieldForce = !!(u.org_role_id || u.hierarchy_level_id);
       return {
         user_id: u.id as string,
@@ -303,8 +306,15 @@ export async function setLeaderboardRoleId(org_id: string, client_id: string | n
 }
 
 /**
- * Resolve a single user's target for today + how many leads they've created.
+ * Resolve a single user's target for the current week + how many leads
+ * they've created since the IST start of this week (Monday).
  * Priority: per-user override > their org role > their hierarchy level > org default.
+ *
+ * Stored target rows use period='daily' historically; we now treat them
+ * as weekly figures (the admin enters "X leads per week" and we count
+ * leads created since Monday). The DB period column is preserved so the
+ * column remains a single source of truth — the value itself is the
+ * weekly figure end-to-end.
  */
 export async function myTargetToday(org_id: string, user_id: string, fe_client_id: string | null) {
   const { data: me } = await supabaseAdmin.from('users')
@@ -334,7 +344,8 @@ export async function myTargetToday(org_id: string, user_id: string, fe_client_i
   for (const r of rows) { const s = score(r); if (s > bestScore) { bestScore = s; best = r; } }
   const target = best?.target_value ?? 0;
 
-  const since = istDayStartUTC();
+  // This-week-so-far count — IST week starts on Monday 00:00.
+  const since = istPeriodStartUTC('week');
   let cq = supabaseAdmin.from('crm_leads')
     .select('id', { count: 'exact', head: true })
     .eq('org_id', org_id).eq('created_by', user_id).is('deleted_at', null)
@@ -342,5 +353,5 @@ export async function myTargetToday(org_id: string, user_id: string, fe_client_i
   if (fe_client_id) cq = cq.eq('client_id', fe_client_id);
   const { count, error: cErr } = await cq;
   if (cErr) throw new AppError(500, cErr.message, 'DB_ERROR');
-  return { metric: DEFAULT_METRIC, period: DEFAULT_PERIOD, target, achieved: count ?? 0 };
+  return { metric: DEFAULT_METRIC, period: 'weekly', target, achieved: count ?? 0 };
 }

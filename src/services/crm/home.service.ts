@@ -228,12 +228,12 @@ export async function homePayload(opts: {
   const progress_pct = targetN > 0 ? Math.min(100, Math.round((achieved / targetN) * 100)) : 0;
   const remaining = Math.max(0, targetN - achieved);
   const headline = !target?.target
-    ? `Welcome back — no target set for today.`
+    ? `Welcome back — no target set for this week.`
     : progress_pct >= 100
-      ? `Target hit! ${achieved}/${targetN} leads created today.`
+      ? `Target hit! ${achieved}/${targetN} leads this week.`
       : progress_pct >= 60
-        ? `Strong pace — ${remaining} more lead${remaining === 1 ? '' : 's'} to hit today's target.`
-        : `${achieved} of ${targetN} so far. Solid morning sets the day.`;
+        ? `Strong pace — ${remaining} more lead${remaining === 1 ? '' : 's'} to hit this week's target.`
+        : `${achieved} of ${targetN} so far this week.`;
 
   // ── My open leads (single round-trip, ranked) ─────────────────────
   // We pull the user's "actionable" leads in one query, then derive
