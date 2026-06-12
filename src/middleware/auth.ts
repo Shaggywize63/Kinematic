@@ -275,6 +275,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // alone isn't enough to scope frontline reps to their own data.
   let roleAssignedCities: string[] = [];
   let orgRoleDataScope: 'own' | 'team' | 'all' = 'all';
+  let orgRoleName: string | undefined;
   // org_roles.permissions (read) / permissions_write are the source of truth the
   // Roles UI configures. We load them so requireModuleAccess() can gate reads vs
   // writes per module instead of relying on the looser client-entitlement check.
@@ -282,13 +283,16 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   let rolePermissionsWrite: string[] | undefined;
   if (profile.org_role_id) {
     const { data: roleRow } = await supabaseAdmin
-      .from('org_roles').select('assigned_cities, data_scope, permissions, permissions_write')
+      .from('org_roles').select('name, assigned_cities, data_scope, permissions, permissions_write')
       .eq('id', profile.org_role_id).single();
     if (Array.isArray(roleRow?.assigned_cities)) {
       roleAssignedCities = (roleRow!.assigned_cities as string[]).filter(Boolean);
     }
     if (roleRow?.data_scope === 'own' || roleRow?.data_scope === 'team') {
       orgRoleDataScope = roleRow.data_scope as 'own' | 'team';
+    }
+    if (typeof roleRow?.name === 'string') {
+      orgRoleName = roleRow.name;
     }
     if (Array.isArray(roleRow?.permissions)) {
       rolePermissions = (roleRow!.permissions as string[]).filter(Boolean);
@@ -305,6 +309,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     assigned_city_names: userCityNames,
     role_assigned_cities: roleAssignedCities,
     org_role_data_scope: orgRoleDataScope,
+    org_role_name: orgRoleName,
     role_permissions: rolePermissions,
     role_permissions_write: rolePermissionsWrite,
     enabled_modules: entitlements.enabled_modules,
