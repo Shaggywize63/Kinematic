@@ -395,7 +395,7 @@ leads.get('/', wrap(async (req, res) => {
   // owner_id = self (plus their hierarchy subtree if applicable). Their
   // city allocation does NOT broaden visibility — a new Champion lands
   // on an empty list until leads are assigned to them.
-  const ownOnly = (me?.org_role_name ?? '').toLowerCase() === 'consumer champion';
+  const ownOnly = (me?.org_role_name ?? '').toLowerCase().includes('consumer champion');
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
@@ -482,7 +482,7 @@ leads.get('/export', wrap(async (req, res) => {
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
   const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
-  const ownOnly = (me?.org_role_name ?? '').toLowerCase() === 'consumer champion';
+  const ownOnly = (me?.org_role_name ?? '').toLowerCase().includes('consumer champion');
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
   // bounded.
@@ -637,7 +637,7 @@ leads.get('/geo', wrap(async (req, res) => {
   // Consumer Champion: own-only regardless of city allocation. Drops the
   // city.in.() term so an unassigned Champion's map is empty rather than
   // showing every pin in their city.
-  const isChampion = (me.org_role_name ?? '').toLowerCase() === 'consumer champion';
+  const isChampion = (me.org_role_name ?? '').toLowerCase().includes('consumer champion');
   if (isChampion) {
     const orParts: string[] = [];
     if (me.id) orParts.push(`owner_id.eq.${me.id}`);
@@ -1137,7 +1137,7 @@ activities.get('/calendar', wrap(async (req, res) => {
   // matching restriction. Force the subtree to just self so the calendar
   // never surfaces another rep's planned or completed activities.
   const meCal = (req as AuthRequest).user;
-  if ((meCal?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meCal?.id) {
+  if ((meCal?.org_role_name ?? '').toLowerCase().includes('consumer champion') && meCal?.id) {
     subtreeIds = [meCal.id];
   }
   // Hierarchy mode supersedes the per-user scope (the caller's id is
@@ -1171,7 +1171,7 @@ activities.get('/', wrap(async (req, res) => {
   // other reps' activities even if hierarchy RBAC would otherwise widen
   // visibility.
   const meAct = (req as AuthRequest).user;
-  if ((meAct?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meAct?.id) {
+  if ((meAct?.org_role_name ?? '').toLowerCase().includes('consumer champion') && meAct?.id) {
     subtreeIds = [meAct.id];
   }
   // `view` is the dashboard's KPI-tile-as-filter: clicking the
@@ -1291,7 +1291,7 @@ activities.get('/export', wrap(async (req, res) => {
   // Consumer Champion: own activities only — mirror the /activities GET
   // restriction so the CSV never leaks other reps' rows.
   const meExp = (req as AuthRequest).user;
-  if ((meExp?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meExp?.id) {
+  if ((meExp?.org_role_name ?? '').toLowerCase().includes('consumer champion') && meExp?.id) {
     subtreeIds = [meExp.id];
   }
   const userScope = subtreeIds ? undefined : activityVisibilityScope(req);
@@ -1965,7 +1965,7 @@ targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
 // would otherwise pass requireRole — they are view-only on targets.
 targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   const me = (req as AuthRequest).user;
-  if ((me?.org_role_name ?? '').toLowerCase() === 'consumer champion') {
+  if ((me?.org_role_name ?? '').toLowerCase().includes('consumer champion')) {
     throw new AppError(403, 'Consumer Champions cannot set targets', 'FORBIDDEN');
   }
   const { user_id, org_role_id, hierarchy_level_id, target_value, all } = req.body ?? {};
@@ -2338,15 +2338,24 @@ const { cached: cachedAnalytics } = require('../utils/analyticsCache') as typeof
 // hierarchy). null fields = no extra restriction (admins see everything).
 async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope> {
   const me = (req as AuthRequest).user;
+  const selfOwnerId = me?.id ?? null;
+  // Consumer Champions see only their own data — no city broadening and no
+  // hierarchy expansion. Mirrors the ownOnly flag used in the leads list.
+  const isChampion = (me?.org_role_name ?? '').toLowerCase().includes('consumer champion');
+  if (isChampion) {
+    return {
+      effectiveCities: null,
+      visibleOwnerIds: selfOwnerId ? [selfOwnerId] : [],
+      selfOwnerId,
+      includeNullCity: false,
+      ownOnly: true,
+    };
+  }
   // Visibility is the intersection of: (a) the hierarchy subtree the caller
   // can see and (b) the geography (assigned_cities) they're tied to. A
-  // Consumer Champion Manager with assigned cities still only sees their
-  // team's work within their geography — managing someone doesn't extend
-  // their geographic remit. (Per the latest direction.) Cities filter
-  // applies to every scope; only the platform-admin tier returns null
-  // from `getEffectiveCityNames` which bypasses it entirely.
+  // manager with assigned cities still only sees their team's work within
+  // their geography — managing someone doesn't extend their geographic remit.
   const effectiveCities = rbac.getEffectiveCityNames(me);
-  const selfOwnerId = me?.id ?? null;
   let visibleOwnerIds: string[] | null = null;
   const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
   if (hierOn) {
