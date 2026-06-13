@@ -237,6 +237,24 @@ async function activityScopeOpts(req: AuthRequest): Promise<{
 }
 
 /**
+ * Build the subject line for the auto-spawned site_visit activity. Carries
+ * the lead's display name so the timeline / activities list reads like
+ * "Site visit — Rajesh Kumar" instead of a bare "Site visit". When the rep
+ * ticks the "First visit" sub-option, the prefix flips to "First visit"
+ * to distinguish the rep's first physical meeting from later visits.
+ */
+function buildSiteVisitSubject(
+  lead: { first_name?: string | null; last_name?: string | null; email?: string | null; phone?: string | null; company?: string | null } | null | undefined,
+  isFirst: boolean,
+): string {
+  const prefix = isFirst ? 'First visit' : 'Site visit';
+  if (!lead) return prefix;
+  const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim()
+    || lead.company || lead.email || lead.phone || '';
+  return name ? `${prefix} — ${name}` : prefix;
+}
+
+/**
  * Normalise an activity payload to the actual `crm_activities` columns.
  * The dashboard edit modal sends `description`, but the table's note column is
  * `body` — writing `description` straight through made every edit fail with
@@ -430,7 +448,8 @@ leads.post('/', wrap(async (req, res) => {
   // off before the lead insert (it's not a column on crm_leads), use it
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, ...rest } = parsed;
+  const siteVisitIsFirst = parsed._site_visit_first === true;
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
   const payload = { ...rest, client_id: rest.client_id ?? clientId(req) };
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
 
@@ -439,11 +458,12 @@ leads.post('/', wrap(async (req, res) => {
   if (autoLogSiteVisit && lead?.id) {
     try {
       const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
+      const subject = buildSiteVisitSubject(lead, siteVisitIsFirst);
       await supabaseAdmin.from('crm_activities').insert({
         org_id: orgId(req),
         client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
         type: 'site_visit',
-        subject: 'Site visit',
+        subject,
         status: 'completed',
         completed_at: new Date().toISOString(),
         activity_date: new Date().toISOString(),
@@ -669,16 +689,18 @@ leads.patch('/:id', wrap(async (req, res) => {
   // created earlier without ticking the box. Pop the flag off — it's
   // not a column — and best-effort spawn the activity after the update.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, ...rest } = parsed;
+  const siteVisitIsFirst = parsed._site_visit_first === true;
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
   const lead = await leadsSvc.updateLead(orgId(req), req.params.id, rest, userId(req));
   if (autoLogSiteVisit && lead?.id) {
     try {
       const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
+      const subject = buildSiteVisitSubject(lead, siteVisitIsFirst);
       await supabaseAdmin.from('crm_activities').insert({
         org_id: orgId(req),
         client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
         type: 'site_visit',
-        subject: 'Site visit',
+        subject,
         status: 'completed',
         completed_at: new Date().toISOString(),
         activity_date: new Date().toISOString(),
