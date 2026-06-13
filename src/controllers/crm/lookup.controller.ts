@@ -47,7 +47,25 @@ function crudFor(table: string) {
 }
 
 // ── Lead Sources ─────────────────────────────────────────────
-export const leadSources = crudFor('crm_lead_sources');
+// Override the generic list so the response is scoped to the selected
+// client. Without this, a Tata Tiscon rep on mobile saw every source row
+// in the org (other clients' sources too) because the generic crudFor
+// helper only filters by org_id. Web already passes client scope via
+// crm.routes.ts but mobile hits this controller directly.
+export const leadSources = {
+  ...crudFor('crm_lead_sources'),
+  list: asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { org_id } = req.user!;
+    const cid = resolveClientFilter(req);
+    let q = supabaseAdmin.from('crm_lead_sources').select('*').eq('org_id', org_id);
+    // Shared-or-own: tenants see global (client_id IS NULL) sources plus
+    // their own. Super-admin with no picker sees everything.
+    q = applySharedOrOwn(q as any, cid) as any;
+    const { data, error } = await q.order('created_at', { ascending: false });
+    if (error) return badRequest(res, error.message);
+    return ok(res, data);
+  }),
+};
 
 // ── Territories ──────────────────────────────────────────────
 export const territories = crudFor('crm_territories');
