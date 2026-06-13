@@ -464,11 +464,16 @@ export const customFieldSchema = z.object({
   // Lets clients give each hierarchy role its own set of custom fields.
   org_role_ids: z.array(z.string().uuid()).optional().nullable(),
   // Lookup-only — which table the picker should search and the optional
-  // filter that narrows the rows. The allowlist below is enforced server-
-  // side too; we don't let admins point lookups at random tables.
-  target_table: z.enum([
-    'crm_leads', 'crm_contacts', 'crm_accounts', 'crm_deals', 'people_directory',
-  ]).optional().nullable(),
+  // filter that narrows the rows. Any public table that carries an `org_id`
+  // column is a valid target; `list_lookup_tables()` is the source of truth
+  // for what the dashboard offers. We just enforce a snake_case identifier
+  // shape here so admins can't smuggle SQL / dotted names through the
+  // validator. The /lookup/search endpoint is what actually scopes the
+  // resulting query to the caller's org + client.
+  target_table: z.string()
+    .regex(/^[a-z_][a-z0-9_]*$/, 'target_table must be a lowercase snake_case table name')
+    .max(63)
+    .optional().nullable(),
   // Simple condition list — every clause is ANDed. `field` is a column
   // on the target table; `op` is one of {eq, ne, contains, gte, lte};
   // `value` is the raw value to match. Salesforce-style OR groups and
