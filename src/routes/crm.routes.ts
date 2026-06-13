@@ -332,7 +332,7 @@ function buildSiteVisitSubject(
   // separate _site_visit_first flag is no longer required.
   const firstVisitDate = lead?.custom_fields?.first_visit_date;
   const isFirst = typeof firstVisitDate === 'string' && firstVisitDate.trim() !== '';
-  const prefix = isFirst ? 'First visit' : 'Site visit';
+  const prefix = isFirst ? 'First Site Visit' : 'Site visit';
   if (!lead) return prefix;
   const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim()
     || lead.company || lead.email || lead.phone || '';
