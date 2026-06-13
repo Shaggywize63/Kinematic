@@ -22,13 +22,29 @@ export interface PlaceDetail {
 }
 
 /** Autocomplete predictions for a partial address (India-restricted). */
-export async function autocomplete(input: string): Promise<PlacePrediction[]> {
+export async function autocomplete(
+  input: string,
+  bias?: { lat: number; lng: number; radiusMeters?: number },
+): Promise<PlacePrediction[]> {
   const q = (input || '').trim();
   if (!PLACES_KEY || q.length < 3) return [];
+  // Location bias — when the caller passes their current GPS fix we ask
+  // Google to prefer results near that point so the rep sees nearby
+  // outlets first (Tata's "I'm here" usage pattern). Radius defaults to
+  // 30 km; capped at 50 km so the bias doesn't degrade into "global".
+  const body: Record<string, unknown> = { input: q, includedRegionCodes: ['in'] };
+  if (bias && Number.isFinite(bias.lat) && Number.isFinite(bias.lng)) {
+    body.locationBias = {
+      circle: {
+        center: { latitude: bias.lat, longitude: bias.lng },
+        radius: Math.max(1, Math.min(50_000, Math.round(bias.radiusMeters ?? 30_000))),
+      },
+    };
+  }
   const res = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': PLACES_KEY },
-    body: JSON.stringify({ input: q, includedRegionCodes: ['in'] }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new AppError(502, `Places autocomplete failed: ${await res.text()}`, 'PLACES_ERROR');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
