@@ -326,12 +326,21 @@ async function enforceLeadRequiredFields(
 function buildSiteVisitSubject(
   lead: { first_name?: string | null; last_name?: string | null; email?: string | null; phone?: string | null; company?: string | null; custom_fields?: Record<string, unknown> | null } | null | undefined,
 ): string {
-  // "First visit" vs "Site visit" is driven entirely by the existing
-  // first_visit_date custom field on the lead — when the rep fills that
-  // in, the auto-spawned activity reads "First visit — {name}". The
-  // separate _site_visit_first flag is no longer required.
-  const firstVisitDate = lead?.custom_fields?.first_visit_date;
-  const isFirst = typeof firstVisitDate === 'string' && firstVisitDate.trim() !== '';
+  // "First Site Visit" vs "Site visit" is driven by any custom field on
+  // the lead whose key matches /first.*visit|first.*site/i and carries a
+  // truthy value (checkbox ticked, date populated, free-text non-empty).
+  // Admins name the field differently per tenant — `first_visit_date`,
+  // `first_site_visit`, `is_first_visit` etc — so we match the SHAPE of
+  // the key rather than a single hardcoded one.
+  const cf = lead?.custom_fields ?? {};
+  const isFirst = Object.entries(cf).some(([key, val]) => {
+    const k = String(key).toLowerCase();
+    if (!/first/.test(k) || !/(visit|site)/.test(k)) return false;
+    if (val === true) return true;
+    if (typeof val === 'string' && val.trim() !== '') return true;
+    if (typeof val === 'number' && val !== 0) return true;
+    return false;
+  });
   const prefix = isFirst ? 'First Site Visit' : 'Site visit';
   if (!lead) return prefix;
   const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim()
