@@ -237,6 +237,86 @@ async function activityScopeOpts(req: AuthRequest): Promise<{
 }
 
 /**
+ * Enforce admin-configured "required" toggles on built-in lead fields. The
+ * dashboard's Settings → Custom Fields page persists these into
+ * crm_settings.config.field_overrides keyed by `lead.<field_key>` (universal)
+ * or `lead.<field_key>@b2b` / `lead.<field_key>@b2c` (scoped). Mobile clients
+ * don't yet read those overrides, so without a server-side check the admin's
+ * toggle is silently ignored on iOS / Android. This guard runs on every lead
+ * create + update so the rule applies to all clients uniformly.
+ */
+async function enforceLeadRequiredFields(
+  org_id: string,
+  client_id: string | null,
+  payload: Record<string, unknown>,
+  mode: 'create' | 'update',
+): Promise<void> {
+  // crm_settings is (org, client)-scoped. Read the row that matches the
+  // payload's client (falling back to the org-level row when none exists).
+  let q = supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id);
+  q = client_id ? q.eq('client_id', client_id) : q.is('client_id', null);
+  const { data: rows } = await q.limit(1);
+  const cfg = (rows?.[0] as { config?: Record<string, unknown> } | undefined)?.config;
+  const overrides = (cfg?.field_overrides as Record<string, { required?: boolean; hidden?: boolean }> | undefined) || {};
+  if (!overrides || Object.keys(overrides).length === 0) return;
+
+  // Active scope mirrors the dashboard helper: b2c if is_b2c, b2b otherwise.
+  const isB2c = (payload.is_b2c as boolean | undefined) === true;
+  const scope: 'b2b' | 'b2c' = isB2c ? 'b2c' : 'b2b';
+
+  // Built-in keys the form gates on `required`. Keep aligned with the
+  // dashboard's BUILTIN_FIELDS list in settings/custom-fields/page.tsx —
+  // anything outside this set is a custom field (handled separately by
+  // crm_custom_field_defs.required).
+  const builtinKeys = [
+    'first_name', 'last_name', 'email', 'phone', 'company', 'title',
+    'industry', 'city', 'state', 'address_line1', 'postal_code', 'country',
+    'date_of_birth', 'gender',
+  ] as const;
+
+  const friendlyLabel: Record<string, string> = {
+    phone: 'Primary mobile',
+    first_name: 'First name',
+    last_name: 'Last name',
+    email: 'Email',
+    company: 'Company',
+    title: 'Job title',
+    industry: 'Industry',
+    city: 'City',
+    state: 'State',
+    address_line1: 'Address line 1',
+    postal_code: 'Postal code',
+    country: 'Country',
+    date_of_birth: 'Date of birth',
+    gender: 'Gender',
+  };
+
+  const merged = (key: string): { required?: boolean; hidden?: boolean } => {
+    const uni = overrides[`lead.${key}`] || {};
+    const scoped = overrides[`lead.${key}@${scope}`] || {};
+    return { ...uni, ...scoped };
+  };
+  const hasValue = (key: string): boolean => {
+    const v = payload[key];
+    if (v == null) return false;
+    if (typeof v === 'string') return v.trim() !== '';
+    return true;
+  };
+
+  for (const key of builtinKeys) {
+    const ov = merged(key);
+    if (!ov.required || ov.hidden) continue;
+    // On update, only enforce if the caller explicitly cleared the field.
+    // A PATCH that omits the key entirely leaves the existing value alone,
+    // so we don't want to 400 the rep for editing an unrelated section.
+    if (mode === 'update' && !(key in payload)) continue;
+    if (!hasValue(key)) {
+      throw new AppError(400, `${friendlyLabel[key] ?? key} is required`, 'VALIDATION');
+    }
+  }
+}
+
+/**
  * Build the subject line for the auto-spawned site_visit activity. Carries
  * the lead's display name so the timeline / activities list reads like
  * "Site visit — Rajesh Kumar" instead of a bare "Site visit". When the rep
@@ -451,6 +531,11 @@ leads.post('/', wrap(async (req, res) => {
   const siteVisitIsFirst = parsed._site_visit_first === true;
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
   const payload = { ...rest, client_id: rest.client_id ?? clientId(req) };
+  // Honour admin-configured "required" toggles for built-in fields. Mobile
+  // clients don't yet read field_overrides client-side, so without this
+  // guard a Tata admin marking Primary Mobile required would still let the
+  // Android/iOS apps POST a phoneless lead.
+  await enforceLeadRequiredFields(orgId(req), payload.client_id ?? null, payload as Record<string, unknown>, 'create');
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
 
   // Spawn the site-visit activity. Best-effort — failures here don't
@@ -690,6 +775,10 @@ leads.patch('/:id', wrap(async (req, res) => {
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
   const siteVisitIsFirst = parsed._site_visit_first === true;
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
+  // Honour admin-configured "required" toggles for built-in fields on PATCH
+  // too. Only enforces when the caller explicitly includes the key — a
+  // partial update that doesn't touch a required field stays valid.
+  await enforceLeadRequiredFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>, 'update');
   const lead = await leadsSvc.updateLead(orgId(req), req.params.id, rest, userId(req));
   if (autoLogSiteVisit && lead?.id) {
     try {
