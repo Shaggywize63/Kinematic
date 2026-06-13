@@ -2332,7 +2332,12 @@ router.use('/locations', locations);
 const places = express.Router();
 places.get('/autocomplete', wrap(async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : '';
-  res.json({ success: true, data: await placesSvc.autocomplete(q) });
+  // Optional location bias — the mobile / web clients send the rep's
+  // current GPS fix so Google returns nearby outlets first.
+  const lat = Number(req.query.lat ?? NaN);
+  const lng = Number(req.query.lng ?? NaN);
+  const bias = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : undefined;
+  res.json({ success: true, data: await placesSvc.autocomplete(q, bias) });
 }));
 places.get('/details', wrap(async (req, res) => {
   const id = typeof req.query.place_id === 'string' ? req.query.place_id : '';
