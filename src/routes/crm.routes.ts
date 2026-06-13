@@ -1871,23 +1871,62 @@ const LOOKUP_TABLES: Record<string, { search: string[]; display: (r: Record<stri
   people_directory: { search: ['first_name','last_name','mobile','email'], display: (r) =>
     [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || (r.email as string) || (r.mobile as string) || 'Person' },
 };
+
+// Generic display fallback for tables the admin picks that aren't in
+// LOOKUP_TABLES. Tries a sensible set of common label-ish columns; if the
+// table has none of them the row shows up with a truncated id. New tables
+// added in future migrations work out of the box without code changes.
+function genericDisplay(r: Record<string, unknown>): string {
+  const name = [r.first_name, r.last_name].filter(Boolean).join(' ').trim();
+  if (name) return name;
+  for (const k of ['name','title','label','subject','email','mobile','phone','code']) {
+    const v = r[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return String(r.id ?? '').slice(0, 8) || 'Record';
+}
+
+// Dynamically lists every multi-tenant table (rows that carry an `org_id`)
+// so the custom-field Linked Record picker can include tables added in
+// future migrations without a code change. Backed by the
+// list_lookup_tables() Postgres function so the filter list (drop history
+// tables / junctions / settings tables) stays in one place.
+router.get('/lookup/targets', wrap(async (_req, res) => {
+  const { data, error } = await supabaseAdmin.rpc('list_lookup_tables');
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const items = (data ?? []) as Array<{ table_name: string; label: string }>;
+  res.json({ success: true, data: items.map((r) => ({ value: r.table_name, label: r.label })) });
+}));
+
 router.get('/lookup/search', wrap(async (req, res) => {
   const target = String(req.query.target ?? '');
+  // Curated metadata wins when present (better display label + search
+  // columns), but unknown targets fall back to generic search instead of
+  // 400'ing — that's what makes the dropdown extensible to tables we
+  // haven't curated yet.
+  if (!/^[a-z_][a-z0-9_]*$/.test(target)) {
+    throw new AppError(400, `Invalid lookup target: ${target}`, 'BAD_TARGET');
+  }
   const meta = LOOKUP_TABLES[target];
-  if (!meta) throw new AppError(400, `Unknown lookup target: ${target}`, 'BAD_TARGET');
+  const display = meta?.display ?? genericDisplay;
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const scope = clientScope(req);
   let query = supabaseAdmin.from(target).select('*').eq('org_id', orgId(req));
-  // Soft-delete column exists on every lookup-eligible table.
-  query = query.is('deleted_at', null);
-  // Client scope: tenant-isolated for the real CRM tables, also strict
-  // on people_directory.
-  if (scope.id) query = query.eq('client_id', scope.id);
-  if (q) {
+  // Soft-delete column exists on most lookup-eligible tables but not all,
+  // so we only enforce it on curated targets where we know it's present.
+  if (meta) query = query.is('deleted_at', null);
+  // Client scope only applies to tables that carry client_id — same
+  // caveat as deleted_at above. Curated targets all do; we skip the
+  // filter for uncurated tables to avoid PostgREST 4xx-ing on a missing
+  // column.
+  if (meta && scope.id) query = query.eq('client_id', scope.id);
+  if (q && meta) {
     const sanitized = q.replace(/[%,]/g, ' ').slice(0, 80);
     const orExpr = meta.search.map((c) => `${c}.ilike.%${sanitized}%`).join(',');
     query = query.or(orExpr);
   }
+  // For uncurated tables, the FE-side filter the admin configured (the
+  // `filter` query param applied below) does the actual narrowing.
   // Apply the admin-configured filter, if the picker forwards one. Each
   // clause is ANDed; the FE has already converted the clause list to a
   // shape we can iterate directly. UUIDs are not interpolated — values
@@ -1912,7 +1951,7 @@ router.get('/lookup/search', wrap(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Slim down to (id, label) the picker can render directly without
   // every column over the wire.
-  const items = (data ?? []).map((r) => ({ id: r.id as string, label: meta.display(r), raw: r }));
+  const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: r }));
   res.json({ success: true, data: items });
 }));
 // Drag-and-drop reordering. Frontend sends the new (id, position)
