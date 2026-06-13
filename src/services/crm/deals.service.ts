@@ -224,7 +224,56 @@ export async function updateDeal(org_id: string, id: string, payload: Partial<De
       changed_by: user_id ?? null, time_in_previous_stage_seconds: tip,
     });
   }
+
+  // Closed-quantity edits — record one history entry per PATCH so the
+  // deal-detail timeline shows when the rep last updated closed numbers
+  // and which products moved. We compare the before/after maps and emit
+  // a single human-readable note like
+  //   "Updated closed quantities: Tiscon 32mm: 0 → 5, Tiscon 25mm: 2 → 3"
+  // — capped at 4 products + "…" so the note stays printable.
+  try {
+    const beforeCf = ((before as Deal & { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {}) as Record<string, unknown>;
+    const afterCf  = ((data   as Deal & { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {}) as Record<string, unknown>;
+    const beforeClosed = (beforeCf.closed_quantities as Record<string, unknown>) ?? {};
+    const afterClosed  = (afterCf.closed_quantities  as Record<string, unknown>) ?? {};
+    const beforeJson = JSON.stringify(sortKeys(beforeClosed));
+    const afterJson  = JSON.stringify(sortKeys(afterClosed));
+    if (beforeJson !== afterJson) {
+      const changed: Array<{ pid: string; from: number; to: number }> = [];
+      const allPids = new Set([...Object.keys(beforeClosed), ...Object.keys(afterClosed)]);
+      for (const pid of allPids) {
+        const fromN = Number(beforeClosed[pid] ?? 0);
+        const toN   = Number(afterClosed[pid]  ?? 0);
+        if (fromN !== toN) changed.push({ pid, from: fromN, to: toN });
+      }
+      if (changed.length > 0) {
+        const pids = changed.map((c) => c.pid);
+        const { data: products } = await supabaseAdmin.from('crm_products')
+          .select('id, name').eq('org_id', org_id).in('id', pids);
+        const nameById = new Map((products ?? []).map((p) => [p.id as string, (p.name as string) || (p.id as string).slice(0, 8)]));
+        const parts = changed.slice(0, 4).map((c) => `${nameById.get(c.pid) ?? c.pid.slice(0, 8)}: ${c.from} → ${c.to}`);
+        const more = changed.length > 4 ? `, +${changed.length - 4} more` : '';
+        await supabaseAdmin.from('crm_deal_history').insert({
+          deal_id: id, org_id,
+          from_stage_id: data.stage_id, to_stage_id: data.stage_id,
+          from_amount: data.amount, to_amount: data.amount,
+          changed_by: user_id ?? null,
+          note: `Updated closed quantities: ${parts.join(', ')}${more}`,
+        });
+      }
+    }
+  } catch { /* non-fatal — the deal update itself succeeded */ }
+
   return data as Deal;
+}
+
+// Deterministic key sort so JSON.stringify diffs aren't fooled by key
+// order. Only one level deep — the closed_quantities map is flat.
+function sortKeys(obj: Record<string, unknown>): Record<string, unknown> {
+  return Object.keys(obj).sort().reduce<Record<string, unknown>>((acc, k) => {
+    acc[k] = obj[k];
+    return acc;
+  }, {});
 }
 
 export async function deleteDeal(org_id: string, id: string) {
@@ -303,6 +352,7 @@ export async function dealHistory(org_id: string, id: string) {
     if (!r.from_stage_id && r.to_stage_id) event_type = 'created';
     else if (stageChanged) event_type = 'stage_changed';
     else if (amountChanged) event_type = 'amount_changed';
+    else if (r.note) event_type = 'note';
     else event_type = 'updated';
 
     return {
