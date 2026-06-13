@@ -1039,6 +1039,19 @@ deals.get('/export', wrap(async (req, res) => {
   // Resolve stage_name from the embedded crm_deal_stages relation —
   // listDealsWithCount selects it as `crm_deal_stages` (an object).
   // Flatten to a single string so the CSV stays one column.
+  // Resolve every product id referenced by closed_quantities once so the
+  // per-row map below can read names without a per-row DB hit.
+  const allClosedPids = new Set<string>();
+  for (const r of enriched as any[]) {
+    const cq = (r?.custom_fields as Record<string, unknown> | undefined)?.closed_quantities as Record<string, unknown> | undefined;
+    if (cq && typeof cq === 'object') Object.keys(cq).forEach((k) => allClosedPids.add(k));
+  }
+  let productNameById = new Map<string, string>();
+  if (allClosedPids.size > 0) {
+    const { data: prodRows } = await supabaseAdmin.from('crm_products')
+      .select('id, name').eq('org_id', orgId(req)).in('id', Array.from(allClosedPids));
+    productNameById = new Map((prodRows ?? []).map((p) => [p.id as string, (p.name as string) || (p.id as string).slice(0, 8)]));
+  }
   const flat = enriched.map((r: any) => {
     const stage = r.crm_deal_stages || null;
     const cf    = (r.custom_fields || {}) as Record<string, unknown>;
@@ -1058,12 +1071,24 @@ deals.get('/export', wrap(async (req, res) => {
     const totalPieces = lines.reduce((s: number, l: any) => s + (Number(l.pieces)    || 0), 0);
     const totalKg     = Number((cf as any).volume_kg ?? lines.reduce((s: number, l: any) => s + (Number(l.volume_kg) || 0), 0));
 
+    // Closed quantities — what the rep recorded in the deal Products
+    // card. Render as "ProductName: qty; ProductName: qty" so a single
+    // column stays Excel-friendly. Sum into total_closed for analytics.
+    const closedMap = ((cf as any).closed_quantities ?? {}) as Record<string, unknown>;
+    const closedPairs = Object.entries(closedMap).filter(([, v]) => Number(v) > 0);
+    const closedStr = closedPairs
+      .map(([pid, qty]) => `${productNameById.get(pid) ?? pid.slice(0, 8)}: ${Number(qty).toLocaleString()}`)
+      .join('; ');
+    const totalClosed = closedPairs.reduce((s, [, v]) => s + (Number(v) || 0), 0);
+
     return {
       ...r,
       stage_name:   stage?.name ?? null,
       total_pieces: totalPieces > 0 ? totalPieces : null,
       total_kg:     totalKg > 0 ? totalKg : null,
       line_items_str: lineItemsStr || null,
+      closed_qty_str: closedStr || null,
+      total_closed_qty: totalClosed > 0 ? totalClosed : null,
       tags_str:     Array.isArray(r.tags) ? r.tags.join(', ') : null,
       probability_pct: r.probability != null ? `${Math.round(Number(r.probability) * 100)}%` : null,
     };
@@ -1090,6 +1115,8 @@ deals.get('/export', wrap(async (req, res) => {
     { key: 'total_pieces',        label: 'Total Pieces' },
     { key: 'total_kg',            label: 'Total Volume (kg)' },
     { key: 'line_items_str',      label: 'Line Items' },
+    { key: 'closed_qty_str',      label: 'Closed Quantities' },
+    { key: 'total_closed_qty',    label: 'Total Closed Qty' },
     { key: 'tags_str',            label: 'Tags' },
     { key: 'won_at',              label: 'Won At' },
     { key: 'lost_at',             label: 'Lost At' },
