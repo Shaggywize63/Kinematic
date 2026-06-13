@@ -290,11 +290,76 @@ export async function winDeal(org_id: string, id: string, payload: { actual_clos
   const deal = await getDeal(org_id, id);
   const { data: wonStage } = await supabaseAdmin.from('crm_deal_stages')
     .select('id').eq('pipeline_id', deal.pipeline_id).eq('stage_type', 'won').limit(1).single();
+  // Won amount: caller's explicit value wins. Otherwise compute the
+  // actual closed value from custom_fields.closed_quantities (filled in
+  // on the deal Products card) using the linked lead's product_lines
+  // for the price / weight / unit context. Falls back to the existing
+  // deal.amount when neither is available — same number the rep saw on
+  // the open deal before they marked it won.
+  let nextAmount: number | null | undefined = payload.amount;
+  if (nextAmount == null) {
+    nextAmount = await computeClosedAmount(org_id, deal) ?? deal.amount;
+  }
   return updateDeal(org_id, id, {
     stage_id: wonStage.id,
     actual_close_date: payload.actual_close_date ?? new Date().toISOString().slice(0, 10),
-    amount: payload.amount ?? deal.amount,
+    amount: nextAmount,
   } as Partial<Deal>, user_id);
+}
+
+/**
+ * Sum (price / weight_kg) × (closed_qty × unitFactor) across the deal's
+ * closed_quantities map, joined against the linked lead's product_lines
+ * for the unit (kg / tonne) on each line and the products catalogue for
+ * price + weight. Returns null when there's nothing to compute — caller
+ * decides the fallback.
+ */
+async function computeClosedAmount(
+  org_id: string,
+  deal: Deal,
+): Promise<number | null> {
+  const dealCf = ((deal as Deal & { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {}) as Record<string, unknown>;
+  const closed = (dealCf.closed_quantities as Record<string, unknown> | undefined) ?? {};
+  const closedPids = Object.entries(closed)
+    .filter(([, v]) => Number(v) > 0)
+    .map(([k]) => k);
+  if (closedPids.length === 0) return null;
+
+  // Pull the unit on each line from the linked lead (if any) so a Tonne
+  // line stays a Tonne when we multiply.
+  let unitByPid = new Map<string, string>();
+  const leadId = (deal as Deal & { lead_id?: string | null }).lead_id ?? null;
+  if (leadId) {
+    const { data: lead } = await supabaseAdmin.from('crm_leads')
+      .select('custom_fields').eq('org_id', org_id).eq('id', leadId).maybeSingle();
+    const leadCf = ((lead?.custom_fields as Record<string, unknown> | null) ?? {}) as Record<string, unknown>;
+    const lines = leadCf.product_lines;
+    if (Array.isArray(lines)) {
+      for (const l of lines as Array<Record<string, unknown>>) {
+        const pid = typeof l.product_id === 'string' ? l.product_id : '';
+        const unit = typeof l.measuring_unit === 'string' ? l.measuring_unit : '';
+        if (pid) unitByPid.set(pid, unit);
+      }
+    }
+  }
+
+  // Batch-fetch the product catalogue rows we need.
+  const { data: products } = await supabaseAdmin.from('crm_products')
+    .select('id, price, weight_kg').eq('org_id', org_id).in('id', closedPids);
+  const byId = new Map((products ?? []).map((p) => [p.id as string, p]));
+
+  let total = 0;
+  for (const pid of closedPids) {
+    const p = byId.get(pid) as { price?: number | string | null; weight_kg?: number | string | null } | undefined;
+    const price = Number(p?.price ?? 0);
+    const weight = Number(p?.weight_kg ?? 0);
+    const qty = Number(closed[pid] ?? 0);
+    if (price <= 0 || weight <= 0 || qty <= 0) continue;
+    const unit = (unitByPid.get(pid) ?? '').trim().toLowerCase();
+    const factor = unit === 'tonne' ? 1000 : 1;
+    total += (price / weight) * (qty * factor);
+  }
+  return total > 0 ? Math.round(total * 100) / 100 : null;
 }
 
 export async function loseDeal(org_id: string, id: string, payload: { actual_close_date?: string | null; lost_reason?: string }, user_id?: string) {
