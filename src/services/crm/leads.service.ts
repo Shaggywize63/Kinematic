@@ -686,6 +686,59 @@ export async function convertLead(org_id: string, id: string, opts: {
       }
     }
 
+    // Final fallback — pull the deal amount from the lead's
+    // custom_fields.product_lines that the rep captured on the lead form.
+    // Recompute per row instead of trusting the cached estimated_amount
+    // (catalogue price/weight may have changed) so the deal lands with
+    // the true current value of the basket.
+    //
+    //   amount = Σ (product.price / product.weight_kg) × (qty × unitFactor)
+    //
+    // unitFactor = 1 for kg, 1000 for tonne. Lines without a resolvable
+    // product or non-positive numbers contribute 0.
+    if (amount == null || amount === 0) {
+      const leadCf = (lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {};
+      const rawLines = (leadCf as Record<string, unknown>).product_lines;
+      const lines: Array<{ product_id?: string; quantity?: unknown; measuring_unit?: unknown }> =
+        Array.isArray(rawLines)
+          ? (rawLines as Array<Record<string, unknown>>).map((r) => ({
+              product_id: typeof r.product_id === 'string' ? r.product_id : undefined,
+              quantity: r.quantity,
+              measuring_unit: r.measuring_unit,
+            }))
+          : (typeof (leadCf as Record<string, unknown>).product_interested === 'string'
+              ? [{
+                  product_id: (leadCf as Record<string, unknown>).product_interested as string,
+                  quantity: (leadCf as Record<string, unknown>).quantity,
+                  measuring_unit: (leadCf as Record<string, unknown>).measuring_unit,
+                }]
+              : []);
+      const lineProductIds = Array.from(new Set(
+        lines.map((l) => l.product_id).filter((x): x is string => typeof x === 'string' && x.length > 0),
+      ));
+      if (lineProductIds.length > 0) {
+        const { data: lineProducts } = await supabaseAdmin.from('crm_products')
+          .select('id, price, weight_kg')
+          .eq('org_id', org_id)
+          .in('id', lineProductIds);
+        const productById = new Map((lineProducts ?? []).map((p) => [p.id as string, p]));
+        let basket = 0;
+        for (const l of lines) {
+          const pid = l.product_id;
+          if (!pid) continue;
+          const p = productById.get(pid) as { price?: number | string | null; weight_kg?: number | string | null } | undefined;
+          const price = Number(p?.price ?? 0);
+          const weight = Number(p?.weight_kg ?? 0);
+          const qtyNum = typeof l.quantity === 'number' ? l.quantity : Number(l.quantity ?? 0);
+          if (price <= 0 || weight <= 0 || !Number.isFinite(qtyNum) || qtyNum <= 0) continue;
+          const unit = String(l.measuring_unit ?? '').trim().toLowerCase();
+          const factor = unit === 'tonne' ? 1000 : 1;
+          basket += (price / weight) * (qtyNum * factor);
+        }
+        if (basket > 0) amount = Math.round(basket * 100) / 100;
+      }
+    }
+
     const dealInsert: Record<string, unknown> = {
       org_id, client_id: leadClientId, pipeline_id, stage_id,
       name: opts.deal_name || `${lead.company || lead.email || 'New deal'} — Opportunity`,
