@@ -302,6 +302,11 @@ export async function winDeal(org_id: string, id: string, payload: { actual_clos
   }
   return updateDeal(org_id, id, {
     stage_id: wonStage.id,
+    // Explicit status flip so the deals list, dashboard filters, and
+    // analytics that key on `status` (not stage_type) all see "won"
+    // immediately — without this the column stayed at 'open' until a
+    // separate cron / trigger reconciled it.
+    status: 'won',
     actual_close_date: payload.actual_close_date ?? new Date().toISOString().slice(0, 10),
     amount: nextAmount,
   } as Partial<Deal>, user_id);
@@ -368,6 +373,7 @@ export async function loseDeal(org_id: string, id: string, payload: { actual_clo
     .select('id').eq('pipeline_id', deal.pipeline_id).eq('stage_type', 'lost').limit(1).single();
   return updateDeal(org_id, id, {
     stage_id: lostStage.id,
+    status: 'lost',
     actual_close_date: payload.actual_close_date ?? new Date().toISOString().slice(0, 10),
     lost_reason: payload.lost_reason ?? null,
   } as Partial<Deal>, user_id);
