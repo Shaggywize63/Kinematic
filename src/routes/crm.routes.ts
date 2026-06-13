@@ -237,6 +237,104 @@ async function activityScopeOpts(req: AuthRequest): Promise<{
 }
 
 /**
+ * Enforce admin-configured "required" toggles on built-in lead fields. The
+ * dashboard's Settings → Custom Fields page persists these into
+ * crm_settings.config.field_overrides keyed by `lead.<field_key>` (universal)
+ * or `lead.<field_key>@b2b` / `lead.<field_key>@b2c` (scoped). Mobile clients
+ * don't yet read those overrides, so without a server-side check the admin's
+ * toggle is silently ignored on iOS / Android. This guard runs on every lead
+ * create + update so the rule applies to all clients uniformly.
+ */
+async function enforceLeadRequiredFields(
+  org_id: string,
+  client_id: string | null,
+  payload: Record<string, unknown>,
+  mode: 'create' | 'update',
+): Promise<void> {
+  // crm_settings is (org, client)-scoped. Read the row that matches the
+  // payload's client (falling back to the org-level row when none exists).
+  let q = supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id);
+  q = client_id ? q.eq('client_id', client_id) : q.is('client_id', null);
+  const { data: rows } = await q.limit(1);
+  const cfg = (rows?.[0] as { config?: Record<string, unknown> } | undefined)?.config;
+  const overrides = (cfg?.field_overrides as Record<string, { required?: boolean; hidden?: boolean }> | undefined) || {};
+  if (!overrides || Object.keys(overrides).length === 0) return;
+
+  // Active scope mirrors the dashboard helper: b2c if is_b2c, b2b otherwise.
+  const isB2c = (payload.is_b2c as boolean | undefined) === true;
+  const scope: 'b2b' | 'b2c' = isB2c ? 'b2c' : 'b2b';
+
+  // Built-in keys the form gates on `required`. Keep aligned with the
+  // dashboard's BUILTIN_FIELDS list in settings/custom-fields/page.tsx —
+  // anything outside this set is a custom field (handled separately by
+  // crm_custom_field_defs.required).
+  const builtinKeys = [
+    'first_name', 'last_name', 'email', 'phone', 'company', 'title',
+    'industry', 'city', 'state', 'address_line1', 'postal_code', 'country',
+    'date_of_birth', 'gender',
+  ] as const;
+
+  const friendlyLabel: Record<string, string> = {
+    phone: 'Primary mobile',
+    first_name: 'First name',
+    last_name: 'Last name',
+    email: 'Email',
+    company: 'Company',
+    title: 'Job title',
+    industry: 'Industry',
+    city: 'City',
+    state: 'State',
+    address_line1: 'Address line 1',
+    postal_code: 'Postal code',
+    country: 'Country',
+    date_of_birth: 'Date of birth',
+    gender: 'Gender',
+  };
+
+  const merged = (key: string): { required?: boolean; hidden?: boolean } => {
+    const uni = overrides[`lead.${key}`] || {};
+    const scoped = overrides[`lead.${key}@${scope}`] || {};
+    return { ...uni, ...scoped };
+  };
+  const hasValue = (key: string): boolean => {
+    const v = payload[key];
+    if (v == null) return false;
+    if (typeof v === 'string') return v.trim() !== '';
+    return true;
+  };
+
+  for (const key of builtinKeys) {
+    const ov = merged(key);
+    if (!ov.required || ov.hidden) continue;
+    // On update, only enforce if the caller explicitly cleared the field.
+    // A PATCH that omits the key entirely leaves the existing value alone,
+    // so we don't want to 400 the rep for editing an unrelated section.
+    if (mode === 'update' && !(key in payload)) continue;
+    if (!hasValue(key)) {
+      throw new AppError(400, `${friendlyLabel[key] ?? key} is required`, 'VALIDATION');
+    }
+  }
+}
+
+/**
+ * Build the subject line for the auto-spawned site_visit activity. Carries
+ * the lead's display name so the timeline / activities list reads like
+ * "Site visit — Rajesh Kumar" instead of a bare "Site visit". When the rep
+ * ticks the "First visit" sub-option, the prefix flips to "First visit"
+ * to distinguish the rep's first physical meeting from later visits.
+ */
+function buildSiteVisitSubject(
+  lead: { first_name?: string | null; last_name?: string | null; email?: string | null; phone?: string | null; company?: string | null } | null | undefined,
+  isFirst: boolean,
+): string {
+  const prefix = isFirst ? 'First visit' : 'Site visit';
+  if (!lead) return prefix;
+  const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim()
+    || lead.company || lead.email || lead.phone || '';
+  return name ? `${prefix} — ${name}` : prefix;
+}
+
+/**
  * Normalise an activity payload to the actual `crm_activities` columns.
  * The dashboard edit modal sends `description`, but the table's note column is
  * `body` — writing `description` straight through made every edit fail with
@@ -395,7 +493,7 @@ leads.get('/', wrap(async (req, res) => {
   // owner_id = self (plus their hierarchy subtree if applicable). Their
   // city allocation does NOT broaden visibility — a new Champion lands
   // on an empty list until leads are assigned to them.
-  const ownOnly = (me?.org_role_name ?? '').toLowerCase() === 'consumer champion';
+  const ownOnly = (me?.org_role_name ?? '').toLowerCase().includes('consumer champion');
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
@@ -430,8 +528,14 @@ leads.post('/', wrap(async (req, res) => {
   // off before the lead insert (it's not a column on crm_leads), use it
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, ...rest } = parsed;
+  const siteVisitIsFirst = parsed._site_visit_first === true;
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
   const payload = { ...rest, client_id: rest.client_id ?? clientId(req) };
+  // Honour admin-configured "required" toggles for built-in fields. Mobile
+  // clients don't yet read field_overrides client-side, so without this
+  // guard a Tata admin marking Primary Mobile required would still let the
+  // Android/iOS apps POST a phoneless lead.
+  await enforceLeadRequiredFields(orgId(req), payload.client_id ?? null, payload as Record<string, unknown>, 'create');
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
 
   // Spawn the site-visit activity. Best-effort — failures here don't
@@ -439,14 +543,14 @@ leads.post('/', wrap(async (req, res) => {
   if (autoLogSiteVisit && lead?.id) {
     try {
       const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
+      const subject = buildSiteVisitSubject(lead, siteVisitIsFirst);
       await supabaseAdmin.from('crm_activities').insert({
         org_id: orgId(req),
         client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
         type: 'site_visit',
-        subject: 'Site visit',
+        subject,
         status: 'completed',
         completed_at: new Date().toISOString(),
-        activity_date: new Date().toISOString(),
         lead_id: lead.id,
         owner_id: userId(req),
         assigned_to: userId(req),
@@ -482,7 +586,7 @@ leads.get('/export', wrap(async (req, res) => {
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
   const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
-  const ownOnly = (me?.org_role_name ?? '').toLowerCase() === 'consumer champion';
+  const ownOnly = (me?.org_role_name ?? '').toLowerCase().includes('consumer champion');
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
   // bounded.
@@ -637,7 +741,7 @@ leads.get('/geo', wrap(async (req, res) => {
   // Consumer Champion: own-only regardless of city allocation. Drops the
   // city.in.() term so an unassigned Champion's map is empty rather than
   // showing every pin in their city.
-  const isChampion = (me.org_role_name ?? '').toLowerCase() === 'consumer champion';
+  const isChampion = (me.org_role_name ?? '').toLowerCase().includes('consumer champion');
   if (isChampion) {
     const orParts: string[] = [];
     if (me.id) orParts.push(`owner_id.eq.${me.id}`);
@@ -669,19 +773,24 @@ leads.patch('/:id', wrap(async (req, res) => {
   // created earlier without ticking the box. Pop the flag off — it's
   // not a column — and best-effort spawn the activity after the update.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, ...rest } = parsed;
+  const siteVisitIsFirst = parsed._site_visit_first === true;
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
+  // Honour admin-configured "required" toggles for built-in fields on PATCH
+  // too. Only enforces when the caller explicitly includes the key — a
+  // partial update that doesn't touch a required field stays valid.
+  await enforceLeadRequiredFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>, 'update');
   const lead = await leadsSvc.updateLead(orgId(req), req.params.id, rest, userId(req));
   if (autoLogSiteVisit && lead?.id) {
     try {
       const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
+      const subject = buildSiteVisitSubject(lead, siteVisitIsFirst);
       await supabaseAdmin.from('crm_activities').insert({
         org_id: orgId(req),
         client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
         type: 'site_visit',
-        subject: 'Site visit',
+        subject,
         status: 'completed',
         completed_at: new Date().toISOString(),
-        activity_date: new Date().toISOString(),
         lead_id: lead.id,
         owner_id: userId(req),
         assigned_to: userId(req),
@@ -1137,7 +1246,7 @@ activities.get('/calendar', wrap(async (req, res) => {
   // matching restriction. Force the subtree to just self so the calendar
   // never surfaces another rep's planned or completed activities.
   const meCal = (req as AuthRequest).user;
-  if ((meCal?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meCal?.id) {
+  if ((meCal?.org_role_name ?? '').toLowerCase().includes('consumer champion') && meCal?.id) {
     subtreeIds = [meCal.id];
   }
   // Hierarchy mode supersedes the per-user scope (the caller's id is
@@ -1171,7 +1280,7 @@ activities.get('/', wrap(async (req, res) => {
   // other reps' activities even if hierarchy RBAC would otherwise widen
   // visibility.
   const meAct = (req as AuthRequest).user;
-  if ((meAct?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meAct?.id) {
+  if ((meAct?.org_role_name ?? '').toLowerCase().includes('consumer champion') && meAct?.id) {
     subtreeIds = [meAct.id];
   }
   // `view` is the dashboard's KPI-tile-as-filter: clicking the
@@ -1291,7 +1400,7 @@ activities.get('/export', wrap(async (req, res) => {
   // Consumer Champion: own activities only — mirror the /activities GET
   // restriction so the CSV never leaks other reps' rows.
   const meExp = (req as AuthRequest).user;
-  if ((meExp?.org_role_name ?? '').toLowerCase() === 'consumer champion' && meExp?.id) {
+  if ((meExp?.org_role_name ?? '').toLowerCase().includes('consumer champion') && meExp?.id) {
     subtreeIds = [meExp.id];
   }
   const userScope = subtreeIds ? undefined : activityVisibilityScope(req);
@@ -1965,7 +2074,7 @@ targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
 // would otherwise pass requireRole — they are view-only on targets.
 targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   const me = (req as AuthRequest).user;
-  if ((me?.org_role_name ?? '').toLowerCase() === 'consumer champion') {
+  if ((me?.org_role_name ?? '').toLowerCase().includes('consumer champion')) {
     throw new AppError(403, 'Consumer Champions cannot set targets', 'FORBIDDEN');
   }
   const { user_id, org_role_id, hierarchy_level_id, target_value, all } = req.body ?? {};
@@ -2338,15 +2447,24 @@ const { cached: cachedAnalytics } = require('../utils/analyticsCache') as typeof
 // hierarchy). null fields = no extra restriction (admins see everything).
 async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope> {
   const me = (req as AuthRequest).user;
+  const selfOwnerId = me?.id ?? null;
+  // Consumer Champions see only their own data — no city broadening and no
+  // hierarchy expansion. Mirrors the ownOnly flag used in the leads list.
+  const isChampion = (me?.org_role_name ?? '').toLowerCase().includes('consumer champion');
+  if (isChampion) {
+    return {
+      effectiveCities: null,
+      visibleOwnerIds: selfOwnerId ? [selfOwnerId] : [],
+      selfOwnerId,
+      includeNullCity: false,
+      ownOnly: true,
+    };
+  }
   // Visibility is the intersection of: (a) the hierarchy subtree the caller
   // can see and (b) the geography (assigned_cities) they're tied to. A
-  // Consumer Champion Manager with assigned cities still only sees their
-  // team's work within their geography — managing someone doesn't extend
-  // their geographic remit. (Per the latest direction.) Cities filter
-  // applies to every scope; only the platform-admin tier returns null
-  // from `getEffectiveCityNames` which bypasses it entirely.
+  // manager with assigned cities still only sees their team's work within
+  // their geography — managing someone doesn't extend their geographic remit.
   const effectiveCities = rbac.getEffectiveCityNames(me);
-  const selfOwnerId = me?.id ?? null;
   let visibleOwnerIds: string[] | null = null;
   const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
   if (hierOn) {

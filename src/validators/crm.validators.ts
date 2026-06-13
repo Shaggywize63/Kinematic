@@ -102,6 +102,10 @@ export const leadCreateSchema = z.object({
   // pops this key before persisting (it isn't a column) and only honours
   // it for clients that have the matching activity type configured.
   _auto_log_site_visit: z.boolean().optional(),
+  // Sub-flag for _auto_log_site_visit — when true, the spawned activity's
+  // subject reads "First visit — {lead name}" instead of "Site visit —
+  // {lead name}". Captures the rep's first physical meeting with the lead.
+  _site_visit_first: z.boolean().optional(),
   ...utmFields,
   ...b2cBase,
 });
