@@ -688,14 +688,29 @@ export async function convertLead(org_id: string, id: string, opts: {
 
     // Final fallback — pull the deal amount from the lead's
     // custom_fields.product_lines that the rep captured on the lead form.
-    // Recompute per row instead of trusting the cached estimated_amount
-    // (catalogue price/weight may have changed) so the deal lands with
-    // the true current value of the basket.
+    //
+    // Fast path: the lead form already wrote the basket total to
+    // custom_fields.estimated_amount whenever it persisted product_lines.
+    // Trust it when present so we don't need to round-trip the products
+    // table just to recompute the same number.
+    //
+    // Slow path: recompute from price + weight + quantity per line in
+    // case the cached number was lost / never written / out-of-date.
     //
     //   amount = Σ (product.price / product.weight_kg) × (qty × unitFactor)
     //
     // unitFactor = 1 for kg, 1000 for tonne. Lines without a resolvable
     // product or non-positive numbers contribute 0.
+    if (amount == null || amount === 0) {
+      const leadCfFast = (lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {};
+      const cachedTotal = (leadCfFast as Record<string, unknown>).estimated_amount;
+      const cachedNum = typeof cachedTotal === 'number'
+        ? cachedTotal
+        : (typeof cachedTotal === 'string' ? Number(cachedTotal) : NaN);
+      if (Number.isFinite(cachedNum) && cachedNum > 0) {
+        amount = Math.round(cachedNum * 100) / 100;
+      }
+    }
     if (amount == null || amount === 0) {
       const leadCf = (lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {};
       const rawLines = (leadCf as Record<string, unknown>).product_lines;
