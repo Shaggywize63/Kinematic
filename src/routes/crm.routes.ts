@@ -324,9 +324,14 @@ async function enforceLeadRequiredFields(
  * to distinguish the rep's first physical meeting from later visits.
  */
 function buildSiteVisitSubject(
-  lead: { first_name?: string | null; last_name?: string | null; email?: string | null; phone?: string | null; company?: string | null } | null | undefined,
-  isFirst: boolean,
+  lead: { first_name?: string | null; last_name?: string | null; email?: string | null; phone?: string | null; company?: string | null; custom_fields?: Record<string, unknown> | null } | null | undefined,
 ): string {
+  // "First visit" vs "Site visit" is driven entirely by the existing
+  // first_visit_date custom field on the lead — when the rep fills that
+  // in, the auto-spawned activity reads "First visit — {name}". The
+  // separate _site_visit_first flag is no longer required.
+  const firstVisitDate = lead?.custom_fields?.first_visit_date;
+  const isFirst = typeof firstVisitDate === 'string' && firstVisitDate.trim() !== '';
   const prefix = isFirst ? 'First visit' : 'Site visit';
   if (!lead) return prefix;
   const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim()
@@ -528,7 +533,6 @@ leads.post('/', wrap(async (req, res) => {
   // off before the lead insert (it's not a column on crm_leads), use it
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const siteVisitIsFirst = parsed._site_visit_first === true;
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
   const payload = { ...rest, client_id: rest.client_id ?? clientId(req) };
   // Honour admin-configured "required" toggles for built-in fields. Mobile
@@ -543,7 +547,7 @@ leads.post('/', wrap(async (req, res) => {
   if (autoLogSiteVisit && lead?.id) {
     try {
       const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
-      const subject = buildSiteVisitSubject(lead, siteVisitIsFirst);
+      const subject = buildSiteVisitSubject(lead);
       await supabaseAdmin.from('crm_activities').insert({
         org_id: orgId(req),
         client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
@@ -773,7 +777,6 @@ leads.patch('/:id', wrap(async (req, res) => {
   // created earlier without ticking the box. Pop the flag off — it's
   // not a column — and best-effort spawn the activity after the update.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const siteVisitIsFirst = parsed._site_visit_first === true;
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
   // Honour admin-configured "required" toggles for built-in fields on PATCH
   // too. Only enforces when the caller explicitly includes the key — a
@@ -783,7 +786,7 @@ leads.patch('/:id', wrap(async (req, res) => {
   if (autoLogSiteVisit && lead?.id) {
     try {
       const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
-      const subject = buildSiteVisitSubject(lead, siteVisitIsFirst);
+      const subject = buildSiteVisitSubject(lead);
       await supabaseAdmin.from('crm_activities').insert({
         org_id: orgId(req),
         client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,

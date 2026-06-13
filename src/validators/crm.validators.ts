@@ -102,9 +102,10 @@ export const leadCreateSchema = z.object({
   // pops this key before persisting (it isn't a column) and only honours
   // it for clients that have the matching activity type configured.
   _auto_log_site_visit: z.boolean().optional(),
-  // Sub-flag for _auto_log_site_visit — when true, the spawned activity's
-  // subject reads "First visit — {lead name}" instead of "Site visit —
-  // {lead name}". Captures the rep's first physical meeting with the lead.
+  // Accepted but ignored — the activity subject is now derived from the
+  // existing first_visit_date custom field on the lead, so we no longer
+  // need a separate flag. Kept in the schema only so older clients still
+  // mid-rollout don't 400 on it.
   _site_visit_first: z.boolean().optional(),
   ...utmFields,
   ...b2cBase,
