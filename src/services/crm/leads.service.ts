@@ -761,11 +761,31 @@ export async function convertLead(org_id: string, id: string, opts: {
       amount, owner_id: lead.owner_id, source_id: lead.source_id,
       created_by: user_id ?? null,
     };
-    if (lineItemsForCustomFields || totalVolumeKg != null) {
-      dealInsert.custom_fields = {
-        ...(lineItemsForCustomFields ? { line_items: lineItemsForCustomFields } : {}),
-        ...(totalVolumeKg != null ? { volume_kg: totalVolumeKg } : {}),
-      };
+    // Mirror the lead's product_lines + derived basket weight onto the
+    // deal at convert time so dashboard / analytics weight aggregations
+    // read the volume off the deal row directly (instead of joining
+    // back through the lead). Falls through when the lead used the old
+    // single-product fields and totalVolumeKg is already set.
+    const leadCfMirror = ((lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {}) as Record<string, unknown>;
+    const leadLines = leadCfMirror.product_lines;
+    let derivedVolumeKg: number | null = null;
+    if (Array.isArray(leadLines)) {
+      let sum = 0;
+      for (const l of leadLines as Array<Record<string, unknown>>) {
+        const qty = Number((l as Record<string, unknown>).quantity ?? 0);
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+        const u = String((l as Record<string, unknown>).measuring_unit ?? '').trim().toLowerCase();
+        sum += qty * (u === 'tonne' ? 1000 : 1);
+      }
+      if (sum > 0) derivedVolumeKg = Math.round(sum * 100) / 100;
+    }
+    const cfOut: Record<string, unknown> = {};
+    if (lineItemsForCustomFields) cfOut.line_items = lineItemsForCustomFields;
+    if (totalVolumeKg != null) cfOut.volume_kg = totalVolumeKg;
+    else if (derivedVolumeKg != null) cfOut.volume_kg = derivedVolumeKg;
+    if (Array.isArray(leadLines)) cfOut.product_lines = leadLines;
+    if (Object.keys(cfOut).length > 0) {
+      dealInsert.custom_fields = cfOut;
     }
     const { data: deal, error: dErr } = await supabaseAdmin.from('crm_deals').insert(dealInsert)
       .select('id').single();
