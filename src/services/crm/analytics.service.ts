@@ -50,14 +50,34 @@ type DealWithWeight = {
 };
 
 function dealWeightKg(d: DealWithWeight): number {
-  // Prefer the volume captured on the deal (custom_fields.volume_kg); fall
-  // back to the line-items weight view for deals that use that table.
+  // Precedence order so the dashboard's weight tiles surface a real
+  // number regardless of which deal-creation path the rep used:
+  //   1. custom_fields.volume_kg  — written on convert from line-items.
+  //   2. crm_deal_line_items view — older line-item flow.
+  //   3. custom_fields.product_lines — new ProductLinesSection flow,
+  //      sums qty × unit-factor (1 kg / 1000 tonne) across rows. This
+  //      catches deals converted from leads that captured products via
+  //      the Tata "Products of Interest" picker but never got line
+  //      items written.
   const cf = d.custom_fields as Record<string, unknown> | null | undefined;
   const cfVol = cf ? Number(cf.volume_kg) : NaN;
   if (Number.isFinite(cfVol) && cfVol > 0) return cfVol;
   const w = d.weight;
   const row: WeightRow | undefined = Array.isArray(w) ? w[0] : (w ?? undefined);
-  return Number(row?.total_kg ?? 0);
+  const fromView = Number(row?.total_kg ?? 0);
+  if (fromView > 0) return fromView;
+  const lines = cf?.product_lines;
+  if (Array.isArray(lines)) {
+    let total = 0;
+    for (const l of lines as Array<Record<string, unknown>>) {
+      const qty = Number(l.quantity ?? 0);
+      if (!Number.isFinite(qty) || qty <= 0) continue;
+      const u = String(l.measuring_unit ?? '').trim().toLowerCase();
+      total += qty * (u === 'tonne' ? 1000 : 1);
+    }
+    if (total > 0) return total;
+  }
+  return 0;
 }
 
 // Returns the per-deal value used by every aggregation: kg in weight mode,
