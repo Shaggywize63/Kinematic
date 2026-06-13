@@ -781,12 +781,30 @@ leads.get('/geo', wrap(async (req, res) => {
 leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))))));
 leads.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.leadUpdateSchema, req.body);
-  // Mirror the POST path: the rep can tick "Also log as Site Visit" on
-  // the edit form too, e.g. for a follow-up visit on a lead they
-  // created earlier without ticking the box. Pop the flag off — it's
-  // not a column — and best-effort spawn the activity after the update.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
+  // Edit RBAC — Consumer Champions can edit ONLY their own leads
+  // (owner / assigned_to / created_by = self). Other non-admin users
+  // (ASOs, etc.) can edit only leads they own. Org-admin / super-admin
+  // / sub-admin keep blanket edit rights. Manager-tier system roles
+  // ('admin', 'sub_admin', 'super_admin') bypass this check.
+  const meEdit = (req as AuthRequest).user;
+  const sysRole = (meEdit?.role ?? '').toLowerCase();
+  const isAdminTier = ['super_admin', 'admin', 'sub_admin'].includes(sysRole);
+  if (!isAdminTier) {
+    const { data: target } = await supabaseAdmin.from('crm_leads')
+      .select('owner_id, assigned_to, created_by')
+      .eq('org_id', orgId(req)).eq('id', req.params.id).is('deleted_at', null).maybeSingle();
+    if (!target) throw new AppError(404, 'Lead not found', 'NOT_FOUND');
+    const mine = meEdit?.id && (
+      target.owner_id === meEdit.id ||
+      target.assigned_to === meEdit.id ||
+      target.created_by === meEdit.id
+    );
+    if (!mine) {
+      throw new AppError(403, 'You can only edit leads assigned to you. Ask an admin to reassign.', 'FORBIDDEN');
+    }
+  }
   // Honour admin-configured "required" toggles for built-in fields on PATCH
   // too. Only enforces when the caller explicitly includes the key — a
   // partial update that doesn't touch a required field stays valid.
