@@ -1683,7 +1683,20 @@ states.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_states', orgId(req), req.params.id, parse(v.stateSchema.partial(), req.body), userId(req)))));
 states.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_states', orgId(req), req.params.id); res.status(204).end(); }));
 states.get('/:id/cities', wrap(async (req, res) => res.json(
-  await crud.list('crm_cities', orgId(req), { state_id: req.params.id, ...req.query }, { softDelete: false, defaultSort: { column: 'name', ascending: true } })
+  await crud.clientScopedList(
+    'crm_cities',
+    orgId(req),
+    clientScope(req).id,
+    { state_id: req.params.id, ...req.query },
+    {
+      softDelete: false,
+      defaultSort: { column: 'name', ascending: true },
+      // Same per-client gate as the /cities root route so the
+      // LocationPicker on the lead form shows only the active
+      // tenant's cities.
+      strictClient: true,
+    },
+  )
 )));
 states.post('/seed-indian', wrap(async (req, res) => {
   const { data, error } = await supabaseAdmin.rpc('crm_seed_indian_locations', { p_org_id: orgId(req) });
@@ -1694,10 +1707,30 @@ router.use('/states', states);
 
 const cities = express.Router();
 cities.get('/', wrap(async (req, res) => res.json(
-  await crud.list('crm_cities', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name'] })
+  await crud.clientScopedList('crm_cities', orgId(req), clientScope(req).id, req.query, {
+    softDelete: false,
+    defaultSort: { column: 'name', ascending: true },
+    searchColumns: ['name'],
+    // Strict per-client scoping — Tata Tiscon reps must only see the
+    // cities seeded for their client; without this the People
+    // Directory dropdown (and every other city consumer) was
+    // showing the org-wide superset and Tiscon's rollups broke
+    // whenever a rep picked a city that wasn't in their allow-list.
+    strictClient: true,
+  })
 )));
-cities.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_cities', orgId(req), parse(v.citySchema, req.body), userId(req)))));
+cities.post('/', wrap(async (req, res) => {
+  // Stamp the active client onto every new city so the list endpoints'
+  // strictClient gate sees them. Without this, cities added under a
+  // selected client landed with client_id = NULL and never came back
+  // out of the People Directory dropdown (which strict-scopes on the
+  // same column).
+  const parsed = parse(v.citySchema, req.body);
+  const cid = clientScope(req).id;
+  const payload: Record<string, unknown> = { ...parsed };
+  if (cid && payload.client_id == null) payload.client_id = cid;
+  res.status(201).json(await crud.create('crm_cities', orgId(req), payload, userId(req)));
+}));
 cities.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_cities', orgId(req), req.params.id, parse(v.citySchema.partial(), req.body), userId(req)))));
 cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
@@ -1799,13 +1832,22 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     const address    = row.address?.trim()    || null;
     const personType = row.type?.trim()       || null;
     const city       = row.city?.trim()       || null;
+    // CSV `id` column lands here as `code` server-side — see
+    // the dashboard's import mapper.
     const code       = row.code?.trim()       || null;
     if (!first_name && !last_name && !mobile && !email) { skipped++; continue; }
 
-    // Look up an existing row by mobile then email — both are
-    // independently indexed so the probe stays O(log n).
+    // Dedup: match on the user-facing ID (`code`) when present, then
+    // fall back to mobile / email. All three are independently
+    // indexed so the probe stays O(log n).
     let existingId: string | null = null;
-    if (mobile) {
+    if (code) {
+      const r = await supabaseAdmin.from('people_directory').select('id')
+        .eq('org_id', org_id).eq('client_id', cid).eq('code', code)
+        .is('deleted_at', null).limit(1).maybeSingle();
+      existingId = (r.data?.id as string) ?? null;
+    }
+    if (!existingId && mobile) {
       const r = await supabaseAdmin.from('people_directory').select('id')
         .eq('org_id', org_id).eq('client_id', cid).eq('mobile', mobile)
         .is('deleted_at', null).limit(1).maybeSingle();
@@ -1854,8 +1896,13 @@ peopleDir.get('/export', wrap(async (req, res) => {
     const s = String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const header = ['first_name', 'last_name', 'mobile', 'email', 'code', 'type', 'city', 'address', 'created_at'];
-  const body = rows.map((r) => header.map((k) => esc(r[k])).join(',')).join('\n');
+  // Map the user-facing "id" header to the `code` column (tenant-
+  // supplied employee / dealer identifier). The system UUID isn't
+  // surfaced — reps work in their own ID space, and bulk-import
+  // dedups on this column.
+  const header = ['id', 'first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'address', 'created_at'];
+  const colFor = (k: string) => (k === 'id' ? 'code' : k);
+  const body = rows.map((r) => header.map((k) => esc(r[colFor(k)])).join(',')).join('\n');
   const csv = `${header.join(',')}\n${body}\n`;
   const filename = `people-directory-${new Date().toISOString().slice(0, 10)}.csv`;
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -1966,6 +2013,23 @@ router.get('/lookup/search', wrap(async (req, res) => {
   // filter for uncurated tables to avoid PostgREST 4xx-ing on a missing
   // column.
   if (meta && scope.id) query = query.eq('client_id', scope.id);
+  // Per-user city gate for the people_directory lookup target.
+  // Consumer Champions from Dhanbad should only see Engineers /
+  // Architects / Dealers from Dhanbad — not the org-wide roster.
+  // Honours the same effective-cities resolution the leads list uses
+  // (role's assigned_cities ∩ user's assigned_city_names), so a tier
+  // that already lacks a city restriction (admins, super_admins) sees
+  // everyone.
+  if (target === 'people_directory') {
+    const cities = rbac.getEffectiveCityNames((req as AuthRequest).user);
+    if (cities !== null && cities.length > 0) {
+      query = query.in('city', cities);
+    } else if (cities !== null && cities.length === 0) {
+      // Defined but empty → the user has no cities; surface nothing
+      // rather than the whole roster.
+      return res.json({ success: true, data: [] });
+    }
+  }
   if (q && meta) {
     const sanitized = q.replace(/[%,]/g, ' ').slice(0, 80);
     const orExpr = meta.search.map((c) => `${c}.ilike.%${sanitized}%`).join(',');
