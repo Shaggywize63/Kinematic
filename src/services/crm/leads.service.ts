@@ -8,6 +8,7 @@ import * as dedup from './dedup.service';
 import * as assignment from './assignment.service';
 import { triggerEdgeFunction } from './edge.client';
 import * as automations from './automations.service';
+import { validateAndStampCustomFields } from './customFields.service';
 import type { Lead, LeadStatus } from '../../types/crm.types';
 
 // Helper: erase the structural-type-narrowing TS does on Lead so we can
@@ -47,6 +48,13 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   // user_id into assignOwner lets the rule engine still take precedence
   // when a real rule matches, while keeping the "creator becomes owner"
   // fallback for the common "rep types in a new lead" case.
+  // Coerce + validate the custom_fields blob against admin-defined types,
+  // then stamp any formula results. Runs BEFORE owner-assignment so any
+  // formula that references custom_fields sees the cleaned values.
+  payload.custom_fields = await validateAndStampCustomFields(
+    org_id, payload.client_id ?? null, 'lead', payload.custom_fields,
+  );
+
   const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload, user_id));
   // Unified scorer — branches B2B/B2C correctly, no zero-padding of
   // off-profile signals in the breakdown. Engagement is skipped on
@@ -361,6 +369,18 @@ export async function getLead(org_id: string, id: string) {
 
 export async function updateLead(org_id: string, id: string, payload: Partial<Lead>, user_id?: string) {
   const before = await getLead(org_id, id);
+
+  // Same coercion/validation pass as createLead. Skipped when the PATCH
+  // doesn't touch custom_fields at all (no defs lookup needed). Merges
+  // the incoming blob into the existing one so formula stamping has
+  // every column it might reference, then writes back the merged result.
+  if (payload.custom_fields !== undefined) {
+    const beforeCf = (asRow(before).custom_fields as Record<string, unknown> | null | undefined) ?? {};
+    const merged = { ...beforeCf, ...payload.custom_fields };
+    payload.custom_fields = await validateAndStampCustomFields(
+      org_id, (before as { client_id?: string | null }).client_id ?? null, 'lead', merged,
+    );
+  }
 
   const DISQUALIFIED_STATES: LeadStatus[] = ['unqualified', 'lost'];
   const nowIso = new Date().toISOString();

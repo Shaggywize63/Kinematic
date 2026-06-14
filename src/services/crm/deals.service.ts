@@ -3,6 +3,7 @@
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
+import { validateAndStampCustomFields } from './customFields.service';
 import type { Deal } from '../../types/crm.types';
 
 export async function listDeals(
@@ -179,6 +180,10 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     }
   }
 
+  const cleanedCustomFields = await validateAndStampCustomFields(
+    org_id, payload.client_id ?? null, 'deal', payload.custom_fields,
+  );
+
   const insertRow = {
     org_id,
     client_id: payload.client_id ?? null,
@@ -195,7 +200,7 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     source_id: payload.source_id ?? null,
     next_step: payload.next_step ?? null,
     tags: payload.tags ?? [],
-    custom_fields: payload.custom_fields ?? {},
+    custom_fields: cleanedCustomFields,
     created_by: user_id ?? null,
   };
   const { data, error } = await supabaseAdmin.from('crm_deals').insert(insertRow).select('*').single();
@@ -209,6 +214,16 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
 
 export async function updateDeal(org_id: string, id: string, payload: Partial<Deal>, user_id?: string) {
   const before = await getDeal(org_id, id);
+  // Per-type validate + stamp formulas. Merging the incoming patch on top
+  // of the existing blob means a formula referencing fields the rep didn't
+  // touch in this PATCH still recomputes against current state.
+  if (payload.custom_fields !== undefined) {
+    const beforeCf = ((before as Deal & { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {});
+    const merged = { ...beforeCf, ...payload.custom_fields };
+    payload.custom_fields = await validateAndStampCustomFields(
+      org_id, (before as { client_id?: string | null }).client_id ?? null, 'deal', merged,
+    );
+  }
   const update = { ...payload, updated_by: user_id ?? null };
   const { data, error } = await supabaseAdmin.from('crm_deals').update(update)
     .eq('org_id', org_id).eq('id', id).select('*').single();
