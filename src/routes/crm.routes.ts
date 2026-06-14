@@ -1760,7 +1760,7 @@ peopleDir.get('/', wrap(async (req, res) => {
     'people_directory', orgId(req), scope.id, req.query,
     {
       defaultSort: { column: 'created_at', ascending: false },
-      searchColumns: ['first_name', 'last_name', 'mobile', 'email'],
+      searchColumns: ['first_name', 'last_name', 'mobile', 'email', 'code'],
       strictClient: true,
     },
   ));
@@ -1799,6 +1799,7 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     const address    = row.address?.trim()    || null;
     const personType = row.type?.trim()       || null;
     const city       = row.city?.trim()       || null;
+    const code       = row.code?.trim()       || null;
     if (!first_name && !last_name && !mobile && !email) { skipped++; continue; }
 
     // Look up an existing row by mobile then email — both are
@@ -1820,7 +1821,7 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     if (existingId) {
       if (body.on_duplicate === 'skip') { skipped++; continue; }
       await supabaseAdmin.from('people_directory').update({
-        first_name, last_name, mobile, email, address, type: personType, city,
+        first_name, last_name, mobile, email, address, type: personType, city, code,
         updated_at: new Date().toISOString(),
         updated_by: userId(req) ?? null,
       }).eq('id', existingId);
@@ -1828,7 +1829,7 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     } else {
       await supabaseAdmin.from('people_directory').insert({
         org_id, client_id: cid,
-        first_name, last_name, mobile, email, address, type: personType, city,
+        first_name, last_name, mobile, email, address, type: personType, city, code,
         created_by: userId(req) ?? null,
       });
       added++;
@@ -1845,7 +1846,7 @@ peopleDir.get('/export', wrap(async (req, res) => {
   const scope = clientScope(req);
   const rows = await crud.clientScopedList('people_directory', orgId(req), scope.id, req.query, {
     defaultSort: { column: 'created_at', ascending: false },
-    searchColumns: ['first_name', 'last_name', 'mobile', 'email', 'type', 'city'],
+    searchColumns: ['first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'code'],
     strictClient: true,
   }) as Array<Record<string, unknown>>;
   const esc = (v: unknown): string => {
@@ -1853,7 +1854,7 @@ peopleDir.get('/export', wrap(async (req, res) => {
     const s = String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const header = ['first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'address', 'created_at'];
+  const header = ['first_name', 'last_name', 'mobile', 'email', 'code', 'type', 'city', 'address', 'created_at'];
   const body = rows.map((r) => header.map((k) => esc(r[k])).join(',')).join('\n');
   const csv = `${header.join(',')}\n${body}\n`;
   const filename = `people-directory-${new Date().toISOString().slice(0, 10)}.csv`;
