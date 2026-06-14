@@ -334,6 +334,11 @@ export interface DashboardSummary {
   pipeline_velocity: number;
   activities_7d: number;
   conversion_rate: number;
+  /** Total ₹ of `custom_fields.estimated_amount` across the rep's
+   *  leads in scope. Surfaced as the Champion "Total Estimates Raised"
+   *  tile — captures the upstream pipeline they sourced even before
+   *  any of those leads convert to a deal. */
+  estimates_raised: number;
   by_stage: Array<{ stage: string; count: number; value: number }>;
   by_owner: Array<{ owner: string; count: number; value: number }>;
 }

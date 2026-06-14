@@ -188,6 +188,12 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     { data: pipelineRows },
     { data: closedInWindow },
     { count: activities7d },
+    // Sum of the rep's lead-side estimates — Champions surface this as
+    // the "Total Estimates Raised" tile. Pulls only the custom_fields
+    // jsonb so we can extract `estimated_amount` (or, falling back,
+    // sum product_lines[*].estimated_amount when the basket total
+    // wasn't cached on the lead).
+    { data: estimateRows },
   ] = await Promise.all([
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null), scope), client_id),
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), scope), client_id),
@@ -206,7 +212,35 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     ),
     withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), scope), client_id),
     withClient(applyActivityScope(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), scope), client_id),
+    withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('custom_fields').eq('org_id', org_id).is('deleted_at', null), scope), client_id),
   ]);
+
+  // Aggregate per-lead estimated_amount. Prefer the cached scalar the
+  // create / convert paths stamp onto custom_fields.estimated_amount;
+  // fall back to summing the rich product_lines basket when the cache
+  // is missing (older leads / out-of-band edits). Money values come
+  // back as either numbers or numeric strings depending on the path
+  // that wrote them, so both are coerced.
+  let estimates_raised = 0;
+  for (const row of (estimateRows ?? []) as Array<{ custom_fields?: Record<string, unknown> | null }>) {
+    const cf = row.custom_fields ?? {};
+    const cached = typeof cf.estimated_amount === 'number'
+      ? cf.estimated_amount
+      : typeof cf.estimated_amount === 'string'
+        ? Number(cf.estimated_amount) || 0
+        : 0;
+    if (cached > 0) { estimates_raised += cached; continue; }
+    const lines = Array.isArray(cf.product_lines) ? (cf.product_lines as Array<Record<string, unknown>>) : [];
+    for (const l of lines) {
+      const ea = typeof l.estimated_amount === 'number'
+        ? l.estimated_amount
+        : typeof l.estimated_amount === 'string'
+          ? Number(l.estimated_amount) || 0
+          : 0;
+      if (ea > 0) estimates_raised += ea;
+    }
+  }
+  estimates_raised = Math.round(estimates_raised);
 
   // Aggregate live open-pipeline rows. Each row is one deal. In weight mode
   // the "value" carried in every aggregation is kg derived from line items
@@ -276,6 +310,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     pipeline_velocity,
     activities_7d: activities7d ?? 0,
     conversion_rate,
+    estimates_raised,
     by_stage,
     by_owner,
   };

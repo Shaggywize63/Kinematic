@@ -75,7 +75,13 @@ export const leadCreateSchema = z.object({
   // edit.
   last_name: z.string().min(1, 'Last name is required').max(120),
   email: z.string().email().optional().nullable(),
-  phone: z.string().max(40).optional().nullable(),
+  // Indian mobile — exactly 10 digits. Tightened from the prior
+  // free-form max(40) because reps were pasting in country codes /
+  // spaces and the resulting strings didn't roll up cleanly into
+  // city / source / dedup reports. Optional / nullable preserved so
+  // PATCHes that don't touch phone still work; an explicit empty
+  // string is coerced to null upstream in the service.
+  phone: z.string().regex(/^\d{10}$/, 'Mobile number must be 10 digits').optional().nullable(),
   company: z.string().max(200).optional().nullable(),
   title: z.string().max(120).optional().nullable(),
   source_id: optionalUuid,
