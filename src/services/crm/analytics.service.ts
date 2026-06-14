@@ -194,6 +194,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     // sum product_lines[*].estimated_amount when the basket total
     // wasn't cached on the lead).
     { data: estimateRows },
+    { data: estimateDealRows },
   ] = await Promise.all([
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null), scope), client_id),
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), scope), client_id),
@@ -213,6 +214,11 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), scope), client_id),
     withClient(applyActivityScope(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), scope), client_id),
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('custom_fields').eq('org_id', org_id).is('deleted_at', null), scope), client_id),
+    // Every deal the rep has touched — open / won / lost. Used by the
+    // Champion "Total Estimates Raised" tile so the headline ₹ figure
+    // reflects what's in the pipeline today, not just the handful of
+    // leads that happen to have a cached estimated_amount.
+    withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select('amount, lead_id').eq('org_id', org_id).is('deleted_at', null), scope), client_id),
   ]);
 
   // Aggregate per-lead estimated_amount. Prefer the cached scalar the
@@ -239,6 +245,18 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
           : 0;
       if (ea > 0) estimates_raised += ea;
     }
+  }
+  // Plus every ₹ the rep has committed to a deal (open / won / lost).
+  // Deals are where the firmed-up numbers live for reps who skipped
+  // the product_lines basket on the lead form, so without this the
+  // Champion tile read close to ₹0 even for active pipelines.
+  for (const d of (estimateDealRows ?? []) as Array<{ amount?: number | string | null }>) {
+    const amt = typeof d.amount === 'number'
+      ? d.amount
+      : typeof d.amount === 'string'
+        ? Number(d.amount) || 0
+        : 0;
+    if (amt > 0) estimates_raised += amt;
   }
   estimates_raised = Math.round(estimates_raised);
 
