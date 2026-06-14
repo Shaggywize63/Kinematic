@@ -1683,7 +1683,20 @@ states.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_states', orgId(req), req.params.id, parse(v.stateSchema.partial(), req.body), userId(req)))));
 states.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_states', orgId(req), req.params.id); res.status(204).end(); }));
 states.get('/:id/cities', wrap(async (req, res) => res.json(
-  await crud.list('crm_cities', orgId(req), { state_id: req.params.id, ...req.query }, { softDelete: false, defaultSort: { column: 'name', ascending: true } })
+  await crud.clientScopedList(
+    'crm_cities',
+    orgId(req),
+    clientScope(req).id,
+    { state_id: req.params.id, ...req.query },
+    {
+      softDelete: false,
+      defaultSort: { column: 'name', ascending: true },
+      // Same per-client gate as the /cities root route so the
+      // LocationPicker on the lead form shows only the active
+      // tenant's cities.
+      strictClient: true,
+    },
+  )
 )));
 states.post('/seed-indian', wrap(async (req, res) => {
   const { data, error } = await supabaseAdmin.rpc('crm_seed_indian_locations', { p_org_id: orgId(req) });
@@ -1694,10 +1707,30 @@ router.use('/states', states);
 
 const cities = express.Router();
 cities.get('/', wrap(async (req, res) => res.json(
-  await crud.list('crm_cities', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name'] })
+  await crud.clientScopedList('crm_cities', orgId(req), clientScope(req).id, req.query, {
+    softDelete: false,
+    defaultSort: { column: 'name', ascending: true },
+    searchColumns: ['name'],
+    // Strict per-client scoping — Tata Tiscon reps must only see the
+    // cities seeded for their client; without this the People
+    // Directory dropdown (and every other city consumer) was
+    // showing the org-wide superset and Tiscon's rollups broke
+    // whenever a rep picked a city that wasn't in their allow-list.
+    strictClient: true,
+  })
 )));
-cities.post('/', wrap(async (req, res) =>
-  res.status(201).json(await crud.create('crm_cities', orgId(req), parse(v.citySchema, req.body), userId(req)))));
+cities.post('/', wrap(async (req, res) => {
+  // Stamp the active client onto every new city so the list endpoints'
+  // strictClient gate sees them. Without this, cities added under a
+  // selected client landed with client_id = NULL and never came back
+  // out of the People Directory dropdown (which strict-scopes on the
+  // same column).
+  const parsed = parse(v.citySchema, req.body);
+  const cid = clientScope(req).id;
+  const payload: Record<string, unknown> = { ...parsed };
+  if (cid && payload.client_id == null) payload.client_id = cid;
+  res.status(201).json(await crud.create('crm_cities', orgId(req), payload, userId(req)));
+}));
 cities.patch('/:id', wrap(async (req, res) =>
   res.json(await crud.update('crm_cities', orgId(req), req.params.id, parse(v.citySchema.partial(), req.body), userId(req)))));
 cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
