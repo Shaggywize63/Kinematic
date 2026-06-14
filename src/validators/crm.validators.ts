@@ -659,6 +659,10 @@ export const peopleDirectoryBase = z.object({
   // the admin has seeded (no enum lock-in here).
   type:       z.string().max(80).optional().nullable(),
   city:       z.string().max(120).optional().nullable(),
+  // Tenant-supplied identifier (employee id, dealer code, etc.). Free-form
+  // text; tenants like Tata Tiscon need it on every person to roll up
+  // their reports. Indexed per (org, client, code) for lookup speed.
+  code:       z.string().max(80).optional().nullable(),
 });
 export const peopleDirectorySchema = peopleDirectoryBase.refine(
   (p) => Boolean(p.first_name?.trim() || p.last_name?.trim() || p.mobile?.trim() || p.email?.trim()),
@@ -678,6 +682,7 @@ export const peopleDirectoryBulkImportSchema = z.object({
     address:    z.string().max(1000).optional().nullable(),
     type:       z.string().max(80).optional().nullable(),
     city:       z.string().max(120).optional().nullable(),
+    code:       z.string().max(80).optional().nullable(),
   })).min(1).max(5000),
   on_duplicate: z.enum(['skip', 'update']).default('skip'),
 });
