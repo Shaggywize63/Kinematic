@@ -675,10 +675,6 @@ export const peopleDirectorySchema = peopleDirectoryBase.refine(
 // display "added X, updated Y, skipped Z".
 export const peopleDirectoryBulkImportSchema = z.object({
   rows: z.array(z.object({
-    // Optional UUID lets admins update a specific row by id (vs the
-    // default mobile/email dedup). Useful for round-tripping the CSV
-    // export — re-importing the same file then PATCHes each row.
-    id:         z.string().uuid().optional().nullable(),
     first_name: z.string().max(120).optional().nullable(),
     last_name:  z.string().max(120).optional().nullable(),
     mobile:     z.string().max(40).optional().nullable(),
@@ -686,6 +682,8 @@ export const peopleDirectoryBulkImportSchema = z.object({
     address:    z.string().max(1000).optional().nullable(),
     type:       z.string().max(80).optional().nullable(),
     city:       z.string().max(120).optional().nullable(),
+    // CSV import sends this as the user-facing "id" column; the
+    // mapper renames it to `code` before POSTing here.
     code:       z.string().max(80).optional().nullable(),
   })).min(1).max(5000),
   on_duplicate: z.enum(['skip', 'update']).default('skip'),

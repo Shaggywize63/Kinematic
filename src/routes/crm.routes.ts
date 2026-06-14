@@ -1825,7 +1825,6 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
   const org_id = orgId(req);
   let added = 0, updated = 0, skipped = 0;
   for (const row of body.rows) {
-    const id         = row.id?.trim()         || null;
     const first_name = row.first_name?.trim() || null;
     const last_name  = row.last_name?.trim()  || null;
     const mobile     = row.mobile?.trim()     || null;
@@ -1833,17 +1832,18 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     const address    = row.address?.trim()    || null;
     const personType = row.type?.trim()       || null;
     const city       = row.city?.trim()       || null;
+    // CSV `id` column lands here as `code` server-side — see
+    // the dashboard's import mapper.
     const code       = row.code?.trim()       || null;
     if (!first_name && !last_name && !mobile && !email) { skipped++; continue; }
 
-    // Look up an existing row — if the CSV row carries an id (e.g. a
-    // re-imported export) match on that first; otherwise fall back to
-    // the mobile/email dedup. Both id + mobile + email are
-    // independently indexed so the probe stays O(log n).
+    // Dedup: match on the user-facing ID (`code`) when present, then
+    // fall back to mobile / email. All three are independently
+    // indexed so the probe stays O(log n).
     let existingId: string | null = null;
-    if (id) {
+    if (code) {
       const r = await supabaseAdmin.from('people_directory').select('id')
-        .eq('org_id', org_id).eq('client_id', cid).eq('id', id)
+        .eq('org_id', org_id).eq('client_id', cid).eq('code', code)
         .is('deleted_at', null).limit(1).maybeSingle();
       existingId = (r.data?.id as string) ?? null;
     }
@@ -1896,11 +1896,13 @@ peopleDir.get('/export', wrap(async (req, res) => {
     const s = String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  // `id` leads so re-imported exports update the same row instead of
-  // creating duplicates via the mobile/email dedup path. Bulk-import
-  // matches on id first when present.
-  const header = ['id', 'first_name', 'last_name', 'mobile', 'email', 'code', 'type', 'city', 'address', 'created_at'];
-  const body = rows.map((r) => header.map((k) => esc(r[k])).join(',')).join('\n');
+  // Map the user-facing "id" header to the `code` column (tenant-
+  // supplied employee / dealer identifier). The system UUID isn't
+  // surfaced — reps work in their own ID space, and bulk-import
+  // dedups on this column.
+  const header = ['id', 'first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'address', 'created_at'];
+  const colFor = (k: string) => (k === 'id' ? 'code' : k);
+  const body = rows.map((r) => header.map((k) => esc(r[colFor(k)])).join(',')).join('\n');
   const csv = `${header.join(',')}\n${body}\n`;
   const filename = `people-directory-${new Date().toISOString().slice(0, 10)}.csv`;
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
