@@ -675,6 +675,10 @@ export const peopleDirectorySchema = peopleDirectoryBase.refine(
 // display "added X, updated Y, skipped Z".
 export const peopleDirectoryBulkImportSchema = z.object({
   rows: z.array(z.object({
+    // Optional UUID lets admins update a specific row by id (vs the
+    // default mobile/email dedup). Useful for round-tripping the CSV
+    // export — re-importing the same file then PATCHes each row.
+    id:         z.string().uuid().optional().nullable(),
     first_name: z.string().max(120).optional().nullable(),
     last_name:  z.string().max(120).optional().nullable(),
     mobile:     z.string().max(40).optional().nullable(),

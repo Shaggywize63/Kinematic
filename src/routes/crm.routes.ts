@@ -1825,6 +1825,7 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
   const org_id = orgId(req);
   let added = 0, updated = 0, skipped = 0;
   for (const row of body.rows) {
+    const id         = row.id?.trim()         || null;
     const first_name = row.first_name?.trim() || null;
     const last_name  = row.last_name?.trim()  || null;
     const mobile     = row.mobile?.trim()     || null;
@@ -1835,10 +1836,18 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
     const code       = row.code?.trim()       || null;
     if (!first_name && !last_name && !mobile && !email) { skipped++; continue; }
 
-    // Look up an existing row by mobile then email — both are
+    // Look up an existing row — if the CSV row carries an id (e.g. a
+    // re-imported export) match on that first; otherwise fall back to
+    // the mobile/email dedup. Both id + mobile + email are
     // independently indexed so the probe stays O(log n).
     let existingId: string | null = null;
-    if (mobile) {
+    if (id) {
+      const r = await supabaseAdmin.from('people_directory').select('id')
+        .eq('org_id', org_id).eq('client_id', cid).eq('id', id)
+        .is('deleted_at', null).limit(1).maybeSingle();
+      existingId = (r.data?.id as string) ?? null;
+    }
+    if (!existingId && mobile) {
       const r = await supabaseAdmin.from('people_directory').select('id')
         .eq('org_id', org_id).eq('client_id', cid).eq('mobile', mobile)
         .is('deleted_at', null).limit(1).maybeSingle();
@@ -1887,7 +1896,10 @@ peopleDir.get('/export', wrap(async (req, res) => {
     const s = String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const header = ['first_name', 'last_name', 'mobile', 'email', 'code', 'type', 'city', 'address', 'created_at'];
+  // `id` leads so re-imported exports update the same row instead of
+  // creating duplicates via the mobile/email dedup path. Bulk-import
+  // matches on id first when present.
+  const header = ['id', 'first_name', 'last_name', 'mobile', 'email', 'code', 'type', 'city', 'address', 'created_at'];
   const body = rows.map((r) => header.map((k) => esc(r[k])).join(',')).join('\n');
   const csv = `${header.join(',')}\n${body}\n`;
   const filename = `people-directory-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -1999,6 +2011,23 @@ router.get('/lookup/search', wrap(async (req, res) => {
   // filter for uncurated tables to avoid PostgREST 4xx-ing on a missing
   // column.
   if (meta && scope.id) query = query.eq('client_id', scope.id);
+  // Per-user city gate for the people_directory lookup target.
+  // Consumer Champions from Dhanbad should only see Engineers /
+  // Architects / Dealers from Dhanbad — not the org-wide roster.
+  // Honours the same effective-cities resolution the leads list uses
+  // (role's assigned_cities ∩ user's assigned_city_names), so a tier
+  // that already lacks a city restriction (admins, super_admins) sees
+  // everyone.
+  if (target === 'people_directory') {
+    const cities = rbac.getEffectiveCityNames((req as AuthRequest).user);
+    if (cities !== null && cities.length > 0) {
+      query = query.in('city', cities);
+    } else if (cities !== null && cities.length === 0) {
+      // Defined but empty → the user has no cities; surface nothing
+      // rather than the whole roster.
+      return res.json({ success: true, data: [] });
+    }
+  }
   if (q && meta) {
     const sanitized = q.replace(/[%,]/g, ' ').slice(0, 80);
     const orExpr = meta.search.map((c) => `${c}.ilike.%${sanitized}%`).join(',');
