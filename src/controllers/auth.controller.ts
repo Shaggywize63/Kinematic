@@ -408,7 +408,7 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
   // Users without a role fall back to the legacy per-user permission list — this
   // keeps existing admin accounts (no granular role) behaving as before.
   const orgRole = (data as any)?.org_role as
-    | { permissions?: string[]; permissions_write?: string[] }
+    | { permissions?: string[]; permissions_write?: string[]; name?: string; data_scope?: string }
     | null
     | undefined;
   const hasRole = !!(data as any)?.org_role_id && Array.isArray(orgRole?.permissions);
@@ -428,6 +428,15 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     ...data,
     permissions,
     permissions_write,
+    // Flatten the joined org_role so mobile clients (which decode
+    // `org_role_name` / `org_role_data_scope` as flat keys) can read
+    // them without walking the nested object. Without these, the
+    // Champion gate on iOS / Android was always reading nil — so
+    // Lead Analytics + the full manager-tier Reports view leaked
+    // back into Consumer Champion sessions despite the role being
+    // set correctly server-side.
+    org_role_name: orgRole?.name ?? null,
+    org_role_data_scope: orgRole?.data_scope ?? null,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
     location_ping_interval_seconds: locationPingIntervalSeconds,
