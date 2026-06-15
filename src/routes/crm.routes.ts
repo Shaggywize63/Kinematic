@@ -12,6 +12,7 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { requireModule } from '../middleware/rbac';
 import * as rbac from '../middleware/rbac';
 import { AppError } from '../utils';
+import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
 
@@ -1785,15 +1786,35 @@ attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDel
 // CRM Admin and above own this surface.
 const peopleDir = express.Router();
 peopleDir.get('/', wrap(async (req, res) => {
+  // People Directory is a per-tenant roster (engineers, dealers,
+  // architects, etc.) — the whole point of the screen is "see every
+  // person we have on file". Crud.clientScopedList caps page size at
+  // 200, which clipped Tata-Tiscon-style rosters that already have
+  // 800+ entries. Issue the query directly so the cap doesn't apply;
+  // the table is small (single client, no joins) so an un-paged read
+  // is fine.
   const scope = clientScope(req);
-  res.json(await crud.clientScopedList(
-    'people_directory', orgId(req), scope.id, req.query,
-    {
-      defaultSort: { column: 'created_at', ascending: false },
-      searchColumns: ['first_name', 'last_name', 'mobile', 'email', 'code'],
-      strictClient: true,
-    },
-  ));
+  let q = supabaseAdmin.from('people_directory').select('*')
+    .eq('org_id', orgId(req)).is('deleted_at', null);
+  if (scope.id) q = q.eq('client_id', scope.id);
+  // Forward the same filters the existing crud helper honoured
+  // (?type=, ?city=) so the list view's chip filters keep narrowing
+  // server-side rather than pulling everything and filtering on the
+  // client.
+  if (typeof req.query.type === 'string' && req.query.type) q = q.eq('type', req.query.type);
+  if (typeof req.query.city === 'string' && req.query.city) q = q.eq('city', req.query.city);
+  if (typeof req.query.q === 'string' && req.query.q.trim()) {
+    const s = sanitisePostgrestSearch(req.query.q.trim());
+    if (s) {
+      const orExpr = ['first_name', 'last_name', 'mobile', 'email', 'code']
+        .map((c) => `${c}.ilike.%${s}%`).join(',');
+      q = q.or(orExpr);
+    }
+  }
+  q = q.order('created_at', { ascending: false });
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.json({ success: true, data: data ?? [], total: (data ?? []).length });
 }));
 // CSV export must be declared BEFORE peopleDir.get('/:id', …) — Express
 // matches in registration order, so /export was being captured as the
