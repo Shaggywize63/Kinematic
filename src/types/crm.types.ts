@@ -341,6 +341,10 @@ export interface DashboardSummary {
   estimates_raised: number;
   by_stage: Array<{ stage: string; count: number; value: number }>;
   by_owner: Array<{ owner: string; count: number; value: number }>;
+  /** Leads grouped by acquisition source — drives the "Leads by Source"
+   *  chart on the dashboard. Shape matches `by_stage` so the FunnelChart
+   *  component can render either without a code branch. */
+  by_source: Array<{ source: string; stage: string; name: string; count: number; value: number }>;
 }
 
 export interface KiniContext {

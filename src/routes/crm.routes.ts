@@ -552,32 +552,18 @@ leads.post('/', wrap(async (req, res) => {
   await enforceLeadRequiredFields(orgId(req), payload.client_id ?? null, payload as Record<string, unknown>, 'create');
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
 
-  // Spawn the site-visit activity. Best-effort — failures here don't
-  // fail the lead create (the rep still gets the lead back in the 201).
-  if (autoLogSiteVisit && lead?.id) {
-    try {
-      const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
-      const subject = buildSiteVisitSubject(lead);
-      await supabaseAdmin.from('crm_activities').insert({
-        org_id: orgId(req),
-        client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
-        type: 'site_visit',
-        subject,
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-        lead_id: lead.id,
-        owner_id: userId(req),
-        assigned_to: userId(req),
-        // Propagate the lead's photo onto the activity so the FE's
-        // site-visit evidence is visible from the Activities timeline
-        // without the rep having to upload the same image twice.
-        image_url: photoUrl,
-        created_by: userId(req),
-      });
-    } catch { /* non-fatal — the lead create itself succeeded */ }
-  }
+  // Auto-log site visit: the previous version inserted a completed
+  // site_visit activity behind the rep's back. The user asked us to
+  // back that out — they want to land on the activity create screen
+  // with the fields pre-selected (Meeting / Site Visit) so the rep can
+  // attach notes / outcome before saving. Now the backend just echoes
+  // the flag back in the response so the mobile / web client knows to
+  // open the compose screen pre-filled.
+  const autoLogResponse = autoLogSiteVisit && lead?.id
+    ? { auto_log_site_visit_prefill: { lead_id: lead.id, subject: buildSiteVisitSubject(lead), type: 'meeting' } }
+    : {};
 
-  res.status(201).json(await stampSourceName(await stampOwnerName(lead)));
+  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse });
 }));
 // CSV export — same filters as the list endpoint (status, owner, source,
 // state/city/district/block, score_gte, q, from, to, etc.) but caps at
@@ -808,26 +794,13 @@ leads.patch('/:id', wrap(async (req, res) => {
   // partial update that doesn't touch a required field stays valid.
   await enforceLeadRequiredFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>, 'update');
   const lead = await leadsSvc.updateLead(orgId(req), req.params.id, rest, userId(req));
-  if (autoLogSiteVisit && lead?.id) {
-    try {
-      const photoUrl = (lead as { photo_url?: string | null }).photo_url ?? null;
-      const subject = buildSiteVisitSubject(lead);
-      await supabaseAdmin.from('crm_activities').insert({
-        org_id: orgId(req),
-        client_id: (lead as { client_id?: string | null }).client_id ?? clientId(req) ?? null,
-        type: 'site_visit',
-        subject,
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-        lead_id: lead.id,
-        owner_id: userId(req),
-        assigned_to: userId(req),
-        image_url: photoUrl,
-        created_by: userId(req),
-      });
-    } catch { /* non-fatal — the lead update itself succeeded */ }
-  }
-  res.json(await stampSourceName(await stampOwnerName(lead)));
+  // Same revert as the leads.post handler: don't auto-insert the
+  // activity. Echo a prefill block back so the client can open the
+  // compose screen with the lead + suggested subject pre-selected.
+  const autoLogResponse = autoLogSiteVisit && lead?.id
+    ? { auto_log_site_visit_prefill: { lead_id: lead.id, subject: buildSiteVisitSubject(lead), type: 'meeting' } }
+    : {};
+  res.json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse });
 }));
 leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(req), req.params.id); res.status(204).end(); }));
 leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
@@ -2175,6 +2148,47 @@ peopleDirTypes.delete('/:id', wrap(async (req, res) => {
   res.status(204).end();
 }));
 router.use('/people-directory-types', rbac.requireModuleAccess('crm_settings'), peopleDirTypes);
+
+// Activity-subject catalogue — admin-managed list of activity subject
+// presets surfaced as a dropdown on the activity compose screen.
+// Meeting is the first option (position 0) so the picker opens to it
+// by default. Per (org, client) so each tenant can curate its own list;
+// tenant-less seeds are shared across the org.
+const activitySubjects = express.Router();
+activitySubjects.get('/', wrap(async (req, res) => {
+  // Permissive scope here (NULL client_id rows are visible to every
+  // tenant) so seed subjects show up before an admin has curated their
+  // own. Once they add tenant-specific entries those naturally sort
+  // alongside the shared ones via position.
+  res.json(await crud.clientScopedList(
+    'crm_activity_subjects', orgId(req), clientScope(req).id, req.query,
+    { defaultSort: { column: 'position', ascending: true }, searchColumns: ['name'] },
+  ));
+}));
+activitySubjects.post('/', wrap(async (req, res) => {
+  const parsed = parse(v.activitySubjectSchema, req.body);
+  const cid = clientId(req);
+  // Default position = current max + 1 so new entries land at the
+  // end of the dropdown, never displacing the Meeting default.
+  const { data: maxRow } = await supabaseAdmin.from('crm_activity_subjects')
+    .select('position').eq('org_id', orgId(req)).order('position', { ascending: false }).limit(1).maybeSingle();
+  const nextPos = ((maxRow?.position as number | undefined) ?? -1) + 1;
+  const payload = { ...parsed, client_id: cid ?? null, position: parsed.position ?? nextPos };
+  res.status(201).json(await crud.create('crm_activity_subjects', orgId(req), payload, userId(req)));
+}));
+activitySubjects.patch('/:id', wrap(async (req, res) =>
+  res.json(await crud.update('crm_activity_subjects', orgId(req), req.params.id, parse(v.activitySubjectSchema.partial(), req.body), userId(req)))));
+activitySubjects.delete('/:id', wrap(async (req, res) => {
+  await crud.softDelete('crm_activity_subjects', orgId(req), req.params.id);
+  res.status(204).end();
+}));
+// GET is open to every CRM user so the picker shows on the compose
+// screen; mutating routes are gated to crm_settings (admins) so reps
+// can't add subjects ad-hoc.
+router.use('/activity-subjects', (req, res, next) => {
+  if (req.method === 'GET') return next();
+  return rbac.requireModuleAccess('crm_settings')(req, res, next);
+}, activitySubjects);
 
 // Generic lookup search — powers the "linked record" picker for the new
 // lookup custom-field type. Takes a target table (allowlisted on the FE
