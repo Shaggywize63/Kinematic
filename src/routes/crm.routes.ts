@@ -1689,10 +1689,11 @@ states.get('/:id/cities', wrap(async (req, res) => res.json(
     {
       softDelete: false,
       defaultSort: { column: 'name', ascending: true },
-      // Same per-client gate as the /cities root route so the
-      // LocationPicker on the lead form shows only the active
-      // tenant's cities.
-      strictClient: true,
+      // Permissive client scoping: NULL client_id = shared / org-wide
+      // reference data (cities are India-wide and used by every
+      // client's lead form). Per-client additions stay client-scoped.
+      // Without this, Kinematic's lead form came up empty after the
+      // Tata-Tiscon-only strict scope was applied.
     },
   )
 )));
@@ -1709,12 +1710,12 @@ cities.get('/', wrap(async (req, res) => res.json(
     softDelete: false,
     defaultSort: { column: 'name', ascending: true },
     searchColumns: ['name'],
-    // Strict per-client scoping — Tata Tiscon reps must only see the
-    // cities seeded for their client; without this the People
-    // Directory dropdown (and every other city consumer) was
-    // showing the org-wide superset and Tiscon's rollups broke
-    // whenever a rep picked a city that wasn't in their allow-list.
-    strictClient: true,
+    // Permissive: NULL client_id is shared org-wide reference data;
+    // per-client additions still narrow to that client. Strict
+    // scoping was a Tata-Tiscon-only requirement that emptied every
+    // other client's lead form. People Directory has its own
+    // per-tenant city allow-list (via crm_client_locations) for the
+    // narrower use case.
   })
 )));
 cities.post('/', wrap(async (req, res) => {
