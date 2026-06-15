@@ -202,23 +202,32 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     // Live query for open pipeline — the MV (crm_mv_pipeline_value) doesn't
     // track client_id, so reading it here would leak the org-wide totals into
     // any per-client dashboard.
+    // .range(0, 99999) lifts the row cap on deal queries that feed
+    // headline numbers; without it, open pipeline + closed-in-window
+    // both silently capped at 1000 deals.
     withClient(
       applyOwnerScope(supabaseAdmin.from('crm_deals')
         // Always join the weight view here (not just in weight mode) so the
         // Open Pipeline card can show total volume (kg) alongside value.
         .select(`amount, owner_id, custom_fields, crm_deal_stages!inner(name, stage_type)${weightJoin}`)
         .eq('org_id', org_id).is('deleted_at', null)
-        .eq('crm_deal_stages.stage_type', 'open'), scope),
+        .eq('crm_deal_stages.stage_type', 'open')
+        .range(0, 99999), scope),
       client_id,
     ),
-    withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate), scope), client_id),
+    withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate).range(0, 99999), scope), client_id),
     withClient(applyActivityScope(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), scope), client_id),
-    withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('custom_fields').eq('org_id', org_id).is('deleted_at', null), scope), client_id),
+    // .range(0, 99999) lifts PostgREST's default 1000-row cap so the
+    // estimates tile counts every lead. Tata has 1.5k leads; without
+    // the lift, ~500 were silently dropped. Real pagination would
+    // be needed beyond 100k single-tenant leads.
+    withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('custom_fields').eq('org_id', org_id).is('deleted_at', null).range(0, 99999), scope), client_id),
     // Every deal the rep has touched — open / won / lost. Used by the
     // Champion "Total Estimates Raised" tile so the headline ₹ figure
     // reflects what's in the pipeline today, not just the handful of
-    // leads that happen to have a cached estimated_amount.
-    withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select('amount, lead_id').eq('org_id', org_id).is('deleted_at', null), scope), client_id),
+    // leads that happen to have a cached estimated_amount. Same
+    // 100k-row lift as above.
+    withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select('amount, lead_id').eq('org_id', org_id).is('deleted_at', null).range(0, 99999), scope), client_id),
   ]);
 
   // Aggregate per-lead estimated_amount. Prefer the cached scalar the
@@ -338,11 +347,14 @@ export async function pipelineValue(org_id: string, pipeline_id?: string, client
   // Live query — the MV (crm_mv_pipeline_value) doesn't track client_id, so it
   // cannot be filtered per client. Aggregate from crm_deals directly.
   const lines = unit === 'weight' ? weightJoin : '';
+  // .range(0, 99999) lifts the 1000-row cap so pipeline value
+  // reflects every open deal, not just the first 1000.
   let q = supabaseAdmin.from('crm_deals')
     .select(`amount, pipeline_id, crm_deal_stages!inner(name, stage_type, position)${lines}`)
     .eq('org_id', org_id)
     .is('deleted_at', null)
-    .eq('crm_deal_stages.stage_type', 'open');
+    .eq('crm_deal_stages.stage_type', 'open')
+    .range(0, 99999);
   if (pipeline_id) q = q.eq('pipeline_id', pipeline_id);
   q = withClient(q, client_id);
   q = applyOwnerScope(q, scope);
@@ -389,9 +401,12 @@ export async function funnel(org_id: string, days = 30, range?: DateRange, clien
 export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', range?: DateRange, client_id: string | null = null, scope?: AnalyticsScope) {
   if (by === 'source') {
     // Live query — the MV (crm_mv_lead_source_roi) doesn't track client_id.
+    // .range(0, 99999) lifts PostgREST's 1000-row cap; without it
+    // win rate is wrong for any tenant with >1k leads.
     let lq = supabaseAdmin.from('crm_leads')
       .select('status, source_id, crm_lead_sources(name)')
-      .eq('org_id', org_id).is('deleted_at', null);
+      .eq('org_id', org_id).is('deleted_at', null)
+      .range(0, 99999);
     lq = withClient(lq, client_id);
     lq = applyLeadScope(lq, scope);
     const { data } = await lq;
@@ -408,9 +423,12 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
       rate: v.total > 0 ? v.won / v.total : 0,
     }));
   }
+  // .range(0, 99999) lifts the row cap so win-rate covers every deal,
+  // not just the first 1000 PostgREST would otherwise return.
   let q = supabaseAdmin.from('crm_deals')
     .select('amount, owner_id, stage_id, created_at, crm_deal_stages!inner(name, stage_type)')
-    .eq('org_id', org_id).is('deleted_at', null);
+    .eq('org_id', org_id).is('deleted_at', null)
+    .range(0, 99999);
   q = withClient(q, client_id);
   q = applyOwnerScope(q, scope);
   if (range?.from) q = q.gte('created_at', range.from);
@@ -509,9 +527,12 @@ export async function teamPerformance(
 
   // ── 1) All leads for the subtree (lifetime). We post-filter for
   //    period counts client-side to avoid 5 separate queries.
+  // .range(0, 99999) lifts the row cap so team-performance counts every
+  // lead/deal/activity, not just the first 1000.
   let leadQ = supabaseAdmin.from('crm_leads')
     .select('owner_id, status, created_at, score, converted_at')
-    .eq('org_id', org_id).is('deleted_at', null);
+    .eq('org_id', org_id).is('deleted_at', null)
+    .range(0, 99999);
   leadQ = withClient(leadQ, client_id);
   leadQ = applyLeadScope(leadQ, scope);
   const { data: leads } = await leadQ;
@@ -520,7 +541,8 @@ export async function teamPerformance(
   //    won/lost; lifetime for open pipeline.
   let dealQ = supabaseAdmin.from('crm_deals')
     .select('owner_id, amount, status, created_at, won_at, crm_deal_stages!inner(stage_type)')
-    .eq('org_id', org_id).is('deleted_at', null);
+    .eq('org_id', org_id).is('deleted_at', null)
+    .range(0, 99999);
   dealQ = withClient(dealQ, client_id);
   dealQ = applyOwnerScope(dealQ, scope);
   const { data: deals } = await dealQ;
@@ -528,7 +550,8 @@ export async function teamPerformance(
   // ── 3) Activities in window (period scoped if range, else lifetime).
   let actQ = supabaseAdmin.from('crm_activities')
     .select('owner_id, assigned_to, completed_at, activity_date, created_at')
-    .eq('org_id', org_id).is('deleted_at', null);
+    .eq('org_id', org_id).is('deleted_at', null)
+    .range(0, 99999);
   actQ = withClient(actQ, client_id);
   actQ = applyActivityScope(actQ, scope);
   if (rangeFrom) actQ = actQ.gte('created_at', rangeFrom);
@@ -793,9 +816,12 @@ export async function leadTracker(
 
   // Lifetime status / source / city aggregates need every lead; cap the
   // chart aggregations at the last N months for chart performance.
+  // .range(0, 99999) lifts the 1000-row PostgREST cap so the tracker
+  // counts every lead, not just the first 1000.
   let q = supabaseAdmin.from('crm_leads')
     .select('created_at, owner_id, status, source_id, city, crm_lead_sources(name)')
-    .eq('org_id', org_id).is('deleted_at', null);
+    .eq('org_id', org_id).is('deleted_at', null)
+    .range(0, 99999);
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
   const { data: leads } = await q;
@@ -1236,11 +1262,14 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
   const lines = unit === 'weight' ? weightJoin : '';
 
   // Open pipeline expected to close in horizon (probability-weighted vs total)
+  // .range(0, 99999) lifts the 1000-row cap so forecast covers
+  // every open / won deal, not just the first 1000.
   let openQ = supabaseAdmin.from('crm_deals')
     .select(`amount, probability, expected_close_date, crm_deal_stages!inner(probability, stage_type)${lines}`)
     .eq('org_id', org_id).is('deleted_at', null)
     .eq('crm_deal_stages.stage_type', 'open')
-    .lte('expected_close_date', cutoff).not('expected_close_date', 'is', null);
+    .lte('expected_close_date', cutoff).not('expected_close_date', 'is', null)
+    .range(0, 99999);
   openQ = withClient(openQ, client_id);
   openQ = applyOwnerScope(openQ, scope);
   if (fromCutoff) openQ = openQ.gte('expected_close_date', fromCutoff);
@@ -1251,7 +1280,8 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
     .eq('org_id', org_id).is('deleted_at', null)
     .eq('crm_deal_stages.stage_type', 'won')
     .not('actual_close_date', 'is', null)
-    .lte('actual_close_date', cutoff);
+    .lte('actual_close_date', cutoff)
+    .range(0, 99999);
   wonQ = withClient(wonQ, client_id);
   wonQ = applyOwnerScope(wonQ, scope);
   if (fromCutoff) wonQ = wonQ.gte('actual_close_date', fromCutoff);
@@ -1292,13 +1322,16 @@ export async function activityHeatmap(org_id: string, client_id: string | null =
   const since = new Date();
   since.setUTCHours(0, 0, 0, 0);
   since.setUTCDate(since.getUTCDate() - 30);
+  // .range(0, 99999) lifts the row cap so the heatmap reflects every
+  // activity in the window, not just the first 1000.
   const { data } = await withClient(
     supabaseAdmin
       .from('crm_activities')
       .select('created_at')
       .eq('org_id', org_id)
       .is('deleted_at', null)
-      .gte('created_at', since.toISOString()),
+      .gte('created_at', since.toISOString())
+      .range(0, 99999),
     client_id,
   );
 
@@ -1326,9 +1359,12 @@ export async function activityHeatmap(org_id: string, client_id: string | null =
 export async function leadSourceRoi(org_id: string, client_id: string | null = null) {
   // Live query — the MV (crm_mv_lead_source_roi) doesn't track client_id.
   // Pull leads + their source name + cost-per-lead and any converted-deal amount.
+  // .range(0, 99999) lifts the row cap so source ROI covers every
+  // lead, not just the first 1000.
   let lq = supabaseAdmin.from('crm_leads')
     .select('status, converted_deal_id, crm_lead_sources(name, cost_per_lead)')
-    .eq('org_id', org_id).is('deleted_at', null);
+    .eq('org_id', org_id).is('deleted_at', null)
+    .range(0, 99999);
   lq = withClient(lq, client_id);
   const { data: leads } = await lq;
   const dealIds = (leads ?? [])
@@ -1363,7 +1399,9 @@ export async function leadSourceRoi(org_id: string, client_id: string | null = n
 }
 
 export async function leadScoreDistribution(org_id: string, range?: DateRange, client_id: string | null = null, scope?: AnalyticsScope) {
-  let q = supabaseAdmin.from('crm_leads').select('score').eq('org_id', org_id).is('deleted_at', null);
+  // .range(0, 99999) lifts the row cap so the distribution covers
+  // every lead, not just the first 1000.
+  let q = supabaseAdmin.from('crm_leads').select('score').eq('org_id', org_id).is('deleted_at', null).range(0, 99999);
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('created_at', range.from);
