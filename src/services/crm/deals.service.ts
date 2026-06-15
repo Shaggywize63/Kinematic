@@ -225,6 +225,19 @@ export async function updateDeal(org_id: string, id: string, payload: Partial<De
     );
   }
   const update = { ...payload, updated_by: user_id ?? null };
+  // When the rep moves the deal into a won/lost stage, stamp
+  // actual_close_date so the salesCycle + forecast reports can read
+  // it. Without this every deal stayed null and both reports were
+  // permanently empty. winDeal()/loseDeal() already set this
+  // explicitly; this catches the case where the rep just dragged the
+  // card to a won/lost stage via moveStage / kanban.
+  if (payload.stage_id && payload.stage_id !== before.stage_id && !(update as Record<string, unknown>).actual_close_date) {
+    const { data: stage } = await supabaseAdmin.from('crm_deal_stages')
+      .select('stage_type').eq('id', payload.stage_id).maybeSingle();
+    if (stage?.stage_type === 'won' || stage?.stage_type === 'lost') {
+      (update as Record<string, unknown>).actual_close_date = new Date().toISOString().slice(0, 10);
+    }
+  }
   const { data, error } = await supabaseAdmin.from('crm_deals').update(update)
     .eq('org_id', org_id).eq('id', id).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
