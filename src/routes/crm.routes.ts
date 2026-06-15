@@ -2420,7 +2420,17 @@ settings.post('/seed-defaults', wrap(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   res.json({ ok: true });
 }));
-router.use('/settings', rbac.requireModuleAccess('crm_settings'), settings);
+// GET is open to every CRM user so the lead form on web + mobile can
+// fetch the per-tenant `field_overrides` map and hide / relabel
+// built-in fields. Without this, non-admin users (Champions, sub_admins
+// without crm_settings access) get a 403 on /settings and the form
+// renders every field with default labels — exactly the bug reps
+// reported. Mutating verbs stay gated to crm_settings so reps still
+// can't edit the catalogue.
+router.use('/settings', (req, res, next) => {
+  if (req.method === 'GET') return next();
+  return rbac.requireModuleAccess('crm_settings')(req, res, next);
+}, settings);
 
 // ---------- TARGETS (per-FE daily lead targets) ----------------------
 // Managers/admins set targets (per FE or "same for all"); every CRM user
