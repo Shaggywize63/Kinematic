@@ -1795,6 +1795,36 @@ peopleDir.get('/', wrap(async (req, res) => {
     },
   ));
 }));
+// CSV export must be declared BEFORE peopleDir.get('/:id', …) — Express
+// matches in registration order, so /export was being captured as the
+// generic :id handler and the dashboard's Export button returned the
+// row whose id literally equalled "export" (i.e. nothing). Same client
+// + soft-delete scope as the list endpoint, with the dashboard's
+// optional ?type=… / ?city=… filter forwarded through.
+peopleDir.get('/export', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const rows = await crud.clientScopedList('people_directory', orgId(req), scope.id, req.query, {
+    defaultSort: { column: 'created_at', ascending: false },
+    searchColumns: ['first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'code'],
+    strictClient: true,
+  }) as Array<Record<string, unknown>>;
+  const esc = (v: unknown): string => {
+    if (v == null) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  // The user-facing "id" header is the tenant-supplied `code` column.
+  // System UUIDs stay internal — reps work in their own ID space and
+  // bulk-import dedups on this column.
+  const header = ['id', 'first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'address', 'created_at'];
+  const colFor = (k: string) => (k === 'id' ? 'code' : k);
+  const body = rows.map((r) => header.map((k) => esc(r[colFor(k)])).join(',')).join('\n');
+  const csv = `${header.join(',')}\n${body}\n`;
+  const filename = `people-directory-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}));
 peopleDir.get('/:id', wrap(async (req, res) =>
   res.json(await crud.get('people_directory', orgId(req), req.params.id))));
 peopleDir.post('/', wrap(async (req, res) => {
@@ -1877,35 +1907,6 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
   res.json({ added, updated, skipped, total: body.rows.length });
 }));
 
-// CSV export — same client + soft-delete scope as the list endpoint, with
-// the dashboard's optional ?type=… / ?city=… filter forwarded through. The
-// generic list path applies any non-reserved query key as `.eq(...)`, so
-// the same filters the FE uses on the list page also narrow the export.
-peopleDir.get('/export', wrap(async (req, res) => {
-  const scope = clientScope(req);
-  const rows = await crud.clientScopedList('people_directory', orgId(req), scope.id, req.query, {
-    defaultSort: { column: 'created_at', ascending: false },
-    searchColumns: ['first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'code'],
-    strictClient: true,
-  }) as Array<Record<string, unknown>>;
-  const esc = (v: unknown): string => {
-    if (v == null) return '';
-    const s = String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  // Map the user-facing "id" header to the `code` column (tenant-
-  // supplied employee / dealer identifier). The system UUID isn't
-  // surfaced — reps work in their own ID space, and bulk-import
-  // dedups on this column.
-  const header = ['id', 'first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'address', 'created_at'];
-  const colFor = (k: string) => (k === 'id' ? 'code' : k);
-  const body = rows.map((r) => header.map((k) => esc(r[colFor(k)])).join(',')).join('\n');
-  const csv = `${header.join(',')}\n${body}\n`;
-  const filename = `people-directory-${new Date().toISOString().slice(0, 10)}.csv`;
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(csv);
-}));
 router.use('/people-directory', rbac.requireModuleAccess('crm_settings'), peopleDir);
 
 // People Directory Type catalogue — per (org, client) admin-managed list
