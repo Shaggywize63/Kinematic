@@ -509,7 +509,7 @@ export interface TeamPerformanceRow {
   open_pipeline_value: number;
   conversion_rate: number;           // won / (won + lost) — deals
   avg_deal_size: number;             // won_value / won_count
-  avg_sales_cycle_days: number;      // avg (won_at - created_at) for won deals
+  avg_sales_cycle_days: number;      // avg (actual_close_date - created_at) for won deals
   // ── Operational health
   avg_ageing_days: number;           // mean age of open leads (days)
   oldest_open_lead_days: number;     // max age of open leads (days)
@@ -563,7 +563,7 @@ export async function teamPerformance(
   // ── 2) All deals for the subtree (open + closed). Period-bound for
   //    won/lost; lifetime for open pipeline.
   let dealQ = supabaseAdmin.from('crm_deals')
-    .select('owner_id, amount, status, created_at, won_at, crm_deal_stages!inner(stage_type)')
+    .select('owner_id, amount, status, created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).is('deleted_at', null)
     .range(0, 99999);
   dealQ = withClient(dealQ, client_id);
@@ -632,7 +632,7 @@ export async function teamPerformance(
   // Deals.
   for (const d of (deals ?? []) as unknown as Array<{
     owner_id: string | null; amount: number | null; status: string | null;
-    created_at: string; won_at: string | null;
+    created_at: string; actual_close_date: string | null;
     crm_deal_stages: { stage_type: string };
   }>) {
     if (!d.owner_id || !byOwner.has(d.owner_id)) continue;
@@ -642,20 +642,20 @@ export async function teamPerformance(
     if (stageType === 'won') {
       // Period-bound when range is supplied; else lifetime.
       const matchesRange =
-        (!rangeFrom || (d.won_at ? new Date(d.won_at) >= new Date(rangeFrom) : false)) &&
-        (!rangeTo   || (d.won_at ? new Date(d.won_at) <= new Date(rangeTo)   : false));
+        (!rangeFrom || (d.actual_close_date ? new Date(d.actual_close_date) >= new Date(rangeFrom) : false)) &&
+        (!rangeTo   || (d.actual_close_date ? new Date(d.actual_close_date) <= new Date(rangeTo)   : false));
       if (rangeFrom || rangeTo) {
         if (matchesRange) {
           a.won_count += 1; a.won_value += amount;
-          if (d.won_at) {
-            const cycle = (new Date(d.won_at).getTime() - new Date(d.created_at).getTime()) / 86_400_000;
+          if (d.actual_close_date) {
+            const cycle = (new Date(d.actual_close_date).getTime() - new Date(d.created_at).getTime()) / 86_400_000;
             if (Number.isFinite(cycle) && cycle >= 0) { a.cycle_sum += cycle; a.cycle_n += 1; }
           }
         }
       } else {
         a.won_count += 1; a.won_value += amount;
-        if (d.won_at) {
-          const cycle = (new Date(d.won_at).getTime() - new Date(d.created_at).getTime()) / 86_400_000;
+        if (d.actual_close_date) {
+          const cycle = (new Date(d.actual_close_date).getTime() - new Date(d.created_at).getTime()) / 86_400_000;
           if (Number.isFinite(cycle) && cycle >= 0) { a.cycle_sum += cycle; a.cycle_n += 1; }
         }
       }
@@ -1051,7 +1051,7 @@ export async function teamDaily(
       .limit(2000),
     // Deals — open + won-on-day rollups.
     supabaseAdmin.from('crm_deals')
-      .select('owner_id, amount, status, won_at, crm_deal_stages!inner(stage_type)')
+      .select('owner_id, amount, status, actual_close_date, crm_deal_stages!inner(stage_type)')
       .eq('org_id', org_id).is('deleted_at', null)
       .in('owner_id', userIds),
     // Latest activity per rep (lifetime).
@@ -1113,7 +1113,7 @@ export async function teamDaily(
   const dealsByUser = new Map<string, { open: number; pipeline: number; won_today_count: number; won_today_value: number }>();
   for (const d of (dealsRes.data ?? []) as unknown as Array<{
     owner_id: string | null; amount: number | null; status: string | null;
-    won_at: string | null; crm_deal_stages: { stage_type: string };
+    actual_close_date: string | null; crm_deal_stages: { stage_type: string };
   }>) {
     if (!d.owner_id) continue;
     let r = dealsByUser.get(d.owner_id);
@@ -1123,7 +1123,7 @@ export async function teamDaily(
       r.open += 1;
       r.pipeline += Number(d.amount ?? 0);
     }
-    if (stage === 'won' && d.won_at && d.won_at >= dayStart && d.won_at <= dayEnd) {
+    if (stage === 'won' && d.actual_close_date && d.actual_close_date >= dayStart && d.actual_close_date <= dayEnd) {
       r.won_today_count += 1;
       r.won_today_value += Number(d.amount ?? 0);
     }
