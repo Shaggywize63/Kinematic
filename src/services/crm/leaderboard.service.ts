@@ -86,6 +86,8 @@ export async function leaderboard(
   // win_rate is a real ratio rather than an empty value. The join to
   // crm_deal_stages gives stage_type so we don't trust the deal.status alone
   // (older rows pre-status column).
+  // .range(0, 99999) lifts the 1000-row cap so leaderboard totals
+  // reflect every closed deal in the window, not just the first 1000.
   let q = supabaseAdmin.from('crm_deals')
     .select('owner_id, amount, status, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id)
@@ -93,7 +95,8 @@ export async function leaderboard(
     .not('actual_close_date', 'is', null)
     .gte('actual_close_date', from)
     .lte('actual_close_date', to)
-    .in('crm_deal_stages.stage_type', ['won', 'lost']);
+    .in('crm_deal_stages.stage_type', ['won', 'lost'])
+    .range(0, 99999);
   // Hard-isolate JWT-pinned client users; permissive OR-with-NULL for admin
   // pickers so they still see legacy org-level rows.
   if (scope.client_id) {

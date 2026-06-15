@@ -207,10 +207,13 @@ export async function targetsLeaderboard(
   };
 
   // 3. Leads created in the window, counted per author.
+  // .range(0, 99999) lifts the 1000-row cap so per-author counts
+  // reflect every lead in the window, not just the first 1000.
   const since = istPeriodStartUTC(period);
   let lq = supabaseAdmin.from('crm_leads')
     .select('created_by')
-    .eq('org_id', org_id).is('deleted_at', null).gte('created_at', since);
+    .eq('org_id', org_id).is('deleted_at', null).gte('created_at', since)
+    .range(0, 99999);
   if (client_id) lq = lq.eq('client_id', client_id);
   const { data: lData, error: lErr } = await lq;
   if (lErr) throw new AppError(500, lErr.message, 'DB_ERROR');
