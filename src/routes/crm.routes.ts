@@ -1365,7 +1365,7 @@ activities.get('/summary', wrap(async (req, res) => {
   };
   const head = () => supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true });
   const ZERO = { count: 0 };
-  const [total, overdue, upcoming, completed, openS, inProgressS, cancelledS, doneS] = await Promise.all([
+  const [total, overdue, upcoming, completed, undated, openS, inProgressS, cancelledS, doneS, unsetStatus] = await Promise.all([
     (async () => {
       const q = applyShared(head(), 'all');
       if (!q) return ZERO;
@@ -1388,6 +1388,15 @@ activities.get('/summary', wrap(async (req, res) => {
       const q = applyShared(head(), 'completed');
       if (!q) return ZERO;
       const r = await q.not('completed_at', 'is', null);
+      return { count: r.count ?? 0 };
+    })(),
+    // Undated — rows with no due_at AND no completed_at. Adding this
+    // to overdue + upcoming + completed makes the view axis a true
+    // partition that tallies to total.
+    (async () => {
+      const q = applyShared(head(), 'all');
+      if (!q) return ZERO;
+      const r = await q.is('due_at', null).is('completed_at', null);
       return { count: r.count ?? 0 };
     })(),
     // Status-axis counts use the same `all` scope so they roll up to
@@ -1418,6 +1427,15 @@ activities.get('/summary', wrap(async (req, res) => {
       const r = await q.in('status', ['completed', 'done']);
       return { count: r.count ?? 0 };
     })(),
+    // Unset status — NULL or any legacy value outside the canonical
+    // set. Adding to open + in_progress + cancelled + completed makes
+    // the status axis a true partition that tallies to total.
+    (async () => {
+      const q = applyShared(head(), 'all');
+      if (!q) return ZERO;
+      const r = await q.or('status.is.null,status.not.in.(open,in_progress,completed,done,cancelled)');
+      return { count: r.count ?? 0 };
+    })(),
   ]);
   res.json({
     success: true,
@@ -1429,13 +1447,20 @@ activities.get('/summary', wrap(async (req, res) => {
       overdue: overdue.count,
       upcoming: upcoming.count,
       completed: completed.count,
+      // Rows with neither due_at nor completed_at. Surfaced as its own
+      // tile + filter so reps can find activities with no date and
+      // backfill them.
+      undated: undated.count,
       // Status axis (status column directly — partition by status so
-      // open + in_progress + cancelled + completed_or_done = total).
+      // open + in_progress + cancelled + completed_or_done + unset = total).
       by_status: {
         open: openS.count,
         in_progress: inProgressS.count,
         cancelled: cancelledS.count,
         completed: doneS.count,
+        // NULL or legacy status — fed by the "Unset" tile so reps can
+        // find rows whose status was never set and fix them.
+        unset: unsetStatus.count,
       },
     },
   });
@@ -1516,7 +1541,16 @@ activities.get('/', wrap(async (req, res) => {
   // logging "Followup tomorrow" against a lead would then see nothing
   // in the activity list whenever the dashboard's date range picker
   // was set to anything but "All time".
-  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, ...listQuery } = req.query as Record<string, unknown>;
+  // `status=unset` is the dashboard's "Unset" status-tile filter — rows
+  // with no canonical status (NULL or a legacy value outside the
+  // standard set). Strip it from the generic listQuery so crud.list
+  // doesn't apply .eq('status','unset') (no row would match) and apply
+  // the OR filter below in extraFilters.
+  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, status: statusQ, ...listQuery } = req.query as Record<string, unknown>;
+  const statusUnset = statusQ === 'unset';
+  if (typeof statusQ === 'string' && statusQ && !statusUnset) {
+    (listQuery as Record<string, unknown>).status = statusQ;
+  }
   const from = typeof fromQ === 'string' && fromQ ? fromQ : null;
   const to = typeof toQ === 'string' && toQ ? toQ : null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1524,6 +1558,14 @@ activities.get('/', wrap(async (req, res) => {
     if (view === 'overdue')   q = q.not('due_at', 'is', null).lt('due_at', nowIso).is('completed_at', null);
     else if (view === 'upcoming')  q = q.not('due_at', 'is', null).gte('due_at', nowIso).is('completed_at', null);
     else if (view === 'completed') q = q.not('completed_at', 'is', null);
+    // Undated bucket — rows with no due_at AND no completed_at. These
+    // are typically notes / ad-hoc calls created without a date. They
+    // fall outside overdue/upcoming/completed and were the "missing"
+    // rows on the KPI tiles before this filter existed.
+    else if (view === 'undated')   q = q.is('due_at', null).is('completed_at', null);
+    if (statusUnset) {
+      q = q.or('status.is.null,status.not.in.(open,in_progress,completed,done,cancelled)');
+    }
     if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
     if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
     // View-aware date-range filter so planned activities don't vanish
@@ -1624,12 +1666,30 @@ activities.get('/export', wrap(async (req, res) => {
   // the single-column dateRangeColumn filter on completed_at would
   // hide every planned activity from the export the moment a range
   // is set, leaving the two surfaces out of sync.
-  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, ...exportQuery } = req.query as Record<string, unknown>;
+  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, status: statusExpQ, ...exportQuery } = req.query as Record<string, unknown>;
+  // Same status=unset handling as the list endpoint — strip it so
+  // crud.list doesn't .eq('status','unset') against PostgREST, and
+  // apply the OR predicate in ownerExtra below.
+  const statusUnsetExp = statusExpQ === 'unset';
+  if (typeof statusExpQ === 'string' && statusExpQ && !statusUnsetExp) {
+    (exportQuery as Record<string, unknown>).status = statusExpQ;
+  }
   const fromExp = typeof fromQ === 'string' && fromQ ? fromQ : null;
   const toExp = typeof toQ === 'string' && toQ ? toQ : null;
+  const nowExpIso = new Date().toISOString();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ownerExtra = (ownerFilter || locLeadIds !== null || fromExp || toExp)
+  const ownerExtra = (ownerFilter || locLeadIds !== null || fromExp || toExp || exportView !== 'all' || statusUnsetExp)
     ? (q: any) => {
+        // Mirror the list endpoint's view-axis predicates so the CSV
+        // honors the tile-active filter. The list endpoint handles
+        // view in its own extraFilters; the export was missing this.
+        if (exportView === 'overdue')   q = q.not('due_at', 'is', null).lt('due_at', nowExpIso).is('completed_at', null);
+        else if (exportView === 'upcoming')  q = q.not('due_at', 'is', null).gte('due_at', nowExpIso).is('completed_at', null);
+        else if (exportView === 'completed') q = q.not('completed_at', 'is', null);
+        else if (exportView === 'undated')   q = q.is('due_at', null).is('completed_at', null);
+        if (statusUnsetExp) {
+          q = q.or('status.is.null,status.not.in.(open,in_progress,completed,done,cancelled)');
+        }
         if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
         if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
         if (fromExp || toExp) {
