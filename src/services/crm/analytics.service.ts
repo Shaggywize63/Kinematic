@@ -360,25 +360,29 @@ export async function pipelineValue(org_id: string, pipeline_id?: string, client
 
 export async function funnel(org_id: string, days = 30, range?: DateRange, client_id: string | null = null, scope?: AnalyticsScope) {
   // Live query — the MV (crm_mv_funnel_daily) doesn't track client_id.
-  // Aggregate from crm_leads grouped by status within the window.
+  // Use 3 parallel head:true counts instead of selecting rows: the
+  // previous .select('status') silently capped at PostgREST's default
+  // 1000 rows, so for any tenant with >1k leads in the window the
+  // funnel was showing wrong numbers. Counts are exact and unbounded.
   const fromIso = range?.from ?? new Date(Date.now() - days * 86400000).toISOString();
   const toIso = range?.to ?? new Date().toISOString();
-  let q = supabaseAdmin.from('crm_leads').select('status')
-    .eq('org_id', org_id).is('deleted_at', null)
-    .gte('created_at', fromIso).lte('created_at', toIso);
-  q = withClient(q, client_id);
-  q = applyLeadScope(q, scope);
-  const { data } = await q;
-  let n_new = 0, n_qual = 0, n_conv = 0;
-  for (const r of (data ?? []) as Array<{ status: string }>) {
-    n_new += 1;
-    if (r.status === 'qualified' || r.status === 'converted') n_qual += 1;
-    if (r.status === 'converted') n_conv += 1;
-  }
+  const base = () => {
+    let q = supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true })
+      .eq('org_id', org_id).is('deleted_at', null)
+      .gte('created_at', fromIso).lte('created_at', toIso);
+    q = withClient(q, client_id);
+    q = applyLeadScope(q, scope);
+    return q;
+  };
+  const [r_new, r_qual, r_conv] = await Promise.all([
+    base(),
+    base().in('status', ['qualified', 'converted']),
+    base().eq('status', 'converted'),
+  ]);
   return [
-    { stage: 'New', count: n_new, value: 0 },
-    { stage: 'Qualified', count: n_qual, value: 0 },
-    { stage: 'Converted', count: n_conv, value: 0 },
+    { stage: 'New', count: r_new.count ?? 0, value: 0 },
+    { stage: 'Qualified', count: r_qual.count ?? 0, value: 0 },
+    { stage: 'Converted', count: r_conv.count ?? 0, value: 0 },
   ];
 }
 
