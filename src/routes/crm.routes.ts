@@ -1292,6 +1292,155 @@ router.use('/stages', stagesRouter);
 
 // ---------- ACTIVITIES + NOTES + TASKS ------------------------------
 const activities = express.Router();
+
+// Per-status + per-view counts that always roll up to the total. The
+// dashboard's KPI tiles used to count statuses off the current page
+// of results, so "Overdue / Upcoming / Completed" only summed to the
+// page size while the "Total" tile showed the server-wide figure —
+// reps reported the breakdown didn't tally. This endpoint runs the
+// same scope as the list (subtree / client / role gating) but as
+// count-only PostgREST head queries, so each tile shows the true
+// network-wide number that adds back up to total. Declared BEFORE
+// activities.get('/:id', …) so Express doesn't capture `summary`
+// as an id.
+activities.get('/summary', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  let subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const meAct = (req as AuthRequest).user;
+  if ((meAct?.org_role_name ?? '').toLowerCase().includes('consumer champion') && meAct?.id) {
+    subtreeIds = [meAct.id];
+  }
+  const ownerFilter = activityOwnerFilter(req.query.owner_id);
+  const locLeadIds = req.query.lead_id
+    ? null
+    : await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
+  const nowIso = new Date().toISOString();
+  const { from: fromQ, to: toQ } = req.query as Record<string, unknown>;
+  const from = typeof fromQ === 'string' && fromQ ? fromQ : null;
+  const to = typeof toQ === 'string' && toQ ? toQ : null;
+  // Shared scope-applier — applies tenant, soft-delete, client, owner,
+  // location, type filter, and the search-q `q` ILIKE (matching the
+  // list path) onto a head-count query. Date-range is applied
+  // per-view (same axis the list uses) so each count uses the right
+  // column for its bucket.
+  const applyShared = (baseQ: any, view: string) => {
+    let q = baseQ.eq('org_id', orgId(req)).is('deleted_at', null);
+    if (scope.id) {
+      q = scope.strict
+        ? q.eq('client_id', scope.id)
+        : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+    }
+    if (subtreeIds && subtreeIds.length === 0) return null;
+    if (subtreeIds && subtreeIds.length > 0) {
+      const ids = subtreeIds.join(',');
+      q = q.or(`owner_id.in.(${ids}),assigned_to.in.(${ids})`);
+    }
+    if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
+    if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
+    if (typeof req.query.type === 'string' && req.query.type) q = q.eq('type', req.query.type);
+    if (typeof req.query.q === 'string' && req.query.q.trim()) {
+      const s = req.query.q.trim().replace(/[%,]/g, ' ').slice(0, 80);
+      if (s) q = q.or(`subject.ilike.%${s}%,body.ilike.%${s}%`);
+    }
+    if (from || to) {
+      if (view === 'completed') {
+        if (from) q = q.gte('completed_at', from);
+        if (to) q = q.lte('completed_at', to);
+      } else if (view === 'overdue' || view === 'upcoming') {
+        if (from) q = q.gte('due_at', from);
+        if (to) q = q.lte('due_at', to);
+      } else {
+        const lo = from ?? '0001-01-01';
+        const hi = to ?? '9999-12-31';
+        q = q.or(
+          [
+            `and(completed_at.gte.${lo},completed_at.lte.${hi})`,
+            `and(due_at.gte.${lo},due_at.lte.${hi})`,
+            `and(created_at.gte.${lo},created_at.lte.${hi})`,
+          ].join(','),
+        );
+      }
+    }
+    return q;
+  };
+  const head = () => supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true });
+  const ZERO = { count: 0 };
+  const [total, overdue, upcoming, completed, openS, inProgressS, cancelledS, doneS] = await Promise.all([
+    (async () => {
+      const q = applyShared(head(), 'all');
+      if (!q) return ZERO;
+      const r = await q;
+      return { count: r.count ?? 0 };
+    })(),
+    (async () => {
+      const q = applyShared(head(), 'overdue');
+      if (!q) return ZERO;
+      const r = await q.not('due_at', 'is', null).lt('due_at', nowIso).is('completed_at', null);
+      return { count: r.count ?? 0 };
+    })(),
+    (async () => {
+      const q = applyShared(head(), 'upcoming');
+      if (!q) return ZERO;
+      const r = await q.not('due_at', 'is', null).gte('due_at', nowIso).is('completed_at', null);
+      return { count: r.count ?? 0 };
+    })(),
+    (async () => {
+      const q = applyShared(head(), 'completed');
+      if (!q) return ZERO;
+      const r = await q.not('completed_at', 'is', null);
+      return { count: r.count ?? 0 };
+    })(),
+    // Status-axis counts use the same `all` scope so they roll up to
+    // the total when summed.
+    (async () => {
+      const q = applyShared(head(), 'all');
+      if (!q) return ZERO;
+      const r = await q.eq('status', 'open');
+      return { count: r.count ?? 0 };
+    })(),
+    (async () => {
+      const q = applyShared(head(), 'all');
+      if (!q) return ZERO;
+      const r = await q.eq('status', 'in_progress');
+      return { count: r.count ?? 0 };
+    })(),
+    (async () => {
+      const q = applyShared(head(), 'all');
+      if (!q) return ZERO;
+      const r = await q.eq('status', 'cancelled');
+      return { count: r.count ?? 0 };
+    })(),
+    (async () => {
+      const q = applyShared(head(), 'all');
+      if (!q) return ZERO;
+      // 'done' is a legacy synonym for completed; some old rows still
+      // have it. Roll into the completed-status bucket for tile math.
+      const r = await q.in('status', ['completed', 'done']);
+      return { count: r.count ?? 0 };
+    })(),
+  ]);
+  res.json({
+    success: true,
+    data: {
+      total: total.count,
+      // View axis (date-derived buckets — overdue + upcoming + completed
+      // partition the rows that have a due_at OR completed_at; the
+      // leftover are status-only rows with neither timestamp).
+      overdue: overdue.count,
+      upcoming: upcoming.count,
+      completed: completed.count,
+      // Status axis (status column directly — partition by status so
+      // open + in_progress + cancelled + completed_or_done = total).
+      by_status: {
+        open: openS.count,
+        in_progress: inProgressS.count,
+        cancelled: cancelledS.count,
+        completed: doneS.count,
+      },
+    },
+  });
+}));
+
 activities.get('/calendar', wrap(async (req, res) => {
   const from = String(req.query.from ?? new Date(Date.now() - 7 * 86400000).toISOString());
   const to = String(req.query.to ?? new Date(Date.now() + 30 * 86400000).toISOString());
