@@ -218,16 +218,15 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate).range(0, 99999), scope), client_id),
     withClient(applyActivityScope(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), scope), client_id),
     // .range(0, 99999) lifts PostgREST's default 1000-row cap so the
-    // estimates tile counts every lead. Tata has 1.5k leads; without
-    // the lift, ~500 were silently dropped. Real pagination would
-    // be needed beyond 100k single-tenant leads.
-    withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('custom_fields').eq('org_id', org_id).is('deleted_at', null).range(0, 99999), scope), client_id),
-    // Every deal the rep has touched — open / won / lost. Used by the
-    // Champion "Total Estimates Raised" tile so the headline ₹ figure
-    // reflects what's in the pipeline today, not just the handful of
-    // leads that happen to have a cached estimated_amount. Same
-    // 100k-row lift as above.
-    withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select('amount, lead_id').eq('org_id', org_id).is('deleted_at', null).range(0, 99999), scope), client_id),
+    // estimates tile counts every lead in the window. Window is applied
+    // via lead.created_at so the Reports date-range filter actually
+    // affects this tile (it used to be lifetime regardless of range).
+    withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('custom_fields').eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso).range(0, 99999), scope), client_id),
+    // Every deal the rep has touched within the window — open / won /
+    // lost. Used by the Champion "Total Estimates Raised" tile so the
+    // headline ₹ figure reflects the current window's pipeline. Window
+    // applied via deal.created_at; 100k-row lift same as above.
+    withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select('amount, lead_id').eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso).range(0, 99999), scope), client_id),
   ]);
 
   // Aggregate per-lead estimated_amount. Prefer the cached scalar the
@@ -297,6 +296,29 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   const by_stage = Array.from(stageMap.entries()).map(([stage, v]) => ({ stage, count: v.count, value: v.value }));
   const by_owner = Array.from(ownerMap.entries()).map(([owner, v]) => ({ owner, count: v.count, value: v.value }));
 
+  // Leads grouped by acquisition source — drives the "Leads by Source"
+  // chart on the dashboard. Same window as the headline numbers so the
+  // chart stays coherent with the date-range filter. Mobile reads this
+  // as `summary.bySource`; before this it was always empty because the
+  // response didn't carry the key at all.
+  const sourceMap = new Map<string, { count: number; value: number }>();
+  const { data: sourceLeads } = await withClient(applyLeadScope(
+    supabaseAdmin.from('crm_leads')
+      .select('source_id, crm_lead_sources(name)')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .gte('created_at', fromIso).lte('created_at', toIso)
+      .range(0, 99999),
+    scope), client_id);
+  for (const r of (sourceLeads ?? []) as Array<{ source_id?: string | null; crm_lead_sources?: { name?: string } | null }>) {
+    const name = r.crm_lead_sources?.name ?? 'Unspecified';
+    const s = sourceMap.get(name) ?? { count: 0, value: 0 };
+    s.count += 1;
+    sourceMap.set(name, s);
+  }
+  const by_source = Array.from(sourceMap.entries())
+    .map(([source, v]) => ({ source, stage: source, name: source, count: v.count, value: v.value }))
+    .sort((a, b) => b.count - a.count);
+
   // Won / lost in window
   let won_revenue = 0, wonCount = 0, lostCount = 0;
   for (const r of (closedInWindow ?? []) as unknown as Array<DealWithWeight & { crm_deal_stages: { stage_type: string } | null }>) {
@@ -340,6 +362,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     estimates_raised,
     by_stage,
     by_owner,
+    by_source,
   };
 }
 

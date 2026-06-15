@@ -704,3 +704,13 @@ export const peopleDirectoryTypeSchema = z.object({
   is_active: z.boolean().optional(),
   position: z.number().int().min(0).optional(),
 });
+
+// Activity-subject preset — admin-managed dropdown options on the
+// activity compose screen. Same shape as the people-directory type
+// schema (name + is_active + position) so the settings UI stays
+// uniform across catalogue editors.
+export const activitySubjectSchema = z.object({
+  name: z.string().min(1).max(120),
+  is_active: z.boolean().optional(),
+  position: z.number().int().min(0).optional(),
+});
