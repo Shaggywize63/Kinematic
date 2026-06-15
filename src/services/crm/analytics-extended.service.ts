@@ -29,7 +29,7 @@ export async function leadVelocity(org_id: string, client_id: string | null = nu
     .gte('created_at', since.toISOString());
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
-  const { data } = await q;
+  const { data } = await q.range(0, 99999);
 
   const buckets = new Map<string, { total: number; qualified: number }>();
   for (const r of (data ?? []) as Array<{ created_at: string; status: string }>) {
@@ -59,7 +59,7 @@ export async function timeToFirstTouch(org_id: string, client_id: string | null 
     .gte('created_at', fromIso).lte('created_at', toIso);
   lq = withClient(lq, client_id);
   lq = applyLeadScope(lq, scope);
-  const { data: leads } = await lq;
+  const { data: leads } = await lq.range(0, 99999);
   if (!leads?.length) return { avg_minutes: 0, median_minutes: 0, sla_breach_pct: 0, total: 0, breaches: 0, sla_minutes, distribution: [] };
 
   const leadIds = leads.map((l: any) => l.id);
@@ -67,7 +67,7 @@ export async function timeToFirstTouch(org_id: string, client_id: string | null 
     .select('lead_id, created_at')
     .in('lead_id', leadIds)
     .is('deleted_at', null)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true }).range(0, 99999);
 
   const firstByLead = new Map<string, string>();
   for (const a of acts ?? []) {
@@ -123,7 +123,7 @@ export async function stuckLeads(org_id: string, client_id: string | null = null
     .in('status', ['new', 'working', 'nurturing', 'qualified']);
   lq = withClient(lq, client_id);
   lq = applyLeadScope(lq, scope);
-  const { data: leads } = await lq;
+  const { data: leads } = await lq.range(0, 99999);
 
   let c7 = 0, c14 = 0, c30 = 0;
   const byOwner = new Map<string, { owner_id: string; count: number }>();
@@ -161,7 +161,7 @@ async function reasonsByStatus(
   q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('updated_at', range.from);
   if (range?.to) q = q.lte('updated_at', range.to);
-  const { data } = await q;
+  const { data } = await q.range(0, 99999);
   const map = new Map<string, number>();
   for (const r of (data ?? []) as Array<Record<string, unknown>>) {
     const k = (r[reasonColumn] as string | null) ?? 'Not specified';
@@ -184,7 +184,7 @@ export async function wonReasons(org_id: string, client_id: string | null = null
   q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('updated_at', range.from);
   if (range?.to) q = q.lte('updated_at', range.to);
-  const { data, error } = await q;
+  const { data, error } = await q.range(0, 99999);
   if (error) return [];
   const map = new Map<string, number>();
   for (const r of (data ?? []) as Array<{ won_reason: string | null }>) {
@@ -222,7 +222,7 @@ export async function stageConversion(org_id: string, pipeline_id: string | unde
   if (pipeline_id) dq = dq.eq('pipeline_id', pipeline_id);
   dq = withClient(dq, client_id);
   dq = applyOwnerScope(dq, scope);
-  const { data: deals } = await dq;
+  const { data: deals } = await dq.range(0, 99999);
   if (!deals?.length) return [];
 
   const stageOrder = new Map(
@@ -269,7 +269,7 @@ export async function leadAging(org_id: string, client_id: string | null = null,
     .not('status', 'in', '(converted,lost,unqualified)');
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
-  const { data } = await q;
+  const { data } = await q.range(0, 99999);
   const buckets = [
     { bucket: '0–7d', max: 7, count: 0 },
     { bucket: '8–30d', max: 30, count: 0 },
@@ -298,7 +298,7 @@ export async function cohortConversion(org_id: string, client_id: string | null 
     .gte('created_at', since.toISOString());
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
-  const { data } = await q;
+  const { data } = await q.range(0, 99999);
 
   const cohorts = new Map<string, { total: number; conv: Map<number, number> }>();
   for (const r of (data ?? []) as Array<{ created_at: string; status: string; converted_at: string | null }>) {
@@ -343,12 +343,13 @@ export async function engagementComparison(org_id: string, client_id: string | n
   lq = applyLeadScope(lq, scope);
   if (range?.from) lq = lq.gte('updated_at', range.from);
   if (range?.to) lq = lq.lte('updated_at', range.to);
-  const { data: leads } = await lq;
+  const { data: leads } = await lq.range(0, 99999);
   if (!leads?.length) return { won: { avg: 0, count: 0 }, lost: { avg: 0, count: 0 } };
 
   const ids = leads.map((l: any) => l.id);
   const { data: acts } = await supabaseAdmin.from('crm_activities')
-    .select('lead_id').in('lead_id', ids).is('deleted_at', null);
+    .select('lead_id').in('lead_id', ids).is('deleted_at', null)
+    .range(0, 99999);
 
   const countByLead = new Map<string, number>();
   for (const a of acts ?? []) {
@@ -376,7 +377,7 @@ export async function daysSinceTouch(org_id: string, client_id: string | null = 
     .not('status', 'in', '(converted,lost)');
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
-  const { data } = await q;
+  const { data } = await q.range(0, 99999);
   const buckets = [
     { bucket: '0d', max: 0, count: 0 },
     { bucket: '1–3d', max: 3, count: 0 },
@@ -404,7 +405,7 @@ export async function scoreBandConversion(org_id: string, client_id: string | nu
   q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
-  const { data } = await q;
+  const { data } = await q.range(0, 99999);
   const bands = [
     { band: '0–19', min: 0, max: 19, total: 0, converted: 0 },
     { band: '20–39', min: 20, max: 39, total: 0, converted: 0 },
@@ -434,7 +435,7 @@ export async function territoryConversion(org_id: string, client_id: string | nu
   q = applyLeadScope(q, scope);
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
-  const { data } = await q;
+  const { data } = await q.range(0, 99999);
   const map = new Map<string, { total: number; converted: number }>();
   for (const r of (data ?? []) as Array<{ state: string | null; city: string | null; status: string }>) {
     const k = r.state ?? r.city ?? 'Unspecified';
@@ -461,14 +462,14 @@ export async function touchpointsToResponse(org_id: string, client_id: string | 
   lq = applyLeadScope(lq, scope);
   if (range?.from) lq = lq.gte('created_at', range.from);
   if (range?.to) lq = lq.lte('created_at', range.to);
-  const { data: leads } = await lq;
+  const { data: leads } = await lq.range(0, 99999);
   if (!leads?.length) return [];
 
   const ids = leads.map((l: any) => l.id);
   const { data: acts } = await supabaseAdmin.from('crm_activities')
     .select('lead_id, direction, created_at')
     .in('lead_id', ids).is('deleted_at', null)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true }).range(0, 99999);
 
   const buckets = [
     { bucket: '1', max: 1, count: 0 },
@@ -507,7 +508,7 @@ export async function leadsAtRisk(org_id: string, client_id: string | null = nul
     .in('status', ['new', 'working', 'nurturing', 'qualified']);
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
-  const { data } = await q;
+  const { data } = await q.range(0, 99999);
   const now = Date.now();
   return ((data ?? []) as Array<{ id: string; first_name: string | null; last_name: string | null; company: string | null; score: number; owner_id: string | null; last_activity_at: string | null; created_at: string }>)
     .map(l => {
