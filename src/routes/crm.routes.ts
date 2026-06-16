@@ -19,6 +19,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
+import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
@@ -1765,6 +1766,15 @@ activities.post('/', wrap(async (req, res) => {
     const uid = userId(req);
     if (uid) payload.owner_id = uid;
   }
+  // Validate any admin-defined activity custom fields against the
+  // crm_custom_field_defs catalogue (entity_type='activity'). Mirrors
+  // the lead/deal create paths so type checks + formula stamping run.
+  if (payload.custom_fields !== undefined) {
+    payload.custom_fields = await validateAndStampCustomFields(
+      orgId(req), (payload.client_id as string | null) ?? null, 'activity',
+      payload.custom_fields as Record<string, unknown>,
+    );
+  }
   const created = await crud.create('crm_activities', orgId(req), payload, userId(req)) as Record<string, unknown>;
   // Side-effect: mirror to the assignee/owner's Google Calendar when
   // they've connected the integration. Fire-and-forget — calendar
@@ -1790,7 +1800,18 @@ activities.patch('/:id', wrap(async (req, res) => {
   const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
   const err = await activityAccessError(req as AuthRequest, existing);
   if (err) throw err;
-  const updated = await crud.update('crm_activities', orgId(req), req.params.id, normalizeActivityPayload(parse(v.activitySchemaBase.partial(), req.body)), userId(req)) as Record<string, unknown>;
+  const patched = normalizeActivityPayload(parse(v.activitySchemaBase.partial(), req.body));
+  // Same validate/stamp pass as the create handler for activity
+  // custom fields. Merge over the existing custom_fields blob so a
+  // partial PATCH that only touches one key doesn't drop the rest.
+  if (patched.custom_fields !== undefined) {
+    const beforeCf = ((existing as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {});
+    const merged = { ...beforeCf, ...(patched.custom_fields as Record<string, unknown>) };
+    patched.custom_fields = await validateAndStampCustomFields(
+      orgId(req), ((existing as { client_id?: string | null }).client_id) ?? null, 'activity', merged,
+    );
+  }
+  const updated = await crud.update('crm_activities', orgId(req), req.params.id, patched, userId(req)) as Record<string, unknown>;
   void (async () => {
     try {
       const { pushActivity } = await import('../services/integrations/googleCalendar.service');
