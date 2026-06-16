@@ -279,6 +279,10 @@ export const activitySchemaBase = z.object({
   // Single image attached to the activity (e.g. site-visit photo). Front-end
   // uploads via the existing /api/v1/upload pipeline and posts the URL here.
   image_url: z.string().url().max(2048).optional().nullable(),
+  // Admin-defined custom fields, keyed by `field_key` from
+  // crm_custom_field_defs (entity_type='activity'). Same shape as lead /
+  // deal / contact / account custom_fields. Persists into the jsonb column.
+  custom_fields: z.record(z.unknown()).optional(),
 });
 
 // Create-side schema enforces a linked entity. Activities without a
@@ -311,7 +315,7 @@ export const taskSchema = z.object({
 });
 
 export const noteSchema = z.object({
-  entity_type: z.enum(['lead','contact','account','deal']),
+  entity_type: z.enum(['lead','contact','account','deal','activity']),
   entity_id: uuid,
   body: z.string().min(1),
   pinned: z.boolean().optional(),
@@ -435,7 +439,7 @@ export const automationSchema = z.object({
 });
 
 export const customFieldSchema = z.object({
-  entity_type: z.enum(['lead','contact','account','deal']),
+  entity_type: z.enum(['lead','contact','account','deal','activity']),
   field_key: z.string().min(1).max(80).regex(/^[a-z][a-z0-9_]*$/),
   label: z.string().min(1).max(120),
   // Full set of supported field types. Beyond the originals we now also

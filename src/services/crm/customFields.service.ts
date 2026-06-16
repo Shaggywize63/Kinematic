@@ -98,7 +98,7 @@ function coerceMultiselect(v: unknown, key: string): string[] {
 export async function validateAndStampCustomFields(
   orgId: string,
   clientId: string | null,
-  entity: 'lead' | 'deal' | 'contact' | 'account',
+  entity: 'lead' | 'deal' | 'contact' | 'account' | 'activity',
   incoming: Record<string, unknown> | null | undefined,
 ): Promise<Record<string, unknown>> {
   const input = { ...(incoming ?? {}) };
