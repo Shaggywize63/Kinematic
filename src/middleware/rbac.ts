@@ -112,6 +112,55 @@ export function requireModuleAccess(moduleName: string) {
 }
 
 /**
+ * Lenient variant — passes when the user has access to ANY of the
+ * supplied modules (read or write depending on the request method).
+ * Used by routes whose semantics span multiple modules (e.g. the
+ * activity-subjects catalogue is "activities settings": CRM Admin
+ * legitimately reaches it via crm_settings, but an org that has
+ * carved out a dedicated "Activities Admin" role with only
+ * crm_activities write should also be able to manage subjects).
+ */
+export function requireAnyModuleAccess(moduleNames: string[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) return unauthorized(res);
+    if (isDemo(req.user)) return next();
+
+    const role = req.user.role?.toLowerCase();
+    if (role === 'super_admin') return next();
+
+    const entitlements = req.user.enabled_modules || [];
+    // Entitlement gate: any one of the modules must be enabled for the
+    // client. (Most CRM modules are bundled together, so this is a
+    // formality except for surgically narrow installs.)
+    if (entitlements.length > 0 && !moduleNames.some((m) => entitlements.includes(m))) {
+      return forbidden(res, `None of the required modules are enabled for your account: ${moduleNames.join(', ')}`);
+    }
+
+    const isWrite = !READ_METHODS.has(req.method.toUpperCase());
+
+    if (hasRoleGovernedPerms(req.user)) {
+      const readPerms = req.user.role_permissions || [];
+      const writePerms = (req.user.role_permissions_write && req.user.role_permissions_write.length > 0)
+        ? req.user.role_permissions_write
+        : readPerms;
+      const perms = isWrite ? writePerms : readPerms;
+      if (moduleNames.some((m) => perms.includes(m))) return next();
+      return forbidden(
+        res,
+        isWrite
+          ? `You don't have write access to any of: ${moduleNames.join(', ')}.`
+          : `Access denied: You do not have permission to access ${moduleNames.join(', ')}.`,
+      );
+    }
+
+    // Legacy path: per-user permissions or entitlement suffice.
+    const permissions = req.user.permissions || [];
+    if (moduleNames.some((m) => permissions.includes(m) || entitlements.includes(m))) return next();
+    return forbidden(res, `Access denied: You do not have permission to access ${moduleNames.join(', ')}.`);
+  };
+}
+
+/**
  * Middleware to enforce city-level data restriction.
  * City Managers only see data for their assigned cities.
  */
