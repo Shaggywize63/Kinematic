@@ -2243,11 +2243,14 @@ activitySubjects.delete('/:id', wrap(async (req, res) => {
   res.status(204).end();
 }));
 // GET is open to every CRM user so the picker shows on the compose
-// screen; mutating routes are gated to crm_settings (admins) so reps
-// can't add subjects ad-hoc.
+// screen. Mutations: a CRM Admin (crm_settings write) curates the
+// catalogue by default, but tenants that carve out a dedicated
+// "Activities Admin" role with only `crm_activities` write should
+// also be able to manage the subject list. Use the lenient gate so
+// either permission grants access.
 router.use('/activity-subjects', (req, res, next) => {
   if (req.method === 'GET') return next();
-  return rbac.requireModuleAccess('crm_settings')(req, res, next);
+  return rbac.requireAnyModuleAccess(['crm_settings', 'crm_activities'])(req, res, next);
 }, activitySubjects);
 
 // Generic lookup search — powers the "linked record" picker for the new
