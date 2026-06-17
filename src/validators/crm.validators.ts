@@ -718,3 +718,16 @@ export const activitySubjectSchema = z.object({
   is_active: z.boolean().optional(),
   position: z.number().int().min(0).optional(),
 });
+
+// Block (taluka) catalogue — admin-managed list of administrative
+// blocks beneath a district. Drives the block lookup picker on the
+// lead form. District is required on create so the lookup-search can
+// filter by it; state is optional (Jharkhand for the seed list, but
+// other tenants might span multiple states).
+export const blockSchema = z.object({
+  district: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  state: z.string().max(120).optional().nullable(),
+  is_active: z.boolean().optional(),
+  position: z.number().int().min(0).optional(),
+});
