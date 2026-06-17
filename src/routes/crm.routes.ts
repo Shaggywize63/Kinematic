@@ -1938,6 +1938,45 @@ cities.patch('/:id', wrap(async (req, res) =>
 cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
 router.use('/cities', cities);
 
+// Blocks (talukas) — admin-managed catalogue of administrative blocks
+// inside a district. Tata's Champions capture block on every lead so
+// reports can roll up below the district level. The block field on
+// the lead form is a lookup-record custom field (target=crm_blocks)
+// with a filter[district] clause auto-stamped from the lead's city.
+// The lookup-search route also gates by the rep's effective cities so
+// a Dhanbad Champion never sees Sahibganj blocks.
+const blocks = express.Router();
+blocks.get('/', wrap(async (req, res) => res.json(
+  await crud.clientScopedList('crm_blocks', orgId(req), clientScope(req).id, req.query, {
+    defaultSort: { column: 'position', ascending: true },
+    searchColumns: ['name', 'district'],
+  })
+)));
+blocks.post('/', wrap(async (req, res) => {
+  const parsed = parse(v.blockSchema, req.body);
+  const cid = clientId(req);
+  // Position defaults to (max in district)+1 so admin-added rows land
+  // at the end of the district's dropdown without re-ordering.
+  const { data: maxRow } = await supabaseAdmin.from('crm_blocks')
+    .select('position').eq('org_id', orgId(req)).eq('district', parsed.district)
+    .order('position', { ascending: false }).limit(1).maybeSingle();
+  const nextPos = ((maxRow?.position as number | undefined) ?? -1) + 1;
+  const payload = { ...parsed, client_id: cid ?? null, position: parsed.position ?? nextPos };
+  res.status(201).json(await crud.create('crm_blocks', orgId(req), payload, userId(req)));
+}));
+blocks.patch('/:id', wrap(async (req, res) =>
+  res.json(await crud.update('crm_blocks', orgId(req), req.params.id, parse(v.blockSchema.partial(), req.body), userId(req)))));
+blocks.delete('/:id', wrap(async (req, res) => {
+  await crud.softDelete('crm_blocks', orgId(req), req.params.id);
+  res.status(204).end();
+}));
+// GET open to every CRM user (the lead form picker needs it). Mutations
+// gated to crm_settings — admins curate, reps just consume.
+router.use('/blocks', (req, res, next) => {
+  if (req.method === 'GET') return next();
+  return rbac.requireModuleAccess('crm_settings')(req, res, next);
+}, blocks);
+
 function attach(
   path: string,
   table: string,
@@ -2227,6 +2266,12 @@ const LOOKUP_TABLES: Record<string, { search: string[]; display: (r: Record<stri
   crm_deals: { search: ['title','name'], display: (r) => (r.title as string) || (r.name as string) || 'Deal' },
   people_directory: { search: ['first_name','last_name','mobile','email'], display: (r) =>
     [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || (r.email as string) || (r.mobile as string) || 'Person' },
+  // Block (taluka) picker. Display is "<Name> · <District>" so a rep
+  // never confuses two blocks named the same in different districts.
+  // City-gated below the same way people_directory is, so a Dhanbad
+  // Champion only sees Dhanbad-district blocks.
+  crm_blocks: { search: ['name', 'district'], display: (r) =>
+    `${(r.name as string) || 'Block'}${r.district ? ` · ${r.district as string}` : ''}` },
 };
 
 // Generic display fallback for tables the admin picks that aren't in
@@ -2291,6 +2336,18 @@ router.get('/lookup/search', wrap(async (req, res) => {
     } else if (cities !== null && cities.length === 0) {
       // Defined but empty → the user has no cities; surface nothing
       // rather than the whole roster.
+      return res.json({ success: true, data: [] });
+    }
+  }
+  // Same per-user city gate for the block picker. Tata Champions are
+  // assigned to a "city" that maps to a district in the block sheet,
+  // so a Dhanbad Champion sees only Dhanbad-district blocks. Admins
+  // (no city restriction) see every block in the catalogue.
+  if (target === 'crm_blocks') {
+    const cities = rbac.getEffectiveCityNames((req as AuthRequest).user);
+    if (cities !== null && cities.length > 0) {
+      query = query.in('district', cities);
+    } else if (cities !== null && cities.length === 0) {
       return res.json({ success: true, data: [] });
     }
   }
