@@ -46,13 +46,21 @@ const b2cBase = {
   gender,
   address_line1: z.string().max(200).optional().nullable(),
   address_line2: z.string().max(200).optional().nullable(),
-  // City is REQUIRED on lead/contact create — the CRM enforces
-  // per-user city scope (req.user.assigned_city_names) on every read,
-  // and a lead with no city slips past that filter and becomes visible
-  // to every user in the org. Force it at the schema level so no
-  // creation path (form, integration webhook, KINI tool, bulk import)
-  // can land a city-less row.
-  city: z.string().min(1, { message: 'City is required' }).max(120),
+  // City is normally REQUIRED — the CRM enforces per-user city scope
+  // (req.user.assigned_city_names) on every read, and a lead with no
+  // city slips past that filter and becomes visible to every user in
+  // the org. We need a real value on disk for every lead.
+  //
+  // BUT: tenants that hide the city field on Settings → Custom Fields
+  // (e.g. Tata Tiscon's Champion / ASO flow where the city is
+  // implicit from the rep's assigned city) can't surface the input
+  // in the form. So the schema only requires city to be a non-empty
+  // string IF the caller supplies one. The lead-create service then
+  // auto-stamps city from the user's `assigned_city_names[0]` when
+  // the payload omits it, before the row hits the DB. That way the
+  // "never null city" invariant is preserved without forcing every
+  // form to render the input.
+  city: z.string().min(1, { message: 'City is required' }).max(120).optional(),
   state: z.string().max(120).optional().nullable(),
   postal_code: z.string().max(20).optional().nullable(),
   country: z.string().max(80).optional().nullable(),
