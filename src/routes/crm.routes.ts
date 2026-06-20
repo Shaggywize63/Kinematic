@@ -545,12 +545,24 @@ leads.post('/', wrap(async (req, res) => {
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
-  const payload = { ...rest, client_id: rest.client_id ?? clientId(req) };
+  const payload: Record<string, unknown> = { ...rest, client_id: rest.client_id ?? clientId(req) };
+  // City fallback: when the form omits city (e.g. Tata tenants that
+  // hide the City field on Settings → Custom Fields), auto-stamp it
+  // from the rep's assigned cities. Champions / ASOs are always
+  // pinned to a single city, so this lands the right value with zero
+  // friction. Without it, every Tata lead submission 400'd with
+  // "Validation failed: city: Required" after the admin hid the field.
+  if (!payload.city) {
+    const assigned = (req as AuthRequest).user?.assigned_city_names ?? [];
+    if (assigned.length > 0) {
+      payload.city = assigned[0];
+    }
+  }
   // Honour admin-configured "required" toggles for built-in fields. Mobile
   // clients don't yet read field_overrides client-side, so without this
   // guard a Tata admin marking Primary Mobile required would still let the
   // Android/iOS apps POST a phoneless lead.
-  await enforceLeadRequiredFields(orgId(req), payload.client_id ?? null, payload as Record<string, unknown>, 'create');
+  await enforceLeadRequiredFields(orgId(req), payload.client_id as string | null ?? null, payload, 'create');
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
 
   // Auto-log site visit: the previous version inserted a completed
