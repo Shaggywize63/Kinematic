@@ -900,10 +900,10 @@ contacts.post('/', wrap(async (req, res) => {
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   res.status(201).json(await stampOwnerName(await crud.create('crm_contacts', orgId(req), payload, userId(req))));
 }));
-contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id)))));
+contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id, true, clientScope(req).id)))));
 contacts.patch('/:id', wrap(async (req, res) =>
-  res.json(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req))))));
-contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id); res.status(204).end(); }));
+  res.json(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req), clientScope(req).id)))));
+contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 contacts.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
   return res.json(
@@ -939,10 +939,10 @@ accounts.post('/', wrap(async (req, res) => {
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   res.status(201).json(await stampOwnerName(await crud.create('crm_accounts', orgId(req), payload, userId(req))));
 }));
-accounts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_accounts', orgId(req), req.params.id)))));
+accounts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id)))));
 accounts.patch('/:id', wrap(async (req, res) =>
-  res.json(await stampOwnerName(await crud.update('crm_accounts', orgId(req), req.params.id, parse(v.accountSchema.partial(), req.body), userId(req))))));
-accounts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_accounts', orgId(req), req.params.id); res.status(204).end(); }));
+  res.json(await stampOwnerName(await crud.update('crm_accounts', orgId(req), req.params.id, parse(v.accountSchema.partial(), req.body), userId(req), clientScope(req).id)))));
+accounts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_accounts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
   await crud.list('crm_contacts', orgId(req), { account_id: req.params.id, ...req.query })
 )));
@@ -1253,9 +1253,9 @@ pipelines.patch('/:id', wrap(async (req, res) => {
         .neq('id', req.params.id);
     }
   }
-  res.json(await crud.update('crm_pipelines', orgId(req), req.params.id, body, userId(req)));
+  res.json(await crud.update('crm_pipelines', orgId(req), req.params.id, body, userId(req), clientScope(req).id));
 }));
-pipelines.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_pipelines', orgId(req), req.params.id); res.status(204).end(); }));
+pipelines.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_pipelines', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 pipelines.get('/:id/stages', wrap(async (req, res) => res.json(
   await crud.list('crm_deal_stages', orgId(req), { pipeline_id: req.params.id }, { softDelete: false, defaultSort: { column: 'position', ascending: true } })
 )));
@@ -1803,13 +1803,13 @@ activities.post('/', wrap(async (req, res) => {
   res.status(201).json(await stampOwnerName(created));
 }));
 activities.get('/:id', wrap(async (req, res) => {
-  const row = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
+  const row = await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, unknown>;
   const err = await activityAccessError(req as AuthRequest, row);
   if (err) throw err;
   res.json(await stampOwnerName(row));
 }));
 activities.patch('/:id', wrap(async (req, res) => {
-  const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
+  const existing = await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, unknown>;
   const err = await activityAccessError(req as AuthRequest, existing);
   if (err) throw err;
   const patched = normalizeActivityPayload(parse(v.activitySchemaBase.partial(), req.body));
@@ -1823,7 +1823,7 @@ activities.patch('/:id', wrap(async (req, res) => {
       orgId(req), ((existing as { client_id?: string | null }).client_id) ?? null, 'activity', merged,
     );
   }
-  const updated = await crud.update('crm_activities', orgId(req), req.params.id, patched, userId(req)) as Record<string, unknown>;
+  const updated = await crud.update('crm_activities', orgId(req), req.params.id, patched, userId(req), clientScope(req).id) as Record<string, unknown>;
   void (async () => {
     try {
       const { pushActivity } = await import('../services/integrations/googleCalendar.service');
@@ -1836,10 +1836,10 @@ activities.patch('/:id', wrap(async (req, res) => {
   res.json(await stampOwnerName(updated));
 }));
 activities.delete('/:id', wrap(async (req, res) => {
-  const existing = await crud.get('crm_activities', orgId(req), req.params.id) as Record<string, unknown>;
+  const existing = await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, unknown>;
   const err = await activityAccessError(req as AuthRequest, existing);
   if (err) throw err;
-  await crud.softDelete('crm_activities', orgId(req), req.params.id);
+  await crud.softDelete('crm_activities', orgId(req), req.params.id, clientScope(req).id);
   void (async () => {
     try {
       const { deleteActivity } = await import('../services/integrations/googleCalendar.service');
@@ -1860,8 +1860,8 @@ notes.post('/', wrap(async (req, res) => {
   res.status(201).json(await crud.create('crm_notes', orgId(req), payload, userId(req)));
 }));
 notes.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_notes', orgId(req), req.params.id, parse(v.noteSchema.partial(), req.body), userId(req)))));
-notes.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_notes', orgId(req), req.params.id); res.status(204).end(); }));
+  res.json(await crud.update('crm_notes', orgId(req), req.params.id, parse(v.noteSchema.partial(), req.body), userId(req), clientScope(req).id))));
+notes.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_notes', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 router.use('/notes', notes);
 
 const tasks = express.Router();
@@ -1873,16 +1873,16 @@ tasks.post('/', wrap(async (req, res) => {
   const payload: Record<string, unknown> = { ...parsed, type: 'task' as const, client_id: clientId(req) };
   res.status(201).json(await stampOwnerName(await crud.create('crm_activities', orgId(req), payload, userId(req))));
 }));
-tasks.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_activities', orgId(req), req.params.id)))));
+tasks.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id)))));
 tasks.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.taskSchema.partial(), req.body);
   const payload: Record<string, unknown> = { ...parsed };
   if (parsed.status === 'done' && !parsed.completed_at) {
     payload.completed_at = new Date().toISOString();
   }
-  res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, payload, userId(req))));
+  res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, payload, userId(req), clientScope(req).id)));
 }));
-tasks.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id); res.status(204).end(); }));
+tasks.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 router.use('/tasks', rbac.requireModuleAccess('crm_tasks'), tasks);
 
 // ---------- STATES + CITIES (location management) -------------------
@@ -1893,8 +1893,8 @@ states.get('/', wrap(async (req, res) => res.json(
 states.post('/', wrap(async (req, res) =>
   res.status(201).json(await crud.create('crm_states', orgId(req), parse(v.stateSchema, req.body), userId(req)))));
 states.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_states', orgId(req), req.params.id, parse(v.stateSchema.partial(), req.body), userId(req)))));
-states.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_states', orgId(req), req.params.id); res.status(204).end(); }));
+  res.json(await crud.update('crm_states', orgId(req), req.params.id, parse(v.stateSchema.partial(), req.body), userId(req), clientScope(req).id))));
+states.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_states', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 states.get('/:id/cities', wrap(async (req, res) => res.json(
   await crud.clientScopedList(
     'crm_cities',
@@ -1946,8 +1946,8 @@ cities.post('/', wrap(async (req, res) => {
   res.status(201).json(await crud.create('crm_cities', orgId(req), payload, userId(req)));
 }));
 cities.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_cities', orgId(req), req.params.id, parse(v.citySchema.partial(), req.body), userId(req)))));
-cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id); res.status(204).end(); }));
+  res.json(await crud.update('crm_cities', orgId(req), req.params.id, parse(v.citySchema.partial(), req.body), userId(req), clientScope(req).id))));
+cities.delete('/:id', wrap(async (req, res) => { await crud.hardDelete('crm_cities', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 router.use('/cities', cities);
 
 // Blocks (talukas) — admin-managed catalogue of administrative blocks
@@ -1977,9 +1977,9 @@ blocks.post('/', wrap(async (req, res) => {
   res.status(201).json(await crud.create('crm_blocks', orgId(req), payload, userId(req)));
 }));
 blocks.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_blocks', orgId(req), req.params.id, parse(v.blockSchema.partial(), req.body), userId(req)))));
+  res.json(await crud.update('crm_blocks', orgId(req), req.params.id, parse(v.blockSchema.partial(), req.body), userId(req), clientScope(req).id))));
 blocks.delete('/:id', wrap(async (req, res) => {
-  await crud.softDelete('crm_blocks', orgId(req), req.params.id);
+  await crud.softDelete('crm_blocks', orgId(req), req.params.id, clientScope(req).id);
   res.status(204).end();
 }));
 // GET open to every CRM user (the lead form picker needs it). Mutations
@@ -2018,11 +2018,18 @@ function attach(
     if (opts.clientScoped) payload.client_id = clientId(req);
     res.status(201).json(await crud.create(table, orgId(req), payload, userId(req)));
   }));
-  r.get('/:id', wrap(async (req, res) => res.json(await crud.get(table, orgId(req), req.params.id, opts.softDelete !== false))));
-  r.patch('/:id', wrap(async (req, res) => res.json(await crud.update(table, orgId(req), req.params.id, parse(schema.partial(), req.body), userId(req)))));
+  r.get('/:id', wrap(async (req, res) => {
+    const cid = opts.clientScoped ? clientScope(req).id : null;
+    res.json(await crud.get(table, orgId(req), req.params.id, opts.softDelete !== false, cid));
+  }));
+  r.patch('/:id', wrap(async (req, res) => {
+    const cid = opts.clientScoped ? clientScope(req).id : null;
+    res.json(await crud.update(table, orgId(req), req.params.id, parse(schema.partial(), req.body), userId(req), cid));
+  }));
   r.delete('/:id', wrap(async (req, res) => {
-    if (opts.softDelete === false) await crud.hardDelete(table, orgId(req), req.params.id);
-    else await crud.softDelete(table, orgId(req), req.params.id);
+    const cid = opts.clientScoped ? clientScope(req).id : null;
+    if (opts.softDelete === false) await crud.hardDelete(table, orgId(req), req.params.id, cid);
+    else await crud.softDelete(table, orgId(req), req.params.id, cid);
     res.status(204).end();
   }));
   router.use(path, r);
@@ -2102,7 +2109,7 @@ peopleDir.get('/export', wrap(async (req, res) => {
   res.send(csv);
 }));
 peopleDir.get('/:id', wrap(async (req, res) =>
-  res.json(await crud.get('people_directory', orgId(req), req.params.id))));
+  res.json(await crud.get('people_directory', orgId(req), req.params.id, true, clientScope(req).id))));
 peopleDir.post('/', wrap(async (req, res) => {
   const parsed = parse(v.peopleDirectorySchema, req.body);
   const cid = clientId(req);
@@ -2111,9 +2118,9 @@ peopleDir.post('/', wrap(async (req, res) => {
   res.status(201).json(await crud.create('people_directory', orgId(req), payload, userId(req)));
 }));
 peopleDir.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('people_directory', orgId(req), req.params.id, parse(v.peopleDirectoryBase.partial(), req.body), userId(req)))));
+  res.json(await crud.update('people_directory', orgId(req), req.params.id, parse(v.peopleDirectoryBase.partial(), req.body), userId(req), clientScope(req).id))));
 peopleDir.delete('/:id', wrap(async (req, res) => {
-  await crud.softDelete('people_directory', orgId(req), req.params.id);
+  await crud.softDelete('people_directory', orgId(req), req.params.id, clientScope(req).id);
   res.status(204).end();
 }));
 
@@ -2214,9 +2221,9 @@ peopleDirTypes.post('/', wrap(async (req, res) => {
   res.status(201).json(await crud.create('people_directory_types', orgId(req), payload, userId(req)));
 }));
 peopleDirTypes.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('people_directory_types', orgId(req), req.params.id, parse(v.peopleDirectoryTypeSchema.partial(), req.body), userId(req)))));
+  res.json(await crud.update('people_directory_types', orgId(req), req.params.id, parse(v.peopleDirectoryTypeSchema.partial(), req.body), userId(req), clientScope(req).id))));
 peopleDirTypes.delete('/:id', wrap(async (req, res) => {
-  await crud.softDelete('people_directory_types', orgId(req), req.params.id);
+  await crud.softDelete('people_directory_types', orgId(req), req.params.id, clientScope(req).id);
   res.status(204).end();
 }));
 router.use('/people-directory-types', rbac.requireModuleAccess('crm_settings'), peopleDirTypes);
@@ -2249,9 +2256,9 @@ activitySubjects.post('/', wrap(async (req, res) => {
   res.status(201).json(await crud.create('crm_activity_subjects', orgId(req), payload, userId(req)));
 }));
 activitySubjects.patch('/:id', wrap(async (req, res) =>
-  res.json(await crud.update('crm_activity_subjects', orgId(req), req.params.id, parse(v.activitySubjectSchema.partial(), req.body), userId(req)))));
+  res.json(await crud.update('crm_activity_subjects', orgId(req), req.params.id, parse(v.activitySubjectSchema.partial(), req.body), userId(req), clientScope(req).id))));
 activitySubjects.delete('/:id', wrap(async (req, res) => {
-  await crud.softDelete('crm_activity_subjects', orgId(req), req.params.id);
+  await crud.softDelete('crm_activity_subjects', orgId(req), req.params.id, clientScope(req).id);
   res.status(204).end();
 }));
 // GET is open to every CRM user so the picker shows on the compose
