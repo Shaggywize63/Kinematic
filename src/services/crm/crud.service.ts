@@ -183,9 +183,15 @@ export async function clientScopedListWithCount(
   return { rows: data ?? [], total: count ?? 0, page, limit };
 }
 
-export async function get(table: string, org_id: string, id: string, softDelete = true) {
+export async function get(table: string, org_id: string, id: string, softDelete = true, client_id?: string | null) {
   let q = supabaseAdmin.from(table).select('*').eq('org_id', org_id).eq('id', id);
   if (softDelete) q = q.is('deleted_at', null);
+  // Defense-in-depth: when the caller knows the active tenant, also
+  // require the row's client_id to be NULL (shared / org-wide) or
+  // equal to it. Org_id alone is not enough — Tata + Kinematic share
+  // the same org_id so a Tata user could otherwise PATCH/DELETE a
+  // Kinematic-only row by guessing the UUID.
+  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
   const { data, error } = await q.single();
   if (error) throw new AppError(404, `${table} not found`, 'NOT_FOUND');
   return data;
@@ -216,22 +222,37 @@ export async function create(table: string, org_id: string, payload: Record<stri
   return data;
 }
 
-export async function update(table: string, org_id: string, id: string, payload: Record<string, unknown>, user_id?: string) {
+export async function update(table: string, org_id: string, id: string, payload: Record<string, unknown>, user_id?: string, client_id?: string | null) {
   const row: Record<string, unknown> = { ...payload };
   if (user_id && !NO_AUDIT_TABLES.has(table)) row.updated_by = user_id;
-  const { data, error } = await supabaseAdmin.from(table).update(row)
-    .eq('org_id', org_id).eq('id', id).select('*').single();
+  // Pre-flight existence + tenant check so a wrong-tenant target id
+  // returns 404 instead of silently 200'ing on zero updated rows.
+  // Without this, an attacker could enumerate IDs by status-code
+  // signal. The `get` helper already does the client-scope OR-NULL
+  // dance, so we reuse it.
+  if (client_id) {
+    await get(table, org_id, id, false, client_id);
+  }
+  let q = supabaseAdmin.from(table).update(row).eq('org_id', org_id).eq('id', id);
+  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  const { data, error } = await q.select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return data;
 }
 
-export async function softDelete(table: string, org_id: string, id: string) {
-  const { error } = await supabaseAdmin.from(table)
+export async function softDelete(table: string, org_id: string, id: string, client_id?: string | null) {
+  if (client_id) await get(table, org_id, id, false, client_id);
+  let q = supabaseAdmin.from(table)
     .update({ deleted_at: new Date().toISOString() }).eq('org_id', org_id).eq('id', id);
+  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  const { error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 }
 
-export async function hardDelete(table: string, org_id: string, id: string) {
-  const { error } = await supabaseAdmin.from(table).delete().eq('org_id', org_id).eq('id', id);
+export async function hardDelete(table: string, org_id: string, id: string, client_id?: string | null) {
+  if (client_id) await get(table, org_id, id, false, client_id);
+  let q = supabaseAdmin.from(table).delete().eq('org_id', org_id).eq('id', id);
+  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
+  const { error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 }
