@@ -178,7 +178,6 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   const { fromIso, toIso } = defaultWindow(range);
   const fromDate = fromIso.slice(0, 10);
   const toDate = toIso.slice(0, 10);
-  const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString();
   const lines = unit === 'weight' ? weightJoin : '';
 
   const [
@@ -216,7 +215,12 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
       client_id,
     ),
     withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select(`amount, owner_id, crm_deal_stages!inner(stage_type)${lines}`).eq('org_id', org_id).is('deleted_at', null).gte('actual_close_date', fromDate).lte('actual_close_date', toDate).range(0, 99999), scope), client_id),
-    withClient(applyActivityScope(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', sevenDaysAgo), scope), client_id),
+    // Activities tile honors the picked date range (`activities_7d`
+    // legacy field name; the value is now whatever the from/to window
+    // resolves to). Without this every preset on the dashboard
+    // returned the same hardcoded 7-day figure even when the rep
+    // picked Today / Yesterday / This month.
+    withClient(applyActivityScope(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), scope), client_id),
     // .range(0, 99999) lifts PostgREST's default 1000-row cap so the
     // estimates tile counts every lead in the window. Window is applied
     // via lead.created_at so the Reports date-range filter actually
