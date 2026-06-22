@@ -2286,8 +2286,19 @@ const LOOKUP_TABLES: Record<string, { search: string[]; display: (r: Record<stri
     [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || (r.email as string) || (r.mobile as string) || 'Contact' },
   crm_accounts: { search: ['name','domain','industry'], display: (r) => (r.name as string) || 'Account' },
   crm_deals: { search: ['title','name'], display: (r) => (r.title as string) || (r.name as string) || 'Deal' },
-  people_directory: { search: ['first_name','last_name','mobile','email'], display: (r) =>
-    [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || (r.email as string) || (r.mobile as string) || 'Person' },
+  // Display the dealer's mobile inline ("Ravi Kumar · 98765 43210") so
+  // the rep can disambiguate two dealers with the same name without
+  // tapping in — and so the picker is useful as a lookup directory in
+  // its own right. Falls back to email or "Person" when the row has
+  // neither name nor mobile.
+  people_directory: { search: ['first_name','last_name','mobile','email'], display: (r) => {
+    const name = [r.first_name, r.last_name].filter(Boolean).join(' ').trim();
+    const mobile = typeof r.mobile === 'string' ? r.mobile : '';
+    if (name && mobile) return `${name} · ${mobile}`;
+    if (name) return name;
+    if (mobile) return mobile;
+    return (r.email as string) || 'Person';
+  } },
   // Block (taluka) picker. Display is "<Name> · <District>" so a rep
   // never confuses two blocks named the same in different districts.
   // City-gated below the same way people_directory is, so a Dhanbad
