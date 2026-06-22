@@ -1196,6 +1196,12 @@ export interface WidgetSummary {
   leads_today: number;
   leads_week: number;
   trend_7d: number[];             // 7 daily counts, oldest → newest
+  // Deal-side stats so the home-screen widget can render both halves
+  // of the pipeline in one tile. The rep can see incoming leads AND
+  // open / closed-won deal counts without launching the app.
+  open_deals: number;
+  won_deals_30d: number;
+  open_deal_value: number;        // rupees
   refreshed_at: string;           // ISO; the widget shows "Updated X ago"
 }
 
@@ -1244,6 +1250,41 @@ export async function widgetSummary(
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([, v]) => v);
 
+  // Deal-side counts for the widget's "Deals" half. Open vs won is
+  // resolved by joining the stage's stage_type so it stays in sync
+  // with any pipeline reshuffle the admin does on the web console.
+  const thirtyDaysAgo = new Date(now); thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
+  const dealQ = withClient(applyOwnerScope(supabaseAdmin.from('crm_deals')
+    .select('amount, actual_close_date, crm_deal_stages!inner(stage_type)')
+    .eq('org_id', org_id).is('deleted_at', null)
+    .range(0, 99999), scope), client_id);
+  const { data: dealRows } = await dealQ;
+  let open_deals = 0;
+  let won_deals_30d = 0;
+  let open_deal_value = 0;
+  for (const d of (dealRows ?? []) as Array<{
+    amount?: number | string | null;
+    actual_close_date?: string | null;
+    crm_deal_stages?: { stage_type?: string } | { stage_type?: string }[] | null;
+  }>) {
+    const st = Array.isArray(d.crm_deal_stages) ? d.crm_deal_stages[0]?.stage_type : d.crm_deal_stages?.stage_type;
+    const amt = typeof d.amount === 'number'
+      ? d.amount
+      : typeof d.amount === 'string'
+        ? Number(d.amount) || 0
+        : 0;
+    if (st === 'open') {
+      open_deals += 1;
+      if (amt > 0) open_deal_value += amt;
+    } else if (st === 'won') {
+      const closedAt = d.actual_close_date ? new Date(d.actual_close_date) : null;
+      if (closedAt && Number.isFinite(closedAt.getTime()) && closedAt >= thirtyDaysAgo) {
+        won_deals_30d += 1;
+      }
+    }
+  }
+  open_deal_value = Math.round(open_deal_value);
+
   return {
     total_leads,
     total_conversions,
@@ -1251,6 +1292,9 @@ export async function widgetSummary(
     leads_today,
     leads_week,
     trend_7d,
+    open_deals,
+    won_deals_30d,
+    open_deal_value,
     refreshed_at: now.toISOString(),
   };
 }
