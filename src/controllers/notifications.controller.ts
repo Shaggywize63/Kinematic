@@ -114,25 +114,66 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
 
   if (!title || !content) return badRequest(res, 'Title and message (body) are required');
 
-  // 1. Identify recipients based on targeting
-  const { city, supervisor_id, fe_id } = targeting || {};
+  // 1. Identify recipients based on targeting.
+  //
+  // Targeting now supports four shapes (any combination):
+  //   - { user_ids: [uuid, ...] }       direct user list (from the new
+  //                                     dashboard tree picker)
+  //   - { group_id: uuid }              expand a saved notification_group
+  //   - { hierarchy_level_id: uuid }    every user at that org-hierarchy
+  //                                     level (replaces supervisor_id /
+  //                                     city_manager / fe_id picking by
+  //                                     role label)
+  //   - { city }                        narrow to a city
+  //
+  // The legacy `supervisor_id` + `fe_id` keys still work so the previous
+  // notifications page doesn't break while the new composer rolls out.
+  const t = (targeting || {}) as {
+    city?: string | null;
+    supervisor_id?: string | null;
+    fe_id?: string | null;
+    user_ids?: string[] | null;
+    group_id?: string | null;
+    hierarchy_level_id?: string | null;
+  };
+  // Expand a saved group's user_ids first, then merge with any
+  // explicit user_ids the caller passed alongside. Dedup later.
+  let directUserIds: string[] = Array.isArray(t.user_ids) ? t.user_ids.filter(Boolean) as string[] : [];
+  if (t.group_id) {
+    const { data: grp } = await supabaseAdmin.from('notification_groups')
+      .select('user_ids').eq('org_id', user.org_id).eq('id', t.group_id).is('deleted_at', null).maybeSingle();
+    if (Array.isArray(grp?.user_ids)) directUserIds.push(...(grp!.user_ids as string[]));
+  }
+
   let usersQuery = supabaseAdmin.from('users').select('id, org_id, fcm_token').eq('org_id', user.org_id);
 
-  if (fe_id) {
-    usersQuery = usersQuery.eq('id', fe_id);
+  if (directUserIds.length > 0) {
+    // Direct list wins — narrow the query to exactly those ids,
+    // optionally further narrowed by city if both were passed.
+    usersQuery = usersQuery.in('id', Array.from(new Set(directUserIds)));
+    if (t.city) usersQuery = usersQuery.eq('city', t.city);
+  } else if (t.fe_id) {
+    usersQuery = usersQuery.eq('id', t.fe_id);
   } else {
-    if (city) usersQuery = usersQuery.eq('city', city);
-    if (supervisor_id) usersQuery = usersQuery.eq('supervisor_id', supervisor_id);
+    if (t.city) usersQuery = usersQuery.eq('city', t.city);
+    if (t.supervisor_id) usersQuery = usersQuery.eq('supervisor_id', t.supervisor_id);
+    if (t.hierarchy_level_id) usersQuery = usersQuery.eq('hierarchy_level_id', t.hierarchy_level_id);
   }
 
   const { data: targetUsers, error: uErr } = await usersQuery;
   if (uErr) return badRequest(res, uErr.message);
-  
+
   const targetUserIds = (targetUsers || []).map(u => u.id);
   if (targetUserIds.length === 0) return badRequest(res, 'No recipients found for the selected targeting');
 
-  // Log to Broadcast History first to get a Broadcast ID
-  const audience_summary = fe_id ? 'Individual FE' : (city || supervisor_id) ? `${city || ''} ${supervisor_id ? 'Team' : ''}` : 'All Users';
+  // Log to Broadcast History first to get a Broadcast ID. Summary
+  // surfaces the active selector so the history page reads usefully.
+  const audience_summary = directUserIds.length > 0
+    ? (t.group_id ? `Saved group · ${targetUserIds.length} users` : `${targetUserIds.length} users`)
+    : t.fe_id ? 'Individual FE'
+    : (t.city || t.supervisor_id || t.hierarchy_level_id)
+        ? `${t.city || ''} ${t.supervisor_id ? 'Team' : ''}${t.hierarchy_level_id ? ' Level' : ''}`.trim()
+        : 'All Users';
   
   const { data: broadcast, error: bErr } = await supabaseAdmin
     .from('notification_broadcasts')
@@ -330,4 +371,77 @@ export const clearHistory = asyncHandler(async (req: AuthRequest, res: Response)
     .eq('org_id', user.org_id);
   if (error) return badRequest(res, 'Failed to clear history');
   return ok(res, null, 'Broadcast history cleared');
+});
+
+// ── Saved notification groups ──────────────────────────────────────────
+//
+// Admin picks a set of users (often via the new hierarchy/city tree on
+// the dashboard composer), saves it under a name, then reuses it on
+// subsequent sends. The `/notifications/send` handler resolves
+// `targeting.group_id` to this row's `user_ids` at send time.
+
+const groupSchema = z.object({
+  name: z.string().min(1).max(80),
+  description: z.string().max(280).optional().nullable(),
+  user_ids: z.array(z.string().uuid()).min(1, 'A group needs at least one user'),
+});
+
+export const listGroups = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { data, error } = await supabaseAdmin
+    .from('notification_groups')
+    .select('id, name, description, user_ids, created_at, updated_at')
+    .eq('org_id', user.org_id)
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false });
+  if (error) return badRequest(res, error.message);
+  return ok(res, data ?? []);
+});
+
+export const createGroup = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const parsed = groupSchema.safeParse(req.body);
+  if (!parsed.success) return badRequest(res, parsed.error.issues[0]?.message || 'Invalid group');
+  const { data, error } = await supabaseAdmin
+    .from('notification_groups')
+    .insert({
+      org_id: user.org_id,
+      client_id: (user as any).client_id ?? null,
+      name: parsed.data.name.trim(),
+      description: parsed.data.description?.trim() || null,
+      user_ids: parsed.data.user_ids,
+      created_by: user.id,
+    })
+    .select('id, name, description, user_ids, created_at, updated_at')
+    .single();
+  if (error) return badRequest(res, error.message);
+  return ok(res, data);
+});
+
+export const updateGroup = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const parsed = groupSchema.partial().safeParse(req.body);
+  if (!parsed.success) return badRequest(res, parsed.error.issues[0]?.message || 'Invalid group');
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (parsed.data.name !== undefined) patch.name = parsed.data.name.trim();
+  if (parsed.data.description !== undefined) patch.description = parsed.data.description?.trim() || null;
+  if (parsed.data.user_ids !== undefined) patch.user_ids = parsed.data.user_ids;
+  const { data, error } = await supabaseAdmin
+    .from('notification_groups')
+    .update(patch)
+    .eq('org_id', user.org_id).eq('id', req.params.id).is('deleted_at', null)
+    .select('id, name, description, user_ids, created_at, updated_at')
+    .single();
+  if (error) return badRequest(res, error.message);
+  return ok(res, data);
+});
+
+export const deleteGroup = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { error } = await supabaseAdmin
+    .from('notification_groups')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('org_id', user.org_id).eq('id', req.params.id).is('deleted_at', null);
+  if (error) return badRequest(res, error.message);
+  return ok(res, null, 'Group deleted');
 });
