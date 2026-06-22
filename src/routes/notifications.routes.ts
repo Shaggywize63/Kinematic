@@ -11,11 +11,20 @@ router.use(requireAuth);
 router.delete('/clear',      ctrl.clearMyNotifications);
 router.delete('/item/:id',   ctrl.deleteMyNotification);
 
-// Admin-specific notification management (History & Send)
-router.delete('/history/clear', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.clearHistory);
-router.delete('/:id',       requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.deleteHistory);
-router.get('/history',       requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.getHistory);
-router.post('/send',         requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'), ctrl.sendNotification);
+// Admin-specific notification management (History, Send, saved groups).
+// Saved groups routes are registered BEFORE the `/:id` deleteHistory
+// route so /groups/:id is not shadowed by the catch-all admin
+// deleteHistory pattern (Express matches in declaration order).
+const ADMIN_ROLES = ['admin', 'super_admin', 'main_admin', 'sub_admin', 'supervisor', 'city_manager', 'client'] as const;
+router.get('/groups',          requireRole(...ADMIN_ROLES), ctrl.listGroups);
+router.post('/groups',         requireRole(...ADMIN_ROLES), ctrl.createGroup);
+router.patch('/groups/:id',    requireRole(...ADMIN_ROLES), ctrl.updateGroup);
+router.delete('/groups/:id',   requireRole(...ADMIN_ROLES), ctrl.deleteGroup);
+
+router.delete('/history/clear', requireRole(...ADMIN_ROLES), ctrl.clearHistory);
+router.delete('/:id',       requireRole(...ADMIN_ROLES), ctrl.deleteHistory);
+router.get('/history',       requireRole(...ADMIN_ROLES), ctrl.getHistory);
+router.post('/send',         requireRole(...ADMIN_ROLES), ctrl.sendNotification);
 
 // Generic user notification interactions
 router.get('/',              ctrl.getNotifications);
