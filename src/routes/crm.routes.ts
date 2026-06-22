@@ -2400,7 +2400,13 @@ router.get('/lookup/search', wrap(async (req, res) => {
       }
     } catch { /* ignore bad filter JSON, fall through to unfiltered */ }
   }
-  const { data, error } = await query.limit(50);
+  // Limit: when the rep is searching, cap at 50 (they're narrowing —
+  // more is noise). When the picker opens fresh (no query), pull up to
+  // 500 so a tenant with a few hundred dealers / engineers in the
+  // People Directory sees every row in the dropdown instead of just
+  // the first 50 by insertion order.
+  const cap = q ? 50 : 500;
+  const { data, error } = await query.limit(cap);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Slim down to (id, label) the picker can render directly without
   // every column over the wire.
