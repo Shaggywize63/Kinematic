@@ -1299,14 +1299,20 @@ export async function widgetSummary(
   };
 }
 
-export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null) {
+export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
     .eq('org_id', org_id).is('deleted_at', null).eq('crm_deal_stages.stage_type', 'won').not('actual_close_date', 'is', null);
   q = withClient(q, client_id);
+  // Deals are scoped by ownership (no city column on the table). The
+  // audit caught that the manager view was leaking org-wide cycle
+  // data into every ASO's report.
+  q = applyOwnerScope(q, scope);
   if (range?.from) q = q.gte('actual_close_date', range.from.slice(0, 10));
   if (range?.to) q = q.lte('actual_close_date', range.to.slice(0, 10));
-  const { data } = await q.limit(500);
+  // .range(0, 99999) lifts the hard 500-deal cap so tenants with a
+  // larger pipeline see a real average instead of a truncated one.
+  const { data } = await q.range(0, 99999);
   const buckets = new Map<string, number[]>();
   for (const d of (data ?? []) as unknown as Array<{ created_at: string; actual_close_date: string }>) {
     const month = d.actual_close_date.slice(0, 7);
@@ -1387,7 +1393,7 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
     }));
 }
 
-export async function activityHeatmap(org_id: string, client_id: string | null = null) {
+export async function activityHeatmap(org_id: string, client_id: string | null = null, scope?: AnalyticsScope) {
   // Last 31 days × 24 hours. Returns full grid (744 rows incl. zeros) so the
   // frontend can render a date-by-hour heatmap without gap-filling.
   const since = new Date();
@@ -1395,14 +1401,20 @@ export async function activityHeatmap(org_id: string, client_id: string | null =
   since.setUTCDate(since.getUTCDate() - 30);
   // .range(0, 99999) lifts the row cap so the heatmap reflects every
   // activity in the window, not just the first 1000.
+  // applyActivityScope keeps the manager's view bounded to their
+  // hierarchy subtree (without it the heatmap leaked org-wide
+  // activity to every ASO / Consumer Champion in the audit).
   const { data } = await withClient(
-    supabaseAdmin
-      .from('crm_activities')
-      .select('created_at')
-      .eq('org_id', org_id)
-      .is('deleted_at', null)
-      .gte('created_at', since.toISOString())
-      .range(0, 99999),
+    applyActivityScope(
+      supabaseAdmin
+        .from('crm_activities')
+        .select('created_at')
+        .eq('org_id', org_id)
+        .is('deleted_at', null)
+        .gte('created_at', since.toISOString())
+        .range(0, 99999),
+      scope,
+    ),
     client_id,
   );
 
@@ -1427,16 +1439,20 @@ export async function activityHeatmap(org_id: string, client_id: string | null =
   return result;
 }
 
-export async function leadSourceRoi(org_id: string, client_id: string | null = null) {
+export async function leadSourceRoi(org_id: string, client_id: string | null = null, scope?: AnalyticsScope) {
   // Live query — the MV (crm_mv_lead_source_roi) doesn't track client_id.
   // Pull leads + their source name + cost-per-lead and any converted-deal amount.
   // .range(0, 99999) lifts the row cap so source ROI covers every
   // lead, not just the first 1000.
+  // applyLeadScope keeps the manager's view bounded to their team's
+  // leads — without it source ROI bled org-wide numbers into every
+  // ASO's report (the audit-flagged accuracy bug).
   let lq = supabaseAdmin.from('crm_leads')
     .select('status, converted_deal_id, crm_lead_sources(name, cost_per_lead)')
     .eq('org_id', org_id).is('deleted_at', null)
     .range(0, 99999);
   lq = withClient(lq, client_id);
+  lq = applyLeadScope(lq, scope);
   const { data: leads } = await lq;
   const dealIds = (leads ?? [])
     .map((l: any) => l.converted_deal_id)
