@@ -3059,16 +3059,16 @@ analytics.get('/team-daily', wrap(async (req, res) => res.json(
     () => analyticsSvc.teamDaily(orgId(req), String(req.query.date ?? ''), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/sales-cycle', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'sales-cycle'), ANALYTICS_TTL,
-    () => analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req))))));
+    () => analyticsSvc.salesCycle(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/forecast', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'forecast'), ANALYTICS_TTL,
     () => analyticsSvc.forecast(orgId(req), (req.query.period as 'month'|'quarter') ?? 'quarter', dateRange(req), clientId(req), unitFromReq(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/activity-heatmap', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'activity-heatmap'), ANALYTICS_TTL,
-    () => analyticsSvc.activityHeatmap(orgId(req), clientId(req))))));
+    () => analyticsSvc.activityHeatmap(orgId(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/lead-source-roi', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lead-source-roi'), ANALYTICS_TTL,
-    () => analyticsSvc.leadSourceRoi(orgId(req), clientId(req))))));
+    () => analyticsSvc.leadSourceRoi(orgId(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 analytics.get('/lead-score-distribution', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'lead-score-distribution'), ANALYTICS_TTL,
     () => analyticsSvc.leadScoreDistribution(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
