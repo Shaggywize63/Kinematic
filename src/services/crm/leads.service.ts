@@ -287,7 +287,19 @@ export async function listLeadsWithCount(
   if (filters.district) q = q.eq('district', String(filters.district));
   if (filters.block)    q = q.eq('block',    String(filters.block));
   if (filters.score_grade) q = q.eq('score_grade', String(filters.score_grade));
-  if (filters.is_converted !== undefined) q = q.eq('is_converted', String(filters.is_converted) === 'true');
+  // Converted-lead default: once a lead becomes a Deal it stops being a
+  // "lead" — the Leads list should drop it. Callers that explicitly want
+  // converted rows back (Lead-Aging report, audit views, archive search)
+  // pass either `is_converted=true` (only converted) or
+  // `include_converted=true` (both). Tolerates legacy NULL on
+  // `is_converted` — those rows came in before the column existed and
+  // are by definition not converted.
+  const includeConverted = String(filters.include_converted ?? '').toLowerCase() === 'true';
+  if (filters.is_converted !== undefined) {
+    q = q.eq('is_converted', String(filters.is_converted) === 'true');
+  } else if (!includeConverted) {
+    q = q.or('is_converted.is.null,is_converted.eq.false');
+  }
   if (filters.q) {
     const s = sanitisePostgrestSearch(filters.q);
     if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`);
