@@ -134,14 +134,14 @@ export async function leaderboard(
   const userIds = Array.from(acc.keys()).filter(id => id !== 'unassigned');
   let usersById = new Map<string, { id: string; full_name: string; avatar_url: string | null; email: string | null }>();
   if (userIds.length) {
+    // public.users has `name`, NOT `full_name`. Selecting `full_name`
+    // 400s the query and empties the leaderboard. Use `name` only.
     const { data: users } = await supabaseAdmin
       .from('users')
-      .select('id, name, full_name, avatar_url, email')
+      .select('id, name, avatar_url, email')
       .in('id', userIds);
-    for (const u of (users ?? []) as Array<{ id: string; name?: string; full_name?: string; avatar_url?: string | null; email?: string | null }>) {
-      // Some legacy rows store the display name in `name`; prefer full_name
-      // when present, fall back to name, then email.
-      const display = u.full_name || u.name || u.email || 'Unknown';
+    for (const u of (users ?? []) as Array<{ id: string; name?: string; avatar_url?: string | null; email?: string | null }>) {
+      const display = u.name || u.email || 'Unknown';
       usersById.set(u.id, {
         id: u.id,
         full_name: display,
