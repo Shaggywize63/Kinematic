@@ -106,29 +106,49 @@ export interface AnalyticsScope {
 const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// Lead-visibility scope (city ∪ self ∪ null-city, then owner subtree) on a
-// crm_leads query — kept identical to listLeads so analytics match the list.
+// Lead-visibility scope on a crm_leads query — kept IDENTICAL to
+// listLeadsWithCount so analytics totals match the leads list exactly.
+//
+// The whole thing must be ONE PostgREST `.or()`. The previous version
+// emitted the city terms as one `.or()` and the owner-subtree as a
+// separate `.in()`, which PostgREST AND-s together. For a team manager
+// (who carries BOTH an assigned-city set AND a hierarchy subtree) that
+// meant "leads in my cities AND owned by my team" — a strict subset that
+// collapsed to near-zero, so every analytics report rendered blank even
+// though the leads list (correctly OR-ing the two) showed ~1.8k rows.
 export function applyLeadScope(q: any, scope?: AnalyticsScope): any {
   if (!scope) return q;
-  // Consumer Champion own-only: bypass city broadening entirely.
+  const hasCityScope = scope.effectiveCities !== undefined && scope.effectiveCities !== null;
+  const hasOwnerScope = scope.visibleOwnerIds !== undefined && scope.visibleOwnerIds !== null;
+
+  // Frontline own-only (data_scope='own' champion): just self, plus the
+  // subtree when present. No city broadening.
   if (scope.ownOnly) {
-    return scope.selfOwnerId
-      ? q.or(`owner_id.eq.${scope.selfOwnerId}`)
-      : q.eq('owner_id', NO_MATCH_UUID);
-  }
-  if (scope.effectiveCities !== undefined && scope.effectiveCities !== null) {
     const orParts: string[] = [];
-    if (scope.effectiveCities.length > 0) {
-      const cityCsv = scope.effectiveCities.map((c) => `"${String(c).replace(/"/g, '')}"`).join(',');
+    if (scope.selfOwnerId) orParts.push(`owner_id.eq.${scope.selfOwnerId}`);
+    if (hasOwnerScope && scope.visibleOwnerIds!.length > 0) {
+      orParts.push(`owner_id.in.(${scope.visibleOwnerIds!.join(',')})`);
+    }
+    return q.or(orParts.length ? orParts.join(',') : `owner_id.eq.${NO_MATCH_UUID}`);
+  }
+
+  // Everyone else: city ∪ self ∪ subtree (∪ null-city only when there is
+  // no owner subtree), combined into a SINGLE OR — mirrors the leads list.
+  if (hasCityScope || hasOwnerScope) {
+    const orParts: string[] = [];
+    if (hasCityScope && scope.effectiveCities!.length > 0) {
+      const cityCsv = scope.effectiveCities!.map((c) => `"${String(c).replace(/"/g, '')}"`).join(',');
       orParts.push(`city.in.(${cityCsv})`);
     }
     if (scope.selfOwnerId) orParts.push(`owner_id.eq.${scope.selfOwnerId}`);
-    if (scope.includeNullCity) orParts.push('city.is.null');
-    if (orParts.length === 0) orParts.push(`owner_id.eq.${NO_MATCH_UUID}`);
-    q = q.or(orParts.join(','));
-  }
-  if (scope.visibleOwnerIds !== undefined && scope.visibleOwnerIds !== null) {
-    q = q.in('owner_id', scope.visibleOwnerIds.length ? scope.visibleOwnerIds : [NO_MATCH_UUID]);
+    if (hasOwnerScope && scope.visibleOwnerIds!.length > 0) {
+      orParts.push(`owner_id.in.(${scope.visibleOwnerIds!.join(',')})`);
+    }
+    // Null-city leads only broaden in when there's no owner subtree (admin /
+    // data_scope='all'); under a subtree they're already covered by the
+    // owner term, and OR-ing every city-less lead would leak other regions.
+    if (scope.includeNullCity && !hasOwnerScope) orParts.push('city.is.null');
+    q = q.or(orParts.length ? orParts.join(',') : `owner_id.eq.${NO_MATCH_UUID}`);
   }
   return q;
 }
