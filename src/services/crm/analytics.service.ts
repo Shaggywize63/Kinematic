@@ -461,9 +461,31 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
   if (range?.from) q = q.gte('created_at', range.from);
   if (range?.to) q = q.lte('created_at', range.to);
   const { data: deals } = await q;
+  // Resolve owner UUIDs → display names in one batched lookup before the
+  // bucket loop. Without this, `by='rep'` returned raw uuids (the FE
+  // showed "a1b2c3…" instead of "Ravi Kumar"). Stage labels come from
+  // the embedded crm_deal_stages join, so no extra resolution needed
+  // for `by='stage'`.
+  let ownerNameById = new Map<string, string>();
+  if (by === 'rep') {
+    const ownerIds = Array.from(new Set(
+      ((deals ?? []) as unknown as Array<{ owner_id?: string | null }>)
+        .map((d) => d.owner_id)
+        .filter((id): id is string => !!id)
+    ));
+    if (ownerIds.length) {
+      const { data: users } = await supabaseAdmin.from('users')
+        .select('id, name, email').in('id', ownerIds);
+      for (const u of (users ?? []) as Array<{ id: string; name?: string; email?: string }>) {
+        ownerNameById.set(u.id, u.name || u.email || 'User');
+      }
+    }
+  }
   const map = new Map<string, { won: number; lost: number }>();
   for (const d of (deals ?? []) as unknown as Array<{ amount: number; owner_id?: string; stage_id: string; crm_deal_stages: { name: string; stage_type: string } }>) {
-    const key = by === 'rep' ? (d.owner_id ?? 'unassigned') : d.crm_deal_stages.name;
+    const key = by === 'rep'
+      ? (d.owner_id ? (ownerNameById.get(d.owner_id) ?? 'Unknown') : 'Unassigned')
+      : d.crm_deal_stages.name;
     const e = map.get(key) ?? { won: 0, lost: 0 };
     if (d.crm_deal_stages.stage_type === 'won') e.won += 1;
     if (d.crm_deal_stages.stage_type === 'lost') e.lost += 1;
