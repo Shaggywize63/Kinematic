@@ -779,6 +779,17 @@ leads.get('/geo', wrap(async (req, res) => {
   if (city) q = q.eq('city', city);
   const state = typeof req.query.state === 'string' ? req.query.state.trim() : '';
   if (state) q = q.eq('state', state);
+  // Drop converted leads from the map by default — once a lead is a
+  // Deal it shouldn't drift back onto the leads map. Opt-in via
+  // `?include_converted=true` (or explicit `?is_converted=...`) so
+  // audit / archive surfaces can still see them.
+  const includeConverted = String(req.query.include_converted ?? '').toLowerCase() === 'true';
+  const explicitIsConverted = typeof req.query.is_converted === 'string';
+  if (explicitIsConverted) {
+    q = q.eq('is_converted', String(req.query.is_converted) === 'true');
+  } else if (!includeConverted) {
+    q = q.or('is_converted.is.null,is_converted.eq.false');
+  }
   const { data, error } = await q.limit(5000);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   res.json({ success: true, data: data ?? [] });
