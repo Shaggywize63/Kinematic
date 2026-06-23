@@ -105,6 +105,31 @@ export interface AnalyticsScope {
 // when the caller can see nothing (no cities, no visible owners).
 const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
 
+// Resolve crm_lead_sources.id -> name (and optionally cost_per_lead) in one
+// batched query. Replaces the PostgREST `crm_lead_sources(name)` EMBED that
+// several analytics functions used: the embed silently fails (e.g. on a
+// stale PostgREST schema cache) returning `data: null`, and because the
+// callers ignored the error they rendered all-zero charts. Resolving the
+// FK ourselves — the same pattern the leads list uses (stampSourceNames) —
+// is immune to that failure mode.
+/* eslint-disable @typescript-eslint/no-explicit-any */
+async function resolveSourceNames(
+  ids: Array<string | null | undefined>,
+): Promise<Map<string, { name: string; cost_per_lead: number }>> {
+  const uniq = Array.from(new Set(ids.filter(Boolean) as string[]));
+  const out = new Map<string, { name: string; cost_per_lead: number }>();
+  if (uniq.length === 0) return out;
+  const { data } = await supabaseAdmin
+    .from('crm_lead_sources')
+    .select('id, name, cost_per_lead')
+    .in('id', uniq);
+  for (const s of (data ?? []) as any[]) {
+    out.set(s.id, { name: (s.name as string) ?? '', cost_per_lead: Number(s.cost_per_lead ?? 0) });
+  }
+  return out;
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Lead-visibility scope on a crm_leads query — kept IDENTICAL to
 // listLeadsWithCount so analytics totals match the leads list exactly.
@@ -328,13 +353,14 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   const sourceMap = new Map<string, { count: number; value: number }>();
   const { data: sourceLeads } = await withClient(applyLeadScope(
     supabaseAdmin.from('crm_leads')
-      .select('source_id, crm_lead_sources(name)')
+      .select('source_id')
       .eq('org_id', org_id).is('deleted_at', null)
       .gte('created_at', fromIso).lte('created_at', toIso)
       .range(0, 99999),
     scope), client_id);
-  for (const r of (sourceLeads ?? []) as Array<{ source_id?: string | null; crm_lead_sources?: { name?: string } | null }>) {
-    const name = r.crm_lead_sources?.name ?? 'Unspecified';
+  const summarySrcNames = await resolveSourceNames((sourceLeads ?? []).map((r: any) => r.source_id));
+  for (const r of (sourceLeads ?? []) as Array<{ source_id?: string | null }>) {
+    const name = (r.source_id ? summarySrcNames.get(r.source_id)?.name : '') || 'Unspecified';
     const s = sourceMap.get(name) ?? { count: 0, value: 0 };
     s.count += 1;
     sourceMap.set(name, s);
@@ -451,15 +477,16 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
     // .range(0, 99999) lifts PostgREST's 1000-row cap; without it
     // win rate is wrong for any tenant with >1k leads.
     let lq = supabaseAdmin.from('crm_leads')
-      .select('status, source_id, crm_lead_sources(name)')
+      .select('status, source_id')
       .eq('org_id', org_id).is('deleted_at', null)
       .range(0, 99999);
     lq = withClient(lq, client_id);
     lq = applyLeadScope(lq, scope);
     const { data } = await lq;
+    const srcNames = await resolveSourceNames((data ?? []).map((r: any) => r.source_id));
     const map = new Map<string, { won: number; total: number }>();
-    for (const r of (data ?? []) as unknown as Array<{ status: string; crm_lead_sources?: { name?: string } | null }>) {
-      const name = r.crm_lead_sources?.name ?? 'Unspecified';
+    for (const r of (data ?? []) as unknown as Array<{ status: string; source_id?: string | null }>) {
+      const name = (r.source_id ? srcNames.get(r.source_id)?.name : '') || 'Unspecified';
       const e = map.get(name) ?? { won: 0, total: 0 };
       e.total += 1;
       if (r.status === 'converted') e.won += 1;
@@ -893,12 +920,15 @@ export async function leadTracker(
   // .range(0, 99999) lifts the 1000-row PostgREST cap so the tracker
   // counts every lead, not just the first 1000.
   let q = supabaseAdmin.from('crm_leads')
-    .select('created_at, owner_id, status, source_id, city, crm_lead_sources(name)')
+    .select('created_at, owner_id, status, source_id, city')
     .eq('org_id', org_id).is('deleted_at', null)
     .range(0, 99999);
   q = withClient(q, client_id);
   q = applyLeadScope(q, scope);
-  const { data: leads } = await q;
+  const { data: leads, error: leadsErr } = await q;
+  if (leadsErr) throw new Error(`lead-tracker leads query failed: ${leadsErr.message}`);
+  // Resolve source names in one batched query (no fragile embed).
+  const srcNames = await resolveSourceNames((leads ?? []).map((l: any) => l.source_id));
 
   // Initialise monthly / weekly / daily buckets so empty windows render zero.
   const monthlyBuckets: Record<string, number> = {};
@@ -933,7 +963,7 @@ export async function leadTracker(
 
   for (const l of (leads ?? []) as Array<{
     created_at: string; status: string | null;
-    crm_lead_sources?: { name?: string } | null; city: string | null;
+    source_id?: string | null; city: string | null;
   }>) {
     const t = new Date(l.created_at);
     if (!Number.isFinite(t.getTime())) continue;
@@ -955,7 +985,7 @@ export async function leadTracker(
     if (t >= monthStart) { periodCounts.month.new  += 1; if (isConv) periodCounts.month.conv += 1; }
 
     // Source / city breakdowns.
-    const srcName = l.crm_lead_sources?.name?.trim() || 'Unspecified';
+    const srcName = (l.source_id ? srcNames.get(l.source_id)?.name : '')?.trim() || 'Unspecified';
     sourceCounts.set(srcName, (sourceCounts.get(srcName) ?? 0) + 1);
     if (l.city) cityCounts.set(l.city, (cityCounts.get(l.city) ?? 0) + 1);
 
@@ -1497,12 +1527,13 @@ export async function leadSourceRoi(org_id: string, client_id: string | null = n
   // leads — without it source ROI bled org-wide numbers into every
   // ASO's report (the audit-flagged accuracy bug).
   let lq = supabaseAdmin.from('crm_leads')
-    .select('status, converted_deal_id, crm_lead_sources(name, cost_per_lead)')
+    .select('status, converted_deal_id, source_id')
     .eq('org_id', org_id).is('deleted_at', null)
     .range(0, 99999);
   lq = withClient(lq, client_id);
   lq = applyLeadScope(lq, scope);
   const { data: leads } = await lq;
+  const roiSrcNames = await resolveSourceNames((leads ?? []).map((l: any) => l.source_id));
   const dealIds = (leads ?? [])
     .map((l: any) => l.converted_deal_id)
     .filter((id: string | null) => !!id) as string[];
@@ -1516,9 +1547,10 @@ export async function leadSourceRoi(org_id: string, client_id: string | null = n
     }
   }
   const map = new Map<string, { source: string; leads: number; deals: number; revenue: number; cost: number }>();
-  for (const l of (leads ?? []) as unknown as Array<{ status: string; converted_deal_id: string | null; crm_lead_sources?: { name?: string; cost_per_lead?: number } | null }>) {
-    const name = l.crm_lead_sources?.name ?? 'Unspecified';
-    const cpl = Number(l.crm_lead_sources?.cost_per_lead ?? 0);
+  for (const l of (leads ?? []) as unknown as Array<{ status: string; converted_deal_id: string | null; source_id?: string | null }>) {
+    const src = l.source_id ? roiSrcNames.get(l.source_id) : undefined;
+    const name = src?.name || 'Unspecified';
+    const cpl = Number(src?.cost_per_lead ?? 0);
     const e = map.get(name) ?? { source: name, leads: 0, deals: 0, revenue: 0, cost: 0 };
     e.leads += 1;
     e.cost += cpl;

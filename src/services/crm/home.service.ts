@@ -239,10 +239,13 @@ export async function homePayload(opts: {
   // We pull the user's "actionable" leads in one query, then derive
   // near-to-close + next-actions in memory. Bounded at 100 so a rep
   // with 5k+ leads doesn't trigger a slow query.
+  // crm_leads has NO `assigned_to` column (that lives on crm_activities) —
+  // selecting/filtering it 400s the whole query and blanks the Home board.
+  // Leads are owned via owner_id only.
   let leadsQ = supabaseAdmin.from('crm_leads')
-    .select('id, first_name, last_name, email, phone, status, lifecycle_stage, score, score_grade, last_activity_at, owner_id, assigned_to')
+    .select('id, first_name, last_name, email, phone, status, lifecycle_stage, score, score_grade, last_activity_at, owner_id')
     .eq('org_id', org_id).is('deleted_at', null)
-    .or(`owner_id.eq.${user_id},assigned_to.eq.${user_id}`)
+    .eq('owner_id', user_id)
     .in('status', ['new', 'working', 'nurturing', 'qualified']);
   if (client_id) leadsQ = leadsQ.eq('client_id', client_id);
   const { data: openLeads } = await leadsQ
