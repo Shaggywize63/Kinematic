@@ -199,10 +199,20 @@ function clientScope(req: Request): { id: string | null; strict: boolean } {
 }
 
 function clientId(req: Request): string | null { return clientScope(req).id; }
+// Accept only well-formed dates so a malformed client value (we saw
+// "23--06--2026" in prod logs) can't reach a query and 500 it — Postgres
+// throws "date/time field value out of range" and, because the analytics
+// services ignore the error, the report silently renders empty. A valid
+// value starts with an ISO date (YYYY-MM-DD, optionally followed by a
+// time) AND parses; anything else is dropped (treated as "no bound").
+function sanitiseDate(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim();
+  if (!/^\d{4}-\d{2}-\d{2}([T ].*)?$/.test(s)) return undefined;
+  return Number.isNaN(Date.parse(s)) ? undefined : s;
+}
 function dateRange(req: Request): { from?: string; to?: string } {
-  const from = req.query.from ? String(req.query.from) : undefined;
-  const to = req.query.to ? String(req.query.to) : undefined;
-  return { from, to };
+  return { from: sanitiseDate(req.query.from), to: sanitiseDate(req.query.to) };
 }
 
 // System roles that get full activity visibility in their org/client
