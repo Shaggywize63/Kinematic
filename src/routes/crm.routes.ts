@@ -3005,15 +3005,33 @@ const { cached: cachedAnalytics } = require('../utils/analyticsCache') as typeof
 // Per-user analytics scope — identical to the leads/deals list endpoints so
 // the dashboard shows each user only their slice (assigned city + role
 // hierarchy). null fields = no extra restriction (admins see everything).
+//
+// The global city picker (`?city=Mumbai`, auto-appended by the dashboard's
+// api.ts) narrows `effectiveCities` to the intersection with the picked
+// city. Without this, the reports would silently ignore the picker — the
+// user would pick Mumbai and the dashboard would still aggregate every
+// city they're assigned to. Picks outside the user's assigned set
+// collapse to an empty list (the route then returns zero rows, which
+// matches what the leads list does for a foreign city).
 async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope> {
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
+  const pickedCity = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+  const narrowToPick = (cities: string[] | null): string[] | null => {
+    if (!pickedCity) return cities;
+    // null = admin (no city restriction) — pick lands as the only city.
+    if (cities === null) return [pickedCity];
+    // Picks outside the assigned set must NOT widen the scope — drop to
+    // an empty list so the analytics call returns nothing instead of
+    // leaking another region's numbers.
+    return cities.includes(pickedCity) ? [pickedCity] : [];
+  };
   // Consumer Champions see only their own data — no city broadening and no
   // hierarchy expansion. Mirrors the ownOnly flag used in the leads list.
   const isChampion = (me?.org_role_name ?? '').toLowerCase().includes('consumer champion');
   if (isChampion) {
     return {
-      effectiveCities: null,
+      effectiveCities: pickedCity ? [pickedCity] : null,
       visibleOwnerIds: selfOwnerId ? [selfOwnerId] : [],
       selfOwnerId,
       includeNullCity: false,
@@ -3024,7 +3042,8 @@ async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope
   // can see and (b) the geography (assigned_cities) they're tied to. A
   // manager with assigned cities still only sees their team's work within
   // their geography — managing someone doesn't extend their geographic remit.
-  const effectiveCities = rbac.getEffectiveCityNames(me);
+  const baseCities = rbac.getEffectiveCityNames(me);
+  const effectiveCities = narrowToPick(baseCities);
   let visibleOwnerIds: string[] | null = null;
   const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
   if (hierOn) {
@@ -3032,8 +3051,12 @@ async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope
   }
   // City-less leads (most of the book) are scoped by owner/hierarchy, not
   // geo — include them for tenant-wide admins and whenever hierarchy RBAC
-  // bounds exposure, so dashboard counts match the leads list.
-  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
+  // bounds exposure, so dashboard counts match the leads list. But once a
+  // specific city is picked, exclude null-city leads — otherwise a Mumbai
+  // pick would still surface every imported / null-city lead and look
+  // identical to "All cities".
+  const includeNullCity = !pickedCity
+    && ((me?.org_role_data_scope ?? 'all') === 'all' || hierOn);
   return { effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity };
 }
 // The scope signature MUST be part of the cache key, otherwise one user's
