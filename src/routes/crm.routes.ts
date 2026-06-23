@@ -44,7 +44,7 @@ import * as targetsSvc from '../services/crm/targets.service';
 import * as homeSvc from '../services/crm/home.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
-import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues } from '../services/crm/owners.helper';
+import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 
 const router: Router = express.Router();
@@ -689,7 +689,12 @@ leads.get('/export', wrap(async (req, res) => {
       .map((u) => `${u.created_at.slice(0, 16).replace('T', ' ')} ${u.author ? `[${u.author}]` : ''} ${u.body}`)
       .join(' | '),
   }));
-  const enriched = stampCustomFieldValues(enrichedHydrated as any[], customCols);
+  // Resolve every lookup custom-field UUID → display label so columns
+  // like "Dealer" / "Block" / "Product" read as names instead of opaque
+  // UUIDs. Inline `{id,label}` writes are picked up for free; bare UUID
+  // strings (legacy + import paths) get hydrated via lookupLabels.
+  const lookupLabels = await resolveLookupLabels(enrichedHydrated as any[], customCols);
+  const enriched = stampCustomFieldValues(enrichedHydrated as any[], customCols, lookupLabels);
 
   // Auto-discover the column set from the sample row so any column added
   // by a future migration appears in the next CSV pull without a code
@@ -1081,7 +1086,8 @@ deals.get('/export', wrap(async (req, res) => {
   // Same flattening + stamping as leads/export so the CSV writer below
   // reads each value via the synthetic custom__<field_key> column.
   const customCols = await listCustomFieldColumns(orgId(req), 'deal');
-  const flatWithCustom = stampCustomFieldValues(flat as any[], customCols);
+  const lookupLabels = await resolveLookupLabels(flat as any[], customCols);
+  const flatWithCustom = stampCustomFieldValues(flat as any[], customCols, lookupLabels);
 
   const cols: Array<{ key: string; label: string }> = [
     { key: 'name',                label: 'Name' },
@@ -2346,6 +2352,17 @@ router.get('/lookup/search', wrap(async (req, res) => {
   const display = meta?.display ?? genericDisplay;
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const scope = clientScope(req);
+  // Resolve-by-ids mode. When the caller passes `ids=uuid1,uuid2,…`
+  // they're hydrating UUIDs they already have (e.g. the lead detail
+  // panel turning custom_fields[dealer_id] into "Ravi Kumar"). Skip the
+  // per-user city/district gate — those are picker UX, not security:
+  // the requester already has the UUID off a row their RBAC let them
+  // read. Org + client scope still apply.
+  const rawIds = typeof req.query.ids === 'string' ? req.query.ids : '';
+  const resolveIds = rawIds
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s));
   let query = supabaseAdmin.from(target).select('*').eq('org_id', orgId(req));
   // Soft-delete column exists on most lookup-eligible tables but not all,
   // so we only enforce it on curated targets where we know it's present.
@@ -2355,6 +2372,13 @@ router.get('/lookup/search', wrap(async (req, res) => {
   // filter for uncurated tables to avoid PostgREST 4xx-ing on a missing
   // column.
   if (meta && scope.id) query = query.eq('client_id', scope.id);
+  if (resolveIds.length > 0) {
+    query = query.in('id', resolveIds);
+    const { data, error } = await query.limit(resolveIds.length);
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: r }));
+    return res.json({ success: true, data: items });
+  }
   // Per-user city gate for the people_directory lookup target.
   // Consumer Champions from Dhanbad should only see Engineers /
   // Architects / Dealers from Dhanbad — not the org-wide roster.
