@@ -574,8 +574,13 @@ export async function teamPerformance(
 ): Promise<{ total: TeamPerformanceRow; rows: TeamPerformanceRow[] }> {
   // ── Resolve hierarchy subtree up-front. Same pattern as teamDaily.
   const subtree = scope?.visibleOwnerIds ?? null;
+  // NB: public.users has `name`, NOT `full_name`. Selecting a column that
+  // doesn't exist makes PostgREST 400 the whole query, which bubbles up
+  // as an empty Team Performance report ("column users.full_name does not
+  // exist"). Select only real columns; the display-name fallback below
+  // already prefers `name`.
   let userQ = supabaseAdmin.from('users')
-    .select('id, name, full_name, email')
+    .select('id, name, email')
     .eq('org_id', org_id);
   if (client_id) userQ = userQ.eq('client_id', client_id);
   if (subtree && subtree.length > 0) userQ = userQ.in('id', subtree);
@@ -1060,8 +1065,10 @@ export async function teamDaily(
 
   // Resolve the subtree.
   const subtree = scope?.visibleOwnerIds ?? null;
+  // public.users has `name`, not `full_name` — selecting `full_name`
+  // 400s the whole query and blanks the Team Daily report.
   let userQ = supabaseAdmin.from('users')
-    .select('id, name, full_name, email, client_id')
+    .select('id, name, email, client_id')
     .eq('org_id', org_id);
   if (client_id) userQ = userQ.eq('client_id', client_id);
   if (subtree && subtree.length > 0) userQ = userQ.in('id', subtree);
