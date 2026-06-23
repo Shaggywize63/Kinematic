@@ -216,6 +216,8 @@ export type CustomFieldCol = {
   key: string;        // synthetic column key the route reads off the row
   label: string;      // header label shown in the CSV
   field_key: string;  // original key in row.custom_fields
+  field_type?: string;     // 'lookup' for linked-record fields
+  target_table?: string | null; // referenced table for lookup fields
 };
 
 export async function listCustomFieldColumns(
@@ -224,7 +226,7 @@ export async function listCustomFieldColumns(
 ): Promise<CustomFieldCol[]> {
   const { data } = await supabaseAdmin
     .from('crm_custom_field_defs')
-    .select('field_key, label, position')
+    .select('field_key, label, position, field_type, target_table')
     .eq('org_id', org_id)
     .eq('entity_type', entity)
     .order('position', { ascending: true, nullsFirst: false });
@@ -232,17 +234,97 @@ export async function listCustomFieldColumns(
     key: `custom__${d.field_key}`,
     label: d.label || d.field_key,
     field_key: d.field_key,
+    field_type: d.field_type,
+    target_table: d.target_table ?? null,
   }));
+}
+
+// Pick the most human-readable label out of a row pulled from an
+// arbitrary lookup table. Tries first/last name first (people_directory,
+// users), then common name-ish columns, then falls back to a short id.
+// Mirrors the genericDisplay used by /api/v1/crm/lookup/search so the
+// CSV reads "Ravi Kumar" instead of an opaque UUID.
+function lookupRowLabel(r: Record<string, unknown>): string {
+  const name = [r.first_name, r.last_name].filter(Boolean).join(' ').trim();
+  if (name) return name;
+  for (const k of ['name', 'title', 'label', 'subject', 'email', 'mobile', 'phone', 'code']) {
+    const v = r[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return String(r.id ?? '').slice(0, 8);
+}
+
+/**
+ * Resolve every lookup custom-field UUID referenced by `rows` to its
+ * display label. Returns a Map keyed `${target_table}:${id}` so the
+ * stamping below can swap UUIDs for names without another round-trip.
+ *
+ * Why this exists: lookup fields can be persisted as either
+ *   - the new `{ id, label, target_table }` object (the picker writes
+ *     this so the detail page renders without resolving), OR
+ *   - a bare UUID string (legacy writes, CSV imports, mobile clients
+ *     that send the raw id).
+ * Without this hydration the CSV export wrote the raw UUID into the
+ * "Dealer" / "Block" / "Product" columns — the bug being fixed.
+ */
+export async function resolveLookupLabels(
+  rows: Array<{ custom_fields?: Record<string, unknown> | null }>,
+  cols: CustomFieldCol[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const idsByTarget = new Map<string, Set<string>>();
+  for (const c of cols) {
+    if (c.field_type !== 'lookup' || !c.target_table) continue;
+    for (const r of rows) {
+      const cf = (r.custom_fields ?? {}) as Record<string, unknown>;
+      const v = cf[c.field_key];
+      if (!v) continue;
+      let id: string | null = null;
+      if (typeof v === 'string') {
+        id = v;
+      } else if (typeof v === 'object') {
+        const o = v as { id?: string; label?: string };
+        if (o.id && !o.label) id = o.id;
+      }
+      if (!id) continue;
+      const set = idsByTarget.get(c.target_table) ?? new Set<string>();
+      set.add(id);
+      idsByTarget.set(c.target_table, set);
+    }
+  }
+  for (const [target, ids] of idsByTarget) {
+    if (ids.size === 0) continue;
+    // Soft-fail per target so a broken lookup target doesn't 500 the
+    // whole CSV — unresolved ids fall back to the raw UUID.
+    try {
+      const { data } = await supabaseAdmin
+        .from(target)
+        .select('*')
+        .in('id', Array.from(ids));
+      for (const row of (data ?? []) as Record<string, unknown>[]) {
+        const id = row.id as string | undefined;
+        if (!id) continue;
+        const label = lookupRowLabel(row);
+        if (label) out.set(`${target}:${id}`, label);
+      }
+    } catch {
+      /* leave UUIDs as-is when the target table can't be read */
+    }
+  }
+  return out;
 }
 
 // Flatten the row.custom_fields jsonb onto top-level synthetic keys
 // (`custom__<field_key>`) so the CSV writer's plain `r[col.key]` lookup
 // finds the value without special-casing every column. Arrays + objects
 // get JSON.stringified so multi-select / file lists survive the trip
-// to a spreadsheet as readable text.
+// to a spreadsheet as readable text. Lookup fields are special-cased to
+// emit the display label (from inline `{id,label}` or the resolution
+// map) instead of the raw UUID.
 export function stampCustomFieldValues<T extends { custom_fields?: Record<string, unknown> | null }>(
   rows: T[],
   cols: CustomFieldCol[],
+  lookupLabels?: Map<string, string>,
 ): T[] {
   if (rows.length === 0 || cols.length === 0) return rows;
   return rows.map((r) => {
@@ -250,9 +332,22 @@ export function stampCustomFieldValues<T extends { custom_fields?: Record<string
     const out: Record<string, unknown> = { ...r };
     for (const c of cols) {
       const v = cf[c.field_key];
+      if (v === undefined || v === null) { out[c.key] = ''; continue; }
+      if (c.field_type === 'lookup' && c.target_table) {
+        if (typeof v === 'object' && !Array.isArray(v)) {
+          const o = v as { id?: string; label?: string };
+          if (o.label) { out[c.key] = o.label; continue; }
+          if (o.id) {
+            out[c.key] = lookupLabels?.get(`${c.target_table}:${o.id}`) ?? o.id;
+            continue;
+          }
+        } else if (typeof v === 'string') {
+          out[c.key] = lookupLabels?.get(`${c.target_table}:${v}`) ?? v;
+          continue;
+        }
+      }
       out[c.key] =
-        v === undefined || v === null ? ''
-        : Array.isArray(v) ? v.join('; ')
+        Array.isArray(v) ? v.join('; ')
         : typeof v === 'object' ? JSON.stringify(v)
         : v;
     }
