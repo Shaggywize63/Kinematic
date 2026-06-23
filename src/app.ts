@@ -238,7 +238,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'kinematic-api',
-    version: '1.0.1-perf-V6',
+    version: '1.0.2-reports-scope-fix',
     timestamp: new Date().toISOString(),
   });
 });
