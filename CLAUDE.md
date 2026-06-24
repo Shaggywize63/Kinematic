@@ -18,6 +18,20 @@ Key conventions:
   `crud.clientScopedList*` adds the client filter; pass `strictClient` for real
   tenant isolation (leads/deals/contacts/accounts) vs shared lookup tables.
 
+## Default tenant for changes — Kinematic, not Tata
+
+Unless the user **explicitly names** a project/tenant, ALL data, schema,
+config, SQL, and edge/cron operations default to the **Kinematic** Supabase
+project (`clldjlojtmrrpozydqxk`), NOT Tata (`lnvxqjqfsxvtjvbzphou`). Only touch
+Tata (or any other org) when the user names it.
+
+Backend code in this repo is **shared** by both tenants, so when adding
+multi-project features keep production behavior for the Tata `default` project
+unchanged: route every no-explicit-project fallback through
+`fallbackProjectKey()` in `src/lib/projects.ts`, which in production ALWAYS
+falls back to `default` (Tata). Dev/tooling may default to Kinematic only
+outside production via `DEV_DEFAULT_PROJECT` (never set it on the prod server).
+
 ## Golden rule: wire BOTH ends for every new module / feature
 
 A green typecheck does **not** mean a feature works. Most bugs have been
