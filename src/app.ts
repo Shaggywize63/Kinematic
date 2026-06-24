@@ -187,6 +187,7 @@ app.use(cors({
   allowedHeaders: [
     'Content-Type', 'Authorization', 'Idempotency-Key', 'X-Idempotency-Key',
     'x-org-id', 'x-client-id', 'X-Org-Id', 'X-Client-Id', 'X-Request-Id',
+    'X-Kinematic-Project', 'x-kinematic-project',
   ],
   maxAge: 600,
 }));
