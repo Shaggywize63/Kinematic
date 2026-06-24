@@ -13,6 +13,7 @@ import leadUpdatesRoutes from './routes/crm/lead-updates.routes';
 import { logger } from './lib/logger';
 import { notFoundHandler } from './middleware/errorHandler';
 import { requireAuth } from './middleware/auth';
+import { withProject } from './middleware/withProject';
 import { auditAll } from './middleware/auditAll';
 import auditLogRoutes from './routes/auditLog.routes';
 import {
@@ -232,6 +233,7 @@ app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 app.use(strictJson);                                            // mutating routes must send JSON
 app.use(prototypePoll);                                         // block __proto__ / constructor injection
 app.use(auditAll);                                              // log every state change after the response finishes
+app.use(withProject);                                           // route each request to its Supabase project (X-Kinematic-Project; default → single project)
 
 // ── Health check ───────────────────────────────────
 app.get('/health', (_req, res) => {
