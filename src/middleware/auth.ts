@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
-import { jwtVerify, createRemoteJWKSet } from 'jose';
 import { supabaseAdmin } from '../lib/supabase';
+import { currentProjectKey, verifyProjectToken } from '../lib/projects';
 import { AuthRequest, UserRole } from '../types';
 import { DEMO_ORG_ID, DEMO_USER_ID, isDemo } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
@@ -71,52 +71,31 @@ export function invalidateAuthCache(predicate?: (u: AuthRequest['user']) => bool
   }
 }
 
-// Token verification — three paths in order of preference:
-//   1. Asymmetric (RS256/ES256) via JWKS — for projects on Supabase's modern
-//      Signing Keys. Set SUPABASE_JWKS_URL to the .well-known/jwks.json URL
-//      (typically https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json).
-//      jose caches the JWKS and refreshes on key rotation.
-//   2. Symmetric HS256 via legacy shared secret — for projects still using
-//      the old JWT secret. Set SUPABASE_JWT_SECRET.
-//   3. Network fallback to supabaseAdmin.auth.getUser — if both env vars are
-//      missing OR local verify rejects (wrong key/alg/expired). Slower but
-//      keeps auth working through misconfiguration.
-const SUPABASE_JWKS_URL   = process.env.SUPABASE_JWKS_URL || '';
-const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || '';
-const JWKS = SUPABASE_JWKS_URL
-  ? createRemoteJWKSet(new URL(SUPABASE_JWKS_URL), { cooldownDuration: 30_000 })
-  : null;
-const HS256_KEY = SUPABASE_JWT_SECRET ? new TextEncoder().encode(SUPABASE_JWT_SECRET) : null;
-
-let warnedJwks = false;
-let warnedHs256 = false;
-
+// Token verification — three paths in order of preference, all scoped to the
+// CURRENT request's Supabase project (resolved from AsyncLocalStorage):
+//   1. Asymmetric (RS256/ES256) via the project's JWKS — modern Signing Keys.
+//   2. Symmetric HS256 via the project's legacy shared secret.
+//      (Both are configured per project in lib/projects from {,KINEMATIC_}
+//       SUPABASE_JWKS_URL / SUPABASE_JWT_SECRET; jose caches + rotates JWKS.)
+//   3. Network fallback to supabaseAdmin.auth.getUser for the current project —
+//      if local verify is unavailable OR rejects. Slower but always correct,
+//      and supabaseAdmin already points at the current project's gotrue.
+// A token minted by one project will NOT verify against another project's
+// keys, so cross-project token confusion fails closed.
 async function verifyToken(token: string): Promise<{ sub: string; exp?: number; email?: string } | null> {
-  // 1. JWKS / asymmetric path
-  if (JWKS) {
-    try {
-      const { payload } = await jwtVerify(token, JWKS);
-      if (payload.sub) return { sub: payload.sub, exp: payload.exp, email: (payload as any).email };
-    } catch (e: any) {
-      if (!warnedJwks) {
-        warnedJwks = true;
-        logger.warn(`[Auth] JWKS verify failed (${e.code || e.message}); falling back. Check SUPABASE_JWKS_URL.`);
-      }
-    }
+  const projectKey = currentProjectKey();
+
+  // 1 + 2. Local verification against this project's keys.
+  const result = await verifyProjectToken(projectKey, token);
+  if (result?.payload?.sub) {
+    return {
+      sub: result.payload.sub,
+      exp: result.payload.exp,
+      email: (result.payload as { email?: string }).email,
+    };
   }
-  // 2. Legacy HS256 secret
-  if (HS256_KEY) {
-    try {
-      const { payload } = await jwtVerify(token, HS256_KEY);
-      if (payload.sub) return { sub: payload.sub, exp: payload.exp, email: (payload as any).email };
-    } catch (e: any) {
-      if (!warnedHs256) {
-        warnedHs256 = true;
-        logger.warn(`[Auth] HS256 verify failed (${e.code || e.message}); falling back to gotrue.`);
-      }
-    }
-  }
-  // 3. Network fallback (slow but always correct)
+
+  // 3. Network fallback (slow but always correct), against this project's gotrue.
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data?.user) return null;
@@ -199,8 +178,12 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     return next();
   }
 
+  // Cache key is scoped by project so two projects' tokens (which are signed
+  // by different keys and never collide anyway) can never share a profile.
+  const cacheKey = `${currentProjectKey()}:${token}`;
+
   // Hot path — cache hit avoids both JWT verification AND profile lookup.
-  const cached = cacheGet(token);
+  const cached = cacheGet(cacheKey);
   if (cached) {
     if (rejectIfStaleSession(req, res, cached)) return;
     req.user = cached;
@@ -323,7 +306,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // can't ride a stale session_id past this gate.
   if (rejectIfStaleSession(req, res, user)) return;
 
-  cacheSet(token, user, verified.exp);
+  cacheSet(cacheKey, user, verified.exp);
   req.user = user;
   req.accessToken = token;
   next();

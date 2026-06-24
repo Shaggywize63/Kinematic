@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
+router.get('/project-for-email', ctrl.projectForEmail);
 router.post('/login',   ctrl.login);
 router.post('/refresh', ctrl.refresh);
 router.post('/logout',  requireAuth, ctrl.logout);
