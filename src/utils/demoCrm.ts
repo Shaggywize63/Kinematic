@@ -8,6 +8,8 @@
  */
 import { Request, Response, NextFunction } from 'express';
 import { isDemo } from './demoData';
+import { currentDemoIndustry } from '../lib/demoContext';
+import { INSURANCE_CRM } from './demo/insuranceCrm';
 
 const REPS = ['Arjun Sharma', 'Priya Patel', 'Rahul Verma', 'Sneha Rao', 'Amit Singh'];
 
@@ -487,9 +489,47 @@ const json = (res: Response, body: unknown) => res.json(body);
 const list = <T,>(rows: T[]) => ({ data: rows, total: rows.length, limit: rows.length, offset: 0 });
 const ok = <T,>(body: T) => body;
 
+// The generic dataset, assembled from the module-level consts. Kept at module
+// scope (not inline in the middleware) so the in-function destructure that
+// shadows these names doesn't shadow this object's initializer too.
+const GENERIC_CRM = {
+  LEADS, ACCOUNTS, CONTACTS, STAGES, PIPELINES, DEALS, ACTIVITIES, SOURCES,
+  DEMO_DASHBOARD_SUMMARY, DEMO_PIPELINE_VALUE, DEMO_FUNNEL, DEMO_WIN_RATE_BY_REP,
+  DEMO_FORECAST, DEMO_HEATMAP, DEMO_LEAD_SOURCE_ROI, DEMO_SCORE_DIST, DEMO_SALES_CYCLE,
+  DEMO_DASHBOARD_COMPLETE, DEMO_TERRITORIES, DEMO_PRODUCTS, DEMO_CRM_SETTINGS,
+  DEMO_CUSTOM_FIELDS, DEMO_AUTOMATIONS, DEMO_ASSIGNMENT_RULES,
+  DEMO_ANALYTICS_LAYOUT, DEMO_OVERVIEW_LAYOUT,
+  DEMO_LEAD_VELOCITY, DEMO_TIME_TO_FIRST_TOUCH, DEMO_STUCK_LEADS_KPI, DEMO_LOST_REASONS,
+  DEMO_WON_REASONS, DEMO_DISQUAL_REASONS, DEMO_STAGE_CONVERSION, DEMO_LEAD_AGING,
+  DEMO_COHORT_CONVERSION, DEMO_ENGAGEMENT_COMPARISON, DEMO_DAYS_SINCE_TOUCH,
+  DEMO_SCORE_BAND_CONVERSION, DEMO_TERRITORY_CONVERSION, DEMO_TOUCHPOINTS_TO_RESPONSE,
+  DEMO_LEADS_AT_RISK,
+};
+
 export function demoCrmMiddleware(req: Request, res: Response, next: NextFunction): void {
   const user = (req as Request & { user?: { org_id?: string } }).user;
   if (!isDemo(user)) return next();
+
+  // Resolve the active dataset for this request's demo industry, then shadow
+  // the module-level consts so the handler body below transparently serves the
+  // chosen vertical. Generic stays byte-identical (uses the module consts).
+  const D = currentDemoIndustry() === 'insurance' ? INSURANCE_CRM : GENERIC_CRM;
+  const {
+    LEADS, ACCOUNTS, CONTACTS, STAGES, PIPELINES, DEALS, ACTIVITIES, SOURCES,
+    DEMO_DASHBOARD_SUMMARY, DEMO_PIPELINE_VALUE, DEMO_FUNNEL, DEMO_WIN_RATE_BY_REP,
+    DEMO_FORECAST, DEMO_HEATMAP, DEMO_LEAD_SOURCE_ROI, DEMO_SCORE_DIST, DEMO_SALES_CYCLE,
+    DEMO_DASHBOARD_COMPLETE, DEMO_TERRITORIES, DEMO_PRODUCTS, DEMO_CRM_SETTINGS,
+    DEMO_CUSTOM_FIELDS, DEMO_AUTOMATIONS, DEMO_ASSIGNMENT_RULES,
+    DEMO_ANALYTICS_LAYOUT, DEMO_OVERVIEW_LAYOUT,
+    DEMO_LEAD_VELOCITY, DEMO_TIME_TO_FIRST_TOUCH, DEMO_STUCK_LEADS_KPI, DEMO_LOST_REASONS,
+    DEMO_WON_REASONS, DEMO_DISQUAL_REASONS, DEMO_STAGE_CONVERSION, DEMO_LEAD_AGING,
+    DEMO_COHORT_CONVERSION, DEMO_ENGAGEMENT_COMPARISON, DEMO_DAYS_SINCE_TOUCH,
+    DEMO_SCORE_BAND_CONVERSION, DEMO_TERRITORY_CONVERSION, DEMO_TOUCHPOINTS_TO_RESPONSE,
+    DEMO_LEADS_AT_RISK,
+  } = D;
+  // STAGES is consumed at module scope (DEMO_PIPELINE_VALUE); reference it here
+  // so the shadowed binding isn't flagged as unused under noUnusedLocals.
+  void STAGES;
 
   const path = req.path; // already relative to /api/v1/crm because router.use mounts the middleware on the crm router
   const method = req.method;
