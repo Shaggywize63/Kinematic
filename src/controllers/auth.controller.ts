@@ -9,6 +9,17 @@ import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
 import { resolveEntitlements } from '../lib/entitlements';
 import { invalidateAuthCache } from '../middleware/auth';
+import { resolveProjectForEmail } from '../lib/projects';
+
+// GET /api/v1/auth/project-for-email?email=...
+// Pre-login lookup so the web dashboard (single URL, multiple Supabase
+// projects) can stamp the correct X-Kinematic-Project header on the login
+// request. Pure config lookup — no DB hit, no auth required. Unknown emails
+// resolve to the default project, so this is always safe to call.
+export const projectForEmail = asyncHandler<Request>(async (req, res) => {
+  const email = String((req.query.email as string) || '').trim();
+  return ok(res, { project: resolveProjectForEmail(email) });
+});
 
 const loginSchema = z.object({
   // Accept either email or mobile number (or mobile@kinematic.app constructed by app)
