@@ -440,6 +440,25 @@ CREATE TABLE IF NOT EXISTS public.crm_email_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_crm_email_logs_org ON public.crm_email_logs(org_id, created_at DESC);
 
+-- Email suppression list. Populated by the public /api/v1/crm/unsubscribe
+-- handler (recipient one-click + footer link) and consulted on every
+-- sendEmail() call. Hard bounces are tracked via crm_email_logs.status
+-- 'bounced' rather than a row here, so the bounce webhook stays a
+-- single-table write.
+CREATE TABLE IF NOT EXISTS public.crm_email_unsubscribes (
+  id            uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id        uuid        NOT NULL,
+  email         text        NOT NULL,
+  source        text        NOT NULL DEFAULT 'one_click'
+                CHECK (source IN ('one_click','link','mailto','manual','complaint')),
+  source_log_id uuid        REFERENCES public.crm_email_logs(id) ON DELETE SET NULL,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_crm_email_unsubscribes_org_email
+  ON public.crm_email_unsubscribes(org_id, email);
+CREATE INDEX IF NOT EXISTS idx_crm_email_unsubscribes_org_created
+  ON public.crm_email_unsubscribes(org_id, created_at DESC);
+
 -- ── WhatsApp Templates & Logs ────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.crm_whatsapp_templates (
   id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),

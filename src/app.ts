@@ -94,6 +94,7 @@ import verifiedSendersRoutes   from './routes/crm/verified-senders.routes';
 import verifiedSendersPublicRoutes from './routes/crm/verified-senders-public.routes';
 import emailAlertsRoutes       from './routes/crm/email-alerts.routes';
 import emailTrackingRoutes     from './routes/crm/email-tracking.routes';
+import emailUnsubscribeRoutes  from './routes/crm/email-unsubscribe.routes';
 
 const app = express();
 
@@ -340,6 +341,9 @@ app.use(V1, (req, res, next) => {
   // Same shape for the verified-sender confirmation link the recipient
   // clicks from the verification email. Token in path = auth.
   if (p.startsWith('/crm/verified-senders/verify/')) return next();
+  // List-Unsubscribe handler — Gmail/Yahoo (RFC 8058) POST here with
+  // no auth header; the 32-char token in ?t= is the auth.
+  if (p === '/crm/unsubscribe') return next();
   return requireAuth(req as any, res, next);
 }, demoExtensionsMiddleware);
 
@@ -439,6 +443,12 @@ app.use(`${V1}/crm/email-alerts`,             requireAuth, requireModule('crm_em
 // the inbound click doesn't bounce on requireAuth. The token in the path
 // IS the auth: it's a 32-char secret stamped onto the message at send time.
 app.use(`${V1}/crm/emails/track`,             emailTrackingRoutes);
+
+// Public unsubscribe — recipients (and Gmail/Yahoo on their behalf,
+// via RFC 8058 one-click) hit this without an Authorization header.
+// Same shape as the tracker: the 32-char token in `?t=` is the auth.
+// Must be mounted BEFORE the auth-gated /crm router below.
+app.use(`${V1}/crm/unsubscribe`,              emailUnsubscribeRoutes);
 
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
