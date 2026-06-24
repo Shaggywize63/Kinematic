@@ -7,7 +7,7 @@ import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.30.1';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const SHARED_SECRET = Deno.env.get('SUPABASE_EDGE_SECRET') || '';
+const SHARED_SECRET = Deno.env.get('CRM_EDGE_SECRET') || Deno.env.get('SUPABASE_EDGE_SECRET') || '';
 const ANTHROPIC_FALLBACK_KEY = Deno.env.get('ANTHROPIC_API_KEY') || '';
 
 const sb = createClient(SUPABASE_URL, SERVICE_KEY);
