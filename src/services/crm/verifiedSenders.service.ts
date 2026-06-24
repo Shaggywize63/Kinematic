@@ -121,5 +121,11 @@ async function dispatchVerificationEmail(
     org_id, user_id: user_id ?? undefined,
     to, subject: 'Verify your Kinematic sender address',
     body_html: html,
+    // Verification is a transactional flow triggered by the sender
+    // themselves — must succeed even if the address previously hard-
+    // bounced or was unsubscribed via an earlier send. The
+    // suppression list exists to protect campaign reputation; this
+    // mail isn't a campaign.
+    bypass_suppression: true,
   });
 }

@@ -22,7 +22,7 @@ export const resendProvider: EmailProvider = {
 
     // Resend accepts arrays for to/cc/bcc; we normalise to arrays so a
     // single comma-separated string never sneaks through.
-    const body = {
+    const body: Record<string, unknown> = {
       from: input.from,
       to: [input.to],
       cc:  (input.cc  && input.cc.length  > 0) ? input.cc  : undefined,
@@ -31,6 +31,12 @@ export const resendProvider: EmailProvider = {
       html: input.html,
       text: input.text,
     };
+    // Resend forwards any keys we set on `headers` straight onto the
+    // outbound message. Used by emails.service to ship
+    // List-Unsubscribe + List-Unsubscribe-Post (RFC 8058 one-click).
+    if (input.headers && Object.keys(input.headers).length > 0) {
+      body.headers = input.headers;
+    }
 
     const res = await fetch(RESEND_ENDPOINT, {
       method: 'POST',
