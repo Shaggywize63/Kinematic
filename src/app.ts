@@ -189,6 +189,11 @@ app.use(cors({
     'Content-Type', 'Authorization', 'Idempotency-Key', 'X-Idempotency-Key',
     'x-org-id', 'x-client-id', 'X-Org-Id', 'X-Client-Id', 'X-Request-Id',
     'X-Kinematic-Project', 'x-kinematic-project',
+    // Demo-mode industry theming header (see withDemoIndustry middleware)
+    // sent by the dashboard. Must be allowlisted or the browser's CORS
+    // preflight rejects EVERY request (login included) for any session
+    // that has a demo industry active.
+    'X-Demo-Industry', 'x-demo-industry',
   ],
   maxAge: 600,
 }));
