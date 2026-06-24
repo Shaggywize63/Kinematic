@@ -128,12 +128,22 @@ export interface DraftEmailTemplateOutput {
 
 const TEMPLATE_SYSTEM_PROMPT = `You are an expert email marketer drafting a REUSABLE email template.
 Use {{snake_case}} placeholders for any value that changes per recipient (e.g. {{first_name}}, {{company}}, {{city}}).
-Keep one clear call-to-action. Write clean, mobile-friendly, inline-styled HTML (no <html>/<head>/<body> wrapper, no <script>).
+Keep one clear call-to-action. Write clean, mobile-friendly, inline-styled HTML.
+
+STRICT FORMATTING RULES — non-negotiable:
+ - DO NOT wrap the body in <html>, <head> or <body>. Just the inner HTML.
+ - DO NOT include <script>, <style>, <link>, <meta>, <iframe>, or <object> tags.
+ - DO NOT use React, JSX, Vue, Svelte, custom components (e.g. <TweakSection>, <EmailTweaks>),
+   ReactDOM.createRoot(...), useState/useEffect, or any client-side framework code.
+   Emails cannot execute JavaScript. Any such output will be rejected.
+ - DO NOT escape the HTML — return RAW HTML inside the JSON body_html string.
+   For example return "<p>Hello</p>", NOT "<p>Hello<\\/p>" and NOT "\\u003cp\\u003eHello\\u003c\\/p\\u003e".
+
 Output JSON ONLY — no prose, no markdown, no code fences — with EXACTLY these keys:
 {
   "name": short template name, max 60 chars,
   "subject": email subject line, may include placeholders,
-  "body_html": the HTML body,
+  "body_html": the HTML body (RAW HTML, not escaped),
   "body_text": a plain-text version of the same email,
   "variables": array of the placeholder names you used, e.g. ["first_name","company"],
   "category": one of "sales" | "follow_up" | "onboarding" | "support" | "marketing"
@@ -168,8 +178,15 @@ export async function draftEmailTemplate(input: DraftEmailTemplateInput): Promis
     throw new AppError(502, 'AI returned an unparseable response — try rephrasing the goal.', 'AI_BAD_RESPONSE');
   }
 
-  const bodyText = String(json.body_text ?? '');
-  const bodyHtml = String(json.body_html ?? (bodyText ? `<p>${escapeHtml(bodyText)}</p>` : ''));
+  const bodyTextRaw = String(json.body_text ?? '');
+  const bodyHtmlRaw = String(json.body_html ?? (bodyTextRaw ? `<p>${escapeHtml(bodyTextRaw)}</p>` : ''));
+  // The model sometimes double-JSON-encodes its body (the output JSON contains
+  // body_html which is itself a JSON-encoded string of the HTML). The textarea
+  // then shows literal "\n", "\"", "/" instead of real newlines / quotes /
+  // slashes. Detect that, decode it, then strip React/JSX/script noise that
+  // emails can't execute anyway. See KINI-EMAIL-TEMPLATE issue 2026-06-24.
+  const bodyHtml = sanitiseEmailHtml(decodeIfDoubleEscaped(bodyHtmlRaw));
+  const bodyText = decodeIfDoubleEscaped(bodyTextRaw);
   if (!bodyHtml.trim() && !bodyText.trim()) {
     throw new AppError(502, 'AI did not return a usable email body — try a more specific goal.', 'AI_EMPTY_RESPONSE');
   }
@@ -213,4 +230,67 @@ function extractJson(s: string): string {
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' } as Record<string, string>)[c]);
+}
+
+/**
+ * If the model double-JSON-encoded its HTML body (so the value carries literal
+ * "\n", "\"" and "/" sequences instead of real newlines / quotes / slashes)
+ * decode it once. Heuristic: the string contains at least one of those
+ * sequences AND lacks the matching real character that would normally be
+ * present in raw HTML (real newline / closing-tag slash). Idempotent — a
+ * cleanly-encoded HTML string passes through unchanged.
+ */
+function decodeIfDoubleEscaped(s: string): string {
+  if (!s) return s;
+  const hasLiteralEscape = /\\n|\\"|\\u00[0-9a-fA-F]{2}|\\\//.test(s);
+  if (!hasLiteralEscape) return s;
+  // Cheap and safe path: wrap in quotes and JSON-parse. If the input isn't a
+  // valid JSON string body, fall back to the raw value rather than throwing —
+  // we'd rather show messy HTML than no HTML.
+  try {
+    const parsed = JSON.parse(`"${s.replace(/(?<!\\)"/g, '\\"')}"`);
+    return typeof parsed === 'string' ? parsed : s;
+  } catch {
+    return s;
+  }
+}
+
+/**
+ * Strip the noise the model occasionally injects into the email body:
+ *  - <script>/<style>/<link>/<meta>/<iframe>/<object> blocks (emails can't
+ *    execute JS, most clients strip <link>/<meta>, and <iframe>/<object> are
+ *    almost universally blocked).
+ *  - JSX/React component tags like <TweakSection>, <EmailTweaks>,
+ *    <TweakText> that the model dreamed up — they render as literal text in
+ *    every email client.
+ *  - The matching ReactDOM.createRoot(...) / render(<X />) glue.
+ * If the result is empty after stripping, leave the original so the user
+ * still has something to edit rather than a blank textarea.
+ */
+function sanitiseEmailHtml(html: string): string {
+  if (!html) return html;
+  let out = html;
+  // Block-level <script>/<style>/<link>/<meta>/<iframe>/<object> (open+close
+  // pair, dot-all so multi-line bodies are caught).
+  out = out.replace(/<script\b[\s\S]*?<\/script\s*>/gi, '');
+  out = out.replace(/<style\b[\s\S]*?<\/style\s*>/gi, '');
+  out = out.replace(/<iframe\b[\s\S]*?<\/iframe\s*>/gi, '');
+  out = out.replace(/<object\b[\s\S]*?<\/object\s*>/gi, '');
+  // Void-ish tags (self-closing or no body).
+  out = out.replace(/<(link|meta)\b[^>]*\/?>(\s*<\/\1\s*>)?/gi, '');
+  // React/Tweak custom components and their orphaned closers. The model
+  // capitalises these (HTML tags are lowercase by convention), so the
+  // PascalCase heuristic catches them without hitting real HTML tags.
+  out = out.replace(/<\/?[A-Z][A-Za-z0-9]*\b[^>]*\/?>/g, '');
+  // Bare ReactDOM.createRoot(...).render(...) snippets that survived the
+  // <script> strip because the model emitted them without a wrapper tag.
+  // Lines (not paren-matched) so the inner parens of getElementById(...) etc.
+  // don't trip the regex up.
+  out = out.replace(/^.*ReactDOM\.createRoot[\s\S]*?(?:;|$)/gm, '');
+  // Orphaned closing tags that the React strip leaves behind (e.g. </script>
+  // when the opening was inside a code fence the model never closed).
+  out = out.replace(/<\/(?:script|style|iframe|object|TweaksPanel)\s*>/gi, '');
+  // Collapse runs of >2 blank lines that the strips leave behind.
+  out = out.replace(/\n{3,}/g, '\n\n').trim();
+  return out || html;
 }
