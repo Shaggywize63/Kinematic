@@ -78,27 +78,45 @@ export function isKnownProject(key: string | undefined | null): boolean {
   return !!key && Object.prototype.hasOwnProperty.call(REGISTRY, key);
 }
 
+/**
+ * Effective fallback project for code paths that have no explicit project: a
+ * missing/unknown X-Kinematic-Project header, an unmatched login email, or
+ * out-of-request code (scripts, cron jobs, module init).
+ *
+ * In PRODUCTION this is ALWAYS the historical DEFAULT_PROJECT ('default' = the
+ * Tata tenant), so live mobile apps and Tata web — none of which send a project
+ * header — are never re-routed. Only OUTSIDE production may DEV_DEFAULT_PROJECT
+ * override it, so local development and admin tooling can default to Kinematic
+ * with zero risk to Tata. BOTH conditions are required (non-prod AND a valid
+ * override), so a stray env var on the production server changes nothing.
+ */
+export function fallbackProjectKey(): string {
+  if (process.env.NODE_ENV === 'production') return DEFAULT_PROJECT;
+  const override = (process.env.DEV_DEFAULT_PROJECT || '').trim().toLowerCase();
+  return override && isKnownProject(override) ? override : DEFAULT_PROJECT;
+}
+
 export function listProjectKeys(): string[] {
   return Object.keys(REGISTRY);
 }
 
 export function getProjectConfig(key?: string | null): ProjectConfig {
   if (key && REGISTRY[key]) return REGISTRY[key];
-  return REGISTRY[DEFAULT_PROJECT];
+  return REGISTRY[fallbackProjectKey()];
 }
 
 // ── Per-request current project (AsyncLocalStorage) ──────────────────────
 const als = new AsyncLocalStorage<{ project: string }>();
 
 export function runWithProject<T>(project: string, fn: () => T): T {
-  const key = isKnownProject(project) ? project : DEFAULT_PROJECT;
+  const key = isKnownProject(project) ? project : fallbackProjectKey();
   return als.run({ project: key }, fn);
 }
 
 /** Current request's project key, or DEFAULT_PROJECT outside a request
  *  (scripts, cron jobs, module init) — i.e. the historical single project. */
 export function currentProjectKey(): string {
-  return als.getStore()?.project || DEFAULT_PROJECT;
+  return als.getStore()?.project || fallbackProjectKey();
 }
 
 // ── Cached Supabase clients, one per project ─────────────────────────────
@@ -201,7 +219,7 @@ const DOMAIN_DIRECTORY = parseJsonMap(process.env.PROJECT_DOMAIN_DIRECTORY);
 
 export function resolveProjectForEmail(email: string | undefined | null): string {
   const e = (email || '').trim().toLowerCase();
-  if (!e) return DEFAULT_PROJECT;
+  if (!e) return fallbackProjectKey();
 
   const exact = EMAIL_DIRECTORY[e];
   if (exact && isKnownProject(exact)) return exact;
@@ -213,7 +231,7 @@ export function resolveProjectForEmail(email: string | undefined | null): string
     if (byDomain && isKnownProject(byDomain)) return byDomain;
   }
 
-  return DEFAULT_PROJECT;
+  return fallbackProjectKey();
 }
 
 export type { JWTPayload };
