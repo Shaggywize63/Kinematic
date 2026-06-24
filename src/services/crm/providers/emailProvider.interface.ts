@@ -11,6 +11,13 @@ export interface EmailSendInput {
   subject: string;
   html: string;
   text?: string;
+  /**
+   * Optional extra RFC 5322 headers. Used to ship
+   * `List-Unsubscribe` + `List-Unsubscribe-Post` (RFC 8058 one-click)
+   * with every send so Gmail/Yahoo bulk-sender policy is satisfied.
+   * Providers that don't surface arbitrary headers may ignore this.
+   */
+  headers?: Record<string, string>;
 }
 
 export interface EmailSendResult {
