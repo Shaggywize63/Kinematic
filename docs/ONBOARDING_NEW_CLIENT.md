@@ -40,8 +40,12 @@ setup; steps 1–6 should eventually be wrapped in a script.
 ## 5. Storage + edge functions
 - Create the storage buckets (`distribution`, `kinematic-*`) + the
   `distribution` org-scoped RLS policies.
-- Deploy the edge functions; set their secrets (`SUPABASE_EDGE_SECRET`,
+- Deploy the edge functions; set their secrets (`CRM_EDGE_SECRET`,
   `KINEMATIC_EDGE_SECRET`, `KINEMATIC_BASE_URL`, `ANTHROPIC_API_KEY`).
+  NOTE: the cron-side shared secret MUST be named `CRM_EDGE_SECRET` —
+  Supabase rejects any function secret starting with the reserved
+  `SUPABASE_` prefix. The functions still read the legacy
+  `SUPABASE_EDGE_SECRET` as a fallback for older deployments.
 - Register the HTTP cron jobs (dispatch-pushes, send-email-queue,
   process-automations, recompute-win-prob, dispatch-scheduled-emails) against
   `https://<ref>.functions.supabase.co/...` using the **new** edge secret. The
