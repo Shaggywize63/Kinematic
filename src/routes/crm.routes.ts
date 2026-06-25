@@ -1789,8 +1789,24 @@ activities.get('/export', wrap(async (req, res) => {
     { key: 'owner_name',       label: 'Owner' },
     { key: 'assigned_to_name', label: 'Assigned To' },
     { key: 'image_url',        label: 'Image URL' },
+    // Visit-kind first-class column. Stamped by the dashboard's
+    // activity composer when the rep picks "Mark as visit" (→
+    // 'completed') vs "Schedule a visit" (→ 'scheduled') for a
+    // meeting. Reads out of crm_activities.custom_fields jsonb;
+    // null on legacy rows + non-meeting activity types is fine —
+    // the column just shows blank.
+    { key: 'visit_kind',       label: 'Visit kind' },
     { key: 'created_at',       label: 'Created At' },
   ];
+  // Lift visit_kind out of custom_fields jsonb into a top-level
+  // field on each enriched row so the generic row[key] lookup in
+  // the CSV body composer below sees it without a special case.
+  for (const r of enriched as Array<{ custom_fields?: unknown; visit_kind?: unknown }>) {
+    const cf = r.custom_fields;
+    if (cf && typeof cf === 'object') {
+      r.visit_kind = (cf as Record<string, unknown>).visit_kind ?? '';
+    }
+  }
   const escape = (v: unknown): string => {
     if (v === null || v === undefined) return '';
     const s = String(v);
