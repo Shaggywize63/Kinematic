@@ -56,6 +56,25 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   );
 
   const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload, user_id));
+
+  // City fallback. Tata Tiscon hides the city field from the lead-create
+  // form (admin override), so on the create path payload.city is always
+  // null. Without this fallback the lead lands city-less and every
+  // city-scoped report / route-planner / nearest-outlet query misses
+  // it. Sequence: payload value → creator's user.city → null. The
+  // creator is typically the Consumer Champion who captured the lead
+  // on the ground, so their assigned city is the right inference.
+  if (!payload.city && user_id) {
+    const { data: creator } = await supabaseAdmin
+      .from('users')
+      .select('city')
+      .eq('id', user_id)
+      .maybeSingle();
+    const champCity = (creator as { city?: string | null } | null)?.city;
+    if (champCity && champCity.trim()) {
+      payload.city = champCity.trim();
+    }
+  }
   // Unified scorer — branches B2B/B2C correctly, no zero-padding of
   // off-profile signals in the breakdown. Engagement is skipped on
   // creation since there are no activities for a lead that doesn't
@@ -287,18 +306,16 @@ export async function listLeadsWithCount(
   if (filters.district) q = q.eq('district', String(filters.district));
   if (filters.block)    q = q.eq('block',    String(filters.block));
   if (filters.score_grade) q = q.eq('score_grade', String(filters.score_grade));
-  // Converted-lead default: once a lead becomes a Deal it stops being a
-  // "lead" — the Leads list should drop it. Callers that explicitly want
-  // converted rows back (Lead-Aging report, audit views, archive search)
-  // pass either `is_converted=true` (only converted) or
-  // `include_converted=true` (both). Tolerates legacy NULL on
-  // `is_converted` — those rows came in before the column existed and
-  // are by definition not converted.
-  const includeConverted = String(filters.include_converted ?? '').toLowerCase() === 'true';
+  // Converted-lead default: converted leads remain visible in the Leads
+  // list with their `status='converted'` badge so reps can still track
+  // the customer's history end-to-end without bouncing into Deals.
+  // Callers that explicitly want to FILTER converted rows still can —
+  // pass `is_converted=false` for active-only, `is_converted=true` for
+  // converted-only. Tolerates legacy NULL on `is_converted` — those
+  // rows came in before the column existed and are by definition not
+  // converted.
   if (filters.is_converted !== undefined) {
     q = q.eq('is_converted', String(filters.is_converted) === 'true');
-  } else if (!includeConverted) {
-    q = q.or('is_converted.is.null,is_converted.eq.false');
   }
   if (filters.q) {
     const s = sanitisePostgrestSearch(filters.q);
