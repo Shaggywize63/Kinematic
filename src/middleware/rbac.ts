@@ -220,6 +220,20 @@ export function getEffectiveCityNames(user: AuthRequest['user']): string[] | nul
   if (!user) return null;
   // Platform-tier users see everything regardless of city.
   if (user.role === 'super_admin' || user.role === 'admin') return null;
+  // Tenant-level admins whose org_role explicitly opts into
+  // data_scope='all' (e.g. CRM Admin, Business Head) are also exempt
+  // from the city geo-cap. The user_city_assignments rows on these
+  // accounts are used as a DEFAULT city filter for convenience, not
+  // a visibility ceiling — without this bypass, a CRM Admin with 10
+  // assigned cities silently loses every lead in the other ~90, even
+  // though their role was explicitly configured for org-wide reads.
+  // Without this branch the only escape was the legacy `users.role`
+  // column ('admin' / 'super_admin'), which most modern tenants
+  // don't populate — they configure the same intent through org_roles
+  // instead. See bug: Hema (sub_admin + CRM Admin) saw 1613/1859
+  // active Tata leads because her 10 user_city_assignments rows
+  // narrowed the in-city slice to ~1058 of ~1273.
+  if (user.org_role_data_scope === 'all') return null;
 
   const roleList = (user.role_assigned_cities || []).filter(Boolean);
   const userList = (user.assigned_city_names || []).filter(Boolean);
