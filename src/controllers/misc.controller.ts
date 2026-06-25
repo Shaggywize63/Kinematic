@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID } from '../utils';
 import { AuthRequest } from '../types';
@@ -1021,29 +1022,97 @@ export const upsertQuote = asyncHandler<AuthRequest>(async (req, res) => {
 })
 
 // SECURITY ALERTS
+
+// Validator. Apps post here every time their pre-flight detector
+// trips; the schema is intentionally tight so a compromised client
+// can't seed arbitrary `type` values into the dashboard's filter chips
+// or push fake metadata through to the notification body.
+const securityAlertSchema = z.object({
+  type: z.enum(['MOCK_LOCATION', 'VPN_DETECTED']),
+  action: z.string().min(1).max(100),
+  lat: z.number().min(-90).max(90).optional().nullable(),
+  lng: z.number().min(-180).max(180).optional().nullable(),
+  metadata: z.record(z.any()).optional(),
+});
+
 export const logSecurityAlert = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { type, action, lat, lng } = req.body
-  const user = req.user!
+  const user = req.user!;
+  const parsed = securityAlertSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new AppError(400, 'Validation failed', 'VALIDATION_ERROR');
+  }
+  const { type, action, lat, lng, metadata } = parsed.data;
 
   const { data, error } = await supabaseAdmin.from('security_alerts')
     .insert({
       org_id: user.org_id,
       client_id: user.client_id,
       user_id: user.id,
-      type, // MOCK_LOCATION, VPN_DETECTED
-      action, // ATTENDANCE, FORM_SUBMISSION, etc.
-      lat,
-      lng,
-      created_at: new Date().toISOString()
+      type,
+      action,
+      lat: lat ?? null,
+      lng: lng ?? null,
+      metadata: metadata ?? {},
     })
-    .select().single()
+    .select()
+    .single();
 
   if (error) {
-    throw new AppError(500, `Failed to log alert: ${error.message}`, 'DB_ERROR')
+    throw new AppError(500, `Failed to log alert: ${error.message}`, 'DB_ERROR');
   }
 
-  sendSuccess(res, data, 'Alert logged', 201)
-})
+  // Manager notification fan-out. Mirrors the SOS controller's pattern:
+  // (1) start with the rep's direct supervisor, (2) add every
+  // city_manager / admin / sub_admin / main_admin in the same org as
+  // a safety net so an absent line manager doesn't leave a violation
+  // unseen. Notifications go into the `notifications` table; the
+  // dispatch cron picks them up and pushes via FCM/APNs.
+  // Best-effort: a failure here MUST NOT break the alert insert —
+  // the audit row is the source of truth, the notification is just
+  // the courtesy ping.
+  try {
+    const usersToNotify: string[] = [];
+    if ((user as any).supervisor_id) usersToNotify.push((user as any).supervisor_id);
+
+    const { data: managers } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('org_id', user.org_id)
+      .in('role', ['city_manager', 'admin', 'sub_admin', 'main_admin']);
+
+    (managers || []).forEach((m: { id: string }) => {
+      if (m.id !== user.id && !usersToNotify.includes(m.id)) usersToNotify.push(m.id);
+    });
+
+    if (usersToNotify.length) {
+      const friendly = type === 'VPN_DETECTED' ? 'VPN connection' : 'mock GPS location';
+      const repName = (user as any).name || 'A field executive';
+      const notifInserts = usersToNotify.map((uid) => ({
+        org_id: user.org_id,
+        user_id: uid,
+        type: 'security_alert' as const,
+        title: `Security alert — ${repName}`,
+        body: `${repName} attempted ${action} with ${friendly} detected. The action was blocked on-device.`,
+        data: {
+          alert_id: data.id,
+          exec_id: user.id,
+          exec_name: repName,
+          violation: type,
+          action,
+          lat: lat ?? null,
+          lng: lng ?? null,
+        },
+      }));
+      await supabaseAdmin.from('notifications').insert(notifInserts);
+    }
+
+    logger.warn(`SECURITY ALERT — User: ${(user as any).name} (${user.id}), Type: ${type}, Action: ${action}`);
+  } catch (notifyErr) {
+    logger.warn(`[security_alert] notify fan-out failed: ${(notifyErr as Error).message}`);
+  }
+
+  sendSuccess(res, data, 'Alert logged', 201);
+});
 
 
 export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
