@@ -4,6 +4,21 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
+import { currentProjectKey, DEFAULT_PROJECT } from '../lib/projects';
+
+// Tata (default project) keeps the legacy single-org model: a client lives in
+// the admin's own org and is scoped by `org_id`. Non-default projects (e.g.
+// Kinematic) use parent-owns-sub-orgs: each client gets its OWN org for true
+// data isolation, and the parent org that owns/manages it is recorded in
+// `owner_org_id`. We ONLY reference owner_org_id for non-default projects, so
+// Tata's schema (which has no such column) is never touched.
+const orgPerClient = () => currentProjectKey() !== DEFAULT_PROJECT;
+const ownerColumn = () => (orgPerClient() ? 'owner_org_id' : 'org_id');
+
+function orgSlug(name: string): string {
+  const base = (name || 'client').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'client';
+  return `${base}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 /**
  * GET /api/v1/clients
@@ -15,7 +30,7 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
   const { data, error } = await supabaseAdmin
     .from('clients')
     .select('*')
-    .eq('org_id', user.org_id)
+    .eq(ownerColumn(), user.org_id)
     .order('name');
 
   if (error) {
@@ -57,10 +72,25 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
     return;
   }
 
+  // Parent-owns-sub-orgs (non-default projects): spin up a dedicated org for
+  // this client so its data is isolated; the creating admin's org owns it.
+  // Tata (default) keeps the client in the admin's own org.
+  let clientOrgId = user.org_id;
+  if (orgPerClient()) {
+    const { data: org, error: orgErr } = await supabaseAdmin
+      .from('organisations')
+      .insert({ name, slug: orgSlug(name) })
+      .select('id')
+      .single();
+    if (orgErr || !org) { badRequest(res, `Org creation failed: ${orgErr?.message || 'unknown'}`); return; }
+    clientOrgId = org.id;
+  }
+
   const { data: client, error } = await supabaseAdmin
     .from('clients')
     .insert({
-      org_id: user.org_id,
+      org_id: clientOrgId,
+      ...(orgPerClient() ? { owner_org_id: user.org_id } : {}),
       name,
       contact_person,
       email,
@@ -102,7 +132,7 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
       // Always upsert to public.users to ensure the profile exists and is linked
       await supabaseAdmin.from('users').upsert({
         id: authId,
-        org_id: user.org_id,
+        org_id: clientOrgId,
         client_id: client.id,
         name: contact_person || name,
         email,
@@ -171,7 +201,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
       updated_at: new Date().toISOString()
     })
     .eq('id', id)
-    .eq('org_id', user.org_id)
+    .eq(ownerColumn(), user.org_id)
     .select()
     .single();
 
@@ -270,7 +300,7 @@ export const deleteClient = asyncHandler(async (req: AuthRequest, res: Response)
     .from('clients')
     .delete()
     .eq('id', id)
-    .eq('org_id', user.org_id);
+    .eq(ownerColumn(), user.org_id);
 
   if (error) {
     badRequest(res, error.message);
