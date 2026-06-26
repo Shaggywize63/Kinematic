@@ -10,6 +10,7 @@ import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
 import { resolveEntitlements } from '../lib/entitlements';
 import { invalidateAuthCache } from '../middleware/auth';
 import { resolveProjectForEmail } from '../lib/projects';
+import * as passwordReset from '../services/auth/passwordReset.service';
 
 // GET /api/v1/auth/project-for-email?email=...
 // Pre-login lookup so the web dashboard (single URL, multiple Supabase
@@ -340,6 +341,70 @@ export const login = asyncHandler<Request>(async (req, res) => {
       active_session_id: issuedSessionId,
     },
   });
+});
+
+// POST /api/v1/auth/forgot-password
+// Public. Always returns 200 with {ok:true} — never reveals whether
+// the email is registered. The work happens server-side: if a user
+// row matches, the service mints a Supabase recovery token and
+// delivers a branded email via the existing sendEmail() pipeline.
+// Reps see "If this email is on file, a reset link is on its way."
+// regardless of result, so an attacker can't walk a wordlist.
+const forgotPasswordSchema = z.object({ email: z.string().min(6) });
+export const forgotPassword = asyncHandler<Request>(async (req, res) => {
+  const body = forgotPasswordSchema.safeParse(req.body);
+  if (!body.success) return badRequest(res, 'Email is required');
+  // Fire-and-forget on the application thread is fine — the service
+  // already swallows every failure (and logs internally). Awaiting
+  // it makes the controller deterministic in tests + keeps response
+  // latency under 1s on a healthy Resend round-trip.
+  await passwordReset.requestReset(body.data.email);
+  return ok(res, { ok: true }, 'If this email is on file, a reset link has been sent');
+});
+
+// POST /api/v1/auth/reset-password
+// Public. Verifies the Supabase recovery token, updates the password,
+// then signs the user in WITH THE NEW PASSWORD so the response carries
+// a fresh access_token + refresh_token. The client saves that session
+// and lands the user straight on the dashboard / home — no second
+// trip through the login screen.
+const resetPasswordSchema = z.object({
+  email: z.string().min(6),
+  token: z.string().min(6),
+  password: z.string().min(6),
+});
+export const resetPassword = asyncHandler<Request>(async (req, res) => {
+  const body = resetPasswordSchema.safeParse(req.body);
+  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
+
+  const result = await passwordReset.verifyAndReset(
+    body.data.email,
+    body.data.token,
+    body.data.password,
+  );
+  if (!result.success || !result.session) {
+    return res.status(400).json({ success: false, error: result.error || 'Reset failed', code: 'RESET_FAILED' });
+  }
+
+  // Build the auto-login payload. Mirrors the /auth/login response
+  // shape (subset thereof) so clients can call saveSession() / the
+  // iOS Session.save helper with no special-casing. Permissions /
+  // entitlements / city assignments are NOT bundled here — the
+  // client will call /auth/me on its next protected request to
+  // hydrate the full profile, which is the same path /auth/refresh
+  // already relies on.
+  const { data: userProfile } = await supabaseAdmin
+    .from('users')
+    .select('id, org_id, client_id, name, email, role, is_active')
+    .eq('id', result.session.user_id)
+    .single();
+
+  return ok(res, {
+    access_token: result.session.access_token,
+    refresh_token: result.session.refresh_token,
+    expires_at: result.session.expires_at,
+    user: userProfile || { id: result.session.user_id, email: result.session.email },
+  }, 'Password updated');
 });
 
 // POST /api/v1/auth/refresh
