@@ -40,12 +40,22 @@ export interface SendEmailInput {
    * Default false — every regular send is subject to suppression.
    */
   bypass_suppression?: boolean;
+  /**
+   * Override the default `from` address. Used by transactional
+   * flows (password reset, sender verification) that want to lock
+   * the visible sender to a known noreply@ mailbox regardless of
+   * what CRM_FROM_EMAIL is set to in the env. Falls back to the
+   * env default when omitted.
+   */
+  from_email?: string;
 }
 
 export async function sendEmail(input: SendEmailInput) {
   const trackingToken = crypto.randomBytes(16).toString('hex');
   const trackedHtml = wrapTracking(input.body_html, trackingToken);
-  const fromEmail = process.env.CRM_FROM_EMAIL || `noreply@${process.env.CRM_TRACKING_DOMAIN || 'kinematic.app'}`;
+  const fromEmail = input.from_email
+    || process.env.CRM_FROM_EMAIL
+    || `noreply@${process.env.CRM_TRACKING_DOMAIN || 'kinematic.app'}`;
   // Plain-text fallback. We always send one. The template editor only
   // *warns* on save when it's empty (the UI doesn't block), so on the
   // server we derive from the HTML body if the caller didn't supply
