@@ -192,6 +192,17 @@ export async function verifyProjectToken(key: string, token: string): Promise<JW
   return null;
 }
 
+/**
+ * HS256 signing key for the project's legacy shared JWT secret. Used to mint
+ * super-admin "Login as client" impersonation tokens, which verifyProjectToken
+ * then accepts natively via its HS256 path. Returns null when the project has
+ * no shared secret configured (asymmetric-only) — callers must then treat
+ * impersonation tokens as unavailable and fall back.
+ */
+export function projectHs256Key(key: string): Uint8Array | null {
+  return verifierFor(key).hs256;
+}
+
 // ── email → project directory ────────────────────────────────────────────
 // Config-driven so we never touch a tenant DB to route a login. JSON maps:
 //   PROJECT_EMAIL_DIRECTORY  = {"s@kinematicapp.com":"kinematic"}   (exact email)
