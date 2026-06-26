@@ -63,6 +63,23 @@ function cacheSet(token: string, user: AuthRequest['user'], jwtExpSec?: number) 
   authCache.set(token, { user, expiresAt: Date.now() + ttl });
 }
 
+const ORG_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Super-admin "Login as client": when a super_admin sends an X-Org-Id that
+// differs from their own org, scope THIS request to that org (impersonation).
+// Returns a CLONE so the token-keyed auth cache is never polluted — the cached
+// entry always holds the real profile org. Gated strictly to super_admin; for
+// every other role org always comes from the profile, so this is a no-op.
+// Normal super-admin traffic sends their own org (X-Org-Id === own) → no-op.
+function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): AuthRequest['user'] {
+  if (!user || (user as { role?: string }).role !== 'super_admin') return user;
+  const raw = req.headers['x-org-id'];
+  const target = Array.isArray(raw) ? raw[0] : raw;
+  if (!target || !ORG_UUID_RE.test(target) || target === (user as { org_id?: string }).org_id) return user;
+  logger.info(`[Auth] super_admin acting as org ${target}`);
+  return { ...(user as object), org_id: target } as AuthRequest['user'];
+}
+
 /** Invalidate every cached profile for a user — call this on role/permission changes. */
 export function invalidateAuthCache(predicate?: (u: AuthRequest['user']) => boolean) {
   if (!predicate) { authCache.clear(); return; }
@@ -186,7 +203,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const cached = cacheGet(cacheKey);
   if (cached) {
     if (rejectIfStaleSession(req, res, cached)) return;
-    req.user = cached;
+    req.user = maybeImpersonate(cached, req);
     req.accessToken = token;
     return next();
   }
@@ -307,7 +324,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (rejectIfStaleSession(req, res, user)) return;
 
   cacheSet(cacheKey, user, verified.exp);
-  req.user = user;
+  req.user = maybeImpersonate(user, req);
   req.accessToken = token;
   next();
 }
