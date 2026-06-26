@@ -4,8 +4,11 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
-import { currentProjectKey, DEFAULT_PROJECT, projectHs256Key } from '../lib/projects';
+import { currentProjectKey, DEFAULT_PROJECT, projectHs256Key, getProjectConfig, resolveProjectForEmail } from '../lib/projects';
 import { SignJWT } from 'jose';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import { encryptSecret, decryptSecret } from '../lib/secretBox';
+import { logger } from '../lib/logger';
 
 // Tata (default project) keeps the legacy single-org model: a client lives in
 // the admin's own org and is scoped by `org_id`. Non-default projects (e.g.
@@ -95,6 +98,8 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
       // Optional admin-set "Org ID" the Login button targets (falls back to
       // the client's own org). Only persisted on non-default projects.
       ...(orgPerClient() && typeof login_org_id === 'string' && isUUID(login_org_id) ? { login_org_id } : {}),
+      // Encrypted account password used by the "Login as client" button.
+      ...(orgPerClient() && password ? { login_password_enc: encryptSecret(password) } : {}),
       name,
       contact_person,
       email,
@@ -230,6 +235,52 @@ export const impersonateClient = asyncHandler(async (req: AuthRequest, res: Resp
 });
 
 /**
+ * POST /api/v1/clients/:id/login-as
+ * Super-admin only: log in using the client's stored account credentials
+ * (email + encrypted password), authenticating against whichever Supabase
+ * project that email routes to, and return a real session for that account.
+ * Lets the super-admin "enter" the client's actual account/data (e.g. the live
+ * Tata project) with no manual credential entry. The password is decrypted
+ * server-side and never returned to the browser.
+ */
+export const loginAsClientCredentials = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+
+  const { data: client, error } = await supabaseAdmin
+    .from('clients')
+    .select('*')
+    .eq('id', id)
+    .eq(ownerColumn(), user.org_id)
+    .single();
+  if (error || !client) { notFound(res, 'Client not found'); return; }
+
+  const email = (client as { email?: string }).email;
+  const password = decryptSecret((client as { login_password_enc?: string }).login_password_enc);
+  if (!email || !password) { badRequest(res, 'This client has no login email/password configured'); return; }
+
+  const projectKey = resolveProjectForEmail(email);
+  const cfg = getProjectConfig(projectKey);
+  const sb = createSupabaseClient(cfg.url, cfg.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const { data: session, error: signInError } = await sb.auth.signInWithPassword({ email, password });
+  if (signInError || !session?.session) {
+    badRequest(res, `Login failed: ${signInError?.message || 'invalid stored credentials'}`);
+    return;
+  }
+
+  logger.info(`[Auth] super_admin ${user.id} logged in as client ${id} (${email}) on project '${projectKey}'`);
+  ok(res, {
+    access_token: session.session.access_token,
+    refresh_token: session.session.refresh_token,
+    project: projectKey,
+    email,
+    client_id: client.id,
+    name: client.name,
+  });
+});
+
+/**
  * PATCH /api/v1/clients/:id
  * Admin only: Update client details and module access
  */
@@ -252,6 +303,9 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
       ...(orgPerClient() && login_org_id !== undefined
         ? { login_org_id: (typeof login_org_id === 'string' && isUUID(login_org_id)) ? login_org_id : null }
         : {}),
+      // Update the encrypted "Login as" password only when a new one is given
+      // (blank on edit = leave unchanged).
+      ...(orgPerClient() && password ? { login_password_enc: encryptSecret(password) } : {}),
       updated_at: new Date().toISOString()
     })
     .eq('id', id)
