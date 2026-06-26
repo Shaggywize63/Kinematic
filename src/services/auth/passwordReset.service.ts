@@ -21,10 +21,14 @@ import { supabase, supabaseAdmin } from '../../lib/supabase';
 import { sendEmail } from '../crm/emails.service';
 import { logger } from '../../lib/logger';
 
-// Visible sender for every password-reset email. Resend must have
-// kinematicapp.com as a verified domain (SPF + DKIM + DMARC) for this
-// to deliver — set up once, then every reset goes through.
-const FROM_EMAIL = 'noreply@kinematicapp.com';
+// Visible sender for every password-reset email. Defaults to the
+// already-Resend-verified `kinematic.app` (SPF + DKIM + DMARC live).
+// Override with PASSWORD_RESET_FROM_EMAIL once `kinematicapp.com` is
+// verified in Resend (https://resend.com/domains) so the flip is a
+// no-deploy env change. Previously hard-coded to `noreply@kinematicapp.com`,
+// which Resend was 403-rejecting with "domain is not verified" so no
+// reset email ever left the queue.
+const FROM_EMAIL = process.env.PASSWORD_RESET_FROM_EMAIL || 'noreply@kinematic.app';
 
 /**
  * Where the reset link points the user. The token + email both ride
@@ -84,7 +88,7 @@ function composeBody(webLink: string, appLink: string): { html: string; text: st
     </p>
   </div>
   <div style="max-width:560px;margin:0 auto 32px;padding:0 16px;font-size:11px;color:#94A3B8;text-align:center;font-family:'Inter',sans-serif">
-    Kinematic, a Kaiyo Technology Labs product · noreply@kinematicapp.com
+    Kinematic, a Kaiyo Technology Labs product · ${FROM_EMAIL}
   </div>
 </body></html>`;
 
