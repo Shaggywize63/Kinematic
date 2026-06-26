@@ -66,7 +66,7 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
  */
 export const createClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { name, contact_person, email, phone, modules, password } = req.body;
+  const { name, contact_person, email, phone, modules, password, login_org_id } = req.body;
 
   if (!name) {
     badRequest(res, 'Client name is required');
@@ -92,6 +92,9 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
     .insert({
       org_id: clientOrgId,
       ...(orgPerClient() ? { owner_org_id: user.org_id } : {}),
+      // Optional admin-set "Org ID" the Login button targets (falls back to
+      // the client's own org). Only persisted on non-default projects.
+      ...(orgPerClient() && typeof login_org_id === 'string' && isUUID(login_org_id) ? { login_org_id } : {}),
       name,
       contact_person,
       email,
@@ -196,11 +199,15 @@ export const impersonateClient = asyncHandler(async (req: AuthRequest, res: Resp
   // Only a client owned by the caller's org may be entered.
   const { data: client, error } = await supabaseAdmin
     .from('clients')
-    .select('id, name, org_id')
+    .select('*')
     .eq('id', id)
     .eq(ownerColumn(), user.org_id)
     .single();
   if (error || !client) { notFound(res, 'Client not found'); return; }
+
+  // Target = the admin-set "Org ID" field if present, else the client's own org.
+  const loginOrg = (client as { login_org_id?: string }).login_org_id;
+  const targetOrg = (typeof loginOrg === 'string' && isUUID(loginOrg)) ? loginOrg : client.org_id;
 
   const key = projectHs256Key(currentProjectKey());
   if (!key) { badRequest(res, 'Impersonation is not available for this project (no shared JWT secret configured)'); return; }
@@ -211,7 +218,7 @@ export const impersonateClient = asyncHandler(async (req: AuthRequest, res: Resp
     role: 'authenticated',
     email: (user as { email?: string }).email,
     act: true,
-    act_org_id: client.org_id,
+    act_org_id: targetOrg,
   })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setSubject(user.id)
@@ -219,7 +226,7 @@ export const impersonateClient = asyncHandler(async (req: AuthRequest, res: Resp
     .setExpirationTime(now + ttlSeconds)
     .sign(key);
 
-  ok(res, { token, org_id: client.org_id, client_id: client.id, name: client.name, expires_in: ttlSeconds });
+  ok(res, { token, org_id: targetOrg, client_id: client.id, name: client.name, expires_in: ttlSeconds });
 });
 
 /**
@@ -229,7 +236,7 @@ export const impersonateClient = asyncHandler(async (req: AuthRequest, res: Resp
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, password, modules, user_id } = req.body;
+  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id } = req.body;
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
@@ -241,6 +248,10 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
       email,
       phone,
       is_active,
+      // "Org ID" the Login button targets; empty clears it. Non-default only.
+      ...(orgPerClient() && login_org_id !== undefined
+        ? { login_org_id: (typeof login_org_id === 'string' && isUUID(login_org_id)) ? login_org_id : null }
+        : {}),
       updated_at: new Date().toISOString()
     })
     .eq('id', id)
