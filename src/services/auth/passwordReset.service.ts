@@ -22,13 +22,14 @@ import { sendEmail } from '../crm/emails.service';
 import { logger } from '../../lib/logger';
 
 // Visible sender for every password-reset email. Defaults to the
-// already-Resend-verified `kinematic.app` (SPF + DKIM + DMARC live).
-// Override with PASSWORD_RESET_FROM_EMAIL once `kinematicapp.com` is
-// verified in Resend (https://resend.com/domains) so the flip is a
-// no-deploy env change. Previously hard-coded to `noreply@kinematicapp.com`,
-// which Resend was 403-rejecting with "domain is not verified" so no
-// reset email ever left the queue.
-const FROM_EMAIL = process.env.PASSWORD_RESET_FROM_EMAIL || 'noreply@kinematic.app';
+// already-Resend-verified `mail.kinematicapp.com` subdomain (SPF + DKIM
+// + DMARC live). Override with PASSWORD_RESET_FROM_EMAIL once the
+// apex `kinematicapp.com` is also verified in Resend
+// (https://resend.com/domains) — flipping the sender is then a
+// no-deploy env change. Previously hard-coded to `noreply@kinematicapp.com`
+// (the apex, not the verified subdomain), which Resend was 403-rejecting
+// with "domain is not verified" so no reset email ever left the queue.
+const FROM_EMAIL = process.env.PASSWORD_RESET_FROM_EMAIL || 'noreply@mail.kinematicapp.com';
 
 /**
  * Where the reset link points the user. The token + email both ride
