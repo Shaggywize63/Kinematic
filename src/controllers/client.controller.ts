@@ -4,7 +4,8 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
-import { currentProjectKey, DEFAULT_PROJECT } from '../lib/projects';
+import { currentProjectKey, DEFAULT_PROJECT, projectHs256Key } from '../lib/projects';
+import { SignJWT } from 'jose';
 
 // Tata (default project) keeps the legacy single-org model: a client lives in
 // the admin's own org and is scoped by `org_id`. Non-default projects (e.g.
@@ -177,6 +178,48 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
   }
 
   created(res, { ...client, modules: modules || [] });
+});
+
+/**
+ * POST /api/v1/clients/:id/impersonate
+ * Super-admin only: mint a short-lived "Login as client" token scoped to the
+ * client's own org. Signed with this project's HS256 secret so the normal
+ * verifier accepts it; carries act:true + act_org_id, which the auth middleware
+ * honours (for super_admin) to scope the whole session to that org. Lets the
+ * super-admin enter a client org with no re-login.
+ */
+export const impersonateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+
+  // Only a client owned by the caller's org may be entered.
+  const { data: client, error } = await supabaseAdmin
+    .from('clients')
+    .select('id, name, org_id')
+    .eq('id', id)
+    .eq(ownerColumn(), user.org_id)
+    .single();
+  if (error || !client) { notFound(res, 'Client not found'); return; }
+
+  const key = projectHs256Key(currentProjectKey());
+  if (!key) { badRequest(res, 'Impersonation is not available for this project (no shared JWT secret configured)'); return; }
+
+  const ttlSeconds = 60 * 60; // 1 hour
+  const now = Math.floor(Date.now() / 1000);
+  const token = await new SignJWT({
+    role: 'authenticated',
+    email: (user as { email?: string }).email,
+    act: true,
+    act_org_id: client.org_id,
+  })
+    .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+    .setSubject(user.id)
+    .setIssuedAt(now)
+    .setExpirationTime(now + ttlSeconds)
+    .sign(key);
+
+  ok(res, { token, org_id: client.org_id, client_id: client.id, name: client.name, expires_in: ttlSeconds });
 });
 
 /**

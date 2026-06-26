@@ -99,16 +99,20 @@ export function invalidateAuthCache(predicate?: (u: AuthRequest['user']) => bool
 //      and supabaseAdmin already points at the current project's gotrue.
 // A token minted by one project will NOT verify against another project's
 // keys, so cross-project token confusion fails closed.
-async function verifyToken(token: string): Promise<{ sub: string; exp?: number; email?: string } | null> {
+async function verifyToken(token: string): Promise<{ sub: string; exp?: number; email?: string; act_org_id?: string } | null> {
   const projectKey = currentProjectKey();
 
   // 1 + 2. Local verification against this project's keys.
   const result = await verifyProjectToken(projectKey, token);
   if (result?.payload?.sub) {
+    const p = result.payload as { email?: string; act?: boolean; act_org_id?: string };
     return {
       sub: result.payload.sub,
       exp: result.payload.exp,
-      email: (result.payload as { email?: string }).email,
+      email: p.email,
+      // Super-admin "Login as client" impersonation claim (minted by
+      // POST /clients/:id/impersonate, signed with this project's HS256 secret).
+      act_org_id: p.act === true && typeof p.act_org_id === 'string' ? p.act_org_id : undefined,
     };
   }
 
@@ -247,6 +251,17 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     profile.org_id = DEMO_ORG_ID;
     profile.role = 'super_admin';
     logger.info(`[Auth] Demo email elevation applied for ${callerEmail} (sub=${verified.sub})`);
+  }
+
+  // Super-admin "Login as client": the impersonation token carries act_org_id.
+  // Scope this whole session to that org so data + entitlements resolve there.
+  // Gated to super_admin; the token is minted only by the super-admin-only
+  // /clients/:id/impersonate endpoint and signed with the project secret. The
+  // result is cached under the (unique) impersonation token, so the real
+  // token's cached identity is never affected.
+  if (verified.act_org_id && profile.role === 'super_admin') {
+    logger.info(`[Auth] super_admin ${profile.id} impersonating org ${verified.act_org_id}`);
+    profile.org_id = verified.act_org_id;
   }
 
   const entitlements = await resolveEntitlements({
