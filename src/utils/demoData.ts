@@ -1,6 +1,18 @@
 import { isoDate } from './index';
 import { currentDemoIndustry } from '../lib/demoContext';
 import * as insuranceField from './demo/insuranceField';
+import * as pharmaceuticalField from './demo/pharmaceuticalField';
+
+// Resolve the active per-vertical field-force module for this request.
+// Returns null for generic (the caller falls back to its inline payload).
+// Insurance and pharmaceutical modules export the same getMock* surface, so
+// callers can `field?.getMockX(...)` uniformly.
+const activeFieldMod = (): typeof insuranceField | null => {
+  const industry = currentDemoIndustry();
+  if (industry === 'insurance')      return insuranceField;
+  if (industry === 'pharmaceutical') return pharmaceuticalField as unknown as typeof insuranceField;
+  return null;
+};
 
 // UUID-shaped sentinels so backend queries that filter `WHERE org_id = $X`
 // against UUID columns don't throw 'invalid input syntax for type uuid' on
@@ -13,7 +25,8 @@ export const DEMO_USER_ID = '00000000-0000-0000-0000-000000000998';
 export const isDemo = (user?: { org_id?: string }) => user?.org_id === DEMO_ORG_ID;
 
 export const getMockSummary = (date: string): ReturnType<typeof insuranceField.getMockSummary> => {
-  if (currentDemoIndustry() === 'insurance') return insuranceField.getMockSummary(date);
+  const f = activeFieldMod();
+  if (f) return f.getMockSummary(date);
   return ({
   date,
   kpis: {
@@ -45,7 +58,8 @@ export const getMockSummary = (date: string): ReturnType<typeof insuranceField.g
 };
 
 export const getMockTrends = () => {
-  if (currentDemoIndustry() === 'insurance') return insuranceField.getMockTrends();
+  const f = activeFieldMod();
+  if (f) return f.getMockTrends();
   const days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
@@ -62,7 +76,7 @@ export const getMockTrends = () => {
   return days;
 };
 
-export const getMockFeed = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockFeed() : [
+export const getMockFeed = () => activeFieldMod()?.getMockFeed() ?? [
   {
     id: '1',
     outlet_name: 'Reliance Fresh - Koramangala',
@@ -114,7 +128,7 @@ export const getMockHeatmap = () => {
   };
 };
 
-export const getMockLocations = (today: string) => currentDemoIndustry() === 'insurance' ? insuranceField.getMockLocations(today) : ({
+export const getMockLocations = (today: string) => activeFieldMod()?.getMockLocations(today) ?? ({
   date: today,
   summary: { total: 15, active: 12, checked_out: 2, absent: 1 },
   locations: [
@@ -126,7 +140,7 @@ export const getMockLocations = (today: string) => currentDemoIndustry() === 'in
   ]
 });
 
-export const getMockAttendanceToday = (today: string) => currentDemoIndustry() === 'insurance' ? insuranceField.getMockAttendanceToday(today) : ({
+export const getMockAttendanceToday = (today: string) => activeFieldMod()?.getMockAttendanceToday(today) ?? ({
   date: today,
   summary: { total: 145, present: 132, on_break: 5, checked_out: 4, absent: 4, regularised: 0 },
   executives: [
@@ -154,7 +168,8 @@ export const getMockAttendanceToday = (today: string) => currentDemoIndustry() =
 });
 
 export const getMockSubmissions = (today: string) => {
-  if (currentDemoIndustry() === 'insurance') return insuranceField.getMockSubmissions(today);
+  const f = activeFieldMod();
+  if (f) return f.getMockSubmissions(today);
   const yesterday = new Date(new Date(today).getTime() - 86400000).toISOString().split('T')[0];
   
   const pics = [
@@ -212,7 +227,7 @@ export const getMockSubmissions = (today: string) => {
   };
 };
 
-export const getMockSubmissionDetails = (id: string) => currentDemoIndustry() === 'insurance' ? insuranceField.getMockSubmissionDetails(id) : ({
+export const getMockSubmissionDetails = (id: string) => activeFieldMod()?.getMockSubmissionDetails(id) ?? ({
   id,
   submitted_at: new Date().toISOString(),
   is_converted: true,
@@ -290,7 +305,7 @@ export const getMockZones = () => [
   { id: 'z5', name: 'Viman Nagar', city: 'Pune', is_active: true, created_at: new Date().toISOString() }
 ];
 
-export const getMockStores = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockStores() : [
+export const getMockStores = () => activeFieldMod()?.getMockStores() ?? [
   { id: 'st1', name: 'Reliance Fresh - Koramangala', city_id: 'c1', zone_id: 'z1', address: '123 Main Rd', is_active: true, cities: { name: 'Bangalore' }, zones: { name: 'Koramangala 4th Block' } },
   { id: 'st2', name: 'Big Bazaar - Indiranagar', city_id: 'c1', zone_id: 'z1', address: '456 Side Rd', is_active: true, cities: { name: 'Bangalore' }, zones: { name: 'Indiranagar Main Rd' } }
 ];
@@ -303,7 +318,7 @@ export const getMockClients = () => [
   { id: 'c5', name: 'Urban Fresh', contact_person: 'Sneha Kapur', email: 'sneha@urban.fresh', is_active: false, modules: ['analytics', 'attendance', 'work_activities'] },
 ];
 
-export const getMockVisitLogs = (today: string) => currentDemoIndustry() === 'insurance' ? insuranceField.getMockVisitLogs(today) : [
+export const getMockVisitLogs = (today: string) => activeFieldMod()?.getMockVisitLogs(today) ?? [
   { id: 'v1', user_id: 'fe1', outlet_name: 'Reliance Fresh - Koramangala', check_in_at: `${today}T10:00:00Z`, check_out_at: `${today}T10:45:00Z`, duration_min: 45, status: 'completed', users: { name: 'Arjun Sharma' } },
   { id: 'v2', user_id: 'fe1', outlet_name: 'Big Bazaar - Indiranagar', check_in_at: `${today}T11:20:00Z`, check_out_at: `${today}T12:05:00Z`, duration_min: 45, status: 'completed', users: { name: 'Arjun Sharma' } },
   { id: 'v3', user_id: 'fe2', outlet_name: 'Star Market - HSR', check_in_at: `${today}T09:45:00Z`, check_out_at: `${today}T10:30:00Z`, duration_min: 45, status: 'completed', users: { name: 'Priya Patel' } },
@@ -311,7 +326,7 @@ export const getMockVisitLogs = (today: string) => currentDemoIndustry() === 'in
   { id: 'v5', user_id: 'fe4', outlet_name: 'Village Hypermarket', check_in_at: `${today}T13:40:00Z`, check_out_at: `${today}T14:30:00Z`, duration_min: 50, status: 'completed', users: { name: 'Sneha Rao' } },
 ];
 
-export const getMockActivities = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockActivities() : [
+export const getMockActivities = () => activeFieldMod()?.getMockActivities() ?? [
   { id: 'a1', name: 'Store Visit', type: 'visit', is_active: true },
   { id: 'a2', name: 'Product Audit', type: 'form', is_active: true },
   { id: 'a3', name: 'Merchandising', type: 'form', is_active: true },
@@ -330,7 +345,7 @@ export const getMockDeviceInfo = () => [
 
 // --- MOBILE APP MOCKS ---
 
-export const getMockFormTemplates = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockFormTemplates() : [
+export const getMockFormTemplates = () => activeFieldMod()?.getMockFormTemplates() ?? [
   {
     id: 'f1',
     activity_id: 'a1',
@@ -358,7 +373,7 @@ export const getMockFormTemplates = () => currentDemoIndustry() === 'insurance' 
   }
 ];
 
-export const getMockRoutePlans = (today: string) => currentDemoIndustry() === 'insurance' ? insuranceField.getMockRoutePlans(today) : [
+export const getMockRoutePlans = (today: string) => activeFieldMod()?.getMockRoutePlans(today) ?? [
   {
     id: 'rp1',
     user_id: 'fe1',
@@ -388,7 +403,7 @@ export const getMockRoutePlans = (today: string) => currentDemoIndustry() === 'i
   }
 ];
 
-export const getMockMyRoutePlan = (today: string) => currentDemoIndustry() === 'insurance' ? insuranceField.getMockMyRoutePlan(today) : ({
+export const getMockMyRoutePlan = (today: string) => activeFieldMod()?.getMockMyRoutePlan(today) ?? ({
   ...getMockRoutePlans(today)[0],
   id: 'unified-' + today,
   multi_plan_ids: ['rp1']
@@ -406,14 +421,14 @@ export const getMockAttendanceHistory = (today: string) => [
   { date: '2024-04-16', status: 'checked_out', checkin_at: '2024-04-16T08:45:00Z', checkout_at: '2024-04-16T17:45:00Z', total_hours: 9.0 }
 ];
 
-export const getMockCityPerformance = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockCityPerformance() : [
+export const getMockCityPerformance = () => activeFieldMod()?.getMockCityPerformance() ?? [
   { city: 'Bangalore', zones: 12, active_fes: 45, checkins: 850, engagements: 1240, tff: 450, tff_rate: 36, unique_outlets: 380, avg_hours: 8.2, lat: 12.9716, lng: 77.5946 },
   { city: 'Mumbai', zones: 18, active_fes: 38, checkins: 720, engagements: 980, tff: 380, tff_rate: 38, unique_outlets: 320, avg_hours: 7.9, lat: 19.0760, lng: 72.8777 },
   { city: 'Delhi', zones: 15, active_fes: 32, checkins: 640, engagements: 850, tff: 320, tff_rate: 37, unique_outlets: 280, avg_hours: 8.5, lat: 28.6139, lng: 77.2090 },
   { city: 'Hyderabad', zones: 10, active_fes: 28, checkins: 510, engagements: 620, tff: 280, tff_rate: 45, unique_outlets: 240, avg_hours: 8.0, lat: 17.3850, lng: 78.4867 }
 ];
 
-export const getMockOutletCoverage = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockOutletCoverage() : ({
+export const getMockOutletCoverage = () => activeFieldMod()?.getMockOutletCoverage() ?? ({
   summary: { total_outlets: 1240, total_checkins: 4500, total_tff: 1560 },
   cities: [
     { city: 'Bangalore', total_outlets: 450, covered: 380, percentage: 84 },
@@ -429,7 +444,7 @@ export const getMockOutletCoverage = () => currentDemoIndustry() === 'insurance'
   ]
 });
 
-export const getMockMobileHome = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockMobileHome() : ({
+export const getMockMobileHome = () => activeFieldMod()?.getMockMobileHome() ?? ({
   attendance: { status: 'checked_in', time: '09:00 AM' },
   today_plan: { total: 5, visited: 2, pending: 3 },
   announcements: [
@@ -490,7 +505,7 @@ export const getMockLeaderboard = () => [
   { rank: 5, users: { name: 'Sneha Rao', employee_id: 'KIN-004' }, overall_score: 860, is_me: false }
 ];
 
-export const getMockUsers = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockUsers() : [
+export const getMockUsers = () => activeFieldMod()?.getMockUsers() ?? [
   { id: 'fe1', name: 'Arjun Sharma', employee_id: 'KIN-001', role: 'executive', city: 'Bangalore', is_active: true, zones: { name: 'Bangalore North' } },
   { id: 'fe2', name: 'Priya Patel', employee_id: 'KIN-002', role: 'executive', city: 'Mumbai', is_active: true, zones: { name: 'Mumbai West' } },
   { id: 'fe3', name: 'Rahul Verma', employee_id: 'KIN-003', role: 'executive', city: 'Delhi', is_active: true, zones: { name: 'Delhi Central' } },
@@ -499,7 +514,7 @@ export const getMockUsers = () => currentDemoIndustry() === 'insurance' ? insura
 ];
 
 
-export const getMockLearningMaterials = () => currentDemoIndustry() === 'insurance' ? insuranceField.getMockLearningMaterials() : [
+export const getMockLearningMaterials = () => activeFieldMod()?.getMockLearningMaterials() ?? [
   { id: 'm1', title: 'Retail Excellence 101', description: 'Master the basics of store presentation and customer service.', category: 'Standards', type: 'video', file_url: 'https://vimeo.com/836444777', thumbnail_url: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=400&q=80', duration_min: 15, is_mandatory: true },
   { id: 'm2', title: 'Merchandising Guidelines V4', description: 'Updated planogram rules for Q2 launch.', category: 'Operations', type: 'pdf', file_url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf', thumbnail_url: 'https://images.unsplash.com/photo-1534723452862-4c874018d66d?auto=format&fit=crop&w=400&q=80', page_count: 24, is_mandatory: true },
   { id: 'm3', title: 'Conflict Resolution', description: 'How to handle difficult customer interactions.', category: 'Soft Skills', type: 'slides', file_url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf', thumbnail_url: 'https://images.unsplash.com/photo-1573497019940-1c28c88b4f3e?auto=format&fit=crop&w=400&q=80', is_mandatory: false }
