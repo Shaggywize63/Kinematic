@@ -4,9 +4,13 @@
 import { supabaseAdmin } from '../../../lib/supabase';
 import { complete as aiComplete } from './aiClient';
 
-export async function summarizeAccount(org_id: string, account_id: string): Promise<string> {
-  const { data: account } = await supabaseAdmin.from('crm_accounts').select('*')
-    .eq('org_id', org_id).eq('id', account_id).maybeSingle();
+export async function summarizeAccount(org_id: string, client_id: string | null, account_id: string): Promise<string> {
+  // Hard client isolation — a cross-client account id resolves to "not found"
+  // so its contacts/deals never reach the prompt.
+  let accQ = supabaseAdmin.from('crm_accounts').select('*')
+    .eq('org_id', org_id).eq('id', account_id);
+  if (client_id) accQ = accQ.eq('client_id', client_id);
+  const { data: account } = await accQ.maybeSingle();
   if (!account) return 'Account not found.';
   const { data: contacts } = await supabaseAdmin.from('crm_contacts').select('first_name,last_name,title,email')
     .eq('org_id', org_id).eq('account_id', account_id).limit(10);
@@ -28,9 +32,12 @@ export async function summarizeAccount(org_id: string, account_id: string): Prom
   return summary;
 }
 
-export async function summarizeDeal(org_id: string, deal_id: string): Promise<string> {
-  const { data: deal } = await supabaseAdmin.from('crm_deals').select('*')
-    .eq('org_id', org_id).eq('id', deal_id).maybeSingle();
+export async function summarizeDeal(org_id: string, client_id: string | null, deal_id: string): Promise<string> {
+  // Hard client isolation — cross-client deal id → "not found".
+  let dealQ = supabaseAdmin.from('crm_deals').select('*')
+    .eq('org_id', org_id).eq('id', deal_id);
+  if (client_id) dealQ = dealQ.eq('client_id', client_id);
+  const { data: deal } = await dealQ.maybeSingle();
   if (!deal) return 'Deal not found.';
   const { data: activities } = await supabaseAdmin.from('crm_activities')
     .select('type, subject, body, completed_at, status')

@@ -36,9 +36,12 @@ export interface WinProbabilityResult {
   breakdown: WinProbabilityBreakdown;
 }
 
-export async function compute(org_id: string, deal_id: string): Promise<WinProbabilityResult> {
-  const { data: deal } = await supabaseAdmin.from('crm_deals').select('*')
-    .eq('org_id', org_id).eq('id', deal_id).is('deleted_at', null).maybeSingle();
+export async function compute(org_id: string, client_id: string | null, deal_id: string): Promise<WinProbabilityResult> {
+  // Hard client isolation — cross-client deal id → treated as not found.
+  let dealQ = supabaseAdmin.from('crm_deals').select('*')
+    .eq('org_id', org_id).eq('id', deal_id).is('deleted_at', null);
+  if (client_id) dealQ = dealQ.eq('client_id', client_id);
+  const { data: deal } = await dealQ.maybeSingle();
   if (!deal) {
     return {
       probability: 0,
