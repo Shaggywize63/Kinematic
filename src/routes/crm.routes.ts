@@ -200,6 +200,21 @@ function clientScope(req: Request): { id: string | null; strict: boolean } {
 }
 
 function clientId(req: Request): string | null { return clientScope(req).id; }
+
+// Tenant gate for KINI / AI features. The cross-tenant ("all clients at once")
+// view is allowed ONLY for super_admin; every other caller must resolve to a
+// single client — either their JWT-pinned client_id or an X-Client-Id picker.
+// A non-super_admin with no client in scope is BLOCKED so they can never reach
+// another tenant's data through KINI. Returns the resolved client_id to scope
+// queries with, plus whether the call is allowed.
+function kiniClientScope(req: Request): { client_id: string | null; allowed: boolean } {
+  const role = ((req as Request & { user?: { role?: string | null } }).user?.role ?? '').toLowerCase();
+  const id = clientScope(req).id;
+  if (id) return { client_id: id, allowed: true };
+  if (role === 'super_admin') return { client_id: null, allowed: true };
+  return { client_id: null, allowed: false };
+}
+const KINI_PICK_CLIENT_MSG = 'Select a client from the workspace switcher to use KINI — it stays scoped to that client\'s data.';
 // Accept only well-formed dates so a malformed client value (we saw
 // "23--06--2026" in prod logs) can't reach a query and 500 it — Postgres
 // throws "date/time field value out of range" and, because the analytics
@@ -1019,7 +1034,7 @@ accounts.get('/:id/notes', wrap(async (req, res) => res.json(
   await crud.list('crm_notes', orgId(req), { entity_type: 'account', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
 accounts.post('/:id/summarize', wrap(async (req, res) =>
-  res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), req.params.id) })));
+  res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), clientId(req), req.params.id) })));
 router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
 
 // ---------- DEALS ----------------------------------------------------
@@ -1194,8 +1209,8 @@ deals.post('/:id/move-stage', wrap(async (req, res) => {
 }));
 deals.post('/:id/win', wrap(async (req, res) => res.json(await dealsSvc.winDeal(orgId(req), req.params.id, parse(v.winSchema, req.body), userId(req)))));
 deals.post('/:id/lose', wrap(async (req, res) => res.json(await dealsSvc.loseDeal(orgId(req), req.params.id, parse(v.loseSchema, req.body), userId(req)))));
-deals.post('/:id/win-probability', wrap(async (req, res) => res.json(await winSvc.compute(orgId(req), req.params.id))));
-deals.post('/:id/next-action', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), req.params.id, true))));
+deals.post('/:id/win-probability', wrap(async (req, res) => res.json(await winSvc.compute(orgId(req), clientId(req), req.params.id))));
+deals.post('/:id/next-action', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), clientId(req), req.params.id, true))));
 deals.get('/:id/history', wrap(async (req, res) => res.json(await dealsSvc.dealHistory(orgId(req), req.params.id))));
 deals.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
@@ -3360,6 +3375,7 @@ ai.post('/draft-reply', wrap(async (req, res) => {
     intent: body.intent!,
     tone: body.tone ?? 'friendly',
     org_id: orgId(req),
+    client_id: clientId(req),
     user_id: userId(req),
   });
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
@@ -3397,25 +3413,25 @@ ai.post('/draft-email-template', wrap(async (req, res) => {
 }));
 ai.post('/next-best-action/:dealId', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
-  const out = await nbaSvc.compute(orgId(req), req.params.dealId, true);
+  const out = await nbaSvc.compute(orgId(req), clientId(req), req.params.dealId, true);
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
 }));
 ai.post('/win-probability/:dealId', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
-  const out = await winSvc.compute(orgId(req), req.params.dealId);
+  const out = await winSvc.compute(orgId(req), clientId(req), req.params.dealId);
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
 }));
 ai.post('/summarize/account/:id', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
-  const text = await summarizeSvc.summarizeAccount(orgId(req), req.params.id);
+  const text = await summarizeSvc.summarizeAccount(orgId(req), clientId(req), req.params.id);
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json({ text });
 }));
 ai.post('/summarize/deal/:id', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
-  const text = await summarizeSvc.summarizeDeal(orgId(req), req.params.id);
+  const text = await summarizeSvc.summarizeDeal(orgId(req), clientId(req), req.params.id);
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json({ text });
 }));
@@ -3448,6 +3464,14 @@ ai.post('/chat', wrap(async (req, res) => {
     }).optional(),
   }), req.body);
 
+  // Tenant gate — block the cross-tenant (org-wide) view for everyone except
+  // super_admin. A non-super_admin with no client in scope gets a friendly
+  // nudge instead of a model run over every client's data.
+  const kscope = kiniClientScope(req);
+  if (!kscope.allowed) {
+    return res.json({ success: true, data: { text: KINI_PICK_CLIENT_MSG, cards: [], tool_calls: [] } });
+  }
+
   const reqUser = (req as Request & { user?: { id?: string; org_id?: string; role?: string; client_id?: string | null } }).user;
   const scope = clientScope(req);
   const actor = { id: reqUser?.id, org_id: reqUser?.org_id, role: reqUser?.role, client_id: reqUser?.client_id ?? scope.id ?? null };
@@ -3473,7 +3497,7 @@ ai.post('/chat', wrap(async (req, res) => {
   }
 
   const tools = kiniTools.toAnthropicTools();
-  const cid = clientId(req);
+  const cid = kscope.client_id;
   const multiLangSuffix = `\n\nLanguage policy: Detect the language of the user's most recent message. If it's Hindi (Devanagari), Bengali, Odia, Assamese, or another Indian language, reply in the same language and script. Otherwise reply in English. Keep tool call arguments in English (slugs, IDs, JSON values must stay machine-readable).`;
   const crmSuffix = `\n\nYou are KINI, the Kinematic CRM AI assistant. You help sales reps close deals.
 You have CRM tools available. Use them to fetch real data — never invent leads, deals, or numbers.

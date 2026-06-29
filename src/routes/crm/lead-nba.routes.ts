@@ -30,7 +30,9 @@ router.post(
     const auth = req as AuthRequest;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const user = auth.user! as any;
-    const out = await computeLeadNba(user.org_id, req.params.leadId, true);
+    // Pin to the caller's client so a client-A user can't pull NBA for a
+    // client-B lead. Null (org-level admin) keeps the org-wide behaviour.
+    const out = await computeLeadNba(user.org_id, user.client_id ?? null, req.params.leadId, true);
     if (!out) {
       return res.status(404).json({ success: false, error: 'Lead not found' });
     }
