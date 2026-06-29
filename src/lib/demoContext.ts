@@ -12,7 +12,7 @@ import { AsyncLocalStorage } from 'async_hooks';
  */
 const als = new AsyncLocalStorage<{ industry: string }>();
 
-const KNOWN_INDUSTRIES = new Set(['insurance']);
+const KNOWN_INDUSTRIES = new Set(['insurance', 'pharmaceutical']);
 
 export function normalizeIndustry(value: string | undefined | null): string {
   const v = String(value || '').trim().toLowerCase();

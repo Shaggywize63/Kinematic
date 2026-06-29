@@ -10,6 +10,7 @@ import { Request, Response, NextFunction } from 'express';
 import { isDemo } from './demoData';
 import { currentDemoIndustry } from '../lib/demoContext';
 import { INSURANCE_CRM } from './demo/insuranceCrm';
+import { PHARMACEUTICAL_CRM } from './demo/pharmaceuticalCrm';
 
 const REPS = ['Arjun Sharma', 'Priya Patel', 'Rahul Verma', 'Sneha Rao', 'Amit Singh'];
 
@@ -513,7 +514,10 @@ export function demoCrmMiddleware(req: Request, res: Response, next: NextFunctio
   // Resolve the active dataset for this request's demo industry, then shadow
   // the module-level consts so the handler body below transparently serves the
   // chosen vertical. Generic stays byte-identical (uses the module consts).
-  const D = currentDemoIndustry() === 'insurance' ? INSURANCE_CRM : GENERIC_CRM;
+  const _industry = currentDemoIndustry();
+  const D = _industry === 'insurance'      ? INSURANCE_CRM
+          : _industry === 'pharmaceutical' ? PHARMACEUTICAL_CRM
+          : GENERIC_CRM;
   const {
     LEADS, ACCOUNTS, CONTACTS, STAGES, PIPELINES, DEALS, ACTIVITIES, SOURCES,
     DEMO_DASHBOARD_SUMMARY, DEMO_PIPELINE_VALUE, DEMO_FUNNEL, DEMO_WIN_RATE_BY_REP,
