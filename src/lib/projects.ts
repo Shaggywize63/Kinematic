@@ -228,6 +228,15 @@ function parseJsonMap(envVal?: string): Record<string, string> {
 const EMAIL_DIRECTORY = parseJsonMap(process.env.PROJECT_EMAIL_DIRECTORY);
 const DOMAIN_DIRECTORY = parseJsonMap(process.env.PROJECT_DOMAIN_DIRECTORY);
 
+// Built-in routing defaults so the platform's OWN accounts resolve correctly
+// even before any PROJECT_*_DIRECTORY env is set. The Kinematic platform admins
+// live in the 'kinematic' project, not the default (Tata) one. Env directories
+// override these; only applied when the target project is actually configured.
+// Tata users use other domains, so this never affects them.
+const BUILTIN_DOMAIN_DIRECTORY: Record<string, string> = {
+  'kinematicapp.com': 'kinematic',
+};
+
 export function resolveProjectForEmail(email: string | undefined | null): string {
   const e = (email || '').trim().toLowerCase();
   if (!e) return fallbackProjectKey();
@@ -238,7 +247,7 @@ export function resolveProjectForEmail(email: string | undefined | null): string
   const at = e.lastIndexOf('@');
   if (at >= 0) {
     const domain = e.slice(at + 1);
-    const byDomain = DOMAIN_DIRECTORY[domain];
+    const byDomain = DOMAIN_DIRECTORY[domain] || BUILTIN_DOMAIN_DIRECTORY[domain];
     if (byDomain && isKnownProject(byDomain)) return byDomain;
   }
 
