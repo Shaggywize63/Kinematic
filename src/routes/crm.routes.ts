@@ -37,6 +37,7 @@ import * as nbaSvc from '../services/crm/ai/nextBestAction.service';
 import * as winSvc from '../services/crm/ai/winProbability.service';
 import * as autoRespSvc from '../services/crm/ai/autoResponse.service';
 import * as summarizeSvc from '../services/crm/ai/summarize.service';
+import * as updateSuggestSvc from '../services/crm/ai/updateSuggest.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
@@ -3363,6 +3364,23 @@ ai.post('/draft-reply', wrap(async (req, res) => {
   });
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
   res.json(out);
+}));
+// Inline lead-update suggestions for the ✨ Suggest button. Deliberately
+// does NOT call gateAi / recordQuery — it's a cheap single-shot helper, not
+// a chat turn, so it must not burn the user's monthly KINI chat quota. Auth
+// is still enforced by the parent /api/v1/crm mount (requireAuth).
+ai.post('/suggest-from-update', wrap(async (req, res) => {
+  const body = parse(z.object({
+    lead_id: z.string().uuid(),
+    draft: z.string().min(1).max(4000),
+  }), req.body);
+  const out = await updateSuggestSvc.suggestFromUpdate(
+    orgId(req),
+    clientId(req),
+    body.lead_id,
+    body.draft,
+  );
+  res.json({ success: true, data: out });
 }));
 ai.post('/draft-email-template', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;

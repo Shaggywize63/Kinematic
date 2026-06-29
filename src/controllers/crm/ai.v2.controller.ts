@@ -70,19 +70,19 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     return badRequest(res, 'messages is required');
   }
 
-  // Resolve or auto-create thread.
+  // Resolve thread. A client that passes a thread_id opts into persistent
+  // history (we load prior turns and append the new ones). A client that
+  // passes NO thread_id runs EPHEMERAL: we answer from the messages it sent
+  // and persist nothing. This keeps the stateless web/iOS/Android chat
+  // clients — which resend their full history every turn — from spawning a
+  // throwaway thread row per message (and from double-counting history that
+  // they already include). Threads remain available for a future history UI.
   let thread: Awaited<ReturnType<typeof getThread>> = null;
-  let thread_id = clientThreadId ?? null;
+  const thread_id = clientThreadId ?? null;
   if (thread_id) {
     const r = await getThread(thread_id, user_id);
     if (!r) return notFound(res, 'Thread not found');
     thread = r;
-  } else {
-    const created = await createThread(user_id, org_id, client_id ?? null);
-    if (created) {
-      thread_id = created.id;
-      thread = { thread: created, messages: [] };
-    }
   }
 
   // Assemble system prompt: identity + role + context + memory + planning.
