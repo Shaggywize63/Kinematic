@@ -4,7 +4,7 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
-import { currentProjectKey, DEFAULT_PROJECT, projectHs256Key, getProjectConfig, resolveProjectForEmail } from '../lib/projects';
+import { currentProjectKey, DEFAULT_PROJECT, projectHs256Key, getProjectConfig, isKnownProject } from '../lib/projects';
 import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
@@ -257,27 +257,33 @@ export const loginAsClientCredentials = asyncHandler(async (req: AuthRequest, re
   if (error || !client) { notFound(res, 'Client not found'); return; }
 
   const email = (client as { email?: string }).email;
-  const password = decryptSecret((client as { login_password_enc?: string }).login_password_enc);
 
   // Impersonation target = admin-set "Org ID" if valid, else the client's own
   // org. Both live in THIS project's database.
   const loginOrg = (client as { login_org_id?: string }).login_org_id;
   const targetOrg = (typeof loginOrg === 'string' && isUUID(loginOrg)) ? loginOrg : client.org_id;
 
-  // No stored credentials → same-project client: the super-admin "enters" it by
+  // Which Supabase project holds this client's DATA. Explicit per-client flag —
+  // NOT guessed from the email (which would wrongly fall back to the default
+  // project). Unset / unknown / same-as-current => same-project client.
+  const dataProjectRaw = (client as { data_project_key?: string }).data_project_key;
+  const targetProject = (dataProjectRaw && isKnownProject(dataProjectRaw)) ? dataProjectRaw : currentProjectKey();
+
+  // Same project (same database): the super-admin "enters" the client by
   // impersonating its org on their EXISTING session (maybeImpersonate honours
-  // X-Org-Id for super_admins). No password required — works for every
-  // same-project client, current and future.
-  if (!password) {
+  // X-Org-Id for super_admins). No password / sign-in required — works for
+  // every same-project client, current and future, password or not.
+  if (targetProject === currentProjectKey()) {
     logger.info(`[Auth] super_admin ${user.id} impersonating client ${id} (org ${targetOrg})`);
     ok(res, { mode: 'impersonate', org_id: targetOrg, project: currentProjectKey(), client_id: client.id, name: client.name });
     return;
   }
 
-  // Stored credentials → authenticate against whichever Supabase project the
-  // email routes to (supports cross-project clients like the live Tata account).
-  if (!email) { badRequest(res, 'This client has a stored password but no login email configured'); return; }
-  const projectKey = resolveProjectForEmail(email);
+  // Cross-project client (data in another Supabase project, e.g. the live Tata
+  // account): authenticate against THAT project with the stored credentials.
+  const password = decryptSecret((client as { login_password_enc?: string }).login_password_enc);
+  if (!email || !password) { badRequest(res, 'This cross-project client needs a stored login email + password.'); return; }
+  const projectKey = targetProject;
   const cfg = getProjectConfig(projectKey);
   const sb = createSupabaseClient(cfg.url, cfg.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const { data: session, error: signInError } = await sb.auth.signInWithPassword({ email, password });
