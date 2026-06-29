@@ -4,7 +4,7 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
-import { currentProjectKey, DEFAULT_PROJECT, projectHs256Key, getProjectConfig, isKnownProject } from '../lib/projects';
+import { currentProjectKey, DEFAULT_PROJECT, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor } from '../lib/projects';
 import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
@@ -69,7 +69,7 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
  */
 export const createClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { name, contact_person, email, phone, modules, password, login_org_id } = req.body;
+  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id } = req.body;
 
   if (!name) {
     badRequest(res, 'Client name is required');
@@ -98,6 +98,10 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
       // Optional admin-set "Org ID" the Login button targets (falls back to
       // the client's own org). Only persisted on non-default projects.
       ...(orgPerClient() && typeof login_org_id === 'string' && isUUID(login_org_id) ? { login_org_id } : {}),
+      // Cross-project data link (which project + client holds this org's data),
+      // so the module ceiling set here syncs there.
+      ...(orgPerClient() && typeof data_project_key === 'string' && isKnownProject(data_project_key) ? { data_project_key } : {}),
+      ...(orgPerClient() && typeof data_client_id === 'string' && isUUID(data_client_id) ? { data_client_id } : {}),
       // Encrypted account password used by the "Login as client" button.
       ...(orgPerClient() && password ? { login_password_enc: encryptSecret(password) } : {}),
       name,
@@ -305,13 +309,59 @@ export const loginAsClientCredentials = asyncHandler(async (req: AuthRequest, re
 });
 
 /**
+ * Mirror a client's module CEILING into a linked client in ANOTHER Supabase
+ * project. The Kinematic client record is the source of truth for the MAXIMUM
+ * modules an org may use; which user gets what within that ceiling stays managed
+ * inside the target org. Unchecked (decommissioned) modules are stripped from
+ * the target client AND its users so they disappear there immediately.
+ */
+async function syncCeilingToLinkedProject(opts: {
+  projectKey: string;
+  targetClientId: string;
+  ceilingModules: string[];
+  grantedBy: string;
+}): Promise<void> {
+  const remote = adminClientFor(opts.projectKey);
+
+  // Validate against the TARGET project's module catalog.
+  const { data: cat } = await remote.from('modules').select('id');
+  const valid = new Set((cat || []).map((m: { id: string }) => m.id));
+  const ceiling = opts.ceilingModules.filter(m => valid.has(m));
+
+  // Replace the target client's module ceiling.
+  await remote.from('client_modules').delete().eq('client_id', opts.targetClientId);
+  if (ceiling.length) {
+    await remote.from('client_modules').insert(ceiling.map(m => ({
+      client_id: opts.targetClientId,
+      module_id: m,
+      enabled: true,
+      source: 'platform_ceiling',
+      granted_by: opts.grantedBy,
+    })));
+  }
+
+  // Decommission: drop any per-user permission no longer in the ceiling so an
+  // unchecked module vanishes for every user. Per-user grants WITHIN the ceiling
+  // are left untouched (the org decides who gets what).
+  const { data: tUsers } = await remote.from('users').select('id').eq('client_id', opts.targetClientId);
+  const ids = (tUsers || []).map((u: { id: string }) => u.id);
+  if (ids.length) {
+    let del = remote.from('user_module_permissions').delete().in('user_id', ids);
+    if (ceiling.length) del = del.not('module_id', 'in', `(${ceiling.map(m => `"${m}"`).join(',')})`);
+    await del;
+  }
+
+  clearEntitlementCache(opts.targetClientId);
+}
+
+/**
  * PATCH /api/v1/clients/:id
  * Admin only: Update client details and module access
  */
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id } = req.body;
+  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id } = req.body;
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
@@ -326,6 +376,14 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
       // "Org ID" the Login button targets; empty clears it. Non-default only.
       ...(orgPerClient() && login_org_id !== undefined
         ? { login_org_id: (typeof login_org_id === 'string' && isUUID(login_org_id)) ? login_org_id : null }
+        : {}),
+      // Cross-project link: which Supabase project + client holds this org's
+      // real data, so the module ceiling here syncs there. Non-default only.
+      ...(orgPerClient() && data_project_key !== undefined
+        ? { data_project_key: (typeof data_project_key === 'string' && isKnownProject(data_project_key)) ? data_project_key : null }
+        : {}),
+      ...(orgPerClient() && data_client_id !== undefined
+        ? { data_client_id: (typeof data_client_id === 'string' && isUUID(data_client_id)) ? data_client_id : null }
         : {}),
       // Update the encrypted "Login as" password only when a new one is given
       // (blank on edit = leave unchanged).
@@ -411,6 +469,28 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
         );
         console.log(`[DEBUG] Syncing ${userPermissionsPayload.length} user-level perms for ${allUserIds.length} users.`);
         await supabaseAdmin.from('user_module_permissions').insert(userPermissionsPayload);
+      }
+    }
+  }
+
+  // 5. Cross-project ceiling sync: if this client is linked to a client in
+  // another Supabase project (e.g. Tata Tiscon -> the live Kaiyo client), push
+  // the module ceiling there. Failure here must not fail the local save.
+  if (modules && Array.isArray(modules)) {
+    const dataProject = (client as { data_project_key?: string }).data_project_key;
+    const dataClientId = (client as { data_client_id?: string }).data_client_id;
+    if (dataProject && isKnownProject(dataProject) && dataProject !== currentProjectKey()
+        && dataClientId && isUUID(dataClientId)) {
+      try {
+        await syncCeilingToLinkedProject({
+          projectKey: dataProject,
+          targetClientId: dataClientId,
+          ceilingModules: modules,
+          grantedBy: user.id,
+        });
+        logger.info(`[Clients] synced module ceiling ${id} -> ${dataProject}/${dataClientId} (${modules.length})`);
+      } catch (e: any) {
+        logger.error(`[Clients] cross-project ceiling sync failed for ${id} -> ${dataProject}/${dataClientId}: ${e?.message || e}`);
       }
     }
   }
