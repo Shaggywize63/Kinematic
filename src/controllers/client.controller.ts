@@ -258,8 +258,25 @@ export const loginAsClientCredentials = asyncHandler(async (req: AuthRequest, re
 
   const email = (client as { email?: string }).email;
   const password = decryptSecret((client as { login_password_enc?: string }).login_password_enc);
-  if (!email || !password) { badRequest(res, 'This client has no login email/password configured'); return; }
 
+  // Impersonation target = admin-set "Org ID" if valid, else the client's own
+  // org. Both live in THIS project's database.
+  const loginOrg = (client as { login_org_id?: string }).login_org_id;
+  const targetOrg = (typeof loginOrg === 'string' && isUUID(loginOrg)) ? loginOrg : client.org_id;
+
+  // No stored credentials → same-project client: the super-admin "enters" it by
+  // impersonating its org on their EXISTING session (maybeImpersonate honours
+  // X-Org-Id for super_admins). No password required — works for every
+  // same-project client, current and future.
+  if (!password) {
+    logger.info(`[Auth] super_admin ${user.id} impersonating client ${id} (org ${targetOrg})`);
+    ok(res, { mode: 'impersonate', org_id: targetOrg, project: currentProjectKey(), client_id: client.id, name: client.name });
+    return;
+  }
+
+  // Stored credentials → authenticate against whichever Supabase project the
+  // email routes to (supports cross-project clients like the live Tata account).
+  if (!email) { badRequest(res, 'This client has a stored password but no login email configured'); return; }
   const projectKey = resolveProjectForEmail(email);
   const cfg = getProjectConfig(projectKey);
   const sb = createSupabaseClient(cfg.url, cfg.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
@@ -271,6 +288,7 @@ export const loginAsClientCredentials = asyncHandler(async (req: AuthRequest, re
 
   logger.info(`[Auth] super_admin ${user.id} logged in as client ${id} (${email}) on project '${projectKey}'`);
   ok(res, {
+    mode: 'credentials',
     access_token: session.session.access_token,
     refresh_token: session.session.refresh_token,
     project: projectKey,
