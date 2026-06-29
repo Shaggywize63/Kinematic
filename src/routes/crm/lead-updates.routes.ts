@@ -13,6 +13,8 @@ import { z } from 'zod';
 import {
   listUpdates,
   createUpdate,
+  updateUpdate,
+  deleteUpdate,
 } from '../../services/crm/leadUpdates.service';
 import { persistMentions, parseMentionIds } from '../../services/crm/messaging.service';
 import type { AuthRequest } from '../../types';
@@ -65,6 +67,43 @@ router.get(
     const limit = Math.min(Number(req.query.limit) || 50, 200);
     const updates = await listUpdates(user.org_id, req.params.leadId, limit);
     return res.json({ success: true, data: updates });
+  }),
+);
+
+// Edit the body of an existing update. Author-only — enforced in the service.
+router.patch(
+  '/:leadId/updates/:updateId',
+  wrap(async (req, res) => {
+    const auth = req as AuthRequest;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const user = auth.user! as any;
+    const parsed = createSchema.parse(req.body);
+    const update = await updateUpdate(
+      user.org_id,
+      user.id,
+      req.params.leadId,
+      req.params.updateId,
+      parsed.body,
+    );
+    return res.json({ success: true, data: update });
+  }),
+);
+
+// Delete an update. Author or admin — enforced in the service.
+router.delete(
+  '/:leadId/updates/:updateId',
+  wrap(async (req, res) => {
+    const auth = req as AuthRequest;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const user = auth.user! as any;
+    await deleteUpdate(
+      user.org_id,
+      user.id,
+      user.role,
+      req.params.leadId,
+      req.params.updateId,
+    );
+    return res.json({ success: true, data: { deleted: true } });
   }),
 );
 
