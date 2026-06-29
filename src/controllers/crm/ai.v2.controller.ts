@@ -30,10 +30,16 @@ import {
   setTitle,
 } from '../../services/crm/ai/kiniThreads.service';
 import { logToolCall } from '../../services/crm/ai/kiniObservability.service';
+import * as kiniQuota from '../../services/crm/ai/kiniQuota.service';
 import { logger } from '../../lib/logger';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AuthUser = any;
+
+function platformOf(req: AuthRequest): 'web' | 'ios' | 'android' {
+  const raw = (req.headers['x-kinematic-platform'] as string | undefined ?? '').toLowerCase().trim();
+  return raw === 'ios' || raw === 'android' ? raw : 'web';
+}
 
 async function gate(req: AuthRequest, res: Response): Promise<boolean> {
   const user = req.user as AuthUser;
@@ -70,19 +76,43 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     return badRequest(res, 'messages is required');
   }
 
-  // Resolve or auto-create thread.
+  // Quota gate — v2 chat meters exactly like the legacy v1 path so the
+  // upgrade doesn't silently make KINI unlimited. Mirrors the 429 shape the
+  // clients already handle for v1.
+  const actor = { id: user_id, org_id, role, client_id: client_id ?? null };
+  const platform = platformOf(req);
+  const gateQuota = await kiniQuota.checkQuota(actor);
+  if (!gateQuota.allowed) {
+    const code = gateQuota.reason ?? 'USER_KINI_LIMIT_REACHED';
+    const msg = code === 'ORG_KINI_LIMIT_REACHED'
+      ? `Your organization has reached its monthly AI limit (${gateQuota.org_cap ?? gateQuota.cap} queries). Resets on the 1st.`
+      : `Monthly AI limit reached (${gateQuota.cap} queries). Resets on the 1st.`;
+    return res.status(429).json({
+      success: false,
+      error: { code, message: msg },
+      data: {
+        usage: {
+          used: gateQuota.used, cap: gateQuota.cap, remaining: 0,
+          month: gateQuota.month, exempt: gateQuota.exempt, limit_reached: true,
+          reason: code, org_used: gateQuota.org_used, org_cap: gateQuota.org_cap,
+        },
+      },
+    });
+  }
+
+  // Resolve thread. A client that passes a thread_id opts into persistent
+  // history (we load prior turns and append the new ones). A client that
+  // passes NO thread_id runs EPHEMERAL: we answer from the messages it sent
+  // and persist nothing. This keeps the stateless web/iOS/Android chat
+  // clients — which resend their full history every turn — from spawning a
+  // throwaway thread row per message (and from double-counting history that
+  // they already include). Threads remain available for a future history UI.
   let thread: Awaited<ReturnType<typeof getThread>> = null;
-  let thread_id = clientThreadId ?? null;
+  const thread_id = clientThreadId ?? null;
   if (thread_id) {
     const r = await getThread(thread_id, user_id);
     if (!r) return notFound(res, 'Thread not found');
     thread = r;
-  } else {
-    const created = await createThread(user_id, org_id, client_id ?? null);
-    if (created) {
-      thread_id = created.id;
-      thread = { thread: created, messages: [] };
-    }
   }
 
   // Assemble system prompt: identity + role + context + memory + planning.
@@ -219,10 +249,17 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Meter the successful turn + return the fresh usage view so the client's
+    // quota badge updates exactly as it did on v1.
+    const tokenUsage = (result as { usage?: { input?: number; output?: number } }).usage;
+    void kiniQuota.recordQuery(actor, tokenUsage, platform);
+    const usage = await kiniQuota.getUsage(actor);
+
     return ok(res, {
       text,
       cards: result.cards,
       tool_calls: result.tool_calls.map((t) => ({ name: t.name, args: t.args })),
+      usage,
       thread_id,
       took_ms: Date.now() - turnStart,
     });
