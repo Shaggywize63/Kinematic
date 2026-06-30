@@ -19,6 +19,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
+import * as automationsSvc from '../services/crm/automations.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as placesSvc from '../services/crm/places.service';
@@ -2128,6 +2129,13 @@ attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false
 // (the decoupled edge-function table), so every automation an admin created
 // silently never fired.
 attach('/automations', 'crm_automations', v.automationSchema, { softDelete: false, clientScoped: true });
+// Manual trigger for the time-based scheduler (lead_idle / deal_stalled /
+// task_overdue) — super_admin only; also runs automatically in-process.
+router.post('/automation-scheduler/run', wrap(async (req, res) => {
+  const role = ((req as AuthRequest).user?.role ?? '').toLowerCase();
+  if (role !== 'super_admin') throw new AppError(403, 'super_admin only', 'FORBIDDEN');
+  res.json(await automationsSvc.runScheduledAutomations());
+}));
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
 
 // People Directory — per-client address book (dealers / influencers /

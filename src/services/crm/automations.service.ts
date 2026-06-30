@@ -441,3 +441,115 @@ function interpolate(template: string, data: Record<string, unknown>): string {
     return v == null ? '' : String(v);
   });
 }
+
+// ── Time-based scheduler ────────────────────────────────────
+// Driven by an in-process interval (server.ts) and/or the manual
+// /crm/automation-scheduler/run endpoint. For each active time-based
+// automation it finds the entities past the threshold, claims them in the
+// dedup ledger, evaluates conditions, and runs the action — exactly once per
+// idle/stall/overdue episode.
+
+const TIMED_TRIGGERS: TriggerType[] = ['lead_idle', 'deal_stalled', 'task_overdue'];
+
+interface TimedMatch {
+  entity: EntityKind;
+  entity_id: string;
+  row: Record<string, unknown>;
+  anchor: string;             // timestamp the dedup window keys on
+  extra?: Record<string, unknown>;
+}
+
+/** Atomically claim an (automation, entity, window) tuple. Returns true only
+ *  for the caller that actually inserted it (others see a duplicate). */
+async function claimEvent(automation_id: string, entity_id: string, window_key: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from('crm_automation_event_log')
+    .upsert({ automation_id, entity_id, window_key }, { onConflict: 'automation_id,entity_id,window_key', ignoreDuplicates: true })
+    .select('id');
+  if (error) return false; // on error, don't fire — safer than double-firing
+  return (data?.length ?? 0) > 0;
+}
+
+async function findTimedEntities(a: AutomationRow, cutoffIso: string): Promise<TimedMatch[]> {
+  const cutoffMs = Date.parse(cutoffIso);
+  const scope = (q: any) => { let x = q.eq('org_id', a.org_id); if (a.client_id) x = x.eq('client_id', a.client_id); return x; };
+
+  if (a.trigger_type === 'lead_idle') {
+    // created_at <= cutoff is necessary (last_activity >= created); the JS
+    // filter then keys on coalesce(last_activity_at, created_at) so a
+    // never-touched old lead also counts as idle.
+    const { data } = await scope(supabaseAdmin.from('crm_leads')
+      .select('id, owner_id, status, last_activity_at, created_at, client_id, email, phone, first_name, last_name, company, score, city')
+      .is('deleted_at', null)
+      .in('status', ['new', 'working', 'nurturing', 'qualified'])
+      .lte('created_at', cutoffIso)).limit(1000);
+    return ((data ?? []) as any[])
+      .filter((r) => Date.parse((r.last_activity_at ?? r.created_at) as string) <= cutoffMs)
+      .map((r) => ({ entity: 'lead' as EntityKind, entity_id: r.id, row: r, anchor: String(r.last_activity_at ?? r.created_at) }));
+  }
+
+  if (a.trigger_type === 'deal_stalled') {
+    const { data } = await scope(supabaseAdmin.from('crm_deals')
+      .select('id, owner_id, status, updated_at, client_id, name, amount, stage_id')
+      .is('deleted_at', null).eq('status', 'open').lte('updated_at', cutoffIso)).limit(1000);
+    return ((data ?? []) as any[]).map((r) => ({ entity: 'deal' as EntityKind, entity_id: r.id, row: r, anchor: String(r.updated_at) }));
+  }
+
+  if (a.trigger_type === 'task_overdue') {
+    const { data } = await scope(supabaseAdmin.from('crm_activities')
+      .select('id, owner_id, assigned_to, type, status, due_at, lead_id, deal_id, client_id, subject')
+      .eq('type', 'task').is('deleted_at', null)
+      .not('status', 'in', '(done,completed,cancelled)')
+      .not('due_at', 'is', null).lte('due_at', cutoffIso)).limit(1000);
+    const out: TimedMatch[] = [];
+    for (const t of (data ?? []) as any[]) {
+      const entity: EntityKind = t.deal_id ? 'deal' : 'lead';
+      const entity_id = (t.lead_id ?? t.deal_id) as string | undefined;
+      if (!entity_id) continue;
+      out.push({ entity, entity_id, row: { id: entity_id, owner_id: t.assigned_to ?? t.owner_id }, anchor: String(t.due_at), extra: { activity: t } });
+    }
+    return out;
+  }
+  return [];
+}
+
+export async function runScheduledAutomations(): Promise<{ checked: number; fired: number }> {
+  let checked = 0, fired = 0;
+  const { data: autos, error } = await supabaseAdmin.from('crm_automations')
+    .select('*').eq('is_active', true).in('trigger_type', TIMED_TRIGGERS);
+  if (error || !autos?.length) return { checked, fired };
+
+  for (const a of autos as AutomationRow[]) {
+    const days = Math.max(1, Number((a.trigger_config as Record<string, unknown> | null)?.days ?? 3));
+    const cutoffIso = new Date(Date.now() - days * 86_400_000).toISOString();
+    let matches: TimedMatch[] = [];
+    try { matches = await findTimedEntities(a, cutoffIso); } catch { continue; }
+
+    for (const m of matches) {
+      checked++;
+      try {
+        if (!(await claimEvent(a.id, m.entity_id, m.anchor))) continue;
+        const context: AutomationContext = {
+          org_id: a.org_id, entity: m.entity, entity_id: m.entity_id,
+          data: {
+            [m.entity]: m.row,
+            ...(m.extra ?? {}),
+            client_id: a.client_id ?? (m.row as { client_id?: string | null }).client_id ?? null,
+            days,
+          },
+        };
+        if (!evaluateConditions(readConditions(a.trigger_config), context)) continue;
+        await executeAction(a, context);
+        fired++;
+      } catch (err) {
+        console.error(`[automation.scheduled] ${a.id} on ${m.entity}:${m.entity_id} failed:`, err instanceof Error ? err.message : err);
+      }
+    }
+    if (fired > 0) {
+      await supabaseAdmin.from('crm_automations')
+        .update({ run_count: (a.run_count ?? 0) + 1, last_run_at: new Date().toISOString() })
+        .eq('id', a.id);
+    }
+  }
+  return { checked, fired };
+}
