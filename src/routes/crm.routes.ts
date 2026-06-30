@@ -2123,7 +2123,11 @@ function attach(
 attach('/lead-sources', 'crm_lead_sources', v.leadSourceSchema, { softDelete: false, clientScoped: true });
 attach('/assignment-rules', 'crm_lead_assignment_rules', v.assignmentRuleSchema, { softDelete: false, clientScoped: true });
 attach('/territories', 'crm_territories', v.territorySchema, { softDelete: false, clientScoped: true });
-attach('/automations', 'crm_workflow_automations', v.automationSchema, { softDelete: false, clientScoped: true });
+// Standardize the admin CRUD on the LIVE engine table (crm_automations) — the
+// one fireForTrigger() reads. Previously this pointed at crm_workflow_automations
+// (the decoupled edge-function table), so every automation an admin created
+// silently never fired.
+attach('/automations', 'crm_automations', v.automationSchema, { softDelete: false, clientScoped: true });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
 
 // People Directory — per-client address book (dealers / influencers /

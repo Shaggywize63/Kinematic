@@ -2,8 +2,40 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound } from '../../utils';
+import * as automations from '../../services/crm/automations.service';
 
 // ── Activities (call, email, meeting, task, note, sms, whatsapp) ──
+
+// Fire an activity automation trigger, scoped to whichever parent entity the
+// activity links to (lead/deal/contact/account). Client_id is resolved from
+// the parent so tenant A's automations never run on tenant B's activity.
+// Fire-and-forget — never blocks or breaks the activity write.
+async function fireActivityTrigger(
+  org_id: string,
+  user_id: string | undefined,
+  trigger: 'activity_created' | 'activity_completed',
+  activity: Record<string, any>,
+): Promise<void> {
+  const linkEntity: 'lead' | 'deal' | 'contact' | 'account' | null =
+    activity.lead_id ? 'lead'
+    : activity.deal_id ? 'deal'
+    : activity.contact_id ? 'contact'
+    : activity.account_id ? 'account'
+    : null;
+  if (!linkEntity) return;
+  const entity_id = activity[`${linkEntity}_id`] as string;
+  let client_id: string | null = (activity.client_id as string | null) ?? null;
+  if (!client_id && (linkEntity === 'lead' || linkEntity === 'deal')) {
+    const tbl = linkEntity === 'lead' ? 'crm_leads' : 'crm_deals';
+    const { data: parent } = await supabaseAdmin.from(tbl)
+      .select('client_id').eq('org_id', org_id).eq('id', entity_id).maybeSingle();
+    client_id = (parent as { client_id?: string | null } | null)?.client_id ?? null;
+  }
+  automations.fireForTrigger(trigger, {
+    org_id, user_id, entity: linkEntity, entity_id,
+    data: { activity, [linkEntity]: { id: entity_id }, client_id },
+  }).catch(() => {});
+}
 
 export const listActivities = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
@@ -61,6 +93,7 @@ export const createActivity = asyncHandler(async (req: AuthRequest, res: Respons
     await supabaseAdmin.from('crm_leads').update({ last_activity_at: new Date().toISOString() })
       .eq('id', payload.lead_id).eq('org_id', org_id);
   }
+  await fireActivityTrigger(org_id, userId, 'activity_created', data);
   return created(res, data, 'Activity logged');
 });
 
@@ -73,16 +106,23 @@ export const getActivity = asyncHandler(async (req: AuthRequest, res: Response) 
 });
 
 export const updateActivity = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
+  const { org_id, id: userId } = req.user!;
   const updates = { ...req.body };
   delete updates.org_id; delete updates.id; delete updates.created_at;
   if (updates.status === 'done' && !updates.completed_at) {
     updates.completed_at = new Date().toISOString();
   }
+  // Snapshot the prior completion so we can fire activity_completed exactly
+  // once — on the null → set transition, not on every later patch.
+  const { data: prev } = await supabaseAdmin.from('crm_activities')
+    .select('completed_at').eq('id', req.params.id).eq('org_id', org_id).maybeSingle();
   const { data, error } = await supabaseAdmin.from('crm_activities')
     .update(updates).eq('id', req.params.id).eq('org_id', org_id)
     .is('deleted_at', null).select().single();
   if (error) return badRequest(res, error.message);
+  if (!(prev as { completed_at?: string | null } | null)?.completed_at && (data as { completed_at?: string | null }).completed_at) {
+    await fireActivityTrigger(org_id, userId, 'activity_completed', data);
+  }
   return ok(res, data);
 });
 

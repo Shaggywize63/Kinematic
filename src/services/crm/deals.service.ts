@@ -5,6 +5,7 @@ import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { validateAndStampCustomFields } from './customFields.service';
 import type { Deal } from '../../types/crm.types';
+import * as automations from './automations.service';
 
 export async function listDeals(
   org_id: string,
@@ -209,6 +210,10 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     deal_id: data.id, org_id, from_stage_id: null, to_stage_id: data.stage_id,
     from_amount: 0, to_amount: data.amount, changed_by: user_id ?? null,
   });
+  automations.fireForTrigger('deal_created', {
+    org_id, user_id, entity: 'deal', entity_id: data.id,
+    data: { deal: data, client_id: (data as { client_id?: string | null }).client_id ?? null },
+  }).catch(() => {});
   return data as Deal;
 }
 
@@ -291,6 +296,29 @@ export async function updateDeal(org_id: string, id: string, payload: Partial<De
       }
     }
   } catch { /* non-fatal — the deal update itself succeeded */ }
+
+  // Fire deal automations centrally — winDeal / loseDeal / moveStage / kanban
+  // drag all route through updateDeal, so this one place covers every path.
+  const dealClientId = (before as { client_id?: string | null }).client_id
+    ?? (data as { client_id?: string | null }).client_id ?? null;
+  if (before.stage_id !== data.stage_id) {
+    automations.fireForTrigger('deal_stage_changed', {
+      org_id, user_id, entity: 'deal', entity_id: id,
+      data: { deal: data, before, after: data, old_stage_id: before.stage_id, new_stage_id: data.stage_id, client_id: dealClientId },
+    }).catch(() => {});
+  }
+  if (data.status === 'won' && before.status !== 'won') {
+    automations.fireForTrigger('deal_won', {
+      org_id, user_id, entity: 'deal', entity_id: id,
+      data: { deal: data, before, client_id: dealClientId },
+    }).catch(() => {});
+  }
+  if (data.status === 'lost' && before.status !== 'lost') {
+    automations.fireForTrigger('deal_lost', {
+      org_id, user_id, entity: 'deal', entity_id: id,
+      data: { deal: data, before, lost_reason: (data as { lost_reason?: string | null }).lost_reason ?? null, client_id: dealClientId },
+    }).catch(() => {});
+  }
 
   return data as Deal;
 }

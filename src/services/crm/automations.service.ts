@@ -44,13 +44,24 @@ export type TriggerType =
   | 'deal_created'
   | 'deal_stage_changed'
   | 'deal_won'
-  | 'deal_lost';
+  | 'deal_lost'
+  | 'activity_created'
+  | 'activity_completed'
+  // Time-based — fired by runScheduledAutomations(), config in trigger_config.days
+  | 'lead_idle'
+  | 'deal_stalled'
+  | 'task_overdue';
 
 export type ActionType =
   | 'create_task'
   | 'create_activity'
   | 'update_lead'
-  | 'send_notification';
+  | 'update_deal'
+  | 'send_notification'
+  | 'send_email'
+  | 'send_whatsapp'
+  | 'assign_owner'
+  | 'convert_lead';
 
 export type EntityKind = 'lead' | 'deal' | 'contact' | 'account';
 
@@ -200,7 +211,12 @@ async function executeAction(automation: AutomationRow, context: AutomationConte
     case 'create_task':       return createTaskAction(cfg, context);
     case 'create_activity':   return createActivityAction(cfg, context);
     case 'update_lead':       return updateLeadAction(cfg, context);
+    case 'update_deal':       return updateDealAction(cfg, context);
     case 'send_notification': return sendNotificationAction(cfg, context);
+    case 'send_email':        return sendEmailAction(cfg, context);
+    case 'send_whatsapp':     return sendWhatsappAction(cfg, context);
+    case 'assign_owner':      return assignOwnerAction(cfg, context);
+    case 'convert_lead':      return convertLeadAction(cfg, context);
     default:
       console.warn(`[automation] ${automation.id} unknown action_type=${automation.action_type}`);
   }
@@ -309,6 +325,86 @@ async function sendNotificationAction(cfg: Record<string, unknown>, ctx: Automat
   } catch (_err) {
     /* swallowed — see comment above */
   }
+}
+
+// Pull the entity row (lead/deal) out of the trigger context.
+function entityRow(ctx: AutomationContext): Record<string, unknown> {
+  return ((ctx.data as Record<string, unknown>)[ctx.entity] ?? {}) as Record<string, unknown>;
+}
+
+async function updateDealAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  if (ctx.entity !== 'deal') return;
+  const updates: Record<string, unknown> = {};
+  if (cfg.set_stage_id) updates.stage_id = cfg.set_stage_id;
+  if (cfg.set_owner_id) updates.owner_id = cfg.set_owner_id;
+  if (cfg.set_status)   updates.status   = cfg.set_status;
+  if (cfg.set_amount != null) updates.amount = Number(cfg.set_amount);
+  if (Object.keys(updates).length === 0) return;
+  const { updateDeal } = await import('./deals.service');
+  await updateDeal(ctx.org_id, ctx.entity_id, updates, ctx.user_id);
+}
+
+async function sendEmailAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  const entity = entityRow(ctx);
+  const to = (interpolate(String(cfg.to ?? ''), ctx.data) || (entity.email as string) || '').trim();
+  if (!to) return;
+  const { sendEmail } = await import('./emails.service');
+  await sendEmail({
+    org_id: ctx.org_id,
+    user_id: ctx.user_id,
+    to,
+    subject:  interpolate(String(cfg.subject ?? ''), ctx.data),
+    body_html: interpolate(String(cfg.body_html ?? cfg.body ?? ''), ctx.data),
+    template_id: (cfg.template_id as string) ?? null,
+    lead_id: ctx.entity === 'lead' ? ctx.entity_id : null,
+    deal_id: ctx.entity === 'deal' ? ctx.entity_id : null,
+  });
+}
+
+async function sendWhatsappAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  const entity = entityRow(ctx);
+  const to = (interpolate(String(cfg.to ?? ''), ctx.data) || (entity.phone as string) || '').trim();
+  if (!to) return;
+  const { sendWhatsapp } = await import('./whatsapp.service');
+  await sendWhatsapp({
+    org_id: ctx.org_id,
+    user_id: ctx.user_id,
+    to,
+    body_text: interpolate(String(cfg.body_text ?? cfg.body ?? ''), ctx.data) || undefined,
+    template_id: (cfg.template_id as string) ?? null,
+    lead_id: ctx.entity === 'lead' ? ctx.entity_id : null,
+    deal_id: ctx.entity === 'deal' ? ctx.entity_id : null,
+  });
+}
+
+async function assignOwnerAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  let newOwner: string | null = null;
+  if (cfg.user_id) {
+    // Explicit user.
+    newOwner = String(cfg.user_id);
+  } else {
+    // Re-run the assignment rules (round-robin / territory / default).
+    const { assignOwner } = await import('./assignment.service');
+    newOwner = await assignOwner(ctx.org_id, entityRow(ctx), ctx.user_id ?? null);
+  }
+  if (!newOwner) return;
+  const table = ctx.entity === 'deal' ? 'crm_deals' : 'crm_leads';
+  await supabaseAdmin.from(table)
+    .update({ owner_id: newOwner })
+    .eq('org_id', ctx.org_id)
+    .eq('id', ctx.entity_id);
+}
+
+async function convertLeadAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  if (ctx.entity !== 'lead') return;
+  const { convertLead } = await import('./leads.service');
+  await convertLead(ctx.org_id, ctx.entity_id, {
+    create_deal: cfg.create_deal !== false,
+    deal_name: cfg.deal_name ? interpolate(String(cfg.deal_name), ctx.data) : undefined,
+    deal_amount: cfg.deal_amount != null ? Number(cfg.deal_amount) : undefined,
+    pipeline_id: (cfg.pipeline_id as string) ?? undefined,
+    stage_id: (cfg.stage_id as string) ?? undefined,
+  }, ctx.user_id);
 }
 
 // ── Helpers ─────────────────────────────────────────────────

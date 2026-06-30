@@ -413,13 +413,25 @@ const automationTriggerType = z.enum([
   'deal_stage_changed',
   'deal_won',
   'deal_lost',
+  'activity_created',
+  'activity_completed',
+  // Time-based (fired by the scheduled processor). `trigger_config.days`
+  // carries the idle/stall/overdue threshold.
+  'lead_idle',
+  'deal_stalled',
+  'task_overdue',
 ]);
 
 const automationActionType = z.enum([
   'create_task',
   'create_activity',
   'update_lead',
+  'update_deal',
   'send_notification',
+  'send_email',
+  'send_whatsapp',
+  'assign_owner',
+  'convert_lead',
 ]);
 
 const automationCondition = z.object({
