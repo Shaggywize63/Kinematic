@@ -41,6 +41,7 @@ import * as autoRespSvc from '../services/crm/ai/autoResponse.service';
 import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as updateSuggestSvc from '../services/crm/ai/updateSuggest.service';
 import * as dailyBriefingSvc from '../services/crm/ai/dailyBriefing.service';
+import * as cardScanSvc from '../services/crm/ai/cardScan.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
@@ -3581,6 +3582,17 @@ ai.get('/daily-briefing', wrap(async (req, res) => {
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context', 'NO_USER');
   const out = await dailyBriefingSvc.generateBriefing(orgId(req), uid, clientId(req));
+  res.json({ success: true, data: out });
+}));
+// Business-card → lead OCR. The apps capture a card photo, downscale it, and
+// POST the base64; we return structured contact fields to pre-fill Create Lead.
+// Single-shot vision helper (no KINI chat-quota spend).
+ai.post('/scan-card', wrap(async (req, res) => {
+  const body = parse(z.object({
+    image_base64: z.string().min(100),
+    media_type: z.enum(['image/jpeg', 'image/png', 'image/webp']).default('image/jpeg'),
+  }), req.body);
+  const out = await cardScanSvc.scanCard(body.image_base64, body.media_type);
   res.json({ success: true, data: out });
 }));
 ai.post('/draft-email-template', wrap(async (req, res) => {
