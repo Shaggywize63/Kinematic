@@ -2197,6 +2197,86 @@ reportSchedules.post('/:id/run-now', wrap(async (req, res) => {
 }));
 router.use('/report-schedules', reportSchedules);
 
+// ── My Day — the rep's beat agenda ─────────────────────────────────────────
+// One call that powers the "My Day" screen on iOS/Android (and a web widget):
+// the signed-in rep's activities due today, anything overdue, a peek at what's
+// upcoming, and their open leads — geo-sorted by nearest when the device
+// passes ?lat=&lng=. Activities are matched on owner_id OR assigned_to (the
+// generic list helper only does one), tasks are crm_activities with
+// type='task'. Read-only, rep-scoped, client-scoped.
+function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 6371, toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat), dLng = toRad(bLng - aLng);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+}
+
+router.get('/my-day', wrap(async (req, res) => {
+  const org = orgId(req);
+  const rep = userId(req);
+  if (!rep || !UUID_RE.test(rep)) throw new AppError(400, 'No user context', 'NO_USER');
+  const scope = clientScope(req);
+
+  const lat = parseFloat(String(req.query.lat ?? ''));
+  const lng = parseFloat(String(req.query.lng ?? ''));
+  const hasGeo = Number.isFinite(lat) && Number.isFinite(lng);
+
+  const now = new Date();
+  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0)).toISOString();
+  const dayEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59)).toISOString();
+
+  // Activities owned by OR assigned to the rep, not completed, with a due date.
+  let aq = supabaseAdmin.from('crm_activities')
+    .select('id, type, subject, status, due_at, priority, lead_id, deal_id')
+    .eq('org_id', org)
+    .is('completed_at', null)
+    .not('due_at', 'is', null)
+    .or(`owner_id.eq.${rep},assigned_to.eq.${rep}`)
+    .order('due_at', { ascending: true })
+    .limit(150);
+  if (scope.id) aq = aq.eq('client_id', scope.id);
+  const { data: actRows } = await aq;
+  const acts = (actRows ?? []) as Array<{ due_at: string }>;
+  const activitiesToday = acts.filter((a) => a.due_at >= dayStart && a.due_at <= dayEnd);
+  const overdue = acts.filter((a) => a.due_at < dayStart);
+  const upcoming = acts.filter((a) => a.due_at > dayEnd).slice(0, 20);
+
+  // Open leads owned by the rep — geo-sorted when we have the device location.
+  let lq = supabaseAdmin.from('crm_leads')
+    .select('id, title, status, city, latitude, longitude, created_at')
+    .eq('org_id', org)
+    .eq('owner_id', rep)
+    .not('status', 'in', '(won,lost,converted,disqualified,unqualified)')
+    .limit(300);
+  if (scope.id) lq = lq.eq('client_id', scope.id);
+  const { data: leadRows } = await lq;
+  let leads = (leadRows ?? []) as Array<any>;
+  if (hasGeo) {
+    leads = leads
+      .map((l) => ({
+        ...l,
+        distance_km: (l.latitude != null && l.longitude != null)
+          ? Math.round(haversineKm(lat, lng, Number(l.latitude), Number(l.longitude)) * 10) / 10
+          : null,
+      }))
+      .sort((a, b) => (a.distance_km ?? 1e9) - (b.distance_km ?? 1e9));
+  } else {
+    leads = leads.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  }
+
+  res.json({
+    success: true,
+    data: {
+      date: dayStart.slice(0, 10),
+      counts: { today: activitiesToday.length, overdue: overdue.length, upcoming: upcoming.length, open_leads: leads.length },
+      activities_today: activitiesToday,
+      overdue,
+      upcoming,
+      leads: leads.slice(0, 20),
+    },
+  });
+}));
+
 // People Directory — per-client address book (dealers / influencers /
 // referrers) that sits alongside contacts. Strict client scope so Tata
 // Tiscon's roster never leaks into Kinematic and vice-versa. RBAC gate:
