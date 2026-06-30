@@ -2,6 +2,7 @@ import app from './app';
 import { logger } from './lib/logger';
 import { runScheduledAutomations } from './services/crm/automations.service';
 import { runDueReportDigests } from './services/crm/reportSchedules.service';
+import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -47,6 +48,22 @@ if (String(process.env.CRM_REPORT_DIGEST_SCHEDULER_ENABLED ?? 'true').toLowerCas
       .catch((e) => logger.warn(`[report-digests] scheduled run failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[report-digests] scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Daily AI briefing. Hourly tick that only fires at the configured UTC hour
+// (default 03:00 UTC ≈ 08:30 IST); the crm_daily_briefing_log dedup makes a
+// rep's briefing once-per-day regardless of how many ticks hit that hour or
+// how many instances run. Toggle with CRM_DAILY_BRIEFING_ENABLED=false; set the
+// send hour with CRM_DAILY_BRIEFING_HOUR_UTC (0-23, default 3).
+if (String(process.env.CRM_DAILY_BRIEFING_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const briefingHour = Math.min(23, Math.max(0, Number(process.env.CRM_DAILY_BRIEFING_HOUR_UTC ?? 3)));
+  setInterval(() => {
+    if (new Date().getUTCHours() !== briefingHour) return;
+    runDailyBriefings(100)
+      .then((r) => { if (r.sent) logger.info(`[daily-briefing] pushed ${r.sent}/${r.checked} briefings`); })
+      .catch((e) => logger.warn(`[daily-briefing] run failed: ${e?.message ?? e}`));
+  }, 3600 * 1000).unref();
+  logger.info(`[daily-briefing] scheduler enabled (fires at ${briefingHour}:00 UTC)`);
 }
 
 // Graceful shutdown
