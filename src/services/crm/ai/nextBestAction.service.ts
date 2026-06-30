@@ -39,9 +39,13 @@ Output JSON only, no prose:
 type RawActivity = { type: string; subject: string | null; completed_at: string | null; status: string | null };
 type RawHistory = { from_stage_id: string | null; to_stage_id: string | null; changed_at: string; time_in_previous_stage_seconds: number | null };
 
-export async function compute(org_id: string, deal_id: string, force = false): Promise<NextBestAction | null> {
-  const { data: deal } = await supabaseAdmin.from('crm_deals').select('*')
-    .eq('org_id', org_id).eq('id', deal_id).is('deleted_at', null).maybeSingle();
+export async function compute(org_id: string, client_id: string | null, deal_id: string, force = false): Promise<NextBestAction | null> {
+  // Hard client isolation — a cross-client deal id resolves to null so its
+  // activities/history never reach the model.
+  let dealQ = supabaseAdmin.from('crm_deals').select('*')
+    .eq('org_id', org_id).eq('id', deal_id).is('deleted_at', null);
+  if (client_id) dealQ = dealQ.eq('client_id', client_id);
+  const { data: deal } = await dealQ.maybeSingle();
   if (!deal) return null;
 
   const cacheAgeMs = deal.next_action_updated_at ? Date.now() - new Date(deal.next_action_updated_at).getTime() : Infinity;

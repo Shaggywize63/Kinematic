@@ -17,6 +17,12 @@ const EMAIL_AI_MODEL = process.env.CRM_AUTO_RESPONSE_MODEL || 'claude-haiku-4-5-
 
 export interface DraftReplyInput {
   org_id: string;
+  /**
+   * Caller's client scope. When set, every entity lookup is hard-filtered to
+   * this client so a client-A user can't draft against a client-B record by
+   * passing its id. Null = org-wide (super-admin only — enforced at the route).
+   */
+  client_id?: string | null;
   user_id?: string;
   lead_id?: string | null;
   deal_id?: string | null;
@@ -43,27 +49,35 @@ Output JSON ONLY:
 Never include placeholders like [NAME] — use real values. If info is missing, omit gracefully.`;
 
 export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutput> {
-  const { org_id } = input;
+  const { org_id, client_id = null } = input;
   const ctx: Record<string, unknown> = { intent: input.intent, tone: input.tone };
 
+  // Hard client isolation: when a client is in scope, every entity read is
+  // pinned to it so a cross-client id resolves to nothing (no leak into the
+  // prompt). Mirrors scopeToClient() in kiniTools.service.ts.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const scope = <Q,>(q: Q): Q => (client_id ? ((q as any).eq('client_id', client_id) as Q) : q);
+
   if (input.lead_id) {
-    const { data } = await supabaseAdmin.from('crm_leads').select('*')
-      .eq('org_id', org_id).eq('id', input.lead_id).maybeSingle();
+    const { data } = await scope(supabaseAdmin.from('crm_leads').select('*')
+      .eq('org_id', org_id).eq('id', input.lead_id)).maybeSingle();
     if (data) ctx.lead = data;
   }
   if (input.contact_id) {
-    const { data } = await supabaseAdmin.from('crm_contacts').select('*')
-      .eq('org_id', org_id).eq('id', input.contact_id).maybeSingle();
+    const { data } = await scope(supabaseAdmin.from('crm_contacts').select('*')
+      .eq('org_id', org_id).eq('id', input.contact_id)).maybeSingle();
     if (data) ctx.contact = data;
   }
   if (input.deal_id) {
-    const { data } = await supabaseAdmin.from('crm_deals').select('*')
-      .eq('org_id', org_id).eq('id', input.deal_id).maybeSingle();
+    const { data } = await scope(supabaseAdmin.from('crm_deals').select('*')
+      .eq('org_id', org_id).eq('id', input.deal_id)).maybeSingle();
     if (data) {
       ctx.deal = data;
+      // Account read is gated by the deal being in scope; only the deal's own
+      // account_id is followed, so no cross-client account can be reached.
       if (data.account_id) {
-        const { data: a } = await supabaseAdmin.from('crm_accounts').select('*')
-          .eq('id', data.account_id).maybeSingle();
+        const { data: a } = await scope(supabaseAdmin.from('crm_accounts').select('*')
+          .eq('org_id', org_id).eq('id', data.account_id)).maybeSingle();
         ctx.account = a;
       }
     }
@@ -71,8 +85,10 @@ export async function draftReply(input: DraftReplyInput): Promise<DraftReplyOutp
   if (input.incoming_message) ctx.incoming_message = input.incoming_message;
   if (input.template_hint) ctx.template_hint = input.template_hint;
 
-  const refTable = input.deal_id ? 'crm_activities' : null;
-  if (refTable) {
+  // Only pull the deal's activity history once the deal itself resolved in
+  // scope (ctx.deal set). Gating on ctx.deal — not just input.deal_id —
+  // prevents a cross-client deal_id from leaking its activities.
+  if (ctx.deal) {
     const { data: recent } = await supabaseAdmin.from('crm_activities')
       .select('type, subject, body, completed_at')
       .eq('org_id', org_id).eq('deal_id', input.deal_id!)

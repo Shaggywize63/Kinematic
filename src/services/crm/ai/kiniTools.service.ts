@@ -173,7 +173,7 @@ export const tools: KiniTool[] = [
       g = scopeToClient(g, client_id);
       const { data: acc } = await g.maybeSingle();
       if (!acc) return { data: { text: 'Account not found in this scope.' } };
-      const text = await summarize.summarizeAccount(org_id, String(args.account_id));
+      const text = await summarize.summarizeAccount(org_id, client_id, String(args.account_id));
       return { card: { type: 'summary', data: { text, account_id: args.account_id } }, data: { text } };
     },
   },
@@ -228,6 +228,7 @@ export const tools: KiniTool[] = [
       if (ok.includes(false)) return { data: { error: 'Referenced entity is not in this client scope.' } };
       const draft = await autoResponse.draftReply({
         org_id,
+        client_id,
         lead_id: (args.lead_id as string) ?? null,
         contact_id: (args.contact_id as string) ?? null,
         deal_id: (args.deal_id as string) ?? null,
@@ -380,7 +381,7 @@ export const tools: KiniTool[] = [
         let deal: unknown = null;
         if ((args.create_deal as boolean) && args.deal_name) {
           const inserted = await supabaseAdmin.from('crm_deals').insert({
-            org_id, name: String(args.deal_name),
+            org_id, client_id, name: String(args.deal_name),
             amount: (args.deal_amount as number) ?? null,
             status: 'open',
           }).select('*').single();

@@ -76,10 +76,28 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     return badRequest(res, 'messages is required');
   }
 
+  // Tenant gate — the cross-tenant ("all clients") view is allowed ONLY for
+  // super_admin. Resolve the caller's client: JWT-pinned client_id, else a
+  // valid X-Client-Id picker header. A non-super_admin with no client in
+  // scope is blocked so they can never browse another tenant's data via KINI.
+  const headerClient = (req.headers['x-client-id'] as string | undefined)?.trim();
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const effectiveClientId: string | null =
+    client_id || (headerClient && UUID_RE.test(headerClient) ? headerClient : null);
+  const isSuperAdmin = String(role ?? '').toLowerCase() === 'super_admin';
+  if (!effectiveClientId && !isSuperAdmin) {
+    return ok(res, {
+      text: "Select a client from the workspace switcher to use KINI — it stays scoped to that client's data.",
+      cards: [],
+      tool_calls: [],
+      thread_id: null,
+    });
+  }
+
   // Quota gate — v2 chat meters exactly like the legacy v1 path so the
   // upgrade doesn't silently make KINI unlimited. Mirrors the 429 shape the
   // clients already handle for v1.
-  const actor = { id: user_id, org_id, role, client_id: client_id ?? null };
+  const actor = { id: user_id, org_id, role, client_id: effectiveClientId };
   const platform = platformOf(req);
   const gateQuota = await kiniQuota.checkQuota(actor);
   if (!gateQuota.allowed) {
@@ -120,7 +138,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
   const contextBlock = buildContextBlock(context, {
     user_id,
     org_id,
-    client_id,
+    client_id: effectiveClientId,
     role,
     full_name,
     city,
@@ -168,7 +186,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
         try {
           const r = await executeTool(
             org_id,
-            client_id ?? null,
+            effectiveClientId,
             name,
             args as Record<string, unknown>,
           );
@@ -183,7 +201,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
           const errMsg = (out as any)?.data?.error as string | undefined;
           logToolCall({
             org_id,
-            client_id: client_id ?? null,
+            client_id: effectiveClientId,
             user_id,
             thread_id,
             tool_name: name,
