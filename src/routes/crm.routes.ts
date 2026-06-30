@@ -3267,6 +3267,29 @@ analytics.get('/touchpoints-to-response', wrap(async (req, res) => res.json(
 analytics.get('/leads-at-risk', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'leads-at-risk'), ANALYTICS_TTL,
     () => analyticsExt.leadsAtRisk(orgId(req), clientId(req), Number(req.query.score ?? 60), Number(req.query.idle_days ?? 14), (req as AuthRequest).analyticsScope)))));
+
+// ── Market Intelligence — competitor/market signals mined from rep lead
+// updates (crm_competitor_signals). City is folded into the cache-key name
+// because the shared cacheKey() doesn't include it. Team-wide rollups, so no
+// per-rep analyticsScope is applied. Gated by crm_lead_analytics like the rest.
+analytics.get('/intel/competitor-share', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, `intel-competitor-share:${req.query.city ?? ''}`), ANALYTICS_TTL,
+    () => analyticsExt.intelCompetitorShare(orgId(req), clientId(req), dateRange(req), (req.query.city as string) || null)))));
+analytics.get('/intel/competitor-price', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, `intel-competitor-price:${req.query.city ?? ''}`), ANALYTICS_TTL,
+    () => analyticsExt.intelCompetitorPrice(orgId(req), clientId(req), dateRange(req), (req.query.city as string) || null)))));
+analytics.get('/intel/signal-breakdown', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, `intel-signal-breakdown:${req.query.city ?? ''}`), ANALYTICS_TTL,
+    () => analyticsExt.intelSignalBreakdown(orgId(req), clientId(req), dateRange(req), (req.query.city as string) || null)))));
+analytics.get('/intel/by-city', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, `intel-by-city:${req.query.city ?? ''}`), ANALYTICS_TTL,
+    () => analyticsExt.intelByCity(orgId(req), clientId(req), dateRange(req), (req.query.city as string) || null)))));
+analytics.get('/intel/trend', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, `intel-trend:${req.query.city ?? ''}`), ANALYTICS_TTL,
+    () => analyticsExt.intelTrend(orgId(req), clientId(req), dateRange(req), (req.query.city as string) || null)))));
+analytics.get('/intel/feed', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, `intel-feed:${req.query.city ?? ''}:${req.query.limit ?? ''}`), ANALYTICS_TTL,
+    () => analyticsExt.intelFeed(orgId(req), clientId(req), dateRange(req), (req.query.city as string) || null, Number(req.query.limit ?? 50))))));
 router.use('/analytics', rbac.requireModuleAccess('crm_lead_analytics'), analytics);
 
 // ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
