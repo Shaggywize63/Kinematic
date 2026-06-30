@@ -6,6 +6,7 @@ import { ok, badRequest, isDemo } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 import { messaging } from '../lib/firebase';
+import { sendApns, apnsEnabled } from '../lib/apns';
 import { logger } from '../lib/logger';
 
 const fcmSchema = z.object({ fcm_token: z.string().min(10) });
@@ -15,52 +16,60 @@ const fcmSchema = z.object({ fcm_token: z.string().min(10) });
 // Body shape (both platforms):
 //   { token: string, platform?: "ios" | "android" }
 //
-// Android has historically POSTed { token } (no platform). The iOS app
-// includes platform: "ios" so that we can later route iOS tokens through
-// the apns config block in messaging.send(...). We persist the platform
-// into a fcm_platform column when one exists; if the column is missing
-// (older schema) we silently fall back to a token-only update so the
-// existing Android flow keeps working unchanged.
+// Android registers an FCM token (dispatched via firebase-admin); iOS
+// registers a native APNs device token (dispatched directly over HTTP/2 —
+// see src/lib/apns.ts). They are NOT interchangeable, so we persist them in
+// separate columns and route on `fcm_platform`. We also null the *other*
+// transport's token on each registration so a user who switched devices
+// can't receive a double push. If the columns aren't migrated yet we fall
+// back to the legacy token-only update so older schemas keep working.
 export const updateFcmToken = asyncHandler(async (req: AuthRequest, res: Response) => {
-  if (isDemo(req.user)) return ok(res, null, 'FCM token updated (Demo)');
+  if (isDemo(req.user)) return ok(res, null, 'Push token updated (Demo)');
   const { token, platform } = req.body as { token?: string; platform?: string };
   if (!token) return badRequest(res, 'token is required');
 
-  // Validate platform if provided. Default Android to preserve historical
-  // behaviour where Android clients send no platform field.
-  const normalised: 'ios' | 'android' =
-    platform === 'ios' ? 'ios' : 'android';
+  // Default Android to preserve historical behaviour where Android clients
+  // send no platform field.
+  const normalised: 'ios' | 'android' = platform === 'ios' ? 'ios' : 'android';
 
-  // Attempt the richer update first.
+  // Route to the right transport column; clear the other so we don't keep a
+  // stale token from the user's previous device.
+  const patch = normalised === 'ios'
+    ? { apns_token: token, fcm_token: null, fcm_platform: 'ios' }
+    : { fcm_token: token, apns_token: null, fcm_platform: 'android' };
+
   const { error: richErr } = await supabaseAdmin
     .from('users')
-    .update({ fcm_token: token, fcm_platform: normalised })
+    .update(patch)
     .eq('id', req.user!.id);
 
   if (richErr) {
-    // PostgREST returns 42703 ("column does not exist") when the
-    // fcm_platform column has not been migrated yet. Retry with just
-    // the token so we never block clients on schema drift.
+    // PostgREST returns 42703 ("column does not exist") when apns_token /
+    // fcm_platform haven't been migrated yet. Fall back to the column that
+    // has always existed (fcm_token) so Android never breaks on schema drift;
+    // iOS can only land once apns_token exists, so soft-succeed + log there.
     const code = (richErr as any).code || '';
     const msg = (richErr.message || '').toLowerCase();
-    const missingColumn =
-      code === '42703' ||
-      msg.includes('column') && msg.includes('fcm_platform');
+    const missingColumn = code === '42703' || (msg.includes('column') && (msg.includes('apns_token') || msg.includes('fcm_platform')));
 
     if (missingColumn) {
-      const { error: fallbackErr } = await supabaseAdmin
-        .from('users')
-        .update({ fcm_token: token })
-        .eq('id', req.user!.id);
-      if (fallbackErr) return badRequest(res, fallbackErr.message);
-      logger.warn(`FCM token saved without platform field — add a "fcm_platform" column to users to track ${normalised} vs android.`);
-      return ok(res, null, 'FCM token updated (platform column missing — token-only update)');
+      if (normalised === 'android') {
+        const { error: fallbackErr } = await supabaseAdmin
+          .from('users')
+          .update({ fcm_token: token })
+          .eq('id', req.user!.id);
+        if (fallbackErr) return badRequest(res, fallbackErr.message);
+        logger.warn('Push token saved without platform field — run migrations/add_apns_push_columns.sql to track ios vs android.');
+        return ok(res, null, 'Push token updated (platform columns missing — token-only update)');
+      }
+      logger.warn('iOS push token could not be stored — apns_token column missing. Run migrations/add_apns_push_columns.sql.');
+      return ok(res, null, 'Push token received (apns_token column missing — iOS push inactive until migrated)');
     }
 
     return badRequest(res, richErr.message);
   }
 
-  return ok(res, null, 'FCM token updated');
+  return ok(res, null, 'Push token updated');
 });
 
 // GET /api/v1/notifications
@@ -145,7 +154,7 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
     if (Array.isArray(grp?.user_ids)) directUserIds.push(...(grp!.user_ids as string[]));
   }
 
-  let usersQuery = supabaseAdmin.from('users').select('id, org_id, fcm_token').eq('org_id', user.org_id);
+  let usersQuery = supabaseAdmin.from('users').select('id, org_id, fcm_token, apns_token').eq('org_id', user.org_id);
 
   if (directUserIds.length > 0) {
     // Direct list wins — narrow the query to exactly those ids,
@@ -218,29 +227,42 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
     if (iErr) logger.error('Failed to insert notification chunk: ' + iErr.message);
   }
 
-  // 3. Send Push Notifications via FCM
+  // 3. Send Push Notifications — Android via FCM multicast, iOS via APNs.
+  // The notification + data payload is identical on both platforms; the
+  // client parses the data dict (type / lead_id / deal_id / task_id) and
+  // routes its nav stack accordingly.
   if (send_push) {
-    const tokens = targetUsers.map(u => u.fcm_token).filter(t => t && t.length > 10);
-    if (tokens.length > 0) {
-      // Cross-platform multicast. The notification + data payload is the
-      // same on iOS and Android; PushNotificationService on iOS parses the
-      // data dict (type / lead_id / deal_id / task_id) and routes the
-      // SwiftUI nav stack identically to the Android intent handler.
-      //
-      // Per-platform overrides (apns: { ... }, android: { ... }) can be
-      // added here once we start tracking which tokens are iOS — see
-      // fcm_platform column wired into updateFcmToken above.
-      const message = {
-        notification: { title, body: content },
-        tokens: tokens as string[],
-        data: { title, body: content, type: 'broadcast' }
-      };
+    const data = { title, body: content, type: 'broadcast' };
+
+    const fcmTokens = (targetUsers as any[])
+      .map(u => u.fcm_token)
+      .filter((t: any): t is string => !!t && t.length > 10);
+    if (fcmTokens.length > 0 && messaging) {
       try {
-        const response = await messaging.sendEachForMulticast(message);
+        const response = await messaging.sendEachForMulticast({
+          notification: { title, body: content },
+          tokens: fcmTokens,
+          data,
+        });
         logger.info(`FCM: Sent to ${response.successCount} users, failed for ${response.failureCount}`);
       } catch (fcmErr: any) {
         logger.error('FCM Multicast error: ' + fcmErr.message);
       }
+    }
+
+    const apnsTokens = (targetUsers as any[])
+      .map(u => u.apns_token)
+      .filter((t: any): t is string => !!t && t.length > 10);
+    if (apnsTokens.length > 0 && apnsEnabled) {
+      let apnsSent = 0;
+      await Promise.all(apnsTokens.map(async (tok) => {
+        const r = await sendApns(tok, { title, body: content, data });
+        if (r.ok) apnsSent++;
+        else if (r.unregistered) {
+          await supabaseAdmin.from('users').update({ apns_token: null }).eq('apns_token', tok);
+        }
+      }));
+      logger.info(`APNs: Sent to ${apnsSent}/${apnsTokens.length} iOS devices`);
     }
   }
 

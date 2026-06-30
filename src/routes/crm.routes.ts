@@ -20,6 +20,7 @@ import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
 import * as automationsSvc from '../services/crm/automations.service';
+import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as placesSvc from '../services/crm/places.service';
@@ -39,6 +40,8 @@ import * as winSvc from '../services/crm/ai/winProbability.service';
 import * as autoRespSvc from '../services/crm/ai/autoResponse.service';
 import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as updateSuggestSvc from '../services/crm/ai/updateSuggest.service';
+import * as dailyBriefingSvc from '../services/crm/ai/dailyBriefing.service';
+import * as cardScanSvc from '../services/crm/ai/cardScan.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
@@ -2138,6 +2141,144 @@ router.post('/automation-scheduler/run', wrap(async (req, res) => {
 }));
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
 
+// ── Scheduled report digests ───────────────────────────────────────────────
+// Recurring (daily/weekly/monthly) emails that render an analytics report and
+// send it to a recipient list. Gated by crm_settings (an admin/manager manage
+// surface). Dispatched by runDueReportDigests() — see server.ts + cron.routes.
+const reportSchedules = express.Router();
+reportSchedules.use(rbac.requireModuleAccess('crm_settings'));
+
+reportSchedules.get('/catalog', wrap(async (_req, res) => {
+  res.json({ success: true, data: reportSchedulesSvc.reportCatalog() });
+}));
+reportSchedules.get('/', wrap(async (req, res) => {
+  const data = await reportSchedulesSvc.listSchedules(orgId(req), clientId(req));
+  res.json({ success: true, data });
+}));
+reportSchedules.post('/', wrap(async (req, res) => {
+  const parsed = v.reportScheduleSchema.safeParse(req.body);
+  if (!parsed.success) throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid schedule', 'VALIDATION');
+  const d = parsed.data;
+  const data = await reportSchedulesSvc.createSchedule({
+    name: d.name,
+    report_key: d.report_key,
+    config: d.config ?? null,
+    frequency: d.frequency,
+    send_hour: d.send_hour,
+    day_of_week: d.day_of_week ?? null,
+    day_of_month: d.day_of_month ?? null,
+    to_emails: d.to_emails,
+    is_active: d.is_active,
+    org_id: orgId(req),
+    client_id: clientId(req),
+    created_by: userId(req) ?? null,
+  });
+  res.json({ success: true, data });
+}));
+reportSchedules.patch('/:id', wrap(async (req, res) => {
+  const parsed = v.reportScheduleSchema.partial().safeParse(req.body);
+  if (!parsed.success) throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid schedule', 'VALIDATION');
+  const data = await reportSchedulesSvc.updateSchedule(orgId(req), req.params.id, parsed.data);
+  res.json({ success: true, data });
+}));
+reportSchedules.delete('/:id', wrap(async (req, res) => {
+  await reportSchedulesSvc.deleteSchedule(orgId(req), req.params.id);
+  res.json({ success: true });
+}));
+// Send one digest immediately (preview / test).
+reportSchedules.post('/:id/run-now', wrap(async (req, res) => {
+  const list = await reportSchedulesSvc.listSchedules(orgId(req), clientId(req));
+  const sched = (list as any[]).find((s) => s.id === req.params.id);
+  if (!sched) throw new AppError(404, 'Schedule not found', 'NOT_FOUND');
+  const { subject, html } = await reportSchedulesSvc.renderDigest(sched);
+  let sent = 0;
+  for (const to of (sched.to_emails as string[])) {
+    try { await emailsSvc.sendEmail({ org_id: sched.org_id, user_id: userId(req), to, subject, body_html: html, bypass_suppression: true }); sent++; } catch { /* per-recipient */ }
+  }
+  res.json({ success: true, data: { sent, recipients: sched.to_emails?.length ?? 0 } });
+}));
+router.use('/report-schedules', reportSchedules);
+
+// ── My Day — the rep's beat agenda ─────────────────────────────────────────
+// One call that powers the "My Day" screen on iOS/Android (and a web widget):
+// the signed-in rep's activities due today, anything overdue, a peek at what's
+// upcoming, and their open leads — geo-sorted by nearest when the device
+// passes ?lat=&lng=. Activities are matched on owner_id OR assigned_to (the
+// generic list helper only does one), tasks are crm_activities with
+// type='task'. Read-only, rep-scoped, client-scoped.
+function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 6371, toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat), dLng = toRad(bLng - aLng);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+}
+
+router.get('/my-day', wrap(async (req, res) => {
+  const org = orgId(req);
+  const rep = userId(req);
+  if (!rep || !UUID_RE.test(rep)) throw new AppError(400, 'No user context', 'NO_USER');
+  const scope = clientScope(req);
+
+  const lat = parseFloat(String(req.query.lat ?? ''));
+  const lng = parseFloat(String(req.query.lng ?? ''));
+  const hasGeo = Number.isFinite(lat) && Number.isFinite(lng);
+
+  const now = new Date();
+  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0)).toISOString();
+  const dayEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59)).toISOString();
+
+  // Activities owned by OR assigned to the rep, not completed, with a due date.
+  let aq = supabaseAdmin.from('crm_activities')
+    .select('id, type, subject, status, due_at, priority, lead_id, deal_id')
+    .eq('org_id', org)
+    .is('completed_at', null)
+    .not('due_at', 'is', null)
+    .or(`owner_id.eq.${rep},assigned_to.eq.${rep}`)
+    .order('due_at', { ascending: true })
+    .limit(150);
+  if (scope.id) aq = aq.eq('client_id', scope.id);
+  const { data: actRows } = await aq;
+  const acts = (actRows ?? []) as Array<{ due_at: string }>;
+  const activitiesToday = acts.filter((a) => a.due_at >= dayStart && a.due_at <= dayEnd);
+  const overdue = acts.filter((a) => a.due_at < dayStart);
+  const upcoming = acts.filter((a) => a.due_at > dayEnd).slice(0, 20);
+
+  // Open leads owned by the rep — geo-sorted when we have the device location.
+  let lq = supabaseAdmin.from('crm_leads')
+    .select('id, title, status, city, latitude, longitude, created_at')
+    .eq('org_id', org)
+    .eq('owner_id', rep)
+    .not('status', 'in', '(won,lost,converted,disqualified,unqualified)')
+    .limit(300);
+  if (scope.id) lq = lq.eq('client_id', scope.id);
+  const { data: leadRows } = await lq;
+  let leads = (leadRows ?? []) as Array<any>;
+  if (hasGeo) {
+    leads = leads
+      .map((l) => ({
+        ...l,
+        distance_km: (l.latitude != null && l.longitude != null)
+          ? Math.round(haversineKm(lat, lng, Number(l.latitude), Number(l.longitude)) * 10) / 10
+          : null,
+      }))
+      .sort((a, b) => (a.distance_km ?? 1e9) - (b.distance_km ?? 1e9));
+  } else {
+    leads = leads.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  }
+
+  res.json({
+    success: true,
+    data: {
+      date: dayStart.slice(0, 10),
+      counts: { today: activitiesToday.length, overdue: overdue.length, upcoming: upcoming.length, open_leads: leads.length },
+      activities_today: activitiesToday,
+      overdue,
+      upcoming,
+      leads: leads.slice(0, 20),
+    },
+  });
+}));
+
 // People Directory — per-client address book (dealers / influencers /
 // referrers) that sits alongside contacts. Strict client scope so Tata
 // Tiscon's roster never leaks into Kinematic and vice-versa. RBAC gate:
@@ -3431,6 +3572,27 @@ ai.post('/suggest-from-update', wrap(async (req, res) => {
     body.lead_id,
     body.draft,
   );
+  res.json({ success: true, data: out });
+}));
+// On-demand morning briefing for the signed-in rep — single-shot helper, does
+// NOT consume the KINI chat quota (mirrors suggest-from-update). The apps call
+// this to show the briefing on the My Day / home screen; the daily push is
+// generated by the scheduler.
+ai.get('/daily-briefing', wrap(async (req, res) => {
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context', 'NO_USER');
+  const out = await dailyBriefingSvc.generateBriefing(orgId(req), uid, clientId(req));
+  res.json({ success: true, data: out });
+}));
+// Business-card → lead OCR. The apps capture a card photo, downscale it, and
+// POST the base64; we return structured contact fields to pre-fill Create Lead.
+// Single-shot vision helper (no KINI chat-quota spend).
+ai.post('/scan-card', wrap(async (req, res) => {
+  const body = parse(z.object({
+    image_base64: z.string().min(100),
+    media_type: z.enum(['image/jpeg', 'image/png', 'image/webp']).default('image/jpeg'),
+  }), req.body);
+  const out = await cardScanSvc.scanCard(body.image_base64, body.media_type);
   res.json({ success: true, data: out });
 }));
 ai.post('/draft-email-template', wrap(async (req, res) => {
