@@ -44,13 +44,24 @@ export type TriggerType =
   | 'deal_created'
   | 'deal_stage_changed'
   | 'deal_won'
-  | 'deal_lost';
+  | 'deal_lost'
+  | 'activity_created'
+  | 'activity_completed'
+  // Time-based — fired by runScheduledAutomations(), config in trigger_config.days
+  | 'lead_idle'
+  | 'deal_stalled'
+  | 'task_overdue';
 
 export type ActionType =
   | 'create_task'
   | 'create_activity'
   | 'update_lead'
-  | 'send_notification';
+  | 'update_deal'
+  | 'send_notification'
+  | 'send_email'
+  | 'send_whatsapp'
+  | 'assign_owner'
+  | 'convert_lead';
 
 export type EntityKind = 'lead' | 'deal' | 'contact' | 'account';
 
@@ -200,7 +211,12 @@ async function executeAction(automation: AutomationRow, context: AutomationConte
     case 'create_task':       return createTaskAction(cfg, context);
     case 'create_activity':   return createActivityAction(cfg, context);
     case 'update_lead':       return updateLeadAction(cfg, context);
+    case 'update_deal':       return updateDealAction(cfg, context);
     case 'send_notification': return sendNotificationAction(cfg, context);
+    case 'send_email':        return sendEmailAction(cfg, context);
+    case 'send_whatsapp':     return sendWhatsappAction(cfg, context);
+    case 'assign_owner':      return assignOwnerAction(cfg, context);
+    case 'convert_lead':      return convertLeadAction(cfg, context);
     default:
       console.warn(`[automation] ${automation.id} unknown action_type=${automation.action_type}`);
   }
@@ -311,6 +327,86 @@ async function sendNotificationAction(cfg: Record<string, unknown>, ctx: Automat
   }
 }
 
+// Pull the entity row (lead/deal) out of the trigger context.
+function entityRow(ctx: AutomationContext): Record<string, unknown> {
+  return ((ctx.data as Record<string, unknown>)[ctx.entity] ?? {}) as Record<string, unknown>;
+}
+
+async function updateDealAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  if (ctx.entity !== 'deal') return;
+  const updates: Record<string, unknown> = {};
+  if (cfg.set_stage_id) updates.stage_id = cfg.set_stage_id;
+  if (cfg.set_owner_id) updates.owner_id = cfg.set_owner_id;
+  if (cfg.set_status)   updates.status   = cfg.set_status;
+  if (cfg.set_amount != null) updates.amount = Number(cfg.set_amount);
+  if (Object.keys(updates).length === 0) return;
+  const { updateDeal } = await import('./deals.service');
+  await updateDeal(ctx.org_id, ctx.entity_id, updates, ctx.user_id);
+}
+
+async function sendEmailAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  const entity = entityRow(ctx);
+  const to = (interpolate(String(cfg.to ?? ''), ctx.data) || (entity.email as string) || '').trim();
+  if (!to) return;
+  const { sendEmail } = await import('./emails.service');
+  await sendEmail({
+    org_id: ctx.org_id,
+    user_id: ctx.user_id,
+    to,
+    subject:  interpolate(String(cfg.subject ?? ''), ctx.data),
+    body_html: interpolate(String(cfg.body_html ?? cfg.body ?? ''), ctx.data),
+    template_id: (cfg.template_id as string) ?? null,
+    lead_id: ctx.entity === 'lead' ? ctx.entity_id : null,
+    deal_id: ctx.entity === 'deal' ? ctx.entity_id : null,
+  });
+}
+
+async function sendWhatsappAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  const entity = entityRow(ctx);
+  const to = (interpolate(String(cfg.to ?? ''), ctx.data) || (entity.phone as string) || '').trim();
+  if (!to) return;
+  const { sendWhatsapp } = await import('./whatsapp.service');
+  await sendWhatsapp({
+    org_id: ctx.org_id,
+    user_id: ctx.user_id,
+    to,
+    body_text: interpolate(String(cfg.body_text ?? cfg.body ?? ''), ctx.data) || undefined,
+    template_id: (cfg.template_id as string) ?? null,
+    lead_id: ctx.entity === 'lead' ? ctx.entity_id : null,
+    deal_id: ctx.entity === 'deal' ? ctx.entity_id : null,
+  });
+}
+
+async function assignOwnerAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  let newOwner: string | null = null;
+  if (cfg.user_id) {
+    // Explicit user.
+    newOwner = String(cfg.user_id);
+  } else {
+    // Re-run the assignment rules (round-robin / territory / default).
+    const { assignOwner } = await import('./assignment.service');
+    newOwner = await assignOwner(ctx.org_id, entityRow(ctx), ctx.user_id ?? null);
+  }
+  if (!newOwner) return;
+  const table = ctx.entity === 'deal' ? 'crm_deals' : 'crm_leads';
+  await supabaseAdmin.from(table)
+    .update({ owner_id: newOwner })
+    .eq('org_id', ctx.org_id)
+    .eq('id', ctx.entity_id);
+}
+
+async function convertLeadAction(cfg: Record<string, unknown>, ctx: AutomationContext) {
+  if (ctx.entity !== 'lead') return;
+  const { convertLead } = await import('./leads.service');
+  await convertLead(ctx.org_id, ctx.entity_id, {
+    create_deal: cfg.create_deal !== false,
+    deal_name: cfg.deal_name ? interpolate(String(cfg.deal_name), ctx.data) : undefined,
+    deal_amount: cfg.deal_amount != null ? Number(cfg.deal_amount) : undefined,
+    pipeline_id: (cfg.pipeline_id as string) ?? undefined,
+    stage_id: (cfg.stage_id as string) ?? undefined,
+  }, ctx.user_id);
+}
+
 // ── Helpers ─────────────────────────────────────────────────
 
 /**
@@ -344,4 +440,116 @@ function interpolate(template: string, data: Record<string, unknown>): string {
     const v = getPath(data, String(path));
     return v == null ? '' : String(v);
   });
+}
+
+// ── Time-based scheduler ────────────────────────────────────
+// Driven by an in-process interval (server.ts) and/or the manual
+// /crm/automation-scheduler/run endpoint. For each active time-based
+// automation it finds the entities past the threshold, claims them in the
+// dedup ledger, evaluates conditions, and runs the action — exactly once per
+// idle/stall/overdue episode.
+
+const TIMED_TRIGGERS: TriggerType[] = ['lead_idle', 'deal_stalled', 'task_overdue'];
+
+interface TimedMatch {
+  entity: EntityKind;
+  entity_id: string;
+  row: Record<string, unknown>;
+  anchor: string;             // timestamp the dedup window keys on
+  extra?: Record<string, unknown>;
+}
+
+/** Atomically claim an (automation, entity, window) tuple. Returns true only
+ *  for the caller that actually inserted it (others see a duplicate). */
+async function claimEvent(automation_id: string, entity_id: string, window_key: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from('crm_automation_event_log')
+    .upsert({ automation_id, entity_id, window_key }, { onConflict: 'automation_id,entity_id,window_key', ignoreDuplicates: true })
+    .select('id');
+  if (error) return false; // on error, don't fire — safer than double-firing
+  return (data?.length ?? 0) > 0;
+}
+
+async function findTimedEntities(a: AutomationRow, cutoffIso: string): Promise<TimedMatch[]> {
+  const cutoffMs = Date.parse(cutoffIso);
+  const scope = (q: any) => { let x = q.eq('org_id', a.org_id); if (a.client_id) x = x.eq('client_id', a.client_id); return x; };
+
+  if (a.trigger_type === 'lead_idle') {
+    // created_at <= cutoff is necessary (last_activity >= created); the JS
+    // filter then keys on coalesce(last_activity_at, created_at) so a
+    // never-touched old lead also counts as idle.
+    const { data } = await scope(supabaseAdmin.from('crm_leads')
+      .select('id, owner_id, status, last_activity_at, created_at, client_id, email, phone, first_name, last_name, company, score, city')
+      .is('deleted_at', null)
+      .in('status', ['new', 'working', 'nurturing', 'qualified'])
+      .lte('created_at', cutoffIso)).limit(1000);
+    return ((data ?? []) as any[])
+      .filter((r) => Date.parse((r.last_activity_at ?? r.created_at) as string) <= cutoffMs)
+      .map((r) => ({ entity: 'lead' as EntityKind, entity_id: r.id, row: r, anchor: String(r.last_activity_at ?? r.created_at) }));
+  }
+
+  if (a.trigger_type === 'deal_stalled') {
+    const { data } = await scope(supabaseAdmin.from('crm_deals')
+      .select('id, owner_id, status, updated_at, client_id, name, amount, stage_id')
+      .is('deleted_at', null).eq('status', 'open').lte('updated_at', cutoffIso)).limit(1000);
+    return ((data ?? []) as any[]).map((r) => ({ entity: 'deal' as EntityKind, entity_id: r.id, row: r, anchor: String(r.updated_at) }));
+  }
+
+  if (a.trigger_type === 'task_overdue') {
+    const { data } = await scope(supabaseAdmin.from('crm_activities')
+      .select('id, owner_id, assigned_to, type, status, due_at, lead_id, deal_id, client_id, subject')
+      .eq('type', 'task').is('deleted_at', null)
+      .not('status', 'in', '(done,completed,cancelled)')
+      .not('due_at', 'is', null).lte('due_at', cutoffIso)).limit(1000);
+    const out: TimedMatch[] = [];
+    for (const t of (data ?? []) as any[]) {
+      const entity: EntityKind = t.deal_id ? 'deal' : 'lead';
+      const entity_id = (t.lead_id ?? t.deal_id) as string | undefined;
+      if (!entity_id) continue;
+      out.push({ entity, entity_id, row: { id: entity_id, owner_id: t.assigned_to ?? t.owner_id }, anchor: String(t.due_at), extra: { activity: t } });
+    }
+    return out;
+  }
+  return [];
+}
+
+export async function runScheduledAutomations(): Promise<{ checked: number; fired: number }> {
+  let checked = 0, fired = 0;
+  const { data: autos, error } = await supabaseAdmin.from('crm_automations')
+    .select('*').eq('is_active', true).in('trigger_type', TIMED_TRIGGERS);
+  if (error || !autos?.length) return { checked, fired };
+
+  for (const a of autos as AutomationRow[]) {
+    const days = Math.max(1, Number((a.trigger_config as Record<string, unknown> | null)?.days ?? 3));
+    const cutoffIso = new Date(Date.now() - days * 86_400_000).toISOString();
+    let matches: TimedMatch[] = [];
+    try { matches = await findTimedEntities(a, cutoffIso); } catch { continue; }
+
+    for (const m of matches) {
+      checked++;
+      try {
+        if (!(await claimEvent(a.id, m.entity_id, m.anchor))) continue;
+        const context: AutomationContext = {
+          org_id: a.org_id, entity: m.entity, entity_id: m.entity_id,
+          data: {
+            [m.entity]: m.row,
+            ...(m.extra ?? {}),
+            client_id: a.client_id ?? (m.row as { client_id?: string | null }).client_id ?? null,
+            days,
+          },
+        };
+        if (!evaluateConditions(readConditions(a.trigger_config), context)) continue;
+        await executeAction(a, context);
+        fired++;
+      } catch (err) {
+        console.error(`[automation.scheduled] ${a.id} on ${m.entity}:${m.entity_id} failed:`, err instanceof Error ? err.message : err);
+      }
+    }
+    if (fired > 0) {
+      await supabaseAdmin.from('crm_automations')
+        .update({ run_count: (a.run_count ?? 0) + 1, last_run_at: new Date().toISOString() })
+        .eq('id', a.id);
+    }
+  }
+  return { checked, fired };
 }

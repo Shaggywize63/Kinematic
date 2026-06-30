@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, badRequest } from '../../utils';
+import { stampOwnerNames } from '../../services/crm/owners.helper';
 
 export const dashboardSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
@@ -96,10 +97,19 @@ export const winRate = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (d.status === 'won') { grouped[key].won += 1; grouped[key].revenue += d.amount || 0; }
     else grouped[key].lost += 1;
   }
-  return ok(res, Object.entries(grouped).map(([key, v]) => ({
-    name: key, won: v.won, lost: v.lost, total: v.total,
+  // Resolve owner_id UUIDs to rep names so the chart labels read "Ravi Kumar",
+  // not a raw uuid. 'unassigned' → null so the batched lookup skips it.
+  const rows = Object.entries(grouped).map(([key, v]) => ({
+    owner_id: key === 'unassigned' ? null : (key as string | null),
+    owner_name: null as string | null,
+    won: v.won, lost: v.lost, total: v.total,
     win_rate: v.total > 0 ? Math.round((v.won / v.total) * 100) : 0,
     revenue: v.revenue,
+  }));
+  const named = await stampOwnerNames(rows);
+  return ok(res, named.map((r) => ({
+    name: r.owner_name || 'Unassigned',
+    won: r.won, lost: r.lost, total: r.total, win_rate: r.win_rate, revenue: r.revenue,
   })));
 });
 

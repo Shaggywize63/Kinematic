@@ -5,6 +5,7 @@
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import { applyLeadScope, applyOwnerScope, type AnalyticsScope } from './analytics.service';
+import { stampOwnerNames } from './owners.helper';
 
 export interface DateRange { from?: string; to?: string }
 
@@ -141,7 +142,13 @@ export async function stuckLeads(org_id: string, client_id: string | null = null
     }
   }
 
-  const top_owners = Array.from(byOwner.values()).sort((a, b) => b.count - a.count).slice(0, 5);
+  const top_owners_raw = Array.from(byOwner.values()).sort((a, b) => b.count - a.count).slice(0, 5);
+  // Resolve owner_id UUIDs to rep names so the widget labels read a person,
+  // not a uuid. 'unassigned' → null so the batched lookup skips it; expose a
+  // ready-to-render `owner` label (the widget groups on it).
+  const top_owners = (await stampOwnerNames(
+    top_owners_raw.map((o) => ({ ...o, owner_id: o.owner_id === 'unassigned' ? null : (o.owner_id as string | null), owner_name: null as string | null })),
+  )).map((o) => ({ owner_id: o.owner_id, owner: o.owner_name || 'Unassigned', count: o.count }));
   return { count_7d: c7, count_14d: c14, count_30d: c30, top_owners };
 }
 
