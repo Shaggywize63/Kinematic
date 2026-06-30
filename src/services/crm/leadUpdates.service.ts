@@ -114,3 +114,121 @@ export async function createUpdate(
 
   return { ...(data as LeadUpdate), author_name };
 }
+
+// Roles allowed to delete an update they didn't author. Editing someone
+// else's words is never allowed (even for admins); deleting a teammate's
+// stray entry is an admin housekeeping action.
+const ADMIN_ROLES = new Set(['super_admin', 'admin', 'org_admin']);
+
+async function hydrateAuthorName(author_id: string): Promise<string | null> {
+  const { data: author } = await supabaseAdmin
+    .from('users')
+    .select('name, email')
+    .eq('id', author_id)
+    .maybeSingle();
+  return (author as any)?.name || (author as any)?.email || null;
+}
+
+/**
+ * Re-denormalise crm_leads.{latest_update,…} from the newest remaining
+ * update after an edit or delete. Clears the columns when no updates are
+ * left. Also invalidates the NBA cache so the next recommendation reflects
+ * the change. Always safe to call — it recomputes from scratch.
+ */
+async function resyncLatest(org_id: string, lead_id: string): Promise<void> {
+  const { data: latest } = await supabaseAdmin
+    .from('crm_lead_updates')
+    .select('body, created_at, author_id')
+    .eq('org_id', org_id)
+    .eq('lead_id', lead_id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  await supabaseAdmin
+    .from('crm_leads')
+    .update({
+      latest_update: (latest as any)?.body ?? null,
+      latest_update_at: (latest as any)?.created_at ?? null,
+      latest_update_by: (latest as any)?.author_id ?? null,
+      next_action_updated_at: null,
+    })
+    .eq('id', lead_id)
+    .eq('org_id', org_id);
+}
+
+/**
+ * Edit an update's body. Only the original author may edit — rewriting a
+ * teammate's note would misattribute their words. Re-syncs the lead's
+ * denormalised latest_update in case the edited row is the most recent.
+ */
+export async function updateUpdate(
+  org_id: string,
+  user_id: string,
+  lead_id: string,
+  update_id: string,
+  body: string,
+): Promise<LeadUpdate> {
+  const text = (body || '').trim().slice(0, MAX_BODY_LEN);
+  if (!text) throw new AppError(400, 'body is required', 'VALIDATION');
+
+  const { data: existing } = await supabaseAdmin
+    .from('crm_lead_updates')
+    .select('id, author_id')
+    .eq('org_id', org_id)
+    .eq('lead_id', lead_id)
+    .eq('id', update_id)
+    .maybeSingle();
+  if (!existing) throw new AppError(404, 'Update not found', 'NOT_FOUND');
+  if ((existing as any).author_id !== user_id) {
+    throw new AppError(403, 'You can only edit your own updates', 'FORBIDDEN');
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('crm_lead_updates')
+    .update({ body: text })
+    .eq('id', update_id)
+    .eq('org_id', org_id)
+    .select('id, lead_id, org_id, client_id, author_id, body, created_at')
+    .single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  await resyncLatest(org_id, lead_id);
+
+  const author_name = await hydrateAuthorName((data as LeadUpdate).author_id);
+  return { ...(data as LeadUpdate), author_name };
+}
+
+/**
+ * Delete an update. The author can delete their own; an admin can delete
+ * any (housekeeping). Re-syncs the lead's denormalised latest_update.
+ */
+export async function deleteUpdate(
+  org_id: string,
+  user_id: string,
+  role: string | null | undefined,
+  lead_id: string,
+  update_id: string,
+): Promise<void> {
+  const { data: existing } = await supabaseAdmin
+    .from('crm_lead_updates')
+    .select('id, author_id')
+    .eq('org_id', org_id)
+    .eq('lead_id', lead_id)
+    .eq('id', update_id)
+    .maybeSingle();
+  if (!existing) throw new AppError(404, 'Update not found', 'NOT_FOUND');
+
+  const isAdmin = !!role && ADMIN_ROLES.has(role);
+  if ((existing as any).author_id !== user_id && !isAdmin) {
+    throw new AppError(403, 'You can only delete your own updates', 'FORBIDDEN');
+  }
+
+  const { error } = await supabaseAdmin
+    .from('crm_lead_updates')
+    .delete()
+    .eq('id', update_id)
+    .eq('org_id', org_id);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  await resyncLatest(org_id, lead_id);
+}

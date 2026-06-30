@@ -53,16 +53,20 @@ type RawUpdate = { body: string; created_at: string; author_id: string };
 
 export async function compute(
   org_id: string,
+  client_id: string | null,
   lead_id: string,
   force = false,
 ): Promise<LeadNextBestAction | null> {
-  const { data: lead } = await supabaseAdmin
+  // Hard client isolation — a cross-client lead id resolves to null so its
+  // context never reaches the model.
+  let leadQ = supabaseAdmin
     .from('crm_leads')
     .select('*')
     .eq('org_id', org_id)
     .eq('id', lead_id)
-    .is('deleted_at', null)
-    .maybeSingle();
+    .is('deleted_at', null);
+  if (client_id) leadQ = leadQ.eq('client_id', client_id);
+  const { data: lead } = await leadQ.maybeSingle();
   if (!lead) return null;
 
   const cacheAgeMs = lead.next_action_updated_at
