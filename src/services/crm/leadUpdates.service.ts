@@ -13,6 +13,7 @@
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
+import { extractSignalsFromUpdate } from './ai/competitorIntel.service';
 
 export interface LeadUpdate {
   id: string;
@@ -72,7 +73,7 @@ export async function createUpdate(
   // a clean 404 instead of a foreign-key violation.
   const { data: lead, error: le } = await supabaseAdmin
     .from('crm_leads')
-    .select('id')
+    .select('id, city, state, postal_code')
     .eq('org_id', org_id)
     .eq('id', lead_id)
     .is('deleted_at', null)
@@ -111,6 +112,21 @@ export async function createUpdate(
     .eq('id', author_id)
     .maybeSingle();
   const author_name = (author as any)?.name || (author as any)?.email || null;
+
+  // Fire-and-forget: mine this note for competitor / market signals that feed
+  // the Market Intelligence dashboard. Best-effort — it never throws, so it
+  // can't affect the update we just persisted.
+  void extractSignalsFromUpdate({
+    org_id,
+    client_id,
+    lead_id,
+    update_id: (data as LeadUpdate).id,
+    author_id,
+    body: text,
+    city: (lead as any)?.city ?? null,
+    state: (lead as any)?.state ?? null,
+    postal_code: (lead as any)?.postal_code ?? null,
+  });
 
   return { ...(data as LeadUpdate), author_name };
 }

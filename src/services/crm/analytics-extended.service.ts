@@ -525,3 +525,115 @@ export async function leadsAtRisk(org_id: string, client_id: string | null = nul
     .sort((a, b) => b.score - a.score)
     .slice(0, 25);
 }
+
+// ── Market Intelligence (crm_competitor_signals) ───────────────────────────
+// Aggregations over the competitor / market signals KINI extracts from rep
+// lead updates. Tenant-scoped (org_id + client_id) and optionally narrowed to
+// the global city scope. Owner-level scoping is intentionally NOT applied —
+// market intelligence is a team-wide rollup, not a per-rep view.
+
+function intelBase(org_id: string, client_id: string | null, cols: string, range?: DateRange, city?: string | null) {
+  let q = supabaseAdmin.from('crm_competitor_signals').select(cols).eq('org_id', org_id);
+  q = withClient(q, client_id);
+  if (range?.from) q = q.gte('created_at', range.from);
+  if (range?.to) q = q.lte('created_at', range.to);
+  if (city) q = q.eq('city', city);
+  return q;
+}
+
+// MI-1. Competitor share — mentions + win/loss stance per competitor.
+export async function intelCompetitorShare(org_id: string, client_id: string | null = null, range?: DateRange, city?: string | null) {
+  const { data } = await intelBase(org_id, client_id, 'competitor_key, competitor_name, stance', range, city)
+    .not('competitor_key', 'is', null)
+    .range(0, 99999);
+  const map = new Map<string, { name: string; mentions: number; we_winning: number; we_losing: number }>();
+  for (const r of (data ?? []) as unknown as Array<{ competitor_key: string; competitor_name: string | null; stance: string | null }>) {
+    const k = r.competitor_key; if (!k) continue;
+    const e = map.get(k) ?? { name: r.competitor_name || k, mentions: 0, we_winning: 0, we_losing: 0 };
+    e.mentions++;
+    if (r.stance === 'we_winning') e.we_winning++;
+    else if (r.stance === 'we_losing') e.we_losing++;
+    map.set(k, e);
+  }
+  return Array.from(map.entries())
+    .map(([competitor_key, v]) => ({
+      competitor_key, competitor: v.name, mentions: v.mentions,
+      we_winning: v.we_winning, we_losing: v.we_losing,
+      lose_rate_pct: v.mentions ? Math.round((v.we_losing / v.mentions) * 1000) / 10 : 0,
+    }))
+    .sort((a, b) => b.mentions - a.mentions).slice(0, 25);
+}
+
+// MI-2. Competitor price — avg signed price delta (competitor minus ours).
+export async function intelCompetitorPrice(org_id: string, client_id: string | null = null, range?: DateRange, city?: string | null) {
+  const { data } = await intelBase(org_id, client_id, 'competitor_key, competitor_name, price_delta', range, city)
+    .not('price_delta', 'is', null)
+    .not('competitor_key', 'is', null)
+    .range(0, 99999);
+  const map = new Map<string, { name: string; sum: number; n: number }>();
+  for (const r of (data ?? []) as unknown as Array<{ competitor_key: string; competitor_name: string | null; price_delta: number | null }>) {
+    if (r.price_delta == null) continue;
+    const k = r.competitor_key; if (!k) continue;
+    const e = map.get(k) ?? { name: r.competitor_name || k, sum: 0, n: 0 };
+    e.sum += Number(r.price_delta); e.n++;
+    map.set(k, e);
+  }
+  return Array.from(map.entries())
+    .map(([competitor_key, v]) => ({
+      competitor_key, competitor: v.name,
+      avg_price_delta: v.n ? Math.round((v.sum / v.n) * 100) / 100 : 0, samples: v.n,
+    }))
+    .sort((a, b) => a.avg_price_delta - b.avg_price_delta);
+}
+
+// MI-3. Signal-type breakdown.
+export async function intelSignalBreakdown(org_id: string, client_id: string | null = null, range?: DateRange, city?: string | null) {
+  const { data } = await intelBase(org_id, client_id, 'signal_type', range, city).range(0, 99999);
+  const map = new Map<string, number>();
+  for (const r of (data ?? []) as unknown as Array<{ signal_type: string }>) {
+    map.set(r.signal_type, (map.get(r.signal_type) ?? 0) + 1);
+  }
+  return Array.from(map.entries()).map(([signal_type, count]) => ({ signal_type, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+// MI-4. By city — where are we winning / losing.
+export async function intelByCity(org_id: string, client_id: string | null = null, range?: DateRange, city?: string | null) {
+  const { data } = await intelBase(org_id, client_id, 'city, stance', range, city).range(0, 99999);
+  const map = new Map<string, { mentions: number; we_winning: number; we_losing: number }>();
+  for (const r of (data ?? []) as unknown as Array<{ city: string | null; stance: string | null }>) {
+    const k = r.city || 'Unspecified';
+    const e = map.get(k) ?? { mentions: 0, we_winning: 0, we_losing: 0 };
+    e.mentions++;
+    if (r.stance === 'we_winning') e.we_winning++;
+    else if (r.stance === 'we_losing') e.we_losing++;
+    map.set(k, e);
+  }
+  return Array.from(map.entries()).map(([city, v]) => ({ city, ...v }))
+    .sort((a, b) => b.mentions - a.mentions).slice(0, 30);
+}
+
+// MI-5. Trend — monthly mentions + losses.
+export async function intelTrend(org_id: string, client_id: string | null = null, range?: DateRange, city?: string | null) {
+  const { data } = await intelBase(org_id, client_id, 'created_at, stance', range, city).range(0, 99999);
+  const map = new Map<string, { mentions: number; we_losing: number }>();
+  for (const r of (data ?? []) as unknown as Array<{ created_at: string; stance: string | null }>) {
+    const m = monthKey(r.created_at);
+    const e = map.get(m) ?? { mentions: 0, we_losing: 0 };
+    e.mentions++;
+    if (r.stance === 'we_losing') e.we_losing++;
+    map.set(m, e);
+  }
+  return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b))
+    .map(([month, v]) => ({ month, ...v }));
+}
+
+// MI-6. Raw recent signals — drill-down feed.
+export async function intelFeed(org_id: string, client_id: string | null = null, range?: DateRange, city?: string | null, limit = 50) {
+  const { data } = await intelBase(
+    org_id, client_id,
+    'id, created_at, signal_type, competitor_name, stance, price_delta, city, body, lead_id',
+    range, city,
+  ).order('created_at', { ascending: false }).limit(Math.min(limit, 200));
+  return data ?? [];
+}
