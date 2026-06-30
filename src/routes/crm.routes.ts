@@ -20,6 +20,7 @@ import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
 import * as automationsSvc from '../services/crm/automations.service';
+import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as placesSvc from '../services/crm/places.service';
@@ -2137,6 +2138,64 @@ router.post('/automation-scheduler/run', wrap(async (req, res) => {
   res.json(await automationsSvc.runScheduledAutomations());
 }));
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
+
+// ── Scheduled report digests ───────────────────────────────────────────────
+// Recurring (daily/weekly/monthly) emails that render an analytics report and
+// send it to a recipient list. Gated by crm_settings (an admin/manager manage
+// surface). Dispatched by runDueReportDigests() — see server.ts + cron.routes.
+const reportSchedules = express.Router();
+reportSchedules.use(rbac.requireModuleAccess('crm_settings'));
+
+reportSchedules.get('/catalog', wrap(async (_req, res) => {
+  res.json({ success: true, data: reportSchedulesSvc.reportCatalog() });
+}));
+reportSchedules.get('/', wrap(async (req, res) => {
+  const data = await reportSchedulesSvc.listSchedules(orgId(req), clientId(req));
+  res.json({ success: true, data });
+}));
+reportSchedules.post('/', wrap(async (req, res) => {
+  const parsed = v.reportScheduleSchema.safeParse(req.body);
+  if (!parsed.success) throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid schedule', 'VALIDATION');
+  const d = parsed.data;
+  const data = await reportSchedulesSvc.createSchedule({
+    name: d.name,
+    report_key: d.report_key,
+    config: d.config ?? null,
+    frequency: d.frequency,
+    send_hour: d.send_hour,
+    day_of_week: d.day_of_week ?? null,
+    day_of_month: d.day_of_month ?? null,
+    to_emails: d.to_emails,
+    is_active: d.is_active,
+    org_id: orgId(req),
+    client_id: clientId(req),
+    created_by: userId(req) ?? null,
+  });
+  res.json({ success: true, data });
+}));
+reportSchedules.patch('/:id', wrap(async (req, res) => {
+  const parsed = v.reportScheduleSchema.partial().safeParse(req.body);
+  if (!parsed.success) throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid schedule', 'VALIDATION');
+  const data = await reportSchedulesSvc.updateSchedule(orgId(req), req.params.id, parsed.data);
+  res.json({ success: true, data });
+}));
+reportSchedules.delete('/:id', wrap(async (req, res) => {
+  await reportSchedulesSvc.deleteSchedule(orgId(req), req.params.id);
+  res.json({ success: true });
+}));
+// Send one digest immediately (preview / test).
+reportSchedules.post('/:id/run-now', wrap(async (req, res) => {
+  const list = await reportSchedulesSvc.listSchedules(orgId(req), clientId(req));
+  const sched = (list as any[]).find((s) => s.id === req.params.id);
+  if (!sched) throw new AppError(404, 'Schedule not found', 'NOT_FOUND');
+  const { subject, html } = await reportSchedulesSvc.renderDigest(sched);
+  let sent = 0;
+  for (const to of (sched.to_emails as string[])) {
+    try { await emailsSvc.sendEmail({ org_id: sched.org_id, user_id: userId(req), to, subject, body_html: html, bypass_suppression: true }); sent++; } catch { /* per-recipient */ }
+  }
+  res.json({ success: true, data: { sent, recipients: sched.to_emails?.length ?? 0 } });
+}));
+router.use('/report-schedules', reportSchedules);
 
 // People Directory — per-client address book (dealers / influencers /
 // referrers) that sits alongside contacts. Strict client scope so Tata

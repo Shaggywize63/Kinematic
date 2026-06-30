@@ -751,3 +751,19 @@ export const blockSchema = z.object({
   is_active: z.boolean().optional(),
   position: z.number().int().min(0).optional(),
 });
+
+// Scheduled report digest — recurring email of an analytics report.
+// report_key is validated against the server-side catalog in the service.
+// day_of_week / day_of_month are only meaningful for weekly / monthly
+// respectively; computeNextRun ignores the irrelevant one.
+export const reportScheduleSchema = z.object({
+  name: z.string().min(1).max(200),
+  report_key: z.string().min(1).max(64),
+  config: z.record(z.unknown()).optional().nullable(),
+  frequency: z.enum(['daily', 'weekly', 'monthly']),
+  send_hour: z.number().int().min(0).max(23),
+  day_of_week: z.number().int().min(0).max(6).optional().nullable(),
+  day_of_month: z.number().int().min(1).max(28).optional().nullable(),
+  to_emails: z.array(z.string().email()).min(1, 'At least one recipient is required'),
+  is_active: z.boolean().optional(),
+});

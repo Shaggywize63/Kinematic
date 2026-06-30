@@ -16,6 +16,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { dispatchPendingPushes } from '../services/notifications.service';
 import { rescoreLead } from '../services/crm/leads.service';
 import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
+import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -148,6 +149,23 @@ router.post('/dispatch-scheduled-emails', requireEdgeSecret, async (_req, res) =
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] dispatch-scheduled-emails crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/dispatch-report-digests
+ *
+ * Renders + emails every active report schedule whose next_run_at has passed.
+ * Also runs as an in-process hourly tick (see server.ts) so it works without a
+ * pg_cron job, but exposing it here lets pg_cron / a manual call drive it too.
+ */
+router.post('/dispatch-report-digests', requireEdgeSecret, async (_req, res) => {
+  try {
+    const result = await runDueReportDigests(25);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] dispatch-report-digests crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });

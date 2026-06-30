@@ -1,6 +1,7 @@
 import app from './app';
 import { logger } from './lib/logger';
 import { runScheduledAutomations } from './services/crm/automations.service';
+import { runDueReportDigests } from './services/crm/reportSchedules.service';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -31,6 +32,21 @@ if (String(process.env.CRM_AUTOMATION_SCHEDULER_ENABLED ?? 'true').toLowerCase()
       .catch((e) => logger.warn(`[automations] scheduled run failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[automations] time-based scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Scheduled report digests. Hourly in-process tick — schedules are hour-grained
+// (send_hour, UTC) so an hourly scan is sufficient. Each run rolls next_run_at
+// forward, so overlapping ticks across instances at worst re-send one digest,
+// never loop. Toggle with CRM_REPORT_DIGEST_SCHEDULER_ENABLED=false; tune with
+// CRM_REPORT_DIGEST_INTERVAL_SEC (default 3600s).
+if (String(process.env.CRM_REPORT_DIGEST_SCHEDULER_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(60, Number(process.env.CRM_REPORT_DIGEST_INTERVAL_SEC ?? 3600)) * 1000;
+  setInterval(() => {
+    runDueReportDigests(25)
+      .then((r) => { if (r.sent) logger.info(`[report-digests] sent ${r.sent}/${r.checked} due digests`); })
+      .catch((e) => logger.warn(`[report-digests] scheduled run failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[report-digests] scheduler enabled (every ${everyMs / 1000}s)`);
 }
 
 // Graceful shutdown
