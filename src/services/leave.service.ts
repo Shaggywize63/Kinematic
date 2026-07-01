@@ -34,6 +34,24 @@ async function notify(org_id: string, user_id: string | null, title: string, bod
   } catch (e: any) { logger.warn(`[leave] notify failed: ${e?.message || e}`); }
 }
 
+/** Attach requester + leave-type display fields so clients never show raw UUIDs. */
+export async function stampNames(rows: any[], opts: { users?: boolean; types?: boolean }): Promise<any[]> {
+  if (!rows.length) return rows;
+  if (opts.users) {
+    const ids = Array.from(new Set(rows.map((r) => r.user_id).filter(Boolean)));
+    const { data } = await supabaseAdmin.from('users').select('id, name, employee_id').in('id', ids);
+    const m = new Map((data ?? []).map((u: any) => [u.id, u]));
+    for (const r of rows) { const u = m.get(r.user_id); r.user_name = u?.name ?? null; r.employee_id = u?.employee_id ?? null; }
+  }
+  if (opts.types) {
+    const ids = Array.from(new Set(rows.map((r) => r.leave_type_id).filter(Boolean)));
+    const { data } = await supabaseAdmin.from('leave_types').select('id, name, code, color').in('id', ids);
+    const m = new Map((data ?? []).map((t: any) => [t.id, t]));
+    for (const r of rows) { const t = m.get(r.leave_type_id); r.leave_type_name = t?.name ?? null; r.leave_type_code = t?.code ?? null; r.leave_type_color = t?.color ?? null; }
+  }
+  return rows;
+}
+
 async function holidaySet(org_id: string, from: string, to: string): Promise<Set<string>> {
   const { data } = await supabaseAdmin
     .from('holidays').select('holiday_date')
@@ -183,7 +201,7 @@ export async function myRequests(org_id: string, user_id: string, limit = 100) {
     .from('leave_requests').select('*').eq('org_id', org_id).eq('user_id', user_id)
     .order('created_at', { ascending: false }).limit(limit);
   if (error) throw new AppError(500, error.message, 'DB');
-  return data ?? [];
+  return stampNames(data ?? [], { types: true });
 }
 
 export async function cancelLeave(actor: Actor, id: string) {
@@ -206,7 +224,7 @@ export async function pendingForApprover(actor: Actor, limit = 200) {
   if (!isAdmin(actor.role)) q = q.eq('approver_id', actor.id);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB');
-  return data ?? [];
+  return stampNames(data ?? [], { users: true, types: true });
 }
 
 export async function decide(actor: Actor, id: string, decision: 'approved' | 'rejected', note?: string) {
@@ -234,5 +252,5 @@ export async function teamCalendar(actor: Actor, from: string, to: string) {
   if (!isAdmin(actor.role)) q = q.eq('approver_id', actor.id);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB');
-  return data ?? [];
+  return stampNames(data ?? [], { users: true, types: true });
 }

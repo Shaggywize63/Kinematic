@@ -8,7 +8,7 @@
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../utils';
 import { logger } from '../lib/logger';
-import type { Actor } from './leave.service';
+import { stampNames, type Actor } from './leave.service';
 
 const ADMIN_ROLES = ['admin', 'super_admin', 'main_admin', 'org_admin', 'sub_admin', 'client'];
 const isAdmin = (r?: string | null) => ADMIN_ROLES.includes((r ?? '').toLowerCase());
@@ -46,7 +46,7 @@ export async function myRequests(org_id: string, user_id: string, limit = 100) {
     .from('attendance_regularizations').select('*').eq('org_id', org_id).eq('user_id', user_id)
     .order('created_at', { ascending: false }).limit(limit);
   if (error) throw new AppError(500, error.message, 'DB');
-  return data ?? [];
+  return stampNames(data ?? [], { users: true });
 }
 
 export async function pendingForApprover(actor: Actor, limit = 200) {
@@ -55,7 +55,7 @@ export async function pendingForApprover(actor: Actor, limit = 200) {
   if (!isAdmin(actor.role)) q = q.eq('approver_id', actor.id);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB');
-  return data ?? [];
+  return stampNames(data ?? [], { users: true });
 }
 
 export async function decide(actor: Actor, id: string, decision: 'approved' | 'rejected', note?: string) {
