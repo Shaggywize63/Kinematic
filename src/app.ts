@@ -26,6 +26,7 @@ import { demoExtensionsMiddleware } from './utils/demoExtensions';
 // Routes
 import authRoutes         from './routes/auth.routes';
 import attendanceRoutes   from './routes/attendance.routes';
+import leaveRoutes        from './routes/leave.routes';
 import formsRoutes        from './routes/forms.routes';
 import builderRoutes      from './routes/builder.routes';
 import stockRoutes        from './routes/stock.routes';
@@ -352,6 +353,7 @@ app.use(`${V1}/auth`,          perRouteLimit({ windowMs: 60_000, max: 30 }), aut
 
 // Protected routes with RBAC
 app.use(`${V1}/attendance`,    requireAuth, enforceCityScope, attendanceRoutes);
+app.use(`${V1}/leave`,         requireAuth, leaveRoutes);
 app.use(`${V1}/forms`,         requireAuth, enforceCityScope, formsRoutes);
 app.use(`${V1}/builder`,       requireAuth, builderRoutes);
 app.use(`${V1}/stock`,         requireAuth, requireModule('inventory'), stockRoutes);
