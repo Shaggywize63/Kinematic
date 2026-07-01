@@ -75,26 +75,27 @@ BEGIN
   END LOOP;
 END $$;
 
--- 6) Relocate citext + pg_trgm out of `public` into the dedicated `extensions`
---    schema. Prep the app roles' search_path first so name resolution never
---    breaks (PostgREST also injects `extensions` into its per-request path).
---    pg_net is intentionally NOT moved — it is supabase_admin-owned and powers
---    Supabase webhooks/cron, so its `extension_in_public` notice is expected.
+-- 6) DO NOT relocate citext / pg_trgm out of `public`.
+--    (extension_in_public WARN for citext + pg_trgm is left UNRESOLVED — it is a
+--    hardening nicety, not an exploitable hole.)
+--
+--    INCIDENT NOTE: an earlier version of this migration moved citext + pg_trgm
+--    to the `extensions` schema. That broke production with
+--        ERROR: type "public.citext" does not exist
+--    because objects/queries reference the type by its *fully-qualified* name
+--    `public.citext` (the citext extension's own operator/cast machinery, and
+--    columns typed public.citext). Relocating renders those references invalid.
+--    The move was reverted (extensions moved back to `public`). Do not re-attempt
+--    without first rewriting every `public.citext` / `public.<trgm op>` reference
+--    to be schema-agnostic — which is not worth it for a low-severity WARN.
+--
+--    The search_path/grant prep below is harmless and kept (the `extensions`
+--    schema simply stays empty of these two extensions). pg_net also stays in
+--    public (supabase_admin-owned; powers Supabase webhooks/cron).
 GRANT USAGE ON SCHEMA extensions TO anon, authenticated, service_role;
 ALTER ROLE anon          SET search_path = "$user", public, extensions;
 ALTER ROLE authenticated SET search_path = "$user", public, extensions;
 ALTER ROLE service_role  SET search_path = "$user", public, extensions;
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
-             WHERE e.extname = 'citext' AND n.nspname = 'public') THEN
-    EXECUTE 'ALTER EXTENSION citext SET SCHEMA extensions';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
-             WHERE e.extname = 'pg_trgm' AND n.nspname = 'public') THEN
-    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA extensions';
-  END IF;
-END $$;
 
 -- 7) MANUAL (dashboard-only, not settable via SQL): enable Auth "Leaked password
 --    protection" (HaveIBeenPwned) under
