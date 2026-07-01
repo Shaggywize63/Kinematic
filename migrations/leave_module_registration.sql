@@ -19,3 +19,13 @@ on conflict (id) do update
   set is_universal = true,
       package      = 'people',
       name         = 'Leave';
+
+-- Grant Leave into every INTERNAL org-role's read permissions so field reps
+-- (not just admins) see the tab on web — leave self-service is universal for
+-- employees. External Distributor roles are excluded (they don't manage
+-- employee leave). Legacy roles with empty permissions already fall through to
+-- the entitlement grant, so they need no change. Idempotent.
+update org_roles
+   set permissions = array_append(permissions, 'leave')
+ where not ('leave' = any(permissions))
+   and name not ilike '%distributor%';
