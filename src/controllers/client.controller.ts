@@ -261,34 +261,51 @@ export const loginAsClientCredentials = asyncHandler(async (req: AuthRequest, re
   if (error || !client) { notFound(res, 'Client not found'); return; }
 
   const email = (client as { email?: string }).email;
+  // Which environment to enter: the production org, or its staging replica.
+  const env = (req.body && (req.body as { env?: string }).env === 'staging') ? 'staging' : 'production';
 
-  // Impersonation target = admin-set "Org ID" if valid, else the client's own
-  // org. Both live in THIS project's database.
-  const loginOrg = (client as { login_org_id?: string }).login_org_id;
-  const targetOrg = (typeof loginOrg === 'string' && isUUID(loginOrg)) ? loginOrg : client.org_id;
-
-  // Which Supabase project holds this client's DATA. Explicit per-client flag —
-  // NOT guessed from the email (which would wrongly fall back to the default
-  // project). Unset / unknown / same-as-current => same-project client.
+  // Which Supabase project holds this client's DATA (explicit per-client flag).
   const dataProjectRaw = (client as { data_project_key?: string }).data_project_key;
   const targetProject = (dataProjectRaw && isKnownProject(dataProjectRaw)) ? dataProjectRaw : currentProjectKey();
+  const remote = adminClientFor(targetProject);
 
-  // Same project (same database): the super-admin "enters" the client by
-  // impersonating its org on their EXISTING session (maybeImpersonate honours
-  // X-Org-Id for super_admins). No password / sign-in required — works for
-  // every same-project client, current and future, password or not.
+  // Resolve the client's PRODUCTION org in the target project. For a
+  // cross-project client that's the linked client's org; else the admin-set
+  // "Org ID" or the client's own org.
+  let prodOrg: string | null = null;
+  const dataClientId = (client as { data_client_id?: string }).data_client_id;
+  if (dataClientId && isUUID(dataClientId)) {
+    const { data: lc } = await remote.from('clients').select('org_id').eq('id', dataClientId).maybeSingle();
+    prodOrg = (lc as { org_id?: string } | null)?.org_id ?? null;
+  }
+  if (!prodOrg) {
+    const loginOrg = (client as { login_org_id?: string }).login_org_id;
+    prodOrg = (typeof loginOrg === 'string' && isUUID(loginOrg)) ? loginOrg : client.org_id;
+  }
+
+  // For staging, resolve the staging replica linked via organisations.promotes_to.
+  let targetOrg: string = prodOrg as string;
+  if (env === 'staging') {
+    const { data: st } = await remote
+      .from('organisations').select('id')
+      .eq('promotes_to', prodOrg).eq('environment', 'staging').maybeSingle();
+    if (!st) { badRequest(res, 'No staging org is configured for this client'); return; }
+    targetOrg = (st as { id: string }).id;
+  }
+
+  // Same project (same database): enter by impersonating the target org on the
+  // existing super-admin session (maybeImpersonate honours X-Org-Id).
   if (targetProject === currentProjectKey()) {
-    logger.info(`[Auth] super_admin ${user.id} impersonating client ${id} (org ${targetOrg})`);
-    ok(res, { mode: 'impersonate', org_id: targetOrg, project: currentProjectKey(), client_id: client.id, name: client.name });
+    logger.info(`[Auth] super_admin ${user.id} entering client ${id} ${env} (org ${targetOrg})`);
+    ok(res, { mode: 'impersonate', org_id: targetOrg, project: currentProjectKey(), client_id: client.id, name: client.name, env, staging: env === 'staging' });
     return;
   }
 
   // Cross-project client (data in another Supabase project, e.g. the live Tata
-  // account): authenticate against THAT project with the stored credentials.
+  // account): sign in with the stored creds, then act on the target org.
   const password = decryptSecret((client as { login_password_enc?: string }).login_password_enc);
   if (!email || !password) { badRequest(res, 'This cross-project client needs a stored login email + password.'); return; }
-  const projectKey = targetProject;
-  const cfg = getProjectConfig(projectKey);
+  const cfg = getProjectConfig(targetProject);
   const sb = createSupabaseClient(cfg.url, cfg.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const { data: session, error: signInError } = await sb.auth.signInWithPassword({ email, password });
   if (signInError || !session?.session) {
@@ -296,15 +313,18 @@ export const loginAsClientCredentials = asyncHandler(async (req: AuthRequest, re
     return;
   }
 
-  logger.info(`[Auth] super_admin ${user.id} logged in as client ${id} (${email}) on project '${projectKey}'`);
+  logger.info(`[Auth] super_admin ${user.id} logged in as client ${id} (${email}) ${env} on project '${targetProject}'`);
   ok(res, {
     mode: 'credentials',
     access_token: session.session.access_token,
     refresh_token: session.session.refresh_token,
-    project: projectKey,
+    project: targetProject,
     email,
     client_id: client.id,
     name: client.name,
+    org_id: targetOrg,
+    env,
+    staging: env === 'staging',
   });
 });
 
