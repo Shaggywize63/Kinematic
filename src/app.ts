@@ -47,6 +47,7 @@ import routePlanRoutes    from './routes/route-plan.routes';
 import candidatesRouter   from './routes/candidates.routes';
 import activityMappingRoutes from './routes/activity-mapping.routes';
 import clientRoutes          from './routes/client.routes';
+import environmentsRoutes    from './routes/environments.routes';
 import miscRoutes            from './routes/misc.routes';
 import planogramRoutes       from './routes/planogram.routes';
 import integrationsRoutes        from './routes/integrations.routes';
@@ -374,6 +375,7 @@ app.use(`${V1}/roles`,         requireAuth, rolesRoutes);
 app.use('/api/v1/ai',          requireAuth, aiRouter);
 app.use(`${V1}/activity-mappings`, requireAuth, activityMappingRoutes);
 app.use(`${V1}/clients`,           requireAuth, clientRoutes);
+app.use(`${V1}/environments`,      requireAuth, environmentsRoutes);
 app.use(`${V1}/misc`,              requireAuth, miscRoutes);
 app.use(`${V1}/planograms`,        planogramRoutes);
 
