@@ -49,6 +49,22 @@ export const getLocationPingInterval = asyncHandler<AuthRequest>(async (req, res
 });
 
 /**
+ * GET /api/v1/org-settings/ui-flags
+ * Per-org UI toggles for the caller's current org (honours super-admin
+ * impersonation via req.user.org_id). Promotable via org_settings.
+ */
+export const getUiFlags = asyncHandler<AuthRequest>(async (req, res) => {
+  const { org_id } = req.user!;
+  const { data } = await supabaseAdmin
+    .from('org_settings').select('key, value').eq('org_id', org_id)
+    .in('key', ['ui.hide_client_filter']);
+  const map: Record<string, unknown> = {};
+  (data || []).forEach((r: any) => { map[r.key] = r.value; });
+  const truthy = (v: unknown) => v === true || v === 'true' || v === 1 || v === '1';
+  sendSuccess(res, { hide_client_filter: truthy(map['ui.hide_client_filter']) });
+});
+
+/**
  * PATCH /api/v1/org-settings/location-ping-interval
  *
  * Body: { value: 300 | 600 | 900 }

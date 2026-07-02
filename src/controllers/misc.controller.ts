@@ -394,6 +394,30 @@ export const getUserById = asyncHandler<AuthRequest>(async (req, res) => {
   sendSuccess(res, data)
 })
 
+// Active-user cap (per-org, opt-in via org_settings 'limits.max_active_users').
+// Internal/staff domains are exempt and never count toward the limit.
+const ACTIVE_CAP_BYPASS_DOMAINS = new Set([
+  'kinematicapp.com', 'horizontechstudio.com', 'kinematic.com', 'kaiyotechnologylabs.com',
+]);
+function emailDomainOf(email?: string | null): string {
+  return String(email || '').split('@')[1]?.toLowerCase().trim() || '';
+}
+async function assertActiveUserCap(orgId: string | null | undefined, email?: string | null, excludeUserId?: string): Promise<void> {
+  if (!orgId) return;
+  if (ACTIVE_CAP_BYPASS_DOMAINS.has(emailDomainOf(email))) return; // exempt staff domains
+  const { data: setting } = await supabaseAdmin
+    .from('org_settings').select('value').eq('org_id', orgId).eq('key', 'limits.max_active_users').maybeSingle();
+  const limit = parseInt(String((setting as { value?: unknown } | null)?.value ?? ''), 10);
+  if (!Number.isFinite(limit) || limit <= 0) return; // no cap configured for this org
+  const { data: activeUsers } = await supabaseAdmin
+    .from('users').select('id, email').eq('org_id', orgId).eq('is_active', true);
+  const counted = (activeUsers || []).filter(
+    u => u.id !== excludeUserId && !ACTIVE_CAP_BYPASS_DOMAINS.has(emailDomainOf(u.email)));
+  if (counted.length >= limit) {
+    throw new AppError(400, `This organisation allows a maximum of ${limit} active users. Deactivate a user before adding another.`, 'USER_LIMIT_REACHED');
+  }
+}
+
 export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   const { name, mobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email, org_role_id } = req.body
   const admin = req.user!
@@ -412,6 +436,9 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   if (email && !emailRegex.test(email)) {
     throw new AppError(400, 'Please provide a valid email address', 'VALIDATION_ERROR')
   }
+
+  // New users are created active — enforce the org's active-user cap.
+  await assertActiveUserCap(admin.org_id, email);
 
   // Check for duplication
   const { data: existingUser, error: checkErr } = await supabaseAdmin
@@ -605,6 +632,12 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
   // Only run DB update if there's something to update
   if (Object.keys(updates).length === 0 && !req.body.app_password) {
     return sendSuccess(res, null, 'Nothing to update')
+  }
+
+  // Activating a user must respect the org's active-user cap (staff exempt).
+  if (updates.is_active === true) {
+    const { data: target } = await supabaseAdmin.from('users').select('org_id, email').eq('id', req.params.id).maybeSingle()
+    if (target) await assertActiveUserCap((target as { org_id?: string }).org_id, (updates.email ?? (target as { email?: string }).email), req.params.id)
   }
 
   try {
