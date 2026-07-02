@@ -252,11 +252,14 @@ export const loginAsClientCredentials = asyncHandler(async (req: AuthRequest, re
   const { id } = req.params;
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
 
+  // This route is super_admin-only (see routes), so DON'T gate the lookup by the
+  // caller's org — a super-admin whose session is temporarily scoped to another
+  // org (acting-as/impersonation) must still be able to find the client. Look it
+  // up by id in the current project.
   const { data: client, error } = await supabaseAdmin
     .from('clients')
     .select('*')
     .eq('id', id)
-    .eq(ownerColumn(), user.org_id)
     .single();
   if (error || !client) { notFound(res, 'Client not found'); return; }
 
