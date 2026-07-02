@@ -78,6 +78,11 @@ export function isKnownProject(key: string | undefined | null): boolean {
   return !!key && Object.prototype.hasOwnProperty.call(REGISTRY, key);
 }
 
+/** All configured project keys (e.g. ['default','kinematic']). */
+export function knownProjectKeys(): string[] {
+  return Object.keys(REGISTRY);
+}
+
 /**
  * Effective fallback project for code paths that have no explicit project: a
  * missing/unknown X-Kinematic-Project header, an unmatched login email, or
