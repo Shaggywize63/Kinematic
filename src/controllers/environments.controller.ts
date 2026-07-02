@@ -79,3 +79,43 @@ export const promoteEnvironment = asyncHandler(async (req: AuthRequest, res: Res
   logger.info(`[Env] promote ${project} ${staging_org_id} -> ${s.promotes_to} (dry_run=${isDry})`);
   ok(res, { project, staging_org_id, prod_org_id: s.promotes_to, dry_run: isDry, result: data });
 });
+
+async function resolveStaging(project: string, stagingOrgId: string) {
+  const remote = adminClientFor(project);
+  const { data: s } = await remote.from('organisations').select('promotes_to, environment').eq('id', stagingOrgId).single();
+  return { remote, prod: (s as { promotes_to?: string; environment?: string } | null) };
+}
+
+/**
+ * GET /api/v1/environments/diff?project=&staging_org_id=
+ * Returns the per-item config differences (checklist) between a staging org and
+ * its production target.
+ */
+export const diffEnvironment = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const project = String(req.query.project || '');
+  const stagingOrgId = String(req.query.staging_org_id || '');
+  if (!knownProjectKeys().includes(project)) { badRequest(res, 'Unknown project'); return; }
+  if (!isUUID(stagingOrgId)) { badRequest(res, 'Invalid staging_org_id'); return; }
+  const { remote, prod } = await resolveStaging(project, stagingOrgId);
+  if (!prod?.promotes_to || prod.environment !== 'staging') { badRequest(res, 'Not a staging org with a production target'); return; }
+  const { data, error } = await remote.rpc('config_diff', { p_src: stagingOrgId, p_dst: prod.promotes_to });
+  if (error) { badRequest(res, error.message); return; }
+  ok(res, data || []);
+});
+
+/**
+ * POST /api/v1/environments/promote-selective  { project, staging_org_id, items:[{t,id}] }
+ * Promote ONLY the selected config items from staging into its production org.
+ */
+export const promoteSelective = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { project, staging_org_id, items } = req.body || {};
+  if (!project || !knownProjectKeys().includes(project)) { badRequest(res, 'Unknown project'); return; }
+  if (!isUUID(staging_org_id)) { badRequest(res, 'Invalid staging_org_id'); return; }
+  if (!Array.isArray(items) || items.length === 0) { badRequest(res, 'Select at least one change to deploy'); return; }
+  const { remote, prod } = await resolveStaging(project, staging_org_id);
+  if (!prod?.promotes_to || prod.environment !== 'staging') { badRequest(res, 'Not a staging org with a production target'); return; }
+  const { data, error } = await remote.rpc('config_promote_items', { p_src: staging_org_id, p_dst: prod.promotes_to, p_items: items });
+  if (error) { badRequest(res, error.message); return; }
+  logger.info(`[Env] selective promote ${project} ${staging_org_id} -> ${prod.promotes_to} (${items.length} items)`);
+  ok(res, { project, staging_org_id, prod_org_id: prod.promotes_to, result: data });
+});
