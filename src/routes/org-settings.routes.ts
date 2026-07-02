@@ -5,6 +5,7 @@ import {
   setLocationPingInterval,
   getCrmReminderThresholds,
   setCrmReminderThresholds,
+  getUiFlags,
 } from '../controllers/org-settings.controller';
 
 const router = Router();
@@ -35,5 +36,8 @@ router.patch('/crm-reminder-thresholds',
   requireRole(...ADMIN_ROLES),
   setCrmReminderThresholds,
 );
+
+// UI flags are readable by any authenticated user (drives layout rendering).
+router.get('/ui-flags', requireAuth, getUiFlags);
 
 export default router;
