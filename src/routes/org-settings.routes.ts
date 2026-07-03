@@ -6,6 +6,7 @@ import {
   getCrmReminderThresholds,
   setCrmReminderThresholds,
   getUiFlags,
+  setUserLimit,
 } from '../controllers/org-settings.controller';
 
 const router = Router();
@@ -39,5 +40,7 @@ router.patch('/crm-reminder-thresholds',
 
 // UI flags are readable by any authenticated user (drives layout rendering).
 router.get('/ui-flags', requireAuth, getUiFlags);
+// Admins can set the active-user cap for their org.
+router.patch('/user-limit', requireAuth, requireRole(...ADMIN_ROLES), setUserLimit);
 
 export default router;

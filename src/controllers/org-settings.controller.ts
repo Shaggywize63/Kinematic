@@ -53,15 +53,45 @@ export const getLocationPingInterval = asyncHandler<AuthRequest>(async (req, res
  * Per-org UI toggles for the caller's current org (honours super-admin
  * impersonation via req.user.org_id). Promotable via org_settings.
  */
+const ACTIVE_CAP_BYPASS_DOMAINS = ['kinematicapp.com', 'horizontechstudio.com', 'kinematic.com', 'kaiyotechnologylabs.com'];
+const domainOf = (email?: string | null) => String(email || '').split('@')[1]?.toLowerCase().trim() || '';
+
 export const getUiFlags = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
   const { data } = await supabaseAdmin
     .from('org_settings').select('key, value').eq('org_id', org_id)
-    .in('key', ['ui.hide_client_filter']);
+    .in('key', ['ui.hide_client_filter', 'limits.max_active_users']);
   const map: Record<string, unknown> = {};
   (data || []).forEach((r: any) => { map[r.key] = r.value; });
   const truthy = (v: unknown) => v === true || v === 'true' || v === 1 || v === '1';
-  sendSuccess(res, { hide_client_filter: truthy(map['ui.hide_client_filter']) });
+  const lim = parseInt(String(map['limits.max_active_users'] ?? ''), 10);
+  const maxActiveUsers = Number.isFinite(lim) && lim > 0 ? lim : null;
+
+  // Live count of active users that count toward the cap (staff domains exempt).
+  let activeUserCount = 0;
+  const { data: au } = await supabaseAdmin.from('users').select('email').eq('org_id', org_id).eq('is_active', true);
+  activeUserCount = (au || []).filter(u => !ACTIVE_CAP_BYPASS_DOMAINS.includes(domainOf(u.email))).length;
+
+  sendSuccess(res, {
+    hide_client_filter: truthy(map['ui.hide_client_filter']),
+    max_active_users: maxActiveUsers,
+    active_user_count: activeUserCount,
+  });
+});
+
+/**
+ * PATCH /api/v1/org-settings/user-limit  { value: number|null }
+ * Set (or clear, with null/0) the org's max active-user cap.
+ */
+export const setUserLimit = asyncHandler<AuthRequest>(async (req, res) => {
+  const { org_id } = req.user!;
+  const n = parseInt(String((req.body || {}).value ?? ''), 10);
+  const limit = Number.isFinite(n) && n > 0 ? n : null;
+  await supabaseAdmin.from('org_settings').delete().eq('org_id', org_id).eq('key', 'limits.max_active_users');
+  if (limit) {
+    await supabaseAdmin.from('org_settings').insert({ org_id, key: 'limits.max_active_users', value: limit });
+  }
+  sendSuccess(res, { max_active_users: limit });
 });
 
 /**
