@@ -996,6 +996,15 @@ router.get('/conversations', rbac.requireModuleAccess('crm_conversation_intel'),
     limit: req.query.limit ? Number(req.query.limit) : undefined,
   }));
 }));
+// Aggregated insights for the manager analytics charts. Placed BEFORE the
+// '/conversations/:cid' param route so 'analytics' isn't captured as a :cid.
+router.get('/conversations/analytics', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
+  res.json(await convIntel.analyticsForOrg(convActor(req), {
+    user_id: typeof req.query.user_id === 'string' ? req.query.user_id : undefined,
+    city: typeof req.query.city === 'string' ? req.query.city : undefined,
+    days: req.query.days ? Number(req.query.days) : undefined,
+  }));
+}));
 // Full record incl. insights + a short-lived signed playback URL.
 router.get('/conversations/:cid', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
   res.json(await convIntel.getOne(convActor(req), req.params.cid));

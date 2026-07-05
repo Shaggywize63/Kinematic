@@ -272,3 +272,215 @@ export async function listForOrg(actor: Actor, filters: { lead_id?: string; user
     };
   });
 }
+
+// ── Analytics (aggregated insights for the manager charts) ───────────────────
+
+const INTENT_ORDER = ['exploring', 'comparing', 'evaluating', 'negotiating', 'ready_to_buy', 'closed_won', 'closed_lost'];
+
+function normStage(s: any): string {
+  const t = String(s ?? '').toLowerCase().trim().replace(/[\s-]+/g, '_');
+  return t || 'unknown';
+}
+function normSentiment(s: any): 'positive' | 'neutral' | 'negative' {
+  const t = String(s ?? '').toLowerCase();
+  if (/(positive|good|warm|hot|high|happy)/.test(t)) return 'positive';
+  if (/(negative|poor|cold|bad|low|angry|frustrat|unhappy)/.test(t)) return 'negative';
+  return 'neutral';
+}
+function normTrajectory(s: any): 'improved' | 'declined' | 'flat' {
+  const t = String(s ?? '').toLowerCase();
+  if (/(improv|up|better|rising|warm|positive)/.test(t)) return 'improved';
+  if (/(declin|down|worse|drop|cool|negative)/.test(t)) return 'declined';
+  return 'flat';
+}
+// Fold the model's 4-way objection outcome into a 3-bucket status scale so the
+// chart's colours (green / amber / red) stay CVD-separable (amber↔orange fail).
+function normHandled(s: any): 'well' | 'partially' | 'poor' {
+  const t = String(s ?? '').toLowerCase();
+  if (/(well|good|strong|full|resolved)/.test(t)) return 'well';
+  if (/(partial|some|attempt)/.test(t)) return 'partially';
+  return 'poor'; // poorly / ignored / missed / none
+}
+/** "55:45 (...)" | "55/45" | 0.55 | 55 → rep talk-share %, or null if unparseable. */
+function parseTalkPct(v: any): number | null {
+  if (typeof v === 'number' && isFinite(v)) {
+    if (v > 1 && v <= 100) return Math.round(v);
+    if (v > 0 && v <= 1) return Math.round(v * 100);
+    return null;
+  }
+  const m = /(\d{1,3})\s*[:/]\s*(\d{1,3})/.exec(String(v ?? ''));
+  if (!m) return null;
+  const a = Number(m[1]), b = Number(m[2]);
+  if (a + b === 0) return null;
+  return Math.round((a / (a + b)) * 100);
+}
+function dayKey(iso: string): string {
+  return String(iso).slice(0, 10); // YYYY-MM-DD (UTC) — stable bucket per day
+}
+
+export interface ConversationAnalytics {
+  window_days: number;
+  totals: {
+    total: number; analyzed: number; reps: number; leads: number;
+    avg_intent_score: number | null; avg_talk_pct: number | null;
+    risk_calls: number; commitment_calls: number;
+  };
+  intent_stages: Array<{ key: string; count: number }>;
+  sentiment: Array<{ key: 'positive' | 'neutral' | 'negative'; count: number }>;
+  trajectory: Array<{ key: 'improved' | 'flat' | 'declined'; count: number }>;
+  objections: Array<{ type: string; count: number; well: number; partially: number; poor: number }>;
+  handling: { well: number; partially: number; poor: number };
+  competitors: Array<{ name: string; count: number }>;
+  timeline: Array<{ date: string; count: number; avg_score: number | null }>;
+  reps: Array<{ user_id: string; name: string; calls: number; avg_intent_score: number | null; avg_talk_pct: number | null; positive: number; neutral: number; negative: number }>;
+}
+
+/**
+ * Aggregate the structured insights across analyzed conversations into
+ * chart-ready series for the manager "Conversation Analytics" view. Manager-only;
+ * org + client scoped. `city` routes through the linked lead (recordings carry
+ * no geo column). Everything is computed from real rows — empty series come back
+ * empty (the UI renders empty states) rather than being fabricated.
+ */
+export async function analyticsForOrg(actor: Actor, filters: { user_id?: string; city?: string; days?: number } = {}) {
+  if (!isManager(actor.role)) throw new AppError(403, 'Managers only', 'FORBIDDEN');
+  const days = Math.min(Math.max(Math.round(filters.days ?? 90), 1), 365);
+  const sinceIso = new Date(Date.now() - days * 86_400_000).toISOString();
+
+  const empty: ConversationAnalytics = {
+    window_days: days,
+    totals: { total: 0, analyzed: 0, reps: 0, leads: 0, avg_intent_score: null, avg_talk_pct: null, risk_calls: 0, commitment_calls: 0 },
+    intent_stages: [], sentiment: [], trajectory: [], objections: [], handling: { well: 0, partially: 0, poor: 0 },
+    competitors: [], timeline: [], reps: [],
+  };
+
+  let q = supabaseAdmin.from('conversation_recordings')
+    .select('id, user_id, lead_id, status, duration_seconds, insights, created_at')
+    .eq('org_id', actor.org_id)
+    .eq('status', 'complete')
+    .gte('created_at', sinceIso)
+    .order('created_at', { ascending: true })
+    .limit(2000);
+  if (actor.client_id) q = q.eq('client_id', actor.client_id);
+  if (filters.user_id) q = q.eq('user_id', filters.user_id);
+
+  // City filter routes through the linked lead — recordings have no geo column.
+  if (filters.city) {
+    let lq = supabaseAdmin.from('crm_leads').select('id').eq('org_id', actor.org_id).ilike('city', filters.city);
+    if (actor.client_id) lq = lq.eq('client_id', actor.client_id);
+    const { data: leadRows } = await lq.limit(5000);
+    const ids = (leadRows ?? []).map((l: any) => l.id).filter(Boolean);
+    if (!ids.length) return empty;
+    q = q.in('lead_id', ids);
+  }
+
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB');
+  const rows = (data ?? []).filter((r: any) => r.insights && typeof r.insights === 'object');
+  if (!rows.length) return empty;
+
+  const stageMap = new Map<string, number>();
+  const sentMap = { positive: 0, neutral: 0, negative: 0 };
+  const trajMap = { improved: 0, flat: 0, declined: 0 };
+  const handling = { well: 0, partially: 0, poor: 0 };
+  const objByType = new Map<string, { count: number; well: number; partially: number; poor: number }>();
+  const compMap = new Map<string, number>();
+  const timeMap = new Map<string, { count: number; scoreSum: number; scoreN: number }>();
+  const repMap = new Map<string, { calls: number; scoreSum: number; scoreN: number; talkSum: number; talkN: number; positive: number; neutral: number; negative: number }>();
+
+  let scoreSum = 0, scoreN = 0, talkSum = 0, talkN = 0, riskCalls = 0, commitCalls = 0;
+  const leadSet = new Set<string>();
+
+  for (const r of rows) {
+    const ins = r.insights as any;
+    if (r.lead_id) leadSet.add(r.lead_id);
+
+    const stage = normStage(ins?.intent?.stage);
+    if (stage !== 'unknown') stageMap.set(stage, (stageMap.get(stage) ?? 0) + 1);
+
+    const score = Number(ins?.intent?.score);
+    const hasScore = isFinite(score);
+    if (hasScore) { scoreSum += score; scoreN++; }
+
+    const sent = normSentiment(ins?.sentiment?.overall);
+    sentMap[sent]++;
+    trajMap[normTrajectory(ins?.sentiment?.trajectory)]++;
+
+    const talk = parseTalkPct(ins?.coaching?.talk_listen_ratio);
+    if (talk != null) { talkSum += talk; talkN++; }
+
+    if (Array.isArray(ins?.risk_flags) && ins.risk_flags.length) riskCalls++;
+    if (Array.isArray(ins?.commitments) && ins.commitments.length) commitCalls++;
+
+    for (const o of (Array.isArray(ins?.objections) ? ins.objections : [])) {
+      const type = String(o?.type ?? '').toLowerCase().trim().replace(/[\s-]+/g, '_') || 'other';
+      const h = normHandled(o?.handled);
+      handling[h]++;
+      const e = objByType.get(type) ?? { count: 0, well: 0, partially: 0, poor: 0 };
+      e.count++; e[h]++;
+      objByType.set(type, e);
+    }
+    for (const c of (Array.isArray(ins?.competitors) ? ins.competitors : [])) {
+      const name = String(c?.name ?? '').trim();
+      if (name) compMap.set(name, (compMap.get(name) ?? 0) + 1);
+    }
+
+    const dk = dayKey(r.created_at);
+    const tm = timeMap.get(dk) ?? { count: 0, scoreSum: 0, scoreN: 0 };
+    tm.count++; if (hasScore) { tm.scoreSum += score; tm.scoreN++; }
+    timeMap.set(dk, tm);
+
+    if (r.user_id) {
+      const rm = repMap.get(r.user_id) ?? { calls: 0, scoreSum: 0, scoreN: 0, talkSum: 0, talkN: 0, positive: 0, neutral: 0, negative: 0 };
+      rm.calls++;
+      if (hasScore) { rm.scoreSum += score; rm.scoreN++; }
+      if (talk != null) { rm.talkSum += talk; rm.talkN++; }
+      rm[sent]++;
+      repMap.set(r.user_id, rm);
+    }
+  }
+
+  // Resolve rep display names in one batch.
+  const repIds = Array.from(repMap.keys());
+  const { data: users } = repIds.length
+    ? await supabaseAdmin.from('users').select('id, name, employee_id').in('id', repIds)
+    : { data: [] as any[] };
+  const uMap = new Map((users ?? []).map((u: any) => [u.id, u]));
+
+  const stageRank = (k: string) => { const i = INTENT_ORDER.indexOf(k); return i === -1 ? 99 : i; };
+  const avg = (sum: number, n: number) => (n ? Math.round((sum / n) * 10) / 10 : null);
+
+  const result: ConversationAnalytics = {
+    window_days: days,
+    totals: {
+      total: rows.length,
+      analyzed: rows.length,
+      reps: repMap.size,
+      leads: leadSet.size,
+      avg_intent_score: avg(scoreSum, scoreN),
+      avg_talk_pct: avg(talkSum, talkN),
+      risk_calls: riskCalls,
+      commitment_calls: commitCalls,
+    },
+    intent_stages: Array.from(stageMap, ([key, count]) => ({ key, count }))
+      .sort((a, b) => stageRank(a.key) - stageRank(b.key) || b.count - a.count),
+    sentiment: (['positive', 'neutral', 'negative'] as const).map((key) => ({ key, count: sentMap[key] })),
+    trajectory: (['improved', 'flat', 'declined'] as const).map((key) => ({ key, count: trajMap[key] })),
+    objections: Array.from(objByType, ([type, v]) => ({ type, count: v.count, well: v.well, partially: v.partially, poor: v.poor }))
+      .sort((a, b) => b.count - a.count).slice(0, 8),
+    handling,
+    competitors: Array.from(compMap, ([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count).slice(0, 8),
+    timeline: Array.from(timeMap, ([date, v]) => ({ date, count: v.count, avg_score: avg(v.scoreSum, v.scoreN) }))
+      .sort((a, b) => a.date.localeCompare(b.date)),
+    reps: Array.from(repMap, ([user_id, v]) => ({
+      user_id,
+      name: uMap.get(user_id)?.name ?? uMap.get(user_id)?.employee_id ?? 'Unknown',
+      calls: v.calls,
+      avg_intent_score: avg(v.scoreSum, v.scoreN),
+      avg_talk_pct: avg(v.talkSum, v.talkN),
+      positive: v.positive, neutral: v.neutral, negative: v.negative,
+    })).sort((a, b) => b.calls - a.calls || (b.avg_intent_score ?? 0) - (a.avg_intent_score ?? 0)),
+  };
+  return result;
+}
