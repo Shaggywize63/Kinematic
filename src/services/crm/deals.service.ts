@@ -55,8 +55,23 @@ export async function listDealsWithCount(
   if (filters.q) q = q.ilike('name', `%${String(filters.q)}%`);
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
-  q = q.order('expected_close_date', { ascending: true, nullsFirst: false })
-       .range((page - 1) * limit, page * limit - 1);
+  // Sorting. An explicit whitelisted `sort` (+`order`) wins; otherwise fall back
+  // to the historical default (soonest expected close first). Whitelisted so a
+  // caller can only order by real, safe columns.
+  const SORT_COLUMNS: Record<string, string> = {
+    name: 'name', amount: 'amount', status: 'status',
+    expected_close_date: 'expected_close_date', close_date: 'expected_close_date',
+    stage: 'stage_id', created: 'created_at', created_at: 'created_at',
+    updated: 'updated_at', updated_at: 'updated_at',
+  };
+  const sortKey = filters.sort ? String(filters.sort) : '';
+  const ascending = String(filters.order ?? '').toLowerCase() === 'asc';
+  if (sortKey && SORT_COLUMNS[sortKey]) {
+    q = q.order(SORT_COLUMNS[sortKey], { ascending, nullsFirst: false });
+  } else {
+    q = q.order('expected_close_date', { ascending: true, nullsFirst: false });
+  }
+  q = q.range((page - 1) * limit, page * limit - 1);
   const { data, error, count } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return { rows: (data ?? []) as Deal[], total: count ?? 0, page, limit };
