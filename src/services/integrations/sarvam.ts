@@ -61,11 +61,22 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * + speaker segments. Throws on hard failure; the caller marks the recording
  * 'failed' and stores the message.
  */
+// Sarvam's live batch API doesn't always match the documented enum names. Match
+// on any of the common success/failure signatures; the real value gets logged
+// verbatim on timeout so we can tighten this the moment a new one shows up.
+const OK_STATE_RE = /complete|succe|success|done|finish|ready/i;
+const FAIL_STATE_RE = /fail|error|cancel|abort|reject/i;
+
 export async function transcribe(opts: {
   audio: Buffer;
   filename: string;
   languageCode?: string;   // 'unknown' lets Saarika auto-detect (Hindi/Hinglish/…)
   diarize?: boolean;
+  // Fires as soon as we have a job_id (before upload/start/poll). Lets the
+  // caller persist the id to the DB so a later failure is still traceable to
+  // the specific Sarvam job. Awaited but errors ignored — persistence issues
+  // must not abort the transcription.
+  onJob?: (jobId: string) => Promise<void> | void;
 }): Promise<TranscriptResult> {
   if (!sarvamConfigured()) throw new Error('SARVAM_API_KEY not configured');
   const language = opts.languageCode || 'unknown';
@@ -79,6 +90,8 @@ export async function transcribe(opts: {
   const inputPath: string = init.input_storage_path || init.input_storage_url;
   const outputPath: string = init.output_storage_path || init.output_storage_url;
   if (!jobId || !inputPath) throw new Error('Sarvam init returned no job_id/input_storage_path');
+
+  if (opts.onJob) { try { await opts.onJob(jobId); } catch { /* persistence hiccup must not abort */ } }
 
   // 2) upload audio to the presigned (Azure blob) input path
   const uploadUrl = joinBlob(inputPath, opts.filename);
@@ -100,18 +113,28 @@ export async function transcribe(opts: {
   });
   if (!startRes.ok) throw new Error(`Sarvam start failed (${startRes.status}): ${await safeText(startRes)}`);
 
-  // 4) poll (bounded ~5 min: batch STT for a few-minute clip is typically < 1 min)
+  // 4) poll (bounded ~7.5 min: batch STT for a few-minute clip is typically < 1 min)
   let state = 'Pending';
-  for (let i = 0; i < 60; i++) {
+  let lastBody = '';
+  for (let i = 0; i < 90; i++) {
     await sleep(5_000);
     const st = await sarvamFetch(`/speech-to-text/job/${jobId}`, { method: 'GET' });
     if (!st.ok) continue;
-    const j: any = await st.json();
-    state = j.job_state || j.status || state;
-    if (/complete/i.test(state)) break;
-    if (/fail|error/i.test(state)) throw new Error(`Sarvam job failed: ${state}`);
+    try {
+      lastBody = await st.text();
+    } catch { continue; }
+    let j: any = {};
+    try { j = JSON.parse(lastBody); } catch { /* state stays as last known */ }
+    // Sarvam's actual response shape isn't fully stable — check every field
+    // path we've seen in the wild + the documented one.
+    const raw = j.job_state ?? j.status ?? j.state ?? j.job?.status ?? j.job?.state ?? j.data?.status ?? '';
+    if (raw) state = String(raw);
+    if (OK_STATE_RE.test(state)) break;
+    if (FAIL_STATE_RE.test(state)) throw new Error(`Sarvam job failed: state='${state}' body='${lastBody.slice(0, 200).replace(/\s+/g, ' ')}'`);
   }
-  if (!/complete/i.test(state)) throw new Error('Sarvam job timed out');
+  if (!OK_STATE_RE.test(state)) {
+    throw new Error(`Sarvam job timed out: jobId=${jobId} last_state='${state}' last_body='${lastBody.slice(0, 200).replace(/\s+/g, ' ')}'`);
+  }
 
   // 5) fetch the output JSON
   const outUrl = joinBlob(outputPath, replaceExt(opts.filename, 'json'));
