@@ -98,7 +98,16 @@ async function processAsync(id: string): Promise<void> {
     const audio = Buffer.from(await blob.arrayBuffer());
     const filename = String(r.audio_path).split('/').pop() || 'audio.m4a';
 
-    const t = await transcribe({ audio, filename, languageCode: r.language || 'unknown', diarize: true });
+    const t = await transcribe({
+      audio, filename, languageCode: r.language || 'unknown', diarize: true,
+      // Persist the Sarvam job_id the moment we have it so a subsequent
+      // failure is still traceable to the exact job for debugging.
+      onJob: async (jobId) => {
+        await supabaseAdmin.from('conversation_recordings')
+          .update({ sarvam_job_id: jobId, updated_at: new Date().toISOString() })
+          .eq('id', id);
+      },
+    });
 
     await supabaseAdmin.from('conversation_recordings').update({
       status: 'analyzing', transcript: t.transcript, diarization: t.segments,
