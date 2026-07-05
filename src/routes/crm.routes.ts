@@ -42,6 +42,7 @@ import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as updateSuggestSvc from '../services/crm/ai/updateSuggest.service';
 import * as dailyBriefingSvc from '../services/crm/ai/dailyBriefing.service';
 import * as cardScanSvc from '../services/crm/ai/cardScan.service';
+import * as convIntel from '../services/crm/ai/conversationIntel.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
@@ -941,6 +942,29 @@ leads.post('/:id/won', wrap(async (req, res) => {
     await leadsSvc.markLeadAsWon(orgId(req), req.params.id, body.reason ?? null, userId(req)),
   ));
 }));
+
+// ── Conversation Intelligence (record call → transcribe → analyze) ──────────
+// Gated to the client(s) granted the `crm_conversation_intel` module (Tata for
+// now; replicable via a client_modules grant). Consent is mandatory.
+const convActor = (req: Request): convIntel.Actor => {
+  const me = (req as AuthRequest).user as any;
+  return { id: userId(req)!, org_id: orgId(req), client_id: clientId(req), role: me?.role ?? null };
+};
+const convRecordSchema = z.object({
+  consent: z.boolean(),
+  consent_method: z.enum(['in_app', 'verbal']).optional(),
+  duration_seconds: z.number().int().min(0).max(7200).optional(),
+  ext: z.string().max(8).optional(),
+  language: z.string().max(20).optional(),
+});
+// Create a recording (consent gate) → returns a signed upload URL for the audio.
+leads.post('/:id/conversations', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
+  res.json(await convIntel.createRecording(convActor(req), req.params.id, parse(convRecordSchema, req.body ?? {})));
+}));
+// A rep's conversations on this lead (list, own-scope) — no transcript.
+leads.get('/:id/conversations', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
+  res.json(await convIntel.listForLead(convActor(req), req.params.id));
+}));
 // Home aggregator — composes today's target + near-to-close leads +
 // next-best-actions (rules-based, no LLM round-trip) + today's activity
 // + productivity tips into one payload so the Home tab on web + mobile
@@ -957,6 +981,25 @@ router.get('/home', wrap(async (req, res) => {
 }));
 
 router.use('/leads', rbac.requireModuleAccess('crm_leads'), leads);
+
+// ---------- CONVERSATION INTELLIGENCE (recording pipeline + dashboard) ------
+// Kick off processing after the client PUT the audio to the signed URL.
+router.post('/conversations/:cid/process', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
+  res.json(await convIntel.markUploaded(convActor(req), req.params.cid));
+}));
+// Manager/dashboard list — champion name + lead name + insights. Placed BEFORE
+// '/conversations/:cid' so the literal path isn't captured by the param route.
+router.get('/conversations', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
+  res.json(await convIntel.listForOrg(convActor(req), {
+    lead_id: typeof req.query.lead_id === 'string' ? req.query.lead_id : undefined,
+    user_id: typeof req.query.user_id === 'string' ? req.query.user_id : undefined,
+    limit: req.query.limit ? Number(req.query.limit) : undefined,
+  }));
+}));
+// Full record incl. insights + a short-lived signed playback URL.
+router.get('/conversations/:cid', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
+  res.json(await convIntel.getOne(convActor(req), req.params.cid));
+}));
 
 // ---------- CONTACTS -------------------------------------------------
 const contacts = express.Router();
