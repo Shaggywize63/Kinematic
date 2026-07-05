@@ -137,7 +137,7 @@ async function processAsync(id: string): Promise<void> {
 async function fail(id: string, message: string) {
   logger.warn(`[conv-intel] ${id} failed: ${message}`);
   await supabaseAdmin.from('conversation_recordings').update({
-    status: 'failed', error: String(message).slice(0, 500), updated_at: new Date().toISOString(),
+    status: 'failed', error: String(message).slice(0, 2000), updated_at: new Date().toISOString(),
   }).eq('id', id);
 }
 
