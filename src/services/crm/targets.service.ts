@@ -36,7 +36,11 @@ export async function listTargetRoles(org_id: string, client_id: string | null) 
     .is('deleted_at', null)
     .order('position', { ascending: true, nullsFirst: false })
     .order('name', { ascending: true });
-  q = client_id ? q.or(`client_id.is.null,client_id.eq.${client_id}`) : q.is('client_id', null);
+  // No client picked (org-wide admin view) → show every role in the org,
+  // matching clientScopedList's convention elsewhere. Previously this forced
+  // client_id IS NULL, hiding every client-scoped role (e.g. "Consumer
+  // Champion") from an org admin who hadn't picked a specific client.
+  if (client_id) q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return (data ?? []).map((r: any) => ({ id: r.id as string, name: r.name as string }));
@@ -49,7 +53,9 @@ export async function listTargets(org_id: string, client_id: string | null) {
     .eq('org_id', org_id)
     .eq('metric', DEFAULT_METRIC)
     .eq('period', DEFAULT_PERIOD);
-  q = client_id ? q.eq('client_id', client_id) : q.is('client_id', null);
+  // Same fix as listTargetRoles: no client picked → show every target row in
+  // the org rather than only the org-wide (client_id IS NULL) ones.
+  if (client_id) q = q.eq('client_id', client_id);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   const rows = (data ?? []) as TargetRow[];
