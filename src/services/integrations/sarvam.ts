@@ -196,11 +196,33 @@ export async function transcribe(opts: {
       const r = await fetch(explicit);
       if (r.ok) return normalize(await r.json(), jobId);
     }
-  } catch { /* fall through to filename guessing */ }
+  } catch { /* fall through */ }
 
+  // (d) Sarvam REST endpoints for the job's result — try before blob guessing.
+  const REST_RESULT_PATHS = [
+    `/speech-to-text/job/${jobId}/result`,
+    `/speech-to-text/job/${jobId}/output`,
+    `/speech-to-text/job/${jobId}/transcript`,
+    `/speech-to-text/jobs/${jobId}/result`,
+  ];
+  const restAttempts: string[] = [];
+  for (const path of REST_RESULT_PATHS) {
+    const r = await sarvamFetch(path, { method: 'GET' });
+    if (r.ok) {
+      try { return normalize(await r.json(), jobId); } catch { /* keep trying */ }
+    }
+    restAttempts.push(`${path}→${r.status}`);
+  }
+
+  // (e) Filename guessing at the blob output_storage_path.
   const inputBase = opts.filename.replace(/\.[^.]+$/, '');
   const OUTPUT_FILENAME_VARIANTS = Array.from(new Set([
     replaceExt(opts.filename, 'json'),   // audio.m4a → audio.json
+    `${opts.filename}.json`,              // audio.m4a.json (append)
+    `${inputBase}.result.json`,
+    `${inputBase}.transcript.json`,
+    `${inputBase}_result.json`,
+    `${inputBase}_transcript.json`,
     `${inputBase}.txt`,
     'transcript.json', 'output.json', 'result.json',
     `${jobId}.json`, `${jobId}`,
@@ -209,10 +231,20 @@ export async function transcribe(opts: {
   for (const filename of OUTPUT_FILENAME_VARIANTS) {
     const candUrl = joinBlob(outputPath, filename);
     const r = await fetch(candUrl);
-    if (r.ok) return normalize(await r.json(), jobId);
+    if (r.ok) {
+      try { return normalize(await r.json(), jobId); } catch { /* keep trying */ }
+    }
     outputAttempts.push(`${filename}→${r.status}`);
   }
-  throw new Error(`Sarvam output fetch failed — tried: ${outputAttempts.join(' | ')} at path='${outputPath.slice(0, 120)}'`);
+
+  // On all-failure, include the completion body snippet — that's the payload
+  // that told us the job was done, and it very likely names the output file
+  // somewhere I haven't checked yet.
+  const bodySnippet = (lastBody || '').slice(0, 400).replace(/\s+/g, ' ');
+  throw new Error(
+    `Sarvam output fetch failed — rest: [${restAttempts.join(' | ')}] blob: [${outputAttempts.join(' | ')}] `
+    + `path='${outputPath.slice(0, 300)}' completion_body='${bodySnippet}'`,
+  );
 }
 
 /** Map Sarvam's output JSON into our normalized contract, defensively. */
