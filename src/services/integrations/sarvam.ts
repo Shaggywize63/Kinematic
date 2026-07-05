@@ -114,15 +114,53 @@ export async function transcribe(opts: {
   if (!startRes.ok) throw new Error(`Sarvam start failed (${startRes.status}): ${await safeText(startRes)}`);
 
   // 4) poll (bounded ~7.5 min: batch STT for a few-minute clip is typically < 1 min)
+  // Live-API reality: my originally-documented status path returns non-2xx on
+  // every poll, so try a handful of common variants. Whichever first returns
+  // 200 becomes the winner for the rest of the loop. If ALL fail every round,
+  // the timeout error includes each variant's status code + body snippet so we
+  // can fix it precisely on the next iteration instead of guessing.
+  const STATUS_PATH_VARIANTS = [
+    `/speech-to-text/job/${jobId}/status`,
+    `/speech-to-text/job/${jobId}`,
+    `/speech-to-text/job-status/${jobId}`,
+    `/speech-to-text/jobs/${jobId}`,
+    `/speech-to-text/jobs/${jobId}/status`,
+  ];
+  let statusPath: string | null = null;
   let state = 'Pending';
   let lastBody = '';
+  let lastStatus = 0;
+  const failureSummaries: string[] = [];
   for (let i = 0; i < 90; i++) {
     await sleep(5_000);
-    const st = await sarvamFetch(`/speech-to-text/job/${jobId}`, { method: 'GET' });
-    if (!st.ok) continue;
-    try {
-      lastBody = await st.text();
-    } catch { continue; }
+    if (statusPath) {
+      const st = await sarvamFetch(statusPath, { method: 'GET' });
+      lastStatus = st.status;
+      try { lastBody = await st.text(); } catch { lastBody = ''; }
+      if (!st.ok) continue;
+    } else {
+      // Round-robin over variants until one returns 200; then pin it for the
+      // rest of the loop so we're not paying the extra RTTs every 5s.
+      let picked = false;
+      const roundFailures: string[] = [];
+      for (const cand of STATUS_PATH_VARIANTS) {
+        const st = await sarvamFetch(cand, { method: 'GET' });
+        lastStatus = st.status;
+        try { lastBody = await st.text(); } catch { lastBody = ''; }
+        if (st.ok) {
+          statusPath = cand;
+          picked = true;
+          break;
+        }
+        roundFailures.push(`${cand}→${st.status}${lastBody ? ' body="' + lastBody.slice(0, 80).replace(/\s+/g, ' ') + '"' : ''}`);
+      }
+      if (!picked) {
+        // Keep only the most recent round's failures — one line each.
+        failureSummaries.length = 0;
+        failureSummaries.push(...roundFailures);
+        continue;
+      }
+    }
     let j: any = {};
     try { j = JSON.parse(lastBody); } catch { /* state stays as last known */ }
     // Sarvam's actual response shape isn't fully stable — check every field
@@ -133,7 +171,10 @@ export async function transcribe(opts: {
     if (FAIL_STATE_RE.test(state)) throw new Error(`Sarvam job failed: state='${state}' body='${lastBody.slice(0, 200).replace(/\s+/g, ' ')}'`);
   }
   if (!OK_STATE_RE.test(state)) {
-    throw new Error(`Sarvam job timed out: jobId=${jobId} last_state='${state}' last_body='${lastBody.slice(0, 200).replace(/\s+/g, ' ')}'`);
+    const diag = statusPath
+      ? `path='${statusPath}' last_status=${lastStatus} last_body='${lastBody.slice(0, 200).replace(/\s+/g, ' ')}'`
+      : `all-paths-failed: ${failureSummaries.join(' | ')}`;
+    throw new Error(`Sarvam job timed out: jobId=${jobId} last_state='${state}' ${diag}`);
   }
 
   // 5) fetch the output JSON
