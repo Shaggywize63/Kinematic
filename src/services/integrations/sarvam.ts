@@ -177,12 +177,42 @@ export async function transcribe(opts: {
     throw new Error(`Sarvam job timed out: jobId=${jobId} last_state='${state}' ${diag}`);
   }
 
-  // 5) fetch the output JSON
-  const outUrl = joinBlob(outputPath, replaceExt(opts.filename, 'json'));
-  const outRes = await fetch(outUrl);
-  if (!outRes.ok) throw new Error(`Sarvam output fetch failed (${outRes.status})`);
-  const out: any = await outRes.json();
-  return normalize(out, jobId);
+  // 5) fetch the output JSON — in order of preference:
+  //    (a) transcript already in the completion payload → skip network entirely
+  //    (b) explicit output URL in the completion payload
+  //    (c) filename guessing at output_storage_path (with fallbacks)
+  try {
+    const j: any = JSON.parse(lastBody);
+    const payload = j.data ?? j;
+    // Inline: the poll response IS the result. Many batch APIs do this.
+    const inlineTranscript = payload.transcript ?? payload.text ?? payload.diarized_transcript;
+    if (inlineTranscript !== undefined && inlineTranscript !== null) {
+      return normalize(payload, jobId);
+    }
+    // Explicit URL in the completion payload.
+    const explicit: string | undefined = payload.output_url ?? payload.output_file_url
+      ?? payload.result_url ?? payload.data?.output_url ?? payload.outputs?.[0]?.url;
+    if (typeof explicit === 'string' && /^https?:\/\//i.test(explicit)) {
+      const r = await fetch(explicit);
+      if (r.ok) return normalize(await r.json(), jobId);
+    }
+  } catch { /* fall through to filename guessing */ }
+
+  const inputBase = opts.filename.replace(/\.[^.]+$/, '');
+  const OUTPUT_FILENAME_VARIANTS = Array.from(new Set([
+    replaceExt(opts.filename, 'json'),   // audio.m4a → audio.json
+    `${inputBase}.txt`,
+    'transcript.json', 'output.json', 'result.json',
+    `${jobId}.json`, `${jobId}`,
+  ]));
+  const outputAttempts: string[] = [];
+  for (const filename of OUTPUT_FILENAME_VARIANTS) {
+    const candUrl = joinBlob(outputPath, filename);
+    const r = await fetch(candUrl);
+    if (r.ok) return normalize(await r.json(), jobId);
+    outputAttempts.push(`${filename}→${r.status}`);
+  }
+  throw new Error(`Sarvam output fetch failed — tried: ${outputAttempts.join(' | ')} at path='${outputPath.slice(0, 120)}'`);
 }
 
 /** Map Sarvam's output JSON into our normalized contract, defensively. */
