@@ -187,13 +187,19 @@ export async function transcribe(opts: {
   const diag: string[] = [];
   let rawDiag = '';
 
-  // (a) Inline: the completion payload itself may carry the transcript.
+  // (a) Inline: the completion payload MIGHT carry the transcript (it usually
+  //     doesn't — it's the job-status object). We also read the fresher
+  //     output_storage_path from it: init's SAS can be short-lived, but the
+  //     completion payload's output SAS is read-scoped for ~7 days.
+  let completionOutputPath = outputPath;
   try {
     const j: any = JSON.parse(lastBody);
     const payload = j.data ?? j;
+    if (typeof payload.output_storage_path === 'string' && payload.output_storage_path) {
+      completionOutputPath = payload.output_storage_path;
+    }
     const inline = tryNormalize(payload, jobId);
     if (inline) return inline;
-    if (payload && typeof payload === 'object' && Object.keys(payload).length) rawDiag ||= `inline: ${snippet(payload)}`;
 
     // Explicit output URL in the completion payload.
     const explicit: string | undefined = payload.output_url ?? payload.output_file_url
@@ -209,16 +215,18 @@ export async function transcribe(opts: {
     }
   } catch { /* fall through */ }
 
-  // (b) PRIMARY: list the Azure output "directory" and try EVERY candidate blob
-  //     — some jobs write a manifest/status JSON alongside the transcript JSON,
-  //     so accepting only the first would silently yield an empty transcript.
-  const listing = await fetchAzureOutputByListing(outputPath);
+  // (b) PRIMARY: enumerate the Azure output "directory" and try EVERY candidate
+  //     blob. Sarvam's output SAS is DIRECTORY-scoped (sr=d, ADLS Gen2), so a
+  //     Blob container-list is rejected — this uses the DFS "List Paths" API
+  //     (with a Blob container-list fallback) to discover the real transcript
+  //     filename instead of guessing.
+  const listing = await fetchAzureOutputByListing(completionOutputPath);
   for (const cand of listing.candidates) {
     const norm = tryNormalize(cand.json, jobId);
     if (norm) return norm;
     rawDiag ||= `${cand.name}: ${snippet(cand.json)}`;
   }
-  diag.push(`listing(status=${listing.listStatus} fetch=${listing.fetchStatus ?? '-'}):[${listing.names.slice(0, 12).join(', ') || 'none'}]`);
+  diag.push(`listing(dfs=${listing.dfsStatus} blob=${listing.listStatus} fetch=${listing.fetchStatus ?? '-'}):[${listing.names.slice(0, 15).join(', ') || 'none'}]`);
 
   // (c) Sarvam REST endpoints for the job's result (cheap fallbacks).
   const REST_RESULT_PATHS = [
@@ -249,7 +257,7 @@ export async function transcribe(opts: {
   ]));
   const outputAttempts: string[] = [];
   for (const filename of OUTPUT_FILENAME_VARIANTS) {
-    const r = await fetch(joinBlob(outputPath, filename));
+    const r = await fetch(joinBlob(completionOutputPath, filename));
     if (r.ok) {
       const out = await r.json().catch(() => null);
       const norm = out && tryNormalize(out, jobId);
@@ -260,47 +268,82 @@ export async function transcribe(opts: {
   }
   diag.push(`blob:[${outputAttempts.join(' | ')}]`);
 
-  // Nothing yielded a usable transcript. If we DID fetch a JSON payload, lead
-  // with its raw shape — that's the thing that pinpoints the parser fix.
-  // Otherwise report the fetch attempts + completion body.
+  // Nothing yielded a usable transcript. Always include the directory listing +
+  // attempt statuses (that's what pinpoints the fix); if we fetched a JSON
+  // payload we couldn't parse, lead with its raw shape too.
+  const bodySnippet = (lastBody || '').slice(0, 300).replace(/\s+/g, ' ');
   if (rawDiag) {
-    throw new Error(`Sarvam returned no transcript we could parse — raw shape: ${rawDiag}`);
+    throw new Error(`Sarvam returned no transcript we could parse — raw shape: ${rawDiag} | ${diag.join(' | ')}`);
   }
-  const bodySnippet = (lastBody || '').slice(0, 400).replace(/\s+/g, ' ');
   throw new Error(`Sarvam output fetch failed. ${diag.join(' | ')} | completion_body='${bodySnippet}'`);
 }
 
 /**
- * Discover Sarvam's real output by LISTING the Azure blob "directory" the batch
- * job writes to, instead of guessing filenames. Returns EVERY plausible output
- * blob parsed (JSON, or plain-text wrapped as { transcript }), because a job may
- * write a manifest/status JSON next to the transcript JSON and we must try each.
- * `output_storage_path` is an Azure SAS URL pointing at the job's output prefix;
- * we list that prefix (`comp=list`) and fetch each candidate with the same SAS.
+ * Discover Sarvam's real output by ENUMERATING the Azure "directory" the batch
+ * job writes to, then fetching every plausible output blob (JSON, or plain-text
+ * wrapped as { transcript }) — a job may write a manifest/status JSON next to
+ * the transcript JSON, so we must try each.
+ *
+ * Sarvam's `output_storage_path` is a DIRECTORY-scoped SAS (`sr=d`, ADLS Gen2
+ * hierarchical namespace), NOT a container SAS — so a Blob `comp=list` is
+ * rejected. The correct enumeration is the DFS "List Paths" API on the
+ * `*.dfs.core.windows.net` endpoint; we fall back to the Blob container list
+ * for jobs that ever hand back a container SAS. Individual blobs are then read
+ * from the Blob endpoint (a directory SAS authorizes reads within its subtree).
  */
 async function fetchAzureOutputByListing(
   outputPath: string,
-): Promise<{ candidates: { name: string; json: any }[]; names: string[]; listStatus: number; fetchStatus?: number }> {
+): Promise<{ candidates: { name: string; json: any }[]; names: string[]; dfsStatus: number; listStatus: number; fetchStatus?: number }> {
   const qIdx = outputPath.indexOf('?');
   const beforeQ = qIdx >= 0 ? outputPath.slice(0, qIdx) : outputPath;
   const sas = qIdx >= 0 ? outputPath.slice(qIdx + 1) : '';
-  let origin = '', container = '', prefix = '';
+  let origin = '', container = '', dir = '';
   try {
     const u = new URL(beforeQ);
     origin = u.origin;
     const segs = u.pathname.replace(/^\//, '').split('/');
     container = segs.shift() || '';
-    prefix = segs.join('/');
+    dir = segs.join('/');
   } catch {
-    return { candidates: [], names: [], listStatus: 0 };
+    return { candidates: [], names: [], dfsStatus: 0, listStatus: 0 };
   }
-  const listUrl = `${origin}/${container}?restype=container&comp=list&prefix=${encodeURIComponent(prefix)}${sas ? '&' + sas : ''}`;
-  let listRes: Response;
-  try { listRes = await fetch(listUrl); } catch { return { candidates: [], names: [], listStatus: -1 }; }
-  const listStatus = listRes.status;
-  if (!listRes.ok) return { candidates: [], names: [], listStatus };
-  const xml = await listRes.text();
-  const names = Array.from(xml.matchAll(/<Name>([^<]+)<\/Name>/g)).map((m) => m[1]);
+
+  const names: string[] = [];
+  let dfsStatus = 0;
+  let listStatus = 0;
+
+  // (1) ADLS Gen2 DFS "List Paths" — the correct API for the directory SAS.
+  try {
+    const dfsOrigin = origin.replace('.blob.core.windows.net', '.dfs.core.windows.net');
+    const dfsUrl = `${dfsOrigin}/${container}?resource=filesystem&recursive=true&directory=${encodeURIComponent(dir)}${sas ? '&' + sas : ''}`;
+    // Some DFS List-Paths versions require x-ms-version; pass the SAS's own `sv`
+    // so the request can't be rejected for a missing/mismatched version.
+    const svMatch = /(?:^|&)sv=([^&]+)/.exec(sas);
+    const headers: Record<string, string> = svMatch ? { 'x-ms-version': decodeURIComponent(svMatch[1]) } : {};
+    const r = await fetch(dfsUrl, { headers });
+    dfsStatus = r.status;
+    if (r.ok) {
+      const j: any = await r.json().catch(() => null);
+      const paths: any[] = Array.isArray(j?.paths) ? j.paths : [];
+      for (const p of paths) {
+        if (p && p.name && String(p.isDirectory) !== 'true') names.push(String(p.name));
+      }
+    }
+  } catch { dfsStatus = -1; }
+
+  // (2) Blob "List Blobs" fallback — correct when the SAS is container-scoped.
+  if (!names.length) {
+    try {
+      const listUrl = `${origin}/${container}?restype=container&comp=list&prefix=${encodeURIComponent(dir)}${sas ? '&' + sas : ''}`;
+      const r = await fetch(listUrl);
+      listStatus = r.status;
+      if (r.ok) {
+        const xml = await r.text();
+        for (const m of xml.matchAll(/<Name>([^<]+)<\/Name>/g)) names.push(m[1]);
+      }
+    } catch { listStatus = -1; }
+  }
+
   const audio = /\.(m4a|wav|mp3|aac|mp4|opus|ogg|flac)$/i;
   // JSON blobs first (most likely the transcript), then any other non-audio
   // blob (a plain-text transcript). Cap the fetches so a huge listing can't
@@ -325,7 +368,7 @@ async function fetchAzureOutputByListing(
       if (!/^\s*</.test(txt)) candidates.push({ name, json: { transcript: txt } });
     }
   }
-  return { candidates, names, listStatus, fetchStatus };
+  return { candidates, names, dfsStatus, listStatus, fetchStatus };
 }
 
 const TRANSCRIPT_KEY_RE = /^(transcript|full_transcript|text|transcription)$/i;
