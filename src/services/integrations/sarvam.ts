@@ -19,6 +19,8 @@
  * downstream (parsing, storage, analysis) is decoupled from Sarvam via the
  * TranscriptResult contract.
  */
+import { transcodeToWav16kMono } from './audio';
+
 const BASE = process.env.SARVAM_BASE_URL || 'https://api.sarvam.ai';
 const MODEL = process.env.SARVAM_STT_MODEL || 'saarika:v2.5';
 const KEY = () => process.env.SARVAM_API_KEY || '';
@@ -93,12 +95,30 @@ export async function transcribe(opts: {
 
   if (opts.onJob) { try { await opts.onJob(jobId); } catch { /* persistence hiccup must not abort */ } }
 
-  // 2) upload audio to the presigned (Azure blob) input path
-  const uploadUrl = joinBlob(inputPath, opts.filename);
+  // 2) transcode → 16 kHz mono WAV, then upload to the presigned Azure blob.
+  //    Apple's AAC/m4a has repeatedly yielded an EMPTY transcript from Sarvam's
+  //    batch decoder even though the job "succeeds"; WAV PCM at 16 kHz is
+  //    Sarvam's recommended, most-reliably-decoded input. Best-effort: on any
+  //    transcode failure we upload the original bytes unchanged (never regress).
+  //    The measured peak/rms also disambiguates a silent recording from a
+  //    decode/upload issue if the transcript still comes back empty.
+  let uploadAudio: Buffer = opts.audio;
+  let uploadName = opts.filename;
+  let audioDiag = `src=${opts.audio.length}b transcode=skipped`;
+  try {
+    const t = await transcodeToWav16kMono(opts.audio, opts.filename);
+    uploadAudio = t.wav;
+    uploadName = replaceExt(opts.filename, 'wav');
+    audioDiag = `src=${opts.audio.length}b wav=${t.wav.length}b peak=${t.peak.toFixed(3)} rms=${t.rms.toFixed(3)} dur=${t.durationSec.toFixed(1)}s`;
+  } catch (e: any) {
+    audioDiag = `src=${opts.audio.length}b transcode_failed(${String(e?.message || e).slice(0, 100).replace(/\s+/g, ' ')})`;
+  }
+
+  const uploadUrl = joinBlob(inputPath, uploadName);
   const putRes = await fetch(uploadUrl, {
     method: 'PUT',
     headers: { 'x-ms-blob-type': 'BlockBlob', 'Content-Type': 'application/octet-stream' },
-    body: opts.audio,
+    body: uploadAudio,
   });
   if (!putRes.ok) throw new Error(`Sarvam upload failed (${putRes.status})`);
 
@@ -184,7 +204,7 @@ export async function transcribe(opts: {
   //    yields nothing, we FAIL with a snippet of its raw JSON — we never
   //    silently store an empty transcript — so the true field structure is
   //    captured and the next fix is exact.
-  const diag: string[] = [];
+  const diag: string[] = [`audio:${audioDiag}`];
   let rawDiag = '';
 
   // (a) Inline: the completion payload MIGHT carry the transcript (it usually
