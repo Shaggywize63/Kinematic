@@ -177,33 +177,50 @@ export async function transcribe(opts: {
     throw new Error(`Sarvam job timed out: jobId=${jobId} last_state='${state}' ${diag}`);
   }
 
-  // 5) fetch the output JSON — in order of preference:
-  //    (a) transcript already in the completion payload → skip network entirely
-  //    (b) explicit output URL in the completion payload
-  //    (c) filename guessing at output_storage_path (with fallbacks)
+  // 5) fetch the output JSON. Sarvam's real output shape has proven unstable
+  //    across jobs, so we (a) gather every plausible output blob, (b) run a
+  //    DEEP, shape-tolerant extractor over each, and (c) only accept a result
+  //    that actually yields a non-empty transcript. If a payload is fetched but
+  //    yields nothing, we FAIL with a snippet of its raw JSON — we never
+  //    silently store an empty transcript — so the true field structure is
+  //    captured and the next fix is exact.
+  const diag: string[] = [];
+  let rawDiag = '';
+
+  // (a) Inline: the completion payload itself may carry the transcript.
   try {
     const j: any = JSON.parse(lastBody);
     const payload = j.data ?? j;
-    // Inline: the poll response IS the result. Many batch APIs do this.
-    const inlineTranscript = payload.transcript ?? payload.text ?? payload.diarized_transcript;
-    if (inlineTranscript !== undefined && inlineTranscript !== null) {
-      return normalize(payload, jobId);
-    }
-    // Explicit URL in the completion payload.
+    const inline = tryNormalize(payload, jobId);
+    if (inline) return inline;
+    if (payload && typeof payload === 'object' && Object.keys(payload).length) rawDiag ||= `inline: ${snippet(payload)}`;
+
+    // Explicit output URL in the completion payload.
     const explicit: string | undefined = payload.output_url ?? payload.output_file_url
       ?? payload.result_url ?? payload.data?.output_url ?? payload.outputs?.[0]?.url;
     if (typeof explicit === 'string' && /^https?:\/\//i.test(explicit)) {
       const r = await fetch(explicit);
-      if (r.ok) return normalize(await r.json(), jobId);
+      if (r.ok) {
+        const out = await r.json().catch(() => null);
+        const norm = out && tryNormalize(out, jobId);
+        if (norm) return norm;
+        if (out) rawDiag ||= `explicit: ${snippet(out)}`;
+      }
     }
   } catch { /* fall through */ }
 
-  // (d) PRIMARY: list the Azure output "directory" and fetch whatever file
-  //     Sarvam actually wrote — no filename guessing. This is what resolves it.
+  // (b) PRIMARY: list the Azure output "directory" and try EVERY candidate blob
+  //     — some jobs write a manifest/status JSON alongside the transcript JSON,
+  //     so accepting only the first would silently yield an empty transcript.
   const listing = await fetchAzureOutputByListing(outputPath);
-  if (listing.result !== undefined) return normalize(listing.result, jobId);
+  for (const cand of listing.candidates) {
+    const norm = tryNormalize(cand.json, jobId);
+    if (norm) return norm;
+    rawDiag ||= `${cand.name}: ${snippet(cand.json)}`;
+  }
+  diag.push(`listing(status=${listing.listStatus} fetch=${listing.fetchStatus ?? '-'}):[${listing.names.slice(0, 12).join(', ') || 'none'}]`);
 
-  // (e) Sarvam REST endpoints for the job's result (cheap fallbacks).
+  // (c) Sarvam REST endpoints for the job's result (cheap fallbacks).
   const REST_RESULT_PATHS = [
     `/speech-to-text/job/${jobId}/result`,
     `/speech-to-text/job/${jobId}/output`,
@@ -214,12 +231,16 @@ export async function transcribe(opts: {
   for (const path of REST_RESULT_PATHS) {
     const r = await sarvamFetch(path, { method: 'GET' });
     if (r.ok) {
-      try { return normalize(await r.json(), jobId); } catch { /* keep trying */ }
+      const out = await r.json().catch(() => null);
+      const norm = out && tryNormalize(out, jobId);
+      if (norm) return norm;
+      if (out) rawDiag ||= `rest ${path}: ${snippet(out)}`;
     }
     restAttempts.push(`${path}→${r.status}`);
   }
+  diag.push(`rest:[${restAttempts.join(' | ')}]`);
 
-  // (f) Last resort: filename guessing at the blob output_storage_path.
+  // (d) Last resort: filename guessing at the blob output_storage_path.
   const inputBase = opts.filename.replace(/\.[^.]+$/, '');
   const OUTPUT_FILENAME_VARIANTS = Array.from(new Set([
     replaceExt(opts.filename, 'json'), `${opts.filename}.json`,
@@ -229,29 +250,37 @@ export async function transcribe(opts: {
   const outputAttempts: string[] = [];
   for (const filename of OUTPUT_FILENAME_VARIANTS) {
     const r = await fetch(joinBlob(outputPath, filename));
-    if (r.ok) { try { return normalize(await r.json(), jobId); } catch { /* keep trying */ } }
+    if (r.ok) {
+      const out = await r.json().catch(() => null);
+      const norm = out && tryNormalize(out, jobId);
+      if (norm) return norm;
+      if (out) rawDiag ||= `blob ${filename}: ${snippet(out)}`;
+    }
     outputAttempts.push(`${filename}→${r.status}`);
   }
+  diag.push(`blob:[${outputAttempts.join(' | ')}]`);
 
-  // Lead the error with the directory listing (the actual filenames present)
-  // and the completion body — the two things that pinpoint the fix.
-  const bodySnippet = (lastBody || '').slice(0, 600).replace(/\s+/g, ' ');
-  throw new Error(
-    `Sarvam output fetch failed. LISTING(status=${listing.listStatus} fetch=${listing.fetchStatus ?? '-'}): [${listing.names.slice(0, 12).join(', ') || 'none'}] | `
-    + `completion_body='${bodySnippet}' | rest:[${restAttempts.join(' | ')}] blob:[${outputAttempts.join(' | ')}]`,
-  );
+  // Nothing yielded a usable transcript. If we DID fetch a JSON payload, lead
+  // with its raw shape — that's the thing that pinpoints the parser fix.
+  // Otherwise report the fetch attempts + completion body.
+  if (rawDiag) {
+    throw new Error(`Sarvam returned no transcript we could parse — raw shape: ${rawDiag}`);
+  }
+  const bodySnippet = (lastBody || '').slice(0, 400).replace(/\s+/g, ' ');
+  throw new Error(`Sarvam output fetch failed. ${diag.join(' | ')} | completion_body='${bodySnippet}'`);
 }
 
 /**
- * Discover Sarvam's real output filename by LISTING the Azure blob "directory"
- * the batch job writes to, instead of guessing. Returns the parsed JSON if a
- * blob was found + fetched. `output_storage_path` is an Azure SAS URL pointing
- * at the job's output prefix; we list that prefix (`comp=list`), pick the
- * JSON/text blob, and fetch it with the same SAS.
+ * Discover Sarvam's real output by LISTING the Azure blob "directory" the batch
+ * job writes to, instead of guessing filenames. Returns EVERY plausible output
+ * blob parsed (JSON, or plain-text wrapped as { transcript }), because a job may
+ * write a manifest/status JSON next to the transcript JSON and we must try each.
+ * `output_storage_path` is an Azure SAS URL pointing at the job's output prefix;
+ * we list that prefix (`comp=list`) and fetch each candidate with the same SAS.
  */
 async function fetchAzureOutputByListing(
   outputPath: string,
-): Promise<{ result?: any; names: string[]; listStatus: number; fetchStatus?: number }> {
+): Promise<{ candidates: { name: string; json: any }[]; names: string[]; listStatus: number; fetchStatus?: number }> {
   const qIdx = outputPath.indexOf('?');
   const beforeQ = qIdx >= 0 ? outputPath.slice(0, qIdx) : outputPath;
   const sas = qIdx >= 0 ? outputPath.slice(qIdx + 1) : '';
@@ -263,46 +292,159 @@ async function fetchAzureOutputByListing(
     container = segs.shift() || '';
     prefix = segs.join('/');
   } catch {
-    return { names: [], listStatus: 0 };
+    return { candidates: [], names: [], listStatus: 0 };
   }
   const listUrl = `${origin}/${container}?restype=container&comp=list&prefix=${encodeURIComponent(prefix)}${sas ? '&' + sas : ''}`;
   let listRes: Response;
-  try { listRes = await fetch(listUrl); } catch { return { names: [], listStatus: -1 }; }
+  try { listRes = await fetch(listUrl); } catch { return { candidates: [], names: [], listStatus: -1 }; }
   const listStatus = listRes.status;
-  if (!listRes.ok) return { names: [], listStatus };
+  if (!listRes.ok) return { candidates: [], names: [], listStatus };
   const xml = await listRes.text();
   const names = Array.from(xml.matchAll(/<Name>([^<]+)<\/Name>/g)).map((m) => m[1]);
-  const audio = /\.(m4a|wav|mp3|aac|opus|ogg|flac)$/i;
-  const pick = names.find((n) => /\.json$/i.test(n))
-    ?? names.find((n) => !audio.test(n))
-    ?? names[names.length - 1];
-  if (!pick) return { names, listStatus };
-  const blobUrl = `${origin}/${container}/${pick.split('/').map(encodeURIComponent).join('/')}${sas ? '?' + sas : ''}`;
-  let r: Response;
-  try { r = await fetch(blobUrl); } catch { return { names, listStatus, fetchStatus: -1 }; }
-  if (r.ok) {
-    try { return { result: await r.json(), names, listStatus, fetchStatus: 200 }; }
-    catch { return { names, listStatus, fetchStatus: 200 }; }
+  const audio = /\.(m4a|wav|mp3|aac|mp4|opus|ogg|flac)$/i;
+  // JSON blobs first (most likely the transcript), then any other non-audio
+  // blob (a plain-text transcript). Cap the fetches so a huge listing can't
+  // stall the pipeline.
+  const ordered = [
+    ...names.filter((n) => /\.json$/i.test(n)),
+    ...names.filter((n) => !/\.json$/i.test(n) && !audio.test(n)),
+  ];
+  const candidates: { name: string; json: any }[] = [];
+  let fetchStatus: number | undefined;
+  for (const name of ordered.slice(0, 6)) {
+    const blobUrl = `${origin}/${container}/${name.split('/').map(encodeURIComponent).join('/')}${sas ? '?' + sas : ''}`;
+    let r: Response;
+    try { r = await fetch(blobUrl); } catch { continue; }
+    fetchStatus = r.status;
+    if (!r.ok) continue;
+    const txt = await r.text().catch(() => '');
+    if (!txt) continue;
+    try { candidates.push({ name, json: JSON.parse(txt) }); }
+    catch {
+      // Not JSON — if it isn't XML/HTML, treat it as a plain-text transcript.
+      if (!/^\s*</.test(txt)) candidates.push({ name, json: { transcript: txt } });
+    }
   }
-  return { names, listStatus, fetchStatus: r.status };
+  return { candidates, names, listStatus, fetchStatus };
 }
 
-/** Map Sarvam's output JSON into our normalized contract, defensively. */
+const TRANSCRIPT_KEY_RE = /^(transcript|full_transcript|text|transcription)$/i;
+const LANG_KEY_RE = /^(language_code|language|lang|detected_language)$/i;
+const WRAPPER_KEYS = ['output', 'result', 'results', 'data', 'outputs', 'response'];
+
+/**
+ * tryNormalize returns a normalized result ONLY if it carries a non-empty
+ * transcript; otherwise null. Lets callers walk multiple candidate blobs and
+ * accept the first that actually decodes to speech (never a manifest/empty).
+ */
+function tryNormalize(out: any, jobId: string): TranscriptResult | null {
+  const norm = normalize(out, jobId);
+  return norm.transcript.trim() ? norm : null;
+}
+
+/**
+ * Map Sarvam's output JSON into our normalized contract. Sarvam's real batch
+ * output shape has varied across jobs (top-level, nested under output/result/
+ * data, wrapped in a single-element array, keyed by filename), so we DEEP-search
+ * for the transcript string and the diarized entries rather than reading fixed
+ * paths.
+ */
 function normalize(out: any, jobId: string): TranscriptResult {
-  const transcript: string = out.transcript || out.text || '';
-  const language: string | null = out.language_code || out.language || null;
-  const raw = out.diarized_transcript?.entries || out.diarized_transcript || out.segments || [];
-  const segments: DiarizedSegment[] = Array.isArray(raw)
-    ? raw.map((e: any) => ({
-        speaker: e.speaker_id || e.speaker || 'SPEAKER',
-        text: e.transcript || e.text || '',
-        start: numOrUndef(e.start_time_seconds ?? e.start),
-        end: numOrUndef(e.end_time_seconds ?? e.end),
-      })).filter((s: DiarizedSegment) => s.text)
-    : [];
-  // If diarization is absent, fall back to the flat transcript as one segment.
+  const language = deepFindLanguage(out);
+  let transcript = deepFindTranscript(out);
+  const rawEntries = deepFindEntries(out);
+  const segments: DiarizedSegment[] = rawEntries
+    .map((e: any) => ({
+      speaker: e.speaker_id || e.speaker || e.speaker_label || 'SPEAKER',
+      text: (typeof e.transcript === 'string' ? e.transcript : e.text) || '',
+      start: numOrUndef(e.start_time_seconds ?? e.start ?? e.start_time),
+      end: numOrUndef(e.end_time_seconds ?? e.end ?? e.end_time),
+    }))
+    .filter((s: DiarizedSegment) => s.text.trim());
+  if (!transcript && segments.length) transcript = segments.map((s) => s.text).join(' ');
   if (!segments.length && transcript) segments.push({ speaker: 'SPEAKER', text: transcript });
-  return { transcript: transcript || segments.map((s) => s.text).join(' '), segments, language, jobId };
+  return { transcript: transcript || '', segments, language, jobId };
+}
+
+/** First non-empty string found under a transcript-ish key, at any depth. */
+function deepFindTranscript(node: any, depth = 0): string {
+  if (node == null || depth > 6) return '';
+  if (Array.isArray(node)) {
+    for (const el of node) {
+      const t = deepFindTranscript(el, depth + 1);
+      if (t) return t;
+    }
+    return '';
+  }
+  if (typeof node !== 'object') return '';
+  // Direct transcript-ish string keys win.
+  for (const k of Object.keys(node)) {
+    if (TRANSCRIPT_KEY_RE.test(k) && typeof node[k] === 'string' && node[k].trim()) return node[k];
+  }
+  // Then likely wrappers first, then everything else.
+  const order = [
+    ...WRAPPER_KEYS.filter((k) => k in node),
+    ...Object.keys(node).filter((k) => !WRAPPER_KEYS.includes(k)),
+  ];
+  for (const k of order) {
+    const t = deepFindTranscript(node[k], depth + 1);
+    if (t) return t;
+  }
+  return '';
+}
+
+/** First diarized-entries array found at any depth. */
+function deepFindEntries(node: any, depth = 0): any[] {
+  if (node == null || depth > 6) return [];
+  if (Array.isArray(node)) {
+    if (node.length && node.every((e: any) =>
+      e && typeof e === 'object' && !Array.isArray(e) &&
+      (e.speaker !== undefined || e.speaker_id !== undefined || e.speaker_label !== undefined) &&
+      (typeof e.transcript === 'string' || typeof e.text === 'string'))) {
+      return node;
+    }
+    for (const el of node) {
+      const r = deepFindEntries(el, depth + 1);
+      if (r.length) return r;
+    }
+    return [];
+  }
+  if (typeof node !== 'object') return [];
+  // Common wrapper: { diarized_transcript: { entries: [...] } | [...] }.
+  const dt = node.diarized_transcript;
+  if (dt) {
+    if (Array.isArray(dt)) { const r = deepFindEntries(dt, depth + 1); if (r.length) return r; }
+    else if (Array.isArray(dt.entries)) { const r = deepFindEntries(dt.entries, depth + 1); if (r.length) return r; }
+  }
+  for (const k of Object.keys(node)) {
+    const r = deepFindEntries(node[k], depth + 1);
+    if (r.length) return r;
+  }
+  return [];
+}
+
+/** First language-code string found at any depth. */
+function deepFindLanguage(node: any, depth = 0): string | null {
+  if (node == null || depth > 6) return null;
+  if (Array.isArray(node)) {
+    for (const el of node) { const l = deepFindLanguage(el, depth + 1); if (l) return l; }
+    return null;
+  }
+  if (typeof node !== 'object') return null;
+  for (const k of Object.keys(node)) {
+    if (LANG_KEY_RE.test(k) && typeof node[k] === 'string' && node[k].trim()) return node[k];
+  }
+  for (const k of Object.keys(node)) {
+    const l = deepFindLanguage(node[k], depth + 1);
+    if (l) return l;
+  }
+  return null;
+}
+
+/** Compact one-line JSON snippet for diagnostics (fail() keeps up to 2000 ch). */
+function snippet(obj: any): string {
+  try { return JSON.stringify(obj).slice(0, 1200).replace(/\s+/g, ' '); }
+  catch { return String(obj).slice(0, 1200); }
 }
 
 function joinBlob(base: string, file: string): string {
