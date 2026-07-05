@@ -198,7 +198,12 @@ export async function transcribe(opts: {
     }
   } catch { /* fall through */ }
 
-  // (d) Sarvam REST endpoints for the job's result — try before blob guessing.
+  // (d) PRIMARY: list the Azure output "directory" and fetch whatever file
+  //     Sarvam actually wrote — no filename guessing. This is what resolves it.
+  const listing = await fetchAzureOutputByListing(outputPath);
+  if (listing.result !== undefined) return normalize(listing.result, jobId);
+
+  // (e) Sarvam REST endpoints for the job's result (cheap fallbacks).
   const REST_RESULT_PATHS = [
     `/speech-to-text/job/${jobId}/result`,
     `/speech-to-text/job/${jobId}/output`,
@@ -214,37 +219,72 @@ export async function transcribe(opts: {
     restAttempts.push(`${path}→${r.status}`);
   }
 
-  // (e) Filename guessing at the blob output_storage_path.
+  // (f) Last resort: filename guessing at the blob output_storage_path.
   const inputBase = opts.filename.replace(/\.[^.]+$/, '');
   const OUTPUT_FILENAME_VARIANTS = Array.from(new Set([
-    replaceExt(opts.filename, 'json'),   // audio.m4a → audio.json
-    `${opts.filename}.json`,              // audio.m4a.json (append)
-    `${inputBase}.result.json`,
-    `${inputBase}.transcript.json`,
-    `${inputBase}_result.json`,
-    `${inputBase}_transcript.json`,
-    `${inputBase}.txt`,
-    'transcript.json', 'output.json', 'result.json',
-    `${jobId}.json`, `${jobId}`,
+    replaceExt(opts.filename, 'json'), `${opts.filename}.json`,
+    `${inputBase}.result.json`, `${inputBase}.transcript.json`,
+    'transcript.json', 'output.json', 'result.json', `${jobId}.json`, `${jobId}`,
   ]));
   const outputAttempts: string[] = [];
   for (const filename of OUTPUT_FILENAME_VARIANTS) {
-    const candUrl = joinBlob(outputPath, filename);
-    const r = await fetch(candUrl);
-    if (r.ok) {
-      try { return normalize(await r.json(), jobId); } catch { /* keep trying */ }
-    }
+    const r = await fetch(joinBlob(outputPath, filename));
+    if (r.ok) { try { return normalize(await r.json(), jobId); } catch { /* keep trying */ } }
     outputAttempts.push(`${filename}→${r.status}`);
   }
 
-  // On all-failure, include the completion body snippet — that's the payload
-  // that told us the job was done, and it very likely names the output file
-  // somewhere I haven't checked yet.
-  const bodySnippet = (lastBody || '').slice(0, 400).replace(/\s+/g, ' ');
+  // Lead the error with the directory listing (the actual filenames present)
+  // and the completion body — the two things that pinpoint the fix.
+  const bodySnippet = (lastBody || '').slice(0, 600).replace(/\s+/g, ' ');
   throw new Error(
-    `Sarvam output fetch failed — rest: [${restAttempts.join(' | ')}] blob: [${outputAttempts.join(' | ')}] `
-    + `path='${outputPath.slice(0, 300)}' completion_body='${bodySnippet}'`,
+    `Sarvam output fetch failed. LISTING(status=${listing.listStatus} fetch=${listing.fetchStatus ?? '-'}): [${listing.names.slice(0, 12).join(', ') || 'none'}] | `
+    + `completion_body='${bodySnippet}' | rest:[${restAttempts.join(' | ')}] blob:[${outputAttempts.join(' | ')}]`,
   );
+}
+
+/**
+ * Discover Sarvam's real output filename by LISTING the Azure blob "directory"
+ * the batch job writes to, instead of guessing. Returns the parsed JSON if a
+ * blob was found + fetched. `output_storage_path` is an Azure SAS URL pointing
+ * at the job's output prefix; we list that prefix (`comp=list`), pick the
+ * JSON/text blob, and fetch it with the same SAS.
+ */
+async function fetchAzureOutputByListing(
+  outputPath: string,
+): Promise<{ result?: any; names: string[]; listStatus: number; fetchStatus?: number }> {
+  const qIdx = outputPath.indexOf('?');
+  const beforeQ = qIdx >= 0 ? outputPath.slice(0, qIdx) : outputPath;
+  const sas = qIdx >= 0 ? outputPath.slice(qIdx + 1) : '';
+  let origin = '', container = '', prefix = '';
+  try {
+    const u = new URL(beforeQ);
+    origin = u.origin;
+    const segs = u.pathname.replace(/^\//, '').split('/');
+    container = segs.shift() || '';
+    prefix = segs.join('/');
+  } catch {
+    return { names: [], listStatus: 0 };
+  }
+  const listUrl = `${origin}/${container}?restype=container&comp=list&prefix=${encodeURIComponent(prefix)}${sas ? '&' + sas : ''}`;
+  let listRes: Response;
+  try { listRes = await fetch(listUrl); } catch { return { names: [], listStatus: -1 }; }
+  const listStatus = listRes.status;
+  if (!listRes.ok) return { names: [], listStatus };
+  const xml = await listRes.text();
+  const names = Array.from(xml.matchAll(/<Name>([^<]+)<\/Name>/g)).map((m) => m[1]);
+  const audio = /\.(m4a|wav|mp3|aac|opus|ogg|flac)$/i;
+  const pick = names.find((n) => /\.json$/i.test(n))
+    ?? names.find((n) => !audio.test(n))
+    ?? names[names.length - 1];
+  if (!pick) return { names, listStatus };
+  const blobUrl = `${origin}/${container}/${pick.split('/').map(encodeURIComponent).join('/')}${sas ? '?' + sas : ''}`;
+  let r: Response;
+  try { r = await fetch(blobUrl); } catch { return { names, listStatus, fetchStatus: -1 }; }
+  if (r.ok) {
+    try { return { result: await r.json(), names, listStatus, fetchStatus: 200 }; }
+    catch { return { names, listStatus, fetchStatus: 200 }; }
+  }
+  return { names, listStatus, fetchStatus: r.status };
 }
 
 /** Map Sarvam's output JSON into our normalized contract, defensively. */
