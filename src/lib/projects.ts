@@ -74,13 +74,48 @@ function buildRegistry(): Record<string, ProjectConfig> {
 
 const REGISTRY = buildRegistry();
 
-export function isKnownProject(key: string | undefined | null): boolean {
-  return !!key && Object.prototype.hasOwnProperty.call(REGISTRY, key);
+// ── Dynamic registry (runtime-provisioned projects) ──────────────────────
+// Projects created by the onboarding provisioner don't exist as env vars at
+// boot — their connection details live in the control-plane `platform_projects`
+// table and are loaded into this map at startup (and on each new provision) by
+// src/lib/platformProjects.ts. Every resolver below consults the static
+// REGISTRY first (env-configured, never overridden) and this map second, so a
+// runtime project becomes reachable via adminClientFor()/getProjectConfig()
+// exactly like a compile-time one. A dynamic entry can NEVER shadow a static
+// key (the static one wins), keeping default/kinematic behaviour byte-identical.
+const DYNAMIC: Record<string, ProjectConfig> = {};
+
+/** Register/refresh a runtime-provisioned project. Ignored if the key collides
+ *  with a static (env) project, which must always win. Clears any cached client
+ *  so a rotated key takes effect. */
+export function upsertDynamicProject(cfg: ProjectConfig): void {
+  if (REGISTRY[cfg.key]) return;
+  DYNAMIC[cfg.key] = cfg;
+  adminClients.delete(cfg.key);
+  anonClients.delete(cfg.key);
+  verifiers.delete(cfg.key);
 }
 
-/** All configured project keys (e.g. ['default','kinematic']). */
+export function removeDynamicProject(key: string): void {
+  delete DYNAMIC[key];
+  adminClients.delete(key);
+  anonClients.delete(key);
+  verifiers.delete(key);
+}
+
+function lookupConfig(key?: string | null): ProjectConfig | undefined {
+  if (!key) return undefined;
+  return REGISTRY[key] || DYNAMIC[key];
+}
+
+export function isKnownProject(key: string | undefined | null): boolean {
+  return !!key && (Object.prototype.hasOwnProperty.call(REGISTRY, key)
+    || Object.prototype.hasOwnProperty.call(DYNAMIC, key));
+}
+
+/** All configured project keys (env + runtime-provisioned). */
 export function knownProjectKeys(): string[] {
-  return Object.keys(REGISTRY);
+  return Array.from(new Set([...Object.keys(REGISTRY), ...Object.keys(DYNAMIC)]));
 }
 
 /**
@@ -102,12 +137,11 @@ export function fallbackProjectKey(): string {
 }
 
 export function listProjectKeys(): string[] {
-  return Object.keys(REGISTRY);
+  return knownProjectKeys();
 }
 
 export function getProjectConfig(key?: string | null): ProjectConfig {
-  if (key && REGISTRY[key]) return REGISTRY[key];
-  return REGISTRY[fallbackProjectKey()];
+  return lookupConfig(key) ?? REGISTRY[fallbackProjectKey()];
 }
 
 // ── Per-request current project (AsyncLocalStorage) ──────────────────────

@@ -9,6 +9,7 @@ import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
+import { provisionClient as runProvision, provisioningPreflight } from '../services/provisionClient.service';
 
 // Tata (default project) keeps the legacy single-org model: a client lives in
 // the admin's own org and is scoped by `org_id`. Non-default projects (e.g.
@@ -190,6 +191,49 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
   }
 
   created(res, { ...client, modules: modules || [] });
+});
+
+/**
+ * GET /api/v1/clients/provision/preflight
+ * Super-admin only: is automated per-client project provisioning available on
+ * this deployment? Lets the UI show/hide the "dedicated project" toggle.
+ */
+export const provisionPreflight = asyncHandler(async (_req: AuthRequest, res: Response) => {
+  ok(res, provisioningPreflight());
+});
+
+/**
+ * POST /api/v1/clients/provision
+ * Super-admin only: fully automated onboarding — creates a dedicated Supabase
+ * project (separate DB) for the client, loads the golden schema, creates its
+ * org + client record + admin user (test@<slug>.com), creates the control-plane
+ * client record in Kinematic, and links the two. Idempotent via Idempotency-Key.
+ */
+export const provisionClientHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const { name, contact_person, phone, email, password, modules, region } = req.body || {};
+  if (!name || typeof name !== 'string') { badRequest(res, 'Client name is required'); return; }
+
+  const pre = provisioningPreflight();
+  if (!pre.ok) { badRequest(res, pre.reason || 'Provisioning is not configured'); return; }
+
+  try {
+    const result = await runProvision({
+      name: name.trim(),
+      contactPerson: contact_person,
+      phone,
+      adminEmail: typeof email === 'string' && email.trim() ? email.trim() : undefined,
+      adminPassword: typeof password === 'string' && password ? password : undefined,
+      modules: Array.isArray(modules) ? modules : [],
+      region: typeof region === 'string' ? region : undefined,
+      actorUserId: user.id,
+      actorOrgId: user.org_id,
+      idempotencyKey: (req.headers['idempotency-key'] as string) || undefined,
+    });
+    created(res, result);
+  } catch (e: any) {
+    badRequest(res, `Provisioning failed: ${e?.message || e}`);
+  }
 });
 
 /**

@@ -1,5 +1,6 @@
 import app from './app';
 import { logger } from './lib/logger';
+import { loadDynamicProjects } from './lib/platformProjects';
 import { runScheduledAutomations } from './services/crm/automations.service';
 import { runDueReportDigests } from './services/crm/reportSchedules.service';
 import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
@@ -12,6 +13,13 @@ const server = app.listen(PORT, () => {
   logger.info(`   Health      : http://localhost:${PORT}/health`);
   logger.info(`   API base    : http://localhost:${PORT}/api/v1`);
 });
+
+// Hydrate the dynamic project registry with any client projects created by the
+// onboarding provisioner. Non-fatal: a failure just means those tenants aren't
+// reachable until the next successful load (env-configured projects are unaffected).
+loadDynamicProjects()
+  .then((n) => { if (n) logger.info(`[startup] hydrated ${n} runtime project(s)`); })
+  .catch((e) => logger.warn(`[startup] dynamic project load failed: ${e?.message ?? e}`));
 
 // Slowloris / hung-connection protection. headersTimeout slightly exceeds
 // keepAliveTimeout per Node's recommendation; requestTimeout caps any single
