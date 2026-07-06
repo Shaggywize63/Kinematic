@@ -243,13 +243,15 @@ export function projectHs256Key(key: string): Uint8Array | null {
 }
 
 // ── email → project directory ────────────────────────────────────────────
-// Config-driven so we never touch a tenant DB to route a login. JSON maps:
-//   PROJECT_EMAIL_DIRECTORY  = {"s@kinematicapp.com":"kinematic"}   (exact email)
-//   PROJECT_DOMAIN_DIRECTORY = {"example.com":"kinematic"}          (whole domain)
-// Exact-email entries win over domain entries. Anything unmatched resolves to
-// DEFAULT_PROJECT, preserving current behaviour. Prefer exact-email mapping
-// for shared domains (e.g. @kinematicapp.com staff who belong to the default
-// tenant must NOT be domain-routed).
+// A login is routed to the project the user ACTUALLY lives in — we look the
+// email up in each project's users table (resolveProjectForEmailAsync) rather
+// than guessing from the email's domain. No domain is ever hardcoded to a
+// project: a @kinematicapp.com account that belongs to a Tata org routes to
+// Tata, and the same domain in a Kinematic org routes to Kinematic, purely
+// from where the row exists. Optional env maps still let ops PIN a routing when
+// they need to (exact-email wins over everything, then whole-domain):
+//   PROJECT_EMAIL_DIRECTORY  = {"someone@x.com":"kinematic"}   (exact email)
+//   PROJECT_DOMAIN_DIRECTORY = {"example.com":"kinematic"}     (whole domain)
 function parseJsonMap(envVal?: string): Record<string, string> {
   if (!envVal) return {};
   try {
@@ -267,29 +269,88 @@ function parseJsonMap(envVal?: string): Record<string, string> {
 const EMAIL_DIRECTORY = parseJsonMap(process.env.PROJECT_EMAIL_DIRECTORY);
 const DOMAIN_DIRECTORY = parseJsonMap(process.env.PROJECT_DOMAIN_DIRECTORY);
 
-// Built-in routing defaults so the platform's OWN accounts resolve correctly
-// even before any PROJECT_*_DIRECTORY env is set. The Kinematic platform admins
-// live in the 'kinematic' project, not the default (Tata) one. Env directories
-// override these; only applied when the target project is actually configured.
-// Tata users use other domains, so this never affects them.
-const BUILTIN_DOMAIN_DIRECTORY: Record<string, string> = {
-  'kinematicapp.com': 'kinematic',
-};
+// Order in which we probe projects for the email. Explicit (non-default)
+// projects first, the default (Tata catch-all) last, so a rare cross-project
+// duplicate resolves to the more specific tenant deterministically.
+function projectSearchOrder(): string[] {
+  const keys = knownProjectKeys();
+  const ordered = [...keys.filter(k => k !== DEFAULT_PROJECT), DEFAULT_PROJECT];
+  return ordered.filter((k, i, a) => a.indexOf(k) === i);
+}
 
-export function resolveProjectForEmail(email: string | undefined | null): string {
+// Small TTL cache so we don't hit every project DB on each keystroke/login.
+const emailProjectCache = new Map<string, { project: string; at: number }>();
+const EMAIL_PROJECT_TTL_MS = 5 * 60_000;
+
+/** Forget a cached routing (call after creating/moving/deleting a user). */
+export function clearEmailProjectCache(email?: string | null): void {
+  if (email) emailProjectCache.delete(email.trim().toLowerCase());
+  else emailProjectCache.clear();
+}
+
+/**
+ * Resolve which Supabase project a login email belongs to by finding the
+ * project whose `users` table actually holds that email. Active rows win over
+ * inactive; env pins override the lookup. Unknown emails fall back to the
+ * default project (so a brand-new/unseen email still lands somewhere sane).
+ */
+export async function resolveProjectForEmailAsync(email?: string | null): Promise<string> {
   const e = (email || '').trim().toLowerCase();
   if (!e) return fallbackProjectKey();
 
+  // 1. Exact-email env pin wins over everything.
   const exact = EMAIL_DIRECTORY[e];
   if (exact && isKnownProject(exact)) return exact;
 
+  const cached = emailProjectCache.get(e);
+  if (cached && Date.now() - cached.at < EMAIL_PROJECT_TTL_MS) return cached.project;
+
+  // 2. Data-driven: which project's users table holds this email?
+  let firstInactive: string | null = null;
+  for (const key of projectSearchOrder()) {
+    try {
+      const { data } = await adminClientFor(key)
+        .from('users').select('is_active').eq('email', e).limit(1).maybeSingle();
+      if (data) {
+        if ((data as { is_active?: boolean }).is_active !== false) {
+          emailProjectCache.set(e, { project: key, at: Date.now() });
+          return key;
+        }
+        if (!firstInactive) firstInactive = key;
+      }
+    } catch { /* project unreachable — skip it */ }
+  }
+  if (firstInactive) {
+    emailProjectCache.set(e, { project: firstInactive, at: Date.now() });
+    return firstInactive;
+  }
+
+  // 3. Optional whole-domain env pin.
   const at = e.lastIndexOf('@');
   if (at >= 0) {
-    const domain = e.slice(at + 1);
-    const byDomain = DOMAIN_DIRECTORY[domain] || BUILTIN_DOMAIN_DIRECTORY[domain];
+    const byDomain = DOMAIN_DIRECTORY[e.slice(at + 1)];
     if (byDomain && isKnownProject(byDomain)) return byDomain;
   }
 
+  // 4. Fallback — the default project.
+  return fallbackProjectKey();
+}
+
+/**
+ * Synchronous, config-only resolver (env pins + fallback, NO DB lookup and NO
+ * hardcoded domain). Retained for non-login code paths that can't await; the
+ * login project-for-email endpoint uses the async, data-driven resolver above.
+ */
+export function resolveProjectForEmail(email: string | undefined | null): string {
+  const e = (email || '').trim().toLowerCase();
+  if (!e) return fallbackProjectKey();
+  const exact = EMAIL_DIRECTORY[e];
+  if (exact && isKnownProject(exact)) return exact;
+  const at = e.lastIndexOf('@');
+  if (at >= 0) {
+    const byDomain = DOMAIN_DIRECTORY[e.slice(at + 1)];
+    if (byDomain && isKnownProject(byDomain)) return byDomain;
+  }
   return fallbackProjectKey();
 }
 

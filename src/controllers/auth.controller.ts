@@ -9,17 +9,18 @@ import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
 import { resolveEntitlements } from '../lib/entitlements';
 import { invalidateAuthCache } from '../middleware/auth';
-import { resolveProjectForEmail } from '../lib/projects';
+import { resolveProjectForEmailAsync } from '../lib/projects';
 import * as passwordReset from '../services/auth/passwordReset.service';
 
 // GET /api/v1/auth/project-for-email?email=...
 // Pre-login lookup so the web dashboard (single URL, multiple Supabase
 // projects) can stamp the correct X-Kinematic-Project header on the login
-// request. Pure config lookup — no DB hit, no auth required. Unknown emails
-// resolve to the default project, so this is always safe to call.
+// request. Data-driven: routes to whichever project's users table holds the
+// email (the org the user actually lives in), not a hardcoded domain. No auth
+// required; unknown emails resolve to the default project, so it's safe to call.
 export const projectForEmail = asyncHandler<Request>(async (req, res) => {
   const email = String((req.query.email as string) || '').trim();
-  return ok(res, { project: resolveProjectForEmail(email) });
+  return ok(res, { project: await resolveProjectForEmailAsync(email) });
 });
 
 const loginSchema = z.object({
