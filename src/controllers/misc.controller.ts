@@ -219,12 +219,15 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   let query = supabaseAdmin.from('users').select('*, org_role:org_roles!org_role_id(name)', { count: 'exact' });
 
   const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager', 'sub_admin', 'main_admin', 'client'].includes(user.role?.toLowerCase());
-  const isSuper = user.role?.toLowerCase() === 'super_admin';
 
-  if (!isSuper) {
-    if (user.org_id) {
-      query = query.eq('org_id', user.org_id);
-    }
+  // Scope EVERY user list to the caller's current org — including super_admins.
+  // A super_admin who needs another org's team switches into that org
+  // (X-Org-Id / Login-as), which repoints user.org_id here, so they still see
+  // it on demand. Previously super_admins bypassed this filter and therefore
+  // saw every org's users in the whole project — a cross-tenant leak (e.g. a
+  // per-client super_admin like BMW's seeing Kinematic + Demo users).
+  if (user.org_id) {
+    query = query.eq('org_id', user.org_id);
   }
 
   if (isUUID(user.client_id)) {
