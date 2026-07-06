@@ -4,20 +4,28 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
-import { currentProjectKey, DEFAULT_PROJECT, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor } from '../lib/projects';
+import { currentProjectKey, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor } from '../lib/projects';
 import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
 import { provisionClient as runProvision, provisioningPreflight } from '../services/provisionClient.service';
 
-// Tata (default project) keeps the legacy single-org model: a client lives in
-// the admin's own org and is scoped by `org_id`. Non-default projects (e.g.
-// Kinematic) use parent-owns-sub-orgs: each client gets its OWN org for true
-// data isolation, and the parent org that owns/manages it is recorded in
-// `owner_org_id`. We ONLY reference owner_org_id for non-default projects, so
-// Tata's schema (which has no such column) is never touched.
-const orgPerClient = () => currentProjectKey() !== DEFAULT_PROJECT;
+// Org-per-client is now the universal onboarding model: EVERY new client gets
+// its OWN org (a row-level tenant) for isolation, and the parent org that
+// owns/manages it is recorded in `owner_org_id`. This applies to the default
+// (Tata) project too, now that its `clients` table carries owner_org_id +
+// login_org_id + data_project_key/data_client_id + login_password_enc.
+//
+// A project can opt back into the legacy single-org model (client lives in the
+// admin's own org, scoped by `org_id`) by listing its key in SINGLE_ORG_PROJECTS
+// — a comma-separated escape hatch, empty by default. `currentProjectKey()` is
+// never null, so an unmatched project is always org-per-client.
+const SINGLE_ORG_PROJECTS = new Set(
+  (process.env.SINGLE_ORG_PROJECTS || '')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+);
+const orgPerClient = () => !SINGLE_ORG_PROJECTS.has(currentProjectKey());
 const ownerColumn = () => (orgPerClient() ? 'owner_org_id' : 'org_id');
 
 function orgSlug(name: string): string {
