@@ -4,7 +4,7 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
-import { currentProjectKey, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor } from '../lib/projects';
+import { currentProjectKey, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor, clearEmailProjectCache } from '../lib/projects';
 import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
@@ -231,6 +231,9 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
         role: 'client',
         is_active: true
       });
+      // This email now lives in this project — drop any stale routing cache so
+      // the next login resolves to the right project.
+      clearEmailProjectCache(email);
     }
   }
 

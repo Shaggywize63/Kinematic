@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
+import { clearEmailProjectCache } from '../lib/projects';
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID } from '../utils';
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
@@ -512,6 +513,9 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
       .insert(userData)
       .select('*, zones!zone_id(name)')
       .single()
+
+  // The email now lives in this project — drop any stale login-routing cache.
+  if (email) clearEmailProjectCache(email);
 
   const { permissions, assigned_cities } = req.body
 
