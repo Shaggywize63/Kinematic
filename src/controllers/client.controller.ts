@@ -6,7 +6,7 @@ import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
 import { currentProjectKey, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor } from '../lib/projects';
 import { SignJWT } from 'jose';
-import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
 import { provisionClient as runProvision, provisioningPreflight } from '../services/provisionClient.service';
@@ -31,6 +31,72 @@ const ownerColumn = () => (orgPerClient() ? 'owner_org_id' : 'org_id');
 function orgSlug(name: string): string {
   const base = (name || 'client').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'client';
   return `${base}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ── Per-org active-user cap, settable from Client Management ───────────────
+// The cap must land on the org that actually HOLDS this client's users, and be
+// enforced there. For a same-project client that's its own org in the current
+// project; for a cross-project client (data in another Supabase project) it's
+// the linked client's org in that project — same target the module ceiling uses.
+async function resolveCapTarget(client: {
+  org_id?: string; data_project_key?: string; data_client_id?: string;
+}): Promise<{ admin: SupabaseClient; orgId: string | null }> {
+  const dp = client.data_project_key;
+  const dcid = client.data_client_id;
+  if (orgPerClient() && dp && isKnownProject(dp) && dp !== currentProjectKey() && dcid && isUUID(dcid)) {
+    const remote = adminClientFor(dp);
+    const { data } = await remote.from('clients').select('org_id').eq('id', dcid).maybeSingle();
+    const org = (data as { org_id?: string } | null)?.org_id ?? null;
+    if (org) return { admin: remote, orgId: org };
+  }
+  return { admin: supabaseAdmin, orgId: client.org_id ?? null };
+}
+
+// Normalise a max-active-users input to a positive int or null (null = no cap).
+function parseUserCap(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const n = parseInt(String(raw), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Write (or clear, with null) the cap on the client's users-org via org_settings.
+async function writeUserCap(client: { org_id?: string; data_project_key?: string; data_client_id?: string }, value: number | null): Promise<void> {
+  const { admin, orgId } = await resolveCapTarget(client);
+  if (!orgId) return;
+  await admin.from('org_settings').delete().eq('org_id', orgId).eq('key', 'limits.max_active_users');
+  if (value) await admin.from('org_settings').insert({ org_id: orgId, key: 'limits.max_active_users', value });
+}
+
+// Read the current cap for a set of clients (batched for same-project, per-link
+// for cross-project) so the Client Management form can prepopulate it.
+async function readUserCaps(clients: Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>): Promise<Record<string, number | null>> {
+  const out: Record<string, number | null> = {};
+  const isCross = (c: { data_project_key?: string; data_client_id?: string }) =>
+    !!(orgPerClient() && c.data_project_key && isKnownProject(c.data_project_key)
+      && c.data_project_key !== currentProjectKey() && c.data_client_id && isUUID(c.data_client_id));
+
+  const same = clients.filter(c => !isCross(c));
+  const orgIds = Array.from(new Set(same.map(c => c.org_id).filter(Boolean))) as string[];
+  if (orgIds.length) {
+    const { data } = await supabaseAdmin.from('org_settings')
+      .select('org_id, value').eq('key', 'limits.max_active_users').in('org_id', orgIds);
+    const byOrg: Record<string, number> = {};
+    (data || []).forEach((r: { org_id: string; value: unknown }) => {
+      const n = parseInt(String(r.value), 10); if (Number.isFinite(n)) byOrg[r.org_id] = n;
+    });
+    same.forEach(c => { out[c.id] = (c.org_id && byOrg[c.org_id]) ?? null; });
+  }
+  for (const c of clients.filter(isCross)) {
+    try {
+      const { admin, orgId } = await resolveCapTarget(c);
+      if (!orgId) { out[c.id] = null; continue; }
+      const { data } = await admin.from('org_settings')
+        .select('value').eq('org_id', orgId).eq('key', 'limits.max_active_users').maybeSingle();
+      const n = data ? parseInt(String((data as { value: unknown }).value), 10) : NaN;
+      out[c.id] = Number.isFinite(n) ? n : null;
+    } catch { out[c.id] = null; }
+  }
+  return out;
 }
 
 /**
@@ -61,8 +127,11 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
     .eq('enabled', true);
 
   const now = Date.now();
+  // Per-org active-user caps (from the org holding each client's users).
+  const caps = await readUserCaps((data || []) as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
   const results = (data || []).map(client => ({
     ...client,
+    max_active_users: caps[client.id] ?? null,
     modules: (accessData || [])
       .filter(a => a.client_id === client.id
         && (!a.expires_at || new Date(a.expires_at).getTime() > now))
@@ -78,7 +147,7 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
  */
 export const createClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id } = req.body;
+  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id, max_active_users } = req.body;
 
   if (!name) {
     badRequest(res, 'Client name is required');
@@ -198,7 +267,14 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
     }
   }
 
-  created(res, { ...client, modules: modules || [] });
+  // Per-org active-user cap (optional). Written to the org that holds this
+  // client's users; enforced by assertActiveUserCap on user create/activate.
+  if (max_active_users !== undefined) {
+    try { await writeUserCap(client, parseUserCap(max_active_users)); }
+    catch (e: any) { logger.warn(`[Clients] user-cap write failed for ${client.id}: ${e?.message || e}`); }
+  }
+
+  created(res, { ...client, modules: modules || [], max_active_users: parseUserCap(max_active_users) });
 });
 
 /**
@@ -436,7 +512,7 @@ async function syncCeilingToLinkedProject(opts: {
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id } = req.body;
+  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users } = req.body;
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
@@ -570,7 +646,15 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     }
   }
 
-  ok(res, { ...client, modules: modules || [] });
+  // Per-org active-user cap (optional; only when the field was sent).
+  let capOut: number | null = (client as { max_active_users?: number | null }).max_active_users ?? null;
+  if (max_active_users !== undefined) {
+    capOut = parseUserCap(max_active_users);
+    try { await writeUserCap(client, capOut); }
+    catch (e: any) { logger.warn(`[Clients] user-cap write failed for ${id}: ${e?.message || e}`); }
+  }
+
+  ok(res, { ...client, modules: modules || [], max_active_users: capOut });
 });
 
 /**
