@@ -735,6 +735,65 @@ export async function convertLead(org_id: string, id: string, opts: {
       }
     }
 
+    // ── SRS TATA Steel: deal amount = value of the interested product ──
+    // The mobile convert flow sends NO amount for this tenant (the options
+    // sheet is bypassed), so the deal would otherwise land at 0. Derive it
+    // from the lead's captured Product Interested + Quantity as the LIVE
+    // product value: unit price × quantity, unit-aware —
+    //   • pieces / blank unit → price × quantity
+    //   • kg                  → (price ÷ weight_kg) × quantity           (per-kg price × kg)
+    //   • tonne               → (price ÷ weight_kg) × quantity × 1000    (per-kg price × kg)
+    // Runs BEFORE the estimated_amount fallback below so the live product
+    // price wins over any stale cached basket total. Scoped to Tata so no
+    // other tenant's convert behaviour changes.
+    const SRS_TATA_STEEL_CLIENT_ID = 'a1f67468-526e-4734-be3a-2cb132cc2804';
+    if (leadClientId === SRS_TATA_STEEL_CLIENT_ID && (amount == null || amount === 0)) {
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const cf = (lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {};
+      const rawLines = (cf as Record<string, unknown>).product_lines;
+      const lines: Array<{ product_id?: string; quantity?: unknown; measuring_unit?: unknown }> =
+        Array.isArray(rawLines)
+          ? (rawLines as Array<Record<string, unknown>>).map((r) => ({
+              product_id: typeof r.product_id === 'string' ? r.product_id : undefined,
+              quantity: r.quantity,
+              measuring_unit: r.measuring_unit,
+            }))
+          : (typeof (cf as Record<string, unknown>).product_interested === 'string'
+              ? [{
+                  product_id: (cf as Record<string, unknown>).product_interested as string,
+                  quantity: (cf as Record<string, unknown>).quantity,
+                  measuring_unit: (cf as Record<string, unknown>).measuring_unit,
+                }]
+              : []);
+      const ids = Array.from(new Set(
+        lines.map((l) => l.product_id).filter((x): x is string => typeof x === 'string' && UUID_RE.test(x)),
+      ));
+      if (ids.length > 0) {
+        const { data: prods } = await supabaseAdmin.from('crm_products')
+          .select('id, price, weight_kg')
+          .eq('org_id', org_id)
+          .in('id', ids);
+        const byId = new Map((prods ?? []).map((p) => [p.id as string, p]));
+        let total = 0;
+        for (const l of lines) {
+          if (!l.product_id) continue;
+          const p = byId.get(l.product_id) as { price?: number | string | null; weight_kg?: number | string | null } | undefined;
+          const price = Number(p?.price ?? 0);
+          const qty = typeof l.quantity === 'number' ? l.quantity : Number(l.quantity ?? 0);
+          if (!(price > 0) || !Number.isFinite(qty) || qty <= 0) continue;
+          const unit = String(l.measuring_unit ?? '').trim().toLowerCase();
+          const weight = Number(p?.weight_kg ?? 0);
+          if ((unit === 'kg' || unit === 'tonne' || unit === 'tonnes' || unit === 'ton') && weight > 0) {
+            const kg = unit === 'kg' ? qty : qty * 1000;   // tonne → kg
+            total += (price / weight) * kg;
+          } else {
+            total += price * qty;                          // pieces / blank unit
+          }
+        }
+        if (total > 0) amount = Math.round(total * 100) / 100;
+      }
+    }
+
     // Final fallback — pull the deal amount from the lead's
     // custom_fields.product_lines that the rep captured on the lead form.
     //
