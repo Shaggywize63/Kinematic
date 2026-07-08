@@ -336,6 +336,49 @@ export async function resolveProjectForEmailAsync(email?: string | null): Promis
   return fallbackProjectKey();
 }
 
+// Short TTL cache for integration→project lookups so a burst of webhook hits
+// on the same integration doesn't probe every project DB each time.
+const integrationProjectCache = new Map<string, { project: string; at: number }>();
+const INTEGRATION_PROJECT_TTL_MS = 5 * 60_000;
+
+/** Forget a cached integration routing (call after moving/deleting one). */
+export function clearIntegrationProjectCache(integrationId?: string | null): void {
+  if (integrationId) integrationProjectCache.delete(integrationId.trim());
+  else integrationProjectCache.clear();
+}
+
+/**
+ * Resolve which Supabase project holds a given lead-source integration id.
+ *
+ * The public lead-capture surfaces — the hosted form (`/f/:id`) and the inbound
+ * webhook (`/api/v1/integrations/webhook/:provider/:id`) — are unauthenticated
+ * and carry NO `X-Kinematic-Project` header, so without this they always fall
+ * back to the default project and can't see integrations that belong to another
+ * project's clients (the "Form not found" / silently-dropped-webhook bug). We
+ * probe each known project's `crm_lead_source_integrations` table for the id;
+ * unknown ids fall back to the default project, where the handler returns its
+ * own not-found response.
+ */
+export async function resolveProjectForIntegrationAsync(integrationId?: string | null): Promise<string> {
+  const id = (integrationId || '').trim();
+  if (!id) return fallbackProjectKey();
+
+  const cached = integrationProjectCache.get(id);
+  if (cached && Date.now() - cached.at < INTEGRATION_PROJECT_TTL_MS) return cached.project;
+
+  for (const key of projectSearchOrder()) {
+    try {
+      const { data } = await adminClientFor(key)
+        .from('crm_lead_source_integrations').select('id').eq('id', id).limit(1).maybeSingle();
+      if (data) {
+        integrationProjectCache.set(id, { project: key, at: Date.now() });
+        return key;
+      }
+    } catch { /* project unreachable — skip it */ }
+  }
+  return fallbackProjectKey();
+}
+
 /**
  * Synchronous, config-only resolver (env pins + fallback, NO DB lookup and NO
  * hardcoded domain). Retained for non-login code paths that can't await; the

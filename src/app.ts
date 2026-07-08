@@ -14,7 +14,7 @@ import { logger } from './lib/logger';
 import { notFoundHandler } from './middleware/errorHandler';
 import { requireAuth } from './middleware/auth';
 import { withDemoIndustry } from './middleware/withDemoIndustry';
-import { withProject } from './middleware/withProject';
+import { withProject, withIntegrationProject } from './middleware/withProject';
 import { auditAll } from './middleware/auditAll';
 import auditLogRoutes from './routes/auditLog.routes';
 import {
@@ -126,7 +126,7 @@ app.get('/embed.js', cors({ origin: '*' }), function (_req, res) {
 // a link or QR — visitors land on a clean Kinematic-branded page that
 // posts directly to the integration's webhook. Same dedup + scope as
 // every other inbound surface.
-app.get('/f/:id', cors({ origin: '*' }), async function (req, res, next) {
+app.get('/f/:id', cors({ origin: '*' }), withIntegrationProject, async function (req, res, next) {
   try {
     const { supabaseAdmin } = await import('./lib/supabase');
     const integrationId = String(req.params.id || '').trim();
