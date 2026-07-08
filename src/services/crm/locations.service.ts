@@ -96,22 +96,51 @@ export async function bulkImport(org_id: string, client_id: string | null, user_
   });
   if (cleaned.length === 0) return { inserted: 0, skipped: 0, errors };
 
-  const payload = cleaned.map(r => ({ ...r, org_id, client_id, created_by: user_id ?? null }));
-  // upsert with ignoreDuplicates → exact-tuple matches are skipped, new rows are inserted.
-  const { data, error } = await supabaseAdmin
-    .from('crm_client_locations')
-    .upsert(payload, { ignoreDuplicates: true, onConflict: 'org_id,client_id,state,city,district,block' })
-    .select('id');
-  if (error) {
-    // Conflict spec may not match the partial-coalesce unique index — fall
-    // back to plain insert and let the unique index reject dupes silently.
-    const fallback = await supabaseAdmin.from('crm_client_locations').insert(payload).select('id');
-    if (fallback.error && !/duplicate key/i.test(fallback.error.message)) {
-      throw new AppError(500, fallback.error.message, 'DB_ERROR');
-    }
-    const inserted = fallback.data?.length ?? 0;
-    return { inserted, skipped: cleaned.length - inserted, errors };
+  // Uniqueness key MUST mirror the DB's expression index
+  // `ux_crm_client_locations_hierarchy`:
+  //   (org_id, coalesce(client_id,'0…'), lower(state), lower(city),
+  //    lower(coalesce(district,'')), lower(coalesce(block,'')))
+  // so our in-memory dedupe matches exactly what the DB considers a dupe.
+  const keyOf = (r: { state: string; city: string; district: string | null; block: string | null }) =>
+    [r.state.toLowerCase(), r.city.toLowerCase(), (r.district ?? '').toLowerCase(), (r.block ?? '').toLowerCase()].join('|');
+
+  // 1. Dedupe within the uploaded batch — a single collision used to abort
+  //    the whole INSERT and leave 0 rows written (the bug that made bulk
+  //    upload silently add nothing).
+  const seen = new Set<string>();
+  const deduped: typeof cleaned = [];
+  for (const r of cleaned) {
+    const k = keyOf(r);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    deduped.push(r);
   }
-  const inserted = data?.length ?? 0;
-  return { inserted, skipped: cleaned.length - inserted, errors };
+
+  // 2. Pre-filter against rows already stored in the SAME client bucket the
+  //    unique index coalesces on (a client's rows are distinct from the
+  //    org-level `client_id IS NULL` seed).
+  let existingQ = supabaseAdmin.from('crm_client_locations')
+    .select('state, city, district, block').eq('org_id', org_id);
+  existingQ = client_id ? existingQ.eq('client_id', client_id) : existingQ.is('client_id', null);
+  const { data: existing, error: exErr } = await existingQ;
+  if (exErr) throw new AppError(500, exErr.message, 'DB_ERROR');
+  const existingKeys = new Set((existing ?? []).map((r) => keyOf(r as any)));
+
+  const toInsert = deduped.filter((r) => !existingKeys.has(keyOf(r)));
+  const skipped = cleaned.length - toInsert.length;
+  if (toInsert.length === 0) return { inserted: 0, skipped, errors };
+
+  // 3. Plain chunked INSERT. No `onConflict` — PostgREST can't target the
+  //    expression index by column list, and we've already removed every
+  //    in-batch and pre-existing duplicate above, so a plain insert is safe.
+  const payload = toInsert.map((r) => ({ ...r, org_id, client_id, created_by: user_id ?? null }));
+  const CHUNK = 500;
+  let inserted = 0;
+  for (let i = 0; i < payload.length; i += CHUNK) {
+    const slice = payload.slice(i, i + CHUNK);
+    const { data, error } = await supabaseAdmin.from('crm_client_locations').insert(slice).select('id');
+    if (error) { errors.push(error.message); continue; }
+    inserted += data?.length ?? 0;
+  }
+  return { inserted, skipped, errors };
 }
