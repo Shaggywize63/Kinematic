@@ -14,6 +14,7 @@
  */
 import { Router } from 'express';
 import { perRouteLimit } from '../middleware/security';
+import { withIntegrationProject } from '../middleware/withProject';
 import { inboundWebhook, verifyChallenge } from '../controllers/crm/integrations.controller';
 
 const router = Router();
@@ -26,13 +27,14 @@ const webhookLimit = perRouteLimit({ windowMs: 60_000, max: 200 });
 // Meta-style subscription handshake (GET). Only meta-lead-ads uses this
 // today; other providers return 405 from the handler. Same path shape as
 // the POST so admins paste a single URL into the provider's webhook field.
-router.get('/:provider/:id', webhookLimit, verifyChallenge);
+// withIntegrationProject routes the request to whichever project owns :id.
+router.get('/:provider/:id', withIntegrationProject, webhookLimit, verifyChallenge);
 
 // Generic shape: /webhook/:provider/:id?key=<webhook_secret>
 //   :provider is the URL-slug form (web-form, meta-lead-ads, google-ads,
 //             generic-webhook), translated to provider_id inside the
 //             controller.
 //   :id is the integration uuid.
-router.post('/:provider/:id', webhookLimit, inboundWebhook);
+router.post('/:provider/:id', withIntegrationProject, webhookLimit, inboundWebhook);
 
 export default router;
