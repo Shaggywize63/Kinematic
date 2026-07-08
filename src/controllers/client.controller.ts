@@ -196,6 +196,19 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
     return;
   }
 
+  // Auto-populate the CRM location master (36 states + major cities) for the
+  // new client's dedicated org so the lead-form State/City picker works out of
+  // the box. Idempotent (crm_seed_indian_locations upserts) and best-effort —
+  // a seed failure must never fail client creation. Skipped for default-project
+  // (Tata) clients, which share an already-seeded org.
+  if (orgPerClient()) {
+    try {
+      await supabaseAdmin.rpc('crm_seed_indian_locations', { p_org_id: clientOrgId });
+    } catch (e: any) {
+      logger.warn(`[Clients] location seed failed for org ${clientOrgId}: ${e?.message || e}`);
+    }
+  }
+
   // Create/Sync administrator user for this client if password/email provided
   if (password && email) {
     let authId: string | undefined;
