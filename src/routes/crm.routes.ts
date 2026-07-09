@@ -44,6 +44,7 @@ import * as dailyBriefingSvc from '../services/crm/ai/dailyBriefing.service';
 import * as cardScanSvc from '../services/crm/ai/cardScan.service';
 import * as convIntel from '../services/crm/ai/conversationIntel.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
+import * as webChatCtrl from '../controllers/crm/webChat.controller';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as targetsSvc from '../services/crm/targets.service';
@@ -3905,6 +3906,13 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
   }
 }));
 router.use('/ai', ai);
+
+// ---------- WEBSITE CHATBOT (KINI) — conversations from kinematicapp.com ----
+// Read-only dashboard views of the public website chatbot's conversations and
+// the leads it captured. Ingestion is the public keyed route at
+// /api/v1/kini/public/web-chat (mounted before requireAuth in app.ts).
+router.get('/web-chats', webChatCtrl.list);
+router.get('/web-chats/:id', webChatCtrl.detail);
 
 // ---------- ERROR HANDLER (CRM-scoped) -------------------------------
 router.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
