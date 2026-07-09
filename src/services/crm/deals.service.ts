@@ -335,7 +335,71 @@ export async function updateDeal(org_id: string, id: string, payload: Partial<De
     }).catch(() => {});
   }
 
+  // Scheduled follow-up → actionable reminder. The deal-edit form no longer
+  // has a free-text "Next Action"; instead the rep picks an action type +
+  // due date, stored on the deal's custom_fields as { next_action_type,
+  // next_action_at }. When that follow-up is newly set or changed, spawn a
+  // single planned crm_activities row tied to the deal so it surfaces in the
+  // rep's task/reminder lists. Centralised here so web / iOS / Android all
+  // get it for free by writing the same two custom-field keys. Best-effort:
+  // a failure here never fails the deal update itself.
+  try {
+    await spawnFollowUpActivity(org_id, id, before, data as Deal, user_id, dealClientId);
+  } catch { /* non-fatal — the follow-up reminder is a side effect */ }
+
   return data as Deal;
+}
+
+// Friendly labels for the fixed follow-up action set the deal-edit picker
+// offers (same slugs on every platform). Anything unrecognised falls back to
+// a generic "Follow-up" so a custom slug still produces a sane subject.
+const FOLLOW_UP_LABELS: Record<string, string> = {
+  call: 'Call',
+  whatsapp: 'WhatsApp',
+  meeting: 'Meeting',
+  site_visit: 'Site Visit',
+  email: 'Email',
+  follow_up: 'Follow-up',
+};
+
+async function spawnFollowUpActivity(
+  org_id: string,
+  deal_id: string,
+  before: Deal,
+  after: Deal,
+  user_id: string | undefined,
+  client_id: string | null,
+) {
+  const beforeCf = ((before as Deal & { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {}) as Record<string, unknown>;
+  const afterCf  = ((after  as Deal & { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {}) as Record<string, unknown>;
+  const dueRaw = afterCf.next_action_at;
+  const due = typeof dueRaw === 'string' && dueRaw.trim() ? dueRaw.trim() : null;
+  if (!due) return; // no scheduled follow-up on this deal
+  // Only spawn when the follow-up actually changed this PATCH, so re-saving
+  // an unrelated field (products, amount, stage) doesn't duplicate the task.
+  const changed =
+    String(beforeCf.next_action_at ?? '') !== String(afterCf.next_action_at ?? '') ||
+    String(beforeCf.next_action_type ?? '') !== String(afterCf.next_action_type ?? '');
+  if (!changed) return;
+  // Normalise the action slug to the activity type; the regex-validated
+  // activity type accepts these directly. Unknown → generic 'follow_up'.
+  const rawType = String(afterCf.next_action_type ?? '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_');
+  const type = rawType && FOLLOW_UP_LABELS[rawType] ? rawType : 'follow_up';
+  const label = FOLLOW_UP_LABELS[type] ?? 'Follow-up';
+  const ownerId = (after as { owner_id?: string | null }).owner_id ?? user_id ?? null;
+  await supabaseAdmin.from('crm_activities').insert({
+    org_id,
+    type,
+    subject: `Follow-up: ${label} — ${after.name}`,
+    status: 'planned',
+    due_at: due,
+    deal_id,
+    owner_id: ownerId,
+    assigned_to: ownerId,
+    client_id,
+    created_by: user_id ?? null,
+    custom_fields: {},
+  });
 }
 
 // Deterministic key sort so JSON.stringify diffs aren't fooled by key
