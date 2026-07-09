@@ -77,6 +77,7 @@ export const publicIngest = asyncHandler<Request>(async (req, res) => {
       team_size: str(visitor.team_size),
       interest: str(visitor.interest),
       city: str(visitor.city),
+      preferred_time: str(visitor.preferred_time),
     },
     page: { url: str(page.url), path: str(page.path), title: str(page.title) },
     referrer_url: str(b.referrer_url),

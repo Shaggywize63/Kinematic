@@ -36,6 +36,8 @@ export interface WebChatVisitor {
   team_size?: string | null;
   interest?: string | null;
   city?: string | null;
+  /** For a demo/call request: the visitor's preferred day + time slot. */
+  preferred_time?: string | null;
 }
 
 export interface WebChatIngestInput {
@@ -134,7 +136,7 @@ export async function ingestWebChat(input: WebChatIngestInput): Promise<WebChatI
   // (KINI may re-send with a field newly filled or newly blank).
   const { data: prev } = await supabaseAdmin
     .from('crm_web_chat_sessions')
-    .select('id, lead_id, visitor_name, visitor_email, visitor_phone, visitor_company, team_size, interest, city')
+    .select('id, lead_id, visitor_name, visitor_email, visitor_phone, visitor_company, team_size, interest, city, preferred_time')
     .eq('org_id', orgId)
     .eq('session_key', sessionKey)
     .maybeSingle();
@@ -148,6 +150,7 @@ export async function ingestWebChat(input: WebChatIngestInput): Promise<WebChatI
     team_size: coalesce(v.team_size, prevRow?.team_size),
     interest: coalesce(v.interest, prevRow?.interest),
     city: coalesce(v.city, prevRow?.city),
+    preferred_time: coalesce(v.preferred_time, prevRow?.preferred_time),
   };
 
   let leadId: string | null = prevRow?.lead_id ?? null;
@@ -164,6 +167,7 @@ export async function ingestWebChat(input: WebChatIngestInput): Promise<WebChatI
         const notesParts: string[] = ['Captured by KINI website chatbot.'];
         if (merged.team_size) notesParts.push(`Team size: ${merged.team_size}`);
         if (merged.interest) notesParts.push(`Interest: ${merged.interest}`);
+        if (merged.preferred_time) notesParts.push(`Preferred demo slot: ${merged.preferred_time}`);
         if (input.page?.url) notesParts.push(`Chatting on: ${input.page.url}`);
 
         const normalized: NormalizedLead = {
