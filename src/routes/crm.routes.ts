@@ -783,6 +783,104 @@ leads.get('/export', wrap(async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(csv);
 }));
+
+// ── SRS / Tata Tiscon field report ───────────────────────────────────────────
+// Fixed 14-column CSV (the SRS "Format" the client shared): consumer lead + its
+// Tata custom fields + the converted deal. Scoped like /export (an Area Sales
+// Officer with data_scope='own' pulls only their own leads; a CRM Admin with
+// 'all' pulls the whole tenant) and additionally restricted to those two org
+// roles, since it is their operational report.
+const SRS_REPORT_ROLES = ['Area Sales Officer', 'CRM Admin'];
+leads.get('/export-srs-report', wrap(async (req, res) => {
+  const me = (req as AuthRequest).user;
+  const role = (me?.org_role_name ?? '').trim();
+  if (!SRS_REPORT_ROLES.includes(role)) {
+    res.status(403).json({ success: false, error: 'This report is available to the Area Sales Officer and CRM Admin roles only.' });
+    return;
+  }
+  const scope = clientScope(req);
+  const effectiveCities = rbac.getEffectiveCityNames(me);
+  let visibleOwnerIds: string[] | null = null;
+  const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
+  if (hierOn) visibleOwnerIds = await hierarchy.subtreeUserIds(req as AuthRequest);
+  const selfOwnerId = me?.id ?? null;
+  const dataScope = me?.org_role_data_scope ?? 'all';
+  // ASO (own) → only their leads; CRM Admin (all) → everything.
+  const ownOnly = dataScope === 'own';
+  const includeNullCity = dataScope === 'all' || hierOn;
+
+  const PAGE = 200;
+  const MAX = 10000;
+  const rows: any[] = [];
+  for (let page = 1; rows.length < MAX; page++) {
+    const chunk = await leadsSvc.listLeads(
+      orgId(req),
+      { ...req.query, limit: PAGE, page },
+      scope.id,
+      { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity, ownOnly },
+    );
+    rows.push(...chunk);
+    if (chunk.length < PAGE) break;
+  }
+  const leadRows = rows.slice(0, MAX);
+  const stamped = await stampOwnerNames(leadRows);
+
+  // Flatten custom_fields → custom__<key> and resolve lookup UUIDs to labels
+  // (so Block reads "Godda" from crm_blocks, not a UUID).
+  const customCols = await listCustomFieldColumns(orgId(req), 'lead');
+  const lookupLabels = await resolveLookupLabels(stamped as any[], customCols);
+  const enriched = stampCustomFieldValues(stamped as any[], customCols, lookupLabels);
+
+  // Batch-join the converted deal for Deal Tonnage + Deal Amount.
+  const dealIds = Array.from(new Set(enriched.map((r: any) => r.converted_deal_id).filter(Boolean))) as string[];
+  const dealById = new Map<string, { amount: number | null; volumeKg: number | null }>();
+  if (dealIds.length) {
+    const { data: deals } = await supabaseAdmin
+      .from('crm_deals').select('id, amount, custom_fields').in('id', dealIds);
+    for (const d of (deals ?? []) as any[]) {
+      const cf = (d.custom_fields ?? {}) as Record<string, unknown>;
+      const vk = Number(cf.volume_kg);
+      dealById.set(d.id, { amount: d.amount ?? null, volumeKg: Number.isFinite(vk) ? vk : null });
+    }
+  }
+
+  const dateOnly = (v: unknown): string => (v ? String(v).slice(0, 10) : '');
+  const cols: Array<{ label: string; get: (r: any) => unknown }> = [
+    { label: 'Lead Name', get: (r) => [r.first_name, r.last_name].filter(Boolean).join(' ').trim() },
+    { label: 'Phone Number', get: (r) => r.phone ?? '' },
+    { label: 'Address', get: (r) => [r.address_line1, r.address_line2, r.city].filter(Boolean).join(', ') },
+    { label: 'Block', get: (r) => r['custom__block'] ?? '' },
+    { label: 'Pincode', get: (r) => r.postal_code ?? '' },
+    { label: 'Occupation', get: (r) => r['custom__conusmer_occupation'] ?? '' },
+    { label: 'Area sq ft', get: (r) => r['custom__construction_area'] ?? '' },
+    { label: 'Construction Stage', get: (r) => r['custom__construction_stage'] ?? '' },
+    { label: 'Owner Name', get: (r) => r.owner_name ?? '' },
+    { label: 'Creation Date', get: (r) => dateOnly(r.created_at) },
+    { label: 'Latest Activity Date', get: (r) => dateOnly(r.last_activity_at) },
+    { label: 'Estimated Qty', get: (r) => r['custom__estimated_tonnage'] ?? '' },
+    { label: 'Deal Tonnage', get: (r) => {
+        const d = r.converted_deal_id ? dealById.get(r.converted_deal_id) : undefined;
+        return d && d.volumeKg != null ? Math.round((d.volumeKg / 1000) * 100) / 100 : '';
+      } },
+    { label: 'Deal Amount', get: (r) => {
+        const d = r.converted_deal_id ? dealById.get(r.converted_deal_id) : undefined;
+        return d && d.amount != null ? d.amount : '';
+      } },
+  ];
+  const escape = (v: unknown): string => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  const header = cols.map((c) => c.label).join(',');
+  const body = enriched.map((r: any) => cols.map((c) => escape(c.get(r))).join(',')).join('\n');
+  const csv = `${header}\n${body}\n`;
+  const filename = `srs-lead-report-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}));
 // Geo points for the dashboard map — every lead that carries real
 // coordinates, with just the fields the map needs. The list endpoint caps at
 // 200 rows; the map needs all of them, so this dedicated endpoint returns up
