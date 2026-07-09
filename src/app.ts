@@ -55,6 +55,7 @@ import messagingRoutes           from './routes/messaging.routes';
 import integrationsPublicRoutes  from './routes/integrations-public.routes';
 import distIntegrationsRoutes    from './routes/distribution/integrations.routes';
 import tallyAgentPublicRoutes    from './routes/tally-agent-public.routes';
+import kiniPublicRoutes          from './routes/kini-public.routes';
 import orgSettingsRoutes         from './routes/org-settings.routes';
 import cronRoutes                from './routes/cron.routes';
 import { startTallyEnqueuePoller } from './services/distribution/integrations/enqueue.poller';
@@ -310,6 +311,13 @@ app.get(`${V1}/integrations/google/callback`, async (req, res, next) => {
 // the controller). Mounted BEFORE the auth catch-all so the agent never
 // needs a JWT.
 app.use(`${V1}/integrations/tally`, tallyAgentPublicRoutes);
+
+// ── Public KINI website-chatbot ingestion (NO user JWT) ──────────────
+// The marketing website's kini-chat.php proxy POSTs each conversation
+// turn here to store the transcript + create a lead. Authenticated by a
+// shared secret (KINI_WEB_CHAT_KEY) checked in the controller. Mounted
+// BEFORE the auth catch-all so it never needs a Supabase JWT.
+app.use(`${V1}/kini/public`, kiniPublicRoutes);
 
 // ── Internal cron endpoints (NO user JWT) ───────────────────────
 // Invoked by pg_cron via a Supabase Edge Function. Each endpoint in
