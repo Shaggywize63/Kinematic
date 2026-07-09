@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS public.crm_web_chat_sessions (
   team_size         text,
   interest          text,
   city              text,
+  preferred_time    text,   -- demo/call: visitor's preferred day + time slot
 
   -- Where the conversation happened / how the visitor arrived.
   page_url          text,
