@@ -154,6 +154,18 @@ export const leadConvertSchema = z.object({
     volume_kg: z.number().nonnegative().optional(),
     subtotal: z.number().nonnegative().optional(),
   })).max(50).optional(),
+  // Full "Products of Interest" basket captured in the Convert dialog. Kaiyo
+  // moves this off the lead form onto conversion, so the basket arrives here
+  // instead of on lead.custom_fields. Same shape as custom_fields.product_lines;
+  // the service overlays it onto the lead's custom_fields so the existing
+  // amount / volume / deal-mirror logic sources from it, and it lands on the
+  // created deal's custom_fields.product_lines.
+  deal_product_lines: z.array(z.object({
+    product_id: optionalUuid,
+    quantity: z.number().nonnegative().optional(),
+    measuring_unit: z.string().max(20).optional(),
+    estimated_amount: z.number().nonnegative().optional(),
+  })).max(50).optional(),
   pipeline_id: optionalUuid,
   stage_id: optionalUuid,
 });
