@@ -919,7 +919,7 @@ export async function convertLead(org_id: string, id: string, opts: {
   }
 
   const nowIso = new Date().toISOString();
-  await supabaseAdmin.from('crm_leads').update({
+  const leadUpdate: Record<string, unknown> = {
     status: 'converted',
     is_converted: true,
     lifecycle_stage: 'customer',
@@ -927,7 +927,17 @@ export async function convertLead(org_id: string, id: string, opts: {
     converted_account_id: account_id, converted_contact_id: contact_id, converted_deal_id: deal_id,
     stage_changed_at: nowIso,
     updated_by: user_id ?? null,
-  }).eq('org_id', org_id).eq('id', id);
+  };
+  // Persist the Convert-dialog product basket onto the (now converted) lead as
+  // well. `lead.custom_fields` was overlaid with product_lines + estimated_amount
+  // above, so writing it here means every existing display that reads the lead's
+  // product_lines — the deal detail's Products card, analytics baskets — shows
+  // the basket unchanged, even though it was captured at conversion rather than
+  // on the lead form.
+  if (Array.isArray(opts.deal_product_lines) && opts.deal_product_lines.length > 0) {
+    leadUpdate.custom_fields = (lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {};
+  }
+  await supabaseAdmin.from('crm_leads').update(leadUpdate).eq('org_id', org_id).eq('id', id);
 
   automations.fireForTrigger('lead_converted', {
     org_id, user_id, entity: 'lead', entity_id: id,
