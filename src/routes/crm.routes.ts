@@ -849,7 +849,10 @@ leads.get('/export-srs-report', wrap(async (req, res) => {
     { label: 'Lead Name', get: (r) => [r.first_name, r.last_name].filter(Boolean).join(' ').trim() },
     { label: 'Phone Number', get: (r) => r.phone ?? '' },
     { label: 'Address', get: (r) => [r.address_line1, r.address_line2, r.city].filter(Boolean).join(', ') },
-    { label: 'Block', get: (r) => r['custom__block'] ?? '' },
+    // resolveLookupLabels now turns block UUIDs into names; a handful of
+    // legacy rows persisted the literal string "[object Object]" (a broken
+    // client serialise) — blank those rather than print the noise.
+    { label: 'Block', get: (r) => { const b = r['custom__block']; return (b == null || b === '[object Object]') ? '' : b; } },
     { label: 'Pincode', get: (r) => r.postal_code ?? '' },
     { label: 'Occupation', get: (r) => r['custom__conusmer_occupation'] ?? '' },
     { label: 'Area sq ft', get: (r) => r['custom__construction_area'] ?? '' },
