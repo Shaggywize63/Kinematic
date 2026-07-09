@@ -622,10 +622,27 @@ export async function convertLead(org_id: string, id: string, opts: {
   // and/or kg the rep entered, and the computed subtotal. If present,
   // overrides the single-product fields above.
   deal_line_items?: Array<{ product_id?: string; pieces?: number; volume_kg?: number; subtotal?: number }>;
+  // Full product basket captured in the Convert dialog (Kaiyo moves Products of
+  // Interest off the lead form). Overlaid onto the lead's custom_fields below so
+  // the amount/volume/mirror logic sources from it and it lands on the deal.
+  deal_product_lines?: Array<{ product_id?: string; quantity?: number; measuring_unit?: string; estimated_amount?: number }>;
   pipeline_id?: string; stage_id?: string;
 }, user_id?: string) {
   const lead = await getLead(org_id, id);
   if (lead.status === 'converted') throw new AppError(400, 'Lead already converted', 'ALREADY_CONVERTED');
+
+  // Convert-dialog product basket (Kaiyo): treat it as the lead's product_lines
+  // so every downstream read (amount fast/slow path, volume, deal mirror) uses
+  // it without threading a second source through each branch.
+  if (Array.isArray(opts.deal_product_lines) && opts.deal_product_lines.length > 0) {
+    const cf = ((lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {}) as Record<string, unknown>;
+    const basket = opts.deal_product_lines.reduce((s, l) => s + (Number(l.estimated_amount) || 0), 0);
+    (lead as { custom_fields?: Record<string, unknown> | null }).custom_fields = {
+      ...cf,
+      product_lines: opts.deal_product_lines,
+      ...(basket > 0 ? { estimated_amount: Math.round(basket * 100) / 100 } : {}),
+    };
+  }
 
   // Convert inherits the source lead's client_id onto every downstream
   // record (account, contact, deal). Without this, the new rows land with
