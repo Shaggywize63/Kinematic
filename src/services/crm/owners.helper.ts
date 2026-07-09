@@ -267,6 +267,8 @@ function lookupRowLabel(r: Record<string, unknown>): string {
  * Without this hydration the CSV export wrote the raw UUID into the
  * "Dealer" / "Block" / "Product" columns — the bug being fixed.
  */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function resolveLookupLabels(
   rows: Array<{ custom_fields?: Record<string, unknown> | null }>,
   cols: CustomFieldCol[],
@@ -287,6 +289,15 @@ export async function resolveLookupLabels(
         if (o.id && !o.label) id = o.id;
       }
       if (!id) continue;
+      // Only collect UUID-shaped ids. Lookup targets key on a `uuid` id
+      // column, and these jsonb fields carry mixed data in practice — a
+      // real UUID for picker writes, but also free-text names ("Godda")
+      // and stray "[object Object]" from older/broken clients. A single
+      // non-UUID value poisons the `.in('id', …)` batch below: Postgres
+      // rejects it with 22P02 and the whole target's resolution is
+      // dropped, so even the valid UUIDs fall back to the raw id. Non-UUID
+      // strings are already human-readable, so we leave them as-is.
+      if (!UUID_RE.test(id)) continue;
       const set = idsByTarget.get(c.target_table) ?? new Set<string>();
       set.add(id);
       idsByTarget.set(c.target_table, set);
