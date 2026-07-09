@@ -90,6 +90,13 @@ export const publicIngest = asyncHandler<Request>(async (req, res) => {
     return;
   }
 
+  // Health probe from kini-chat.php?selftest — the key matched and we got here,
+  // so report success without storing a junk conversation.
+  if (input.session_key === '__selftest__') {
+    res.status(200).json({ ok: true, selftest: true });
+    return;
+  }
+
   try {
     const result = await runWithProject(WEB_CHAT_PROJECT, () => webChat.ingestWebChat(input));
     res.status(200).json({ ok: true, ...result });

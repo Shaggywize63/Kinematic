@@ -20,7 +20,7 @@ import { findOrCreateLead } from '../integrations/dedup.orchestrator';
 import type { NormalizedLead } from '../integrations/dedup.orchestrator';
 import { logger } from '../../../lib/logger';
 
-const SOURCE_NAME = 'Website Chatbot (KINI)';
+const SOURCE_NAME = 'KINI AI';
 
 export interface WebChatTurn {
   role: 'visitor' | 'kini';
