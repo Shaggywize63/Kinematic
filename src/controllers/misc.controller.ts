@@ -711,6 +711,22 @@ export const resetUserPassword = asyncHandler<AuthRequest>(async (req, res) => {
   sendSuccess(res, { message: 'Password reset successfully' })
 })
 
+// POST /api/v1/users/:id/send-password-reset — admin-triggered password
+// recovery email. Mints a one-time recovery link (Supabase Auth) and emails
+// it to the user, who then sets their own new password via the reset page.
+// Reuses the same service the self-service /auth/forgot-password endpoint uses.
+export const sendUserPasswordReset = asyncHandler<AuthRequest>(async (req, res) => {
+  const { data: u } = await supabaseAdmin
+    .from('users')
+    .select('email')
+    .eq('id', req.params.id)
+    .maybeSingle()
+  if (!u?.email) throw new AppError(404, 'User not found or has no email on file', 'NOT_FOUND')
+  const passwordReset = require('../services/auth/passwordReset.service')
+  await passwordReset.requestReset(u.email)
+  sendSuccess(res, { message: `Password recovery email sent to ${u.email}` })
+})
+
 // ZONES
 export const getZones = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
