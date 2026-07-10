@@ -235,7 +235,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
   console.log(`[DEBUG] Fetching profile for user ID: ${session.user.id}`);
   const { data: userProfile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select('id, org_id, client_id, name, email, role, is_active')
+    .select('id, org_id, client_id, name, email, role, is_active, must_change_password')
     .eq('id', session.user.id)
     .single();
 
@@ -400,12 +400,40 @@ export const resetPassword = asyncHandler<Request>(async (req, res) => {
     .eq('id', result.session.user_id)
     .single();
 
+  // A reset via the emailed recovery link is a deliberate password change, so
+  // the user should not be forced to change it again on the next login.
+  await supabaseAdmin.from('users').update({ must_change_password: false }).eq('id', result.session.user_id);
+
   return ok(res, {
     access_token: result.session.access_token,
     refresh_token: result.session.refresh_token,
     expires_at: result.session.expires_at,
     user: userProfile || { id: result.session.user_id, email: result.session.email },
   }, 'Password updated');
+});
+
+// POST /api/v1/auth/change-password
+// Authenticated. Lets a signed-in user set a new password — this is what the
+// forced "change password on first login" flow calls. Clears
+// must_change_password so clients stop gating the session on it.
+const changePasswordSchema = z.object({ new_password: z.string().min(6) });
+export const changePassword = asyncHandler<AuthRequest>(async (req, res) => {
+  if (!req.user) return unauthorized(res);
+  const body = changePasswordSchema.safeParse(req.body);
+  if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
+
+  // Same strength policy the admin create-user path enforces.
+  const pol = require('../middleware/security').validatePassword(body.data.new_password);
+  if (!pol.ok) return badRequest(res, pol.reason || 'Password does not meet the requirements');
+
+  const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.user.id, {
+    password: body.data.new_password,
+  });
+  if (authErr) return serverError(res);
+
+  await supabaseAdmin.from('users').update({ must_change_password: false }).eq('id', req.user.id);
+  invalidateAuthCache((u) => u?.id === req.user!.id);
+  return ok(res, { ok: true }, 'Password updated');
 });
 
 // POST /api/v1/auth/refresh
@@ -460,7 +488,7 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     .select(`
       id, org_id, client_id, name, mobile, email, role, employee_id,
       zone_id, supervisor_id, city, state, avatar_url, org_role_id,
-      is_active, joined_date, created_at,
+      is_active, joined_date, created_at, must_change_password,
       zones!zone_id(id, name, city, meeting_lat, meeting_lng, geofence_radius),
       organisations!org_id(id, name, logo_url),
       org_role:org_roles!org_role_id(id, name, permissions, permissions_write, data_scope)

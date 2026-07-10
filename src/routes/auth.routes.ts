@@ -14,6 +14,10 @@ router.post('/login',   ctrl.login);
 // token's own one-shot lifetime.
 router.post('/forgot-password', ctrl.forgotPassword);
 router.post('/reset-password',  ctrl.resetPassword);
+// Authenticated password change — powers the forced "set a new password on
+// first login" flow. Requires a valid session (the user is already logged in
+// with their temp/initial password).
+router.post('/change-password', requireAuth, ctrl.changePassword);
 router.post('/refresh', ctrl.refresh);
 router.post('/logout',  requireAuth, ctrl.logout);
 router.get('/me',       requireAuth, ctrl.me);
