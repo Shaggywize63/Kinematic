@@ -216,7 +216,9 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   // show a real designation (Business Manager, Consumer Champion, etc.)
   // instead of leaking internal preset roles. Stamped on each row as
   // `org_role_name` below.
-  let query = supabaseAdmin.from('users').select('*, org_role:org_roles!org_role_id(name)', { count: 'exact' });
+  let query = supabaseAdmin.from('users').select('*, org_role:org_roles!org_role_id(name)', { count: 'exact' })
+    // Hide soft-deleted users (deleteUser sets deleted_at) from the directory.
+    .is('deleted_at', null);
 
   const isPrivileged = ['super_admin', 'admin', 'hr', 'city_manager', 'sub_admin', 'main_admin', 'client'].includes(user.role?.toLowerCase());
 
@@ -396,6 +398,32 @@ export const getUserById = asyncHandler<AuthRequest>(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   if (!data) throw new AppError(404, 'User not found', 'NOT_FOUND')
   sendSuccess(res, data)
+})
+
+// DELETE /users/:id — soft-delete. Sets deleted_at + deactivates + clears the
+// active session so the account disappears from the directory and can no longer
+// sign in. Soft (not hard) so the user's owned leads / deals / activities aren't
+// orphaned. Admins may remove users in their own org only; a plain admin can't
+// remove a super_admin, and nobody can delete themselves.
+export const deleteUser = asyncHandler<AuthRequest>(async (req, res) => {
+  const actor = req.user!
+  const { id } = req.params
+  if (!isUUID(id)) throw new AppError(400, 'Invalid user id', 'VALIDATION_ERROR')
+  if (id === actor.id) throw new AppError(400, 'You cannot delete your own account.', 'SELF_DELETE')
+
+  const { data: target, error } = await supabaseAdmin.from('users')
+    .select('id, org_id, role, name').eq('id', id).single()
+  if (error || !target) throw new AppError(404, 'User not found', 'NOT_FOUND')
+  if (target.org_id !== actor.org_id) throw new AppError(403, 'User is not in your organisation.', 'FORBIDDEN')
+  if (String(target.role).toLowerCase() === 'super_admin' && String(actor.role).toLowerCase() !== 'super_admin') {
+    throw new AppError(403, 'Only a super admin can delete a super admin.', 'FORBIDDEN')
+  }
+
+  const { error: uerr } = await supabaseAdmin.from('users')
+    .update({ deleted_at: new Date().toISOString(), is_active: false, active_session_id: null })
+    .eq('id', id)
+  if (uerr) throw new AppError(500, uerr.message, 'DB_ERROR')
+  return ok(res, { id, deleted: true }, `${target.name || 'User'} deleted`)
 })
 
 // Active-user cap (per-org, opt-in via org_settings 'limits.max_active_users').
