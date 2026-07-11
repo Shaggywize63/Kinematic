@@ -31,6 +31,8 @@ router.patch('/users/:id', requireAuth, requireRole('admin', 'super_admin', 'hr'
 router.post('/users/:id/reset-password', requireAuth, requireRole('admin', 'super_admin', 'hr'), misc.resetUserPassword);
 // Admin-triggered password recovery email — the user resets their own password.
 router.post('/users/:id/send-password-reset', requireAuth, requireRole('admin', 'super_admin', 'hr'), misc.sendUserPasswordReset);
+// Soft-delete a user (removes from the directory + blocks sign-in). Admins only.
+router.delete('/users/:id', requireAuth, requireRole('admin', 'super_admin'), misc.deleteUser);
 router.get('/zones', requireAuth, misc.getZones);
 router.post('/zones', requireAuth, requireRole('admin', 'super_admin'), misc.createZone);
 router.get('/clients', requireAuth, misc.getClients);
