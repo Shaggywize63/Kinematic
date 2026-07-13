@@ -763,8 +763,13 @@ export async function convertLead(org_id: string, id: string, opts: {
     // Runs BEFORE the estimated_amount fallback below so the live product
     // price wins over any stale cached basket total. Scoped to Tata so no
     // other tenant's convert behaviour changes.
-    const SRS_TATA_STEEL_CLIENT_ID = 'a1f67468-526e-4734-be3a-2cb132cc2804';
-    if (leadClientId === SRS_TATA_STEEL_CLIENT_ID && (amount == null || amount === 0)) {
+    // BMW is the second steel-dealer tenant (TMT dealer, same product-basket
+    // deal workflow as SRS/Tata), so it gets the identical amount derivation.
+    const STEEL_DEALER_CLIENT_IDS = new Set([
+      'a1f67468-526e-4734-be3a-2cb132cc2804', // SRS / Tata steel dealer
+      '2ee5e03a-3a56-41c9-aaa0-16468920f871', // BMW (TMT dealer)
+    ]);
+    if (leadClientId && STEEL_DEALER_CLIENT_IDS.has(leadClientId) && (amount == null || amount === 0)) {
       const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const cf = (lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {};
       const rawLines = (cf as Record<string, unknown>).product_lines;
