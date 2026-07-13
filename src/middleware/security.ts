@@ -54,20 +54,25 @@ const KNOWN_ORIGINS = new Set<string>([
   'https://kinematic-dashboard.kaiyo.app',
   'https://app.kinematic.app',
   'https://app.kaiyolabs.com',
+  // Vercel production/branch aliases for the dashboard project (verified
+  // against the project's real domain list).
+  'https://kinematic-dashboard-shaggywize63s-projects.vercel.app',
+  'https://kinematic-dashboard-git-main-shaggywize63s-projects.vercel.app',
   // Local dev
   'http://localhost:3000',
   'http://localhost:3001',
   'http://127.0.0.1:3000',
 ]);
 
+// SECURITY_AUDIT_2026-07.md C1: the previous patterns allowed (a) ANY
+// `kinematic-dashboard-*.vercel.app` — which any Vercel user could create — and
+// (b) EVERY subdomain of four apex domains, so a single subdomain takeover /
+// dangling DNS granted credentialed cross-origin access. Replaced with a single
+// preview pattern pinned to our Vercel team suffix. Specific production hosts
+// live in KNOWN_ORIGINS above; add new ones there (or via CORS_ORIGINS), not as
+// a wildcard.
 const KNOWN_PATTERNS: RegExp[] = [
-  // Vercel preview deployments for our dashboard repo
-  /^https:\/\/kinematic-dashboard-[a-z0-9-]+\.vercel\.app$/i,
-  // Kinematic / Kaiyo-branded subdomains
-  /^https:\/\/[a-z0-9-]+\.kinematicapp\.com$/i,
-  /^https:\/\/[a-z0-9-]+\.kinematic\.app$/i,
-  /^https:\/\/[a-z0-9-]+\.kaiyo\.app$/i,
-  /^https:\/\/[a-z0-9-]+\.kaiyolabs\.com$/i,
+  /^https:\/\/kinematic-dashboard-[a-z0-9-]+-shaggywize63s-projects\.vercel\.app$/i,
 ];
 
 const PARSED_EXTRA = (process.env.CORS_ORIGINS || '')
