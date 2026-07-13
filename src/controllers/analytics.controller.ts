@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
+import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, scopeOwnOrg, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome, getMockBroadcasts, getMockLearningMaterials } from '../utils/demoData';
 
@@ -38,12 +38,9 @@ export const getSummary = asyncHandler(async (req: AuthRequest, res: Response, n
 
   // Combined concurrent fetch for independent counts to minimize sequential await overhead
   const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
-  const isGlobalMetric = (!targetCid || !isUUID(targetCid));
 
-  const applyTenantFilter = (q: any) => {
-    if (isGlobalMetric) return q.eq('org_id', user.org_id);
-    return q.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  };
+  // Always scope to the caller's own org; narrow to a client only within that org.
+  const applyTenantFilter = (q: any) => scopeOwnOrg(q, user.org_id, targetCid);
 
   const [kpisRes, totalExecsRes, activeSosRes, openGrievancesRes, visitLogsRes] = await Promise.all([
     applyTenantFilter(supabaseAdmin.from('v_daily_kpis').select('*')).eq('date', to).single(),
@@ -201,11 +198,7 @@ export const getTffTrends = asyncHandler<AuthRequest>(async (req, res) => {
     .gte('submitted_at', `${from}T00:00:00+05:30`)
     .lte('submitted_at', `${to}T23:59:59+05:30`);
   
-  if (targetCid && isUUID(targetCid)) {
-    trendQuery = trendQuery.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    trendQuery = trendQuery.eq('org_id', user.org_id);
-  }
+  trendQuery = scopeOwnOrg(trendQuery, user.org_id, targetCid);
   const { data, error } = await trendQuery;
 
   if (error) return badRequest(res, error.message);
@@ -293,11 +286,7 @@ export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {
     .from('form_submissions').select('submitted_at, is_converted')
     .gte('submitted_at', `${date}T00:00:00+05:30`).lte('submitted_at', `${date}T23:59:59+05:30`);
   
-  if (targetCid && isUUID(targetCid)) {
-    hourlyQuery = hourlyQuery.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    hourlyQuery = hourlyQuery.eq('org_id', user.org_id);
-  }
+  hourlyQuery = scopeOwnOrg(hourlyQuery, user.org_id, targetCid);
   const { data, error } = await hourlyQuery;
 
   if (error) return badRequest(res, error.message);
@@ -326,11 +315,7 @@ export const getContactHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
     .gte('date', startStr)
     .lte('date', endStr);
   
-  if (targetCid && isUUID(targetCid)) {
-    heatmapQuery = heatmapQuery.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    heatmapQuery = heatmapQuery.eq('org_id', user.org_id);
-  }
+  heatmapQuery = scopeOwnOrg(heatmapQuery, user.org_id, targetCid);
   const { data, error } = await heatmapQuery;
 
   if (error) return badRequest(res, error.message);

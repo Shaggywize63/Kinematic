@@ -5,3 +5,8 @@ logs/
 package-lock.json
 check_users.ts
 .next/
+firebase_b64.txt
+*firebase*.json
+service-account*.json
+*.pem
+*.p8
