@@ -18,6 +18,7 @@ import { rescoreLead } from '../services/crm/leads.service';
 import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
 import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { runDailyBriefings } from '../services/crm/ai/dailyBriefing.service';
+import { runRetentionPurge } from '../services/crm/retention.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -184,6 +185,33 @@ router.post('/dispatch-daily-briefings', requireEdgeSecret, async (_req, res) =>
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] dispatch-daily-briefings crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/purge-retention
+ *
+ * Data-retention purge (GDPR Art.5(1)(e) / DPDP §8(7)): hard-removes
+ * soft-deleted CRM PII past its grace window and trims old GPS/telemetry.
+ * DESTRUCTIVE — runs as a dry run (counts only) unless
+ * RETENTION_PURGE_ENABLED=true on the server. Pass ?dry_run=true to force a
+ * preview even when enabled. Windows are env-tunable
+ * (RETENTION_SOFT_DELETE_DAYS / RETENTION_LOCATION_DAYS / RETENTION_AUDIT_DAYS).
+ * Schedule via a pg_cron → edge-function caller like the other jobs.
+ */
+router.post('/purge-retention', requireEdgeSecret, async (req, res) => {
+  try {
+    const forceDryRun = req.query.dry_run === 'true' || (req.body && req.body.dryRun === true);
+    const result = await runRetentionPurge(forceDryRun ? { dryRun: true } : undefined);
+    if (result.dryRun) {
+      logger.info(`[cron] purge-retention DRY RUN — ${result.totalRows} rows eligible`);
+    } else {
+      logger.info(`[cron] purge-retention purged ${result.totalRows} rows`);
+    }
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] purge-retention crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });
