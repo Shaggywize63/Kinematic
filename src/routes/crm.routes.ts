@@ -53,6 +53,7 @@ import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
+import * as dsarSvc from '../services/crm/dsar.service';
 
 const router: Router = express.Router();
 
@@ -376,6 +377,55 @@ async function enforceLeadRequiredFields(
 }
 
 /**
+ * Server-side enforcement of "hidden" built-in field overrides (data
+ * minimisation — GDPR Art. 5(1)(c)/25, DPDP §6(1)). When an admin hides a
+ * built-in lead field (e.g. Tata hides DOB / gender / city), the clients drop
+ * it from the form, but a stale build or a direct API call could still submit
+ * it. This strips any hidden built-in field from the payload BEFORE persistence
+ * so "hidden" also means "not collected/stored". Mutates `payload` in place and
+ * returns the keys that were stripped. Mirrors enforceLeadRequiredFields's
+ * override-reading so the two stay consistent.
+ */
+async function stripHiddenLeadFields(
+  org_id: string,
+  client_id: string | null,
+  payload: Record<string, unknown>,
+): Promise<string[]> {
+  let q = supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id);
+  q = client_id ? q.eq('client_id', client_id) : q.is('client_id', null);
+  const { data: rows } = await q.limit(1);
+  const cfg = (rows?.[0] as { config?: Record<string, unknown> } | undefined)?.config;
+  const overrides = (cfg?.field_overrides as Record<string, { required?: boolean; hidden?: boolean }> | undefined) || {};
+  if (!overrides || Object.keys(overrides).length === 0) return [];
+
+  const isB2c = (payload.is_b2c as boolean | undefined) === true;
+  const scope: 'b2b' | 'b2c' = isB2c ? 'b2c' : 'b2b';
+  const merged = (key: string): { required?: boolean; hidden?: boolean } => ({
+    ...(overrides[`lead.${key}`] || {}),
+    ...(overrides[`lead.${key}@${scope}`] || {}),
+  });
+
+  // Built-in columns a hidden override may cover. Keep aligned with
+  // enforceLeadRequiredFields's builtinKeys plus the extra PII columns the
+  // lead form can render (address/geo).
+  const builtinKeys = [
+    'first_name', 'last_name', 'email', 'phone', 'company', 'title',
+    'industry', 'city', 'state', 'address_line1', 'address_line2',
+    'postal_code', 'country', 'date_of_birth', 'gender',
+    'preferred_contact_method', 'district', 'block', 'latitude', 'longitude',
+  ];
+
+  const stripped: string[] = [];
+  for (const key of builtinKeys) {
+    if (merged(key).hidden === true && key in payload) {
+      delete payload[key];
+      stripped.push(key);
+    }
+  }
+  return stripped;
+}
+
+/**
  * Build the subject line for the auto-spawned site_visit activity. Carries
  * the lead's display name so the timeline / activities list reads like
  * "Site visit — Rajesh Kumar" instead of a bare "Site visit". When the rep
@@ -624,6 +674,8 @@ leads.post('/', wrap(async (req, res) => {
   // guard a Tata admin marking Primary Mobile required would still let the
   // Android/iOS apps POST a phoneless lead.
   await enforceLeadRequiredFields(orgId(req), payload.client_id as string | null ?? null, payload, 'create');
+  // Data minimisation: never store built-in fields the admin has hidden.
+  await stripHiddenLeadFields(orgId(req), payload.client_id as string | null ?? null, payload);
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
 
   // Auto-log site visit: the previous version inserted a completed
@@ -783,6 +835,8 @@ leads.get('/export', wrap(async (req, res) => {
   ).join('\n');
   const csv = `${header}\n${body}\n`;
   const filename = `leads-${new Date().toISOString().slice(0, 10)}.csv`;
+  // Accountability: record the bulk PII export (who, how many rows). PR-8.
+  await logDsar(req, 'crm.export.leads', null, { exported_rows: enriched.length, format: 'csv' });
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(csv);
@@ -985,6 +1039,8 @@ leads.patch('/:id', wrap(async (req, res) => {
   // too. Only enforces when the caller explicitly includes the key — a
   // partial update that doesn't touch a required field stays valid.
   await enforceLeadRequiredFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>, 'update');
+  // Data minimisation: never store built-in fields the admin has hidden.
+  await stripHiddenLeadFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>);
   const lead = await leadsSvc.updateLead(orgId(req), req.params.id, rest, userId(req));
   // Same revert as the leads.post handler: don't auto-insert the
   // activity. Echo a prefill block back so the client can open the
@@ -3928,5 +3984,84 @@ router.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   }
   return res.status(500).json({ success: false, error: { code: 'INTERNAL', message: err.message } });
 });
+
+// ── GDPR / DPDP data-subject rights (DSAR) ──────────────────────────────────
+// Right of access + portability (export) and right to erasure for a CRM data
+// subject (a lead and/or its linked contact). Admin-gated and audited.
+// See services/crm/dsar.service.ts + SECURITY_AUDIT_2026-07.md PR-2/3/8.
+const gdpr = express.Router();
+
+function dsarScope(req: Request): dsarSvc.Scope {
+  const cs = clientScope(req);
+  return { orgId: orgId(req), clientId: cs.id, strict: cs.strict };
+}
+
+function readLocator(src: Record<string, unknown>): dsarSvc.SubjectLocator {
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const leadId = str(src.lead_id);
+  const contactId = str(src.contact_id);
+  const email = str(src.email);
+  const phoneRaw = str(src.phone);
+  if (leadId && !uuid.test(leadId)) throw new AppError(400, 'lead_id must be a UUID', 'VALIDATION');
+  if (contactId && !uuid.test(contactId)) throw new AppError(400, 'contact_id must be a UUID', 'VALIDATION');
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new AppError(400, 'email is invalid', 'VALIDATION');
+  const phone = phoneRaw ? phoneRaw.replace(/[^\d+]/g, '') : null;
+  if (!leadId && !contactId && !phone && !email) {
+    throw new AppError(400, 'Provide one of: lead_id, contact_id, phone, email', 'VALIDATION');
+  }
+  return { leadId, contactId, phone, email };
+}
+
+// Record every PII access/erasure in audit_log (GDPR Art.5(2)/30 accountability,
+// DPDP §8(4)/(5)). GET exports are otherwise invisible to auditAll (it skips GET).
+async function logDsar(req: Request, action: string, entityId: string | null, metadata: Record<string, unknown>): Promise<void> {
+  const user = (req as AuthRequest).user;
+  if (!user) return;
+  const { error } = await supabaseAdmin.from('audit_log').insert({
+    org_id: user.org_id,
+    client_id: clientScope(req).id,
+    actor_user_id: user.id,
+    actor_role: user.role,
+    action,
+    entity_table: 'crm_leads',
+    entity_id: entityId,
+    before: null,
+    after: null,
+    metadata: { ...metadata, path: req.originalUrl, method: req.method },
+    ip_address: req.ip || null,
+    user_agent: (req.headers['user-agent'] as string) || null,
+  });
+  if (error) console.warn(`[dsar audit] insert failed: ${error.message}`);
+}
+
+// GET /crm/gdpr/export?lead_id=|contact_id=|phone=|email= — access + portability
+gdpr.get('/export', wrap(async (req, res) => {
+  const loc = readLocator(req.query as Record<string, unknown>);
+  const bundle = await dsarSvc.exportSubject(loc, dsarScope(req));
+  if (!bundle.found) throw new AppError(404, 'No data subject found for the given identifier', 'NOT_FOUND');
+  const relatedRows = Object.values(bundle.related).reduce((n, arr) => n + arr.length, 0);
+  await logDsar(req, 'gdpr.export', bundle.subject.lead?.id ?? bundle.subject.contact?.id ?? null, {
+    lead_id: bundle.subject.lead?.id ?? null,
+    contact_id: bundle.subject.contact?.id ?? null,
+    related_rows: relatedRows,
+  });
+  res.json(bundle);
+}));
+
+// POST /crm/gdpr/erase { lead_id | contact_id | phone | email } — right to erasure
+gdpr.post('/erase', wrap(async (req, res) => {
+  const loc = readLocator({ ...(req.body || {}), ...(req.query || {}) });
+  const result = await dsarSvc.eraseSubject(loc, dsarScope(req));
+  if (!result.found) throw new AppError(404, 'No data subject found for the given identifier', 'NOT_FOUND');
+  await logDsar(req, 'gdpr.erase', result.erased.leadId ?? result.erased.contactId, {
+    lead_id: result.erased.leadId,
+    contact_id: result.erased.contactId,
+    child_rows_deleted: result.erased.childRowsDeleted,
+  });
+  res.json(result);
+}));
+
+router.use('/gdpr', requireRole('super_admin', 'admin', 'main_admin'), gdpr);
 
 export default router;
