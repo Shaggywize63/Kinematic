@@ -460,11 +460,17 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   // New users are created active — enforce the org's active-user cap.
   await assertActiveUserCap(admin.org_id, email);
 
-  // Check for duplication
+  // Check for duplication. Scope to the caller's org (this was a cross-org
+  // existence oracle) and strip PostgREST filter metacharacters from the
+  // interpolated values so neither can break out of the .or() predicate.
+  // SECURITY_AUDIT_2026-07.md finding M-2.
+  const safeMobile = String(mobile ?? '').replace(/[(),"\\]/g, '');
+  const safeEmail = email ? String(email).trim().replace(/[(),"\\]/g, '') : '';
   const { data: existingUser, error: checkErr } = await supabaseAdmin
     .from('users')
     .select('id, name, mobile, email')
-    .or(`mobile.eq.${mobile}${email ? `,email.eq.${email.trim()}` : ''}`)
+    .eq('org_id', admin.org_id)
+    .or(`mobile.eq.${safeMobile}${safeEmail ? `,email.eq.${safeEmail}` : ''}`)
     .maybeSingle();
 
   if (existingUser) {
