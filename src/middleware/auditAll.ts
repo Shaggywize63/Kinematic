@@ -29,6 +29,21 @@ const SENSITIVE_KEYS = new Set([
   'authorization',
 ]);
 
+// Direct-identifier / sensitive PII that should not be retained in plaintext in
+// the audit_log payload. The audit trail still records actor, action, entity_table,
+// entity_id and timestamp — accountability is preserved — but the personal-data
+// VALUES are masked to satisfy GDPR data-minimisation / DPDP storage-limitation.
+// Quasi-identifiers like name/city are intentionally left readable for audit
+// usefulness (they are already reachable via entity_id). See SECURITY_AUDIT P-2.
+const PII_KEYS = new Set([
+  'email', 'personal_email', 'work_email',
+  'phone', 'mobile', 'phone_number', 'mobile_number', 'alternate_phone', 'whatsapp', 'whatsapp_number',
+  'dob', 'date_of_birth',
+  'aadhaar', 'aadhar', 'pan', 'passport', 'ssn', 'national_id',
+  'latitude', 'longitude', 'lat', 'lng', 'lon', 'coordinates',
+  'address', 'address_line1', 'address_line2', 'street', 'pincode', 'postal_code', 'zip',
+]);
+
 /**
  * Recursively replace sensitive values with '[REDACTED]'. Operates on
  * a structural clone so we don't mutate the live req.body. Arrays and
@@ -41,7 +56,10 @@ function scrubBody(value: unknown, depth = 0): unknown {
   if (typeof value !== 'object') return value;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    out[k] = SENSITIVE_KEYS.has(k.toLowerCase()) ? '[REDACTED]' : scrubBody(v, depth + 1);
+    const lk = k.toLowerCase();
+    out[k] = SENSITIVE_KEYS.has(lk) ? '[REDACTED]'
+           : PII_KEYS.has(lk) ? '[PII-REDACTED]'
+           : scrubBody(v, depth + 1);
   }
   return out;
 }
@@ -216,7 +234,9 @@ export function auditAll(req: AuthRequest, res: Response, next: NextFunction): v
           summary,
           error: errorMessage,
         },
-        ip_address:     (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || null,
+        // Use req.ip (honours `trust proxy`) rather than the raw client-controlled
+        // X-Forwarded-For, which can be spoofed to forge the forensic IP. SECURITY_AUDIT P-3.
+        ip_address:     req.ip || (req.socket && req.socket.remoteAddress) || null,
         user_agent:     (req.headers['user-agent'] as string) || null,
       })
       .then(({ error }) => {
