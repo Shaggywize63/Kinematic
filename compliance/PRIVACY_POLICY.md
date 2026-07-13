@@ -1,9 +1,9 @@
-# Privacy Policy — [PRODUCT/BRAND NAME]
+# Privacy Policy — Kinematic App
 
-> **DRAFT for legal review.** Effective date: [DATE]. Version: 0.1-draft.
-> Controller: **[LEGAL ENTITY NAME]**, [REGISTERED ADDRESS], [COUNTRY].
+> **DRAFT for legal review.** Effective date: 13 July 2026. Version: 0.1-draft.
+> Controller: **Kaiyo Technology Labs**, F-2587, 4th Floor, Ansal Esencia, Sector 67, Gurugram, Haryana 122101, India.
 
-This policy explains how [LEGAL ENTITY NAME] ("we", "us") collects, uses,
+This policy explains how Kaiyo Technology Labs ("we", "us") collects, uses,
 shares, and protects personal data through the Kinematic CRM / field-force
 platform (the "Service"), and the rights you have. It is written to satisfy the
 EU **General Data Protection Regulation (GDPR)** and India's **Digital Personal
@@ -56,20 +56,22 @@ before tracking begins.
 The Service is **not intended for individuals under 18**. Where a date of birth
 indicates a data principal is a minor, DPDP §9 protections apply: we do not
 undertake tracking, behavioural monitoring, or targeted advertising of children,
-and processing requires verifiable parental/guardian consent. [Describe the
-customer-facing control here.]
+and processing requires verifiable parental/guardian consent. Administrators can
+hide the date-of-birth field entirely; where it is collected and indicates a
+minor, staff are instructed not to proceed without documented parental/guardian
+consent, and the account may be flagged for review.
 
 ## 6. Who we share data with
 We do not sell personal data. We share it with **sub-processors** strictly to
 run the Service (hosting, notifications, AI, tax/e-invoice verification). The
 current list, including their locations, is maintained at `SUBPROCESSORS.md` /
-[PUBLIC SUB-PROCESSOR URL]. Each is bound by a data-processing agreement.
+https://kinematicapp.com/privacy. Each is bound by a data-processing agreement.
 
 ## 7. International transfers
-The Service is currently hosted in **[HOSTING REGION — e.g. Australia
-(ap-southeast-2)]**, and some sub-processors are located in the **United States
-and the EU**. Where we transfer personal data across borders we rely on
-[Standard Contractual Clauses / adequacy / other safeguard], and for Indian data
+The Service is currently hosted in **Australia — Supabase ap-southeast-2
+(Sydney)**, and some sub-processors are located in the **United States**.
+Where we transfer personal data across borders we rely on
+Standard Contractual Clauses (confirm with counsel), and for Indian data
 we comply with DPDP §16. A copy of the safeguards is available on request.
 
 ## 8. Your rights
@@ -78,8 +80,8 @@ Subject to applicable law, you may: **access** a copy of your data; request
 or **restrict** processing; and **withdraw consent**. Indian data principals
 also have the right to **nominate** and to **grievance redressal**.
 
-To exercise any right, contact **[DPO / GRIEVANCE OFFICER: name, email]**. We
-respond within **[30 days / statutory period]** and verify your identity first.
+To exercise any right, contact **Sagar Bhargava, s@kinematicapp.com**. We
+respond within **30 days** and verify your identity first.
 Requests are actioned through our data-subject-request tooling (access and
 erasure) and recorded in our audit log.
 
@@ -87,10 +89,10 @@ erasure) and recorded in our audit log.
 We keep personal data only as long as necessary for the purposes above and then
 delete or anonymise it per our retention schedule (indicative):
 - Active CRM records: for the life of the customer relationship.
-- Soft-deleted records: purged **[90] days** after deletion.
-- GPS / location history: **[180] days**.
-- Audit/accountability logs: **[365] days** (or as legally required).
-- Call recordings & transcripts: **[period]**, subject to consent.
+- Soft-deleted records: purged **90 days** after deletion.
+- GPS / location history: **180 days**.
+- Audit/accountability logs: **365 days** (or as legally required).
+- Call recordings & transcripts: **180 days**, subject to consent.
 Final periods are set in the Data Processing Agreement with each customer.
 
 ## 10. Security
@@ -107,6 +109,6 @@ controller where we act as processor.
 
 ## 12. Changes & contact
 We may update this policy; material changes will be notified. Questions or
-complaints: **[DPO / GRIEVANCE OFFICER]**, [EMAIL], [POSTAL ADDRESS]. EU data
+complaints: **Sagar Bhargava (Grievance Officer)**, s@kinematicapp.com, F-2587, 4th Floor, Ansal Esencia, Sector 67, Gurugram, Haryana 122101, India. EU data
 subjects may also complain to their local supervisory authority; Indian data
 principals may approach the Data Protection Board of India.

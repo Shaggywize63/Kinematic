@@ -1,11 +1,11 @@
-# Record of Processing Activities (ROPA) — [LEGAL ENTITY NAME]
+# Record of Processing Activities (ROPA) — Kaiyo Technology Labs
 
 > **DRAFT — GDPR Art. 30 / DPDP accountability.** Internal register; review at
 > least annually and whenever a processing activity changes. Fill placeholders.
 
-**Controller:** [LEGAL ENTITY NAME], [ADDRESS], [COUNTRY].
-**DPO / Grievance Officer:** [NAME, EMAIL, PHONE].
-**Last reviewed:** [DATE].
+**Controller:** Kaiyo Technology Labs, F-2587, 4th Floor, Ansal Esencia, Sector 67, Gurugram, Haryana 122101, India.
+**DPO / Grievance Officer:** Sagar Bhargava, s@kinematicapp.com, 8802274880.
+**Last reviewed:** 13 July 2026.
 
 ---
 
@@ -18,7 +18,7 @@
 - **Recipients:** Supabase (hosting), the customer's authorised staff.
 - **Storage/region:** Supabase, ap-southeast-2 (Sydney).
 - **Retention:** Life of customer relationship; soft-deleted rows purged after
-  [90] days (see retention job).
+  90 days (see retention job).
 - **Security:** TLS, tenant isolation, RLS, audit log, field-level PII masking
   in logs. **Lawful basis:** Contract / controller instruction.
 
@@ -27,20 +27,20 @@
 - **Data subjects:** Employees/field staff of customers.
 - **Categories:** Check-in/out timestamps, **attendance selfies** (facial image).
 - **Recipients:** Supabase Storage. **Region:** Sydney.
-- **Retention:** [period]. **Risk:** biometric-adjacent — buckets MUST be private
+- **Retention:** 180 days. **Risk:** biometric-adjacent — buckets MUST be private
   (audit PR-1). **Lawful basis:** Employment/legitimate interest + **DPIA**.
 
 ### RPA-3 — Field-staff location tracking
 - **Role:** Processor. **Purpose:** Live tracking, route/visit verification,
   geo-fence checks during working hours.
 - **Categories:** Precise GPS (lat/long) history, battery, device metadata.
-- **Retention:** [180] days (location trim job). **Lawful basis:** Legitimate
+- **Retention:** 180 days (location trim job). **Lawful basis:** Legitimate
   interest + **DPIA**; in-app notice before tracking.
 
 ### RPA-4 — Forms & activity capture
 - **Purpose:** Capture visits, form submissions, photos, orders.
 - **Categories:** Address, GPS, photos, submitted field values.
-- **Retention:** [period]. **Lawful basis:** Contract / notified purpose.
+- **Retention:** 180 days. **Lawful basis:** Contract / notified purpose.
 
 ### RPA-5 — AI features (profiling)
 - **Purpose:** Lead scoring, next-best-action, summaries, business-card OCR,
@@ -58,11 +58,11 @@
 ### RPA-7 — Security, audit & accountability
 - **Purpose:** Authn/authz, fraud/geo-fence flags, immutable audit logging,
   DSAR handling. **Categories:** User IDs, roles, IP, user-agent, action logs
-  (PII values masked). **Retention:** [365] days.
+  (PII values masked). **Retention:** 365 days.
 
 ### RPA-8 — Account & billing (own controller data)
 - **Role:** Controller. **Purpose:** Manage customer accounts, tax/e-invoicing.
-- **Recipients:** [GSTIN provider], [GSP], payment/billing. **Region:** [India].
+- **Recipients:** **TODO: confirm GSTIN-verification vendor, or remove if not used**, **TODO: confirm e-invoice/e-way GSP vendor, or remove if not used**, payment/billing. **Region:** India.
 
 ---
 ## Cross-cutting
