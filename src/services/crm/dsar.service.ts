@@ -77,7 +77,11 @@ export interface Scope {
   strict: boolean; // when true, also require client_id to match (real tenant isolation)
 }
 
-function applyScope<T extends { eq: (k: string, v: any) => T }>(q: T, scope: Scope): T {
+// NB: typed as `any` (matching crud.service's treatment of the Supabase query
+// builder). A recursive generic here — `<T extends { eq: (k, v) => T }>` — makes
+// tsc recurse into the builder's deeply-nested generics and fail with TS2589
+// ("Type instantiation is excessively deep and possibly infinite").
+function applyScope(q: any, scope: Scope): any {
   let scoped = q.eq('org_id', scope.orgId);
   if (scope.strict && scope.clientId) scoped = scoped.eq('client_id', scope.clientId);
   return scoped;
