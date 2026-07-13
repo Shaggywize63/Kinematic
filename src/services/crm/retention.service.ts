@@ -22,7 +22,9 @@ const DAY_MS = 86_400_000;
 // CRM entity tables that soft-delete via deleted_at (verified against schema).
 const SOFT_DELETE_TABLES = ['crm_leads', 'crm_contacts', 'crm_deals', 'crm_accounts', 'crm_activities'];
 // Append-only location / telemetry tables, trimmed by created_at.
-const LOCATION_TABLES = ['visit_logs', 'work_activity', 'security_alerts', 'sos_alerts'];
+// NOTE: work_activity is intentionally EXCLUDED — it is retained (per product
+// decision) and not age-trimmed by this job.
+const LOCATION_TABLES = ['visit_logs', 'security_alerts', 'sos_alerts'];
 
 export interface RetentionResult {
   dryRun: boolean;
