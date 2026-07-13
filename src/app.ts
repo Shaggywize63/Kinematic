@@ -39,6 +39,7 @@ import grievanceRoutes    from './routes/grievance.routes';
 import analyticsRoutes    from './routes/analytics.routes';
 import visitlogRoutes     from './routes/visitlog.routes';
 import uploadRoutes       from './routes/upload.routes';
+import mediaRoutes        from './routes/media.routes';
 import wmsRoutes          from './routes/wms.routes';
 import usersRoutes        from './routes/users.routes';
 import zonesRoutes        from './routes/zones.routes';
@@ -386,6 +387,7 @@ app.use(`${V1}/grievances`,    requireAuth, requireModule('reports'), grievanceR
 app.use(`${V1}/analytics`,     requireAuth, enforceCityScope, analyticsRoutes);
 app.use(`${V1}/visits`,        requireAuth, enforceCityScope, visitlogRoutes);
 app.use(`${V1}/upload`,        requireAuth, uploadRoutes);
+app.use(`${V1}/media`,         requireAuth, mediaRoutes);
 app.use(`${V1}/warehouses`,    requireAuth, requireModule('inventory'), wmsRoutes);
 app.use(`${V1}/users`,         requireAuth, requireModule('users'), usersRoutes);
 app.use(`${V1}/zones`,         requireAuth, enforceCityScope, zonesRoutes);
