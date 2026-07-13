@@ -603,7 +603,10 @@ leads.post('/', wrap(async (req, res) => {
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
-  const payload: Record<string, unknown> = { ...rest, client_id: rest.client_id ?? clientId(req) };
+  // client_id is the tenant boundary — always derive it server-side from the
+  // caller's scope (which honours a super-admin's X-Client-Id header), never from
+  // the request body. See SECURITY_AUDIT_2026-07.md finding H-2.
+  const payload: Record<string, unknown> = { ...rest, client_id: clientId(req) };
   // City fallback: when the form omits city (e.g. Tata tenants that
   // hide the City field on Settings → Custom Fields), auto-stamp it
   // from the rep's assigned cities. Champions / ASOs are always
@@ -1354,7 +1357,8 @@ deals.get('/export', wrap(async (req, res) => {
 }));
 deals.post('/', wrap(async (req, res) => {
   const parsed = parse(v.dealSchema, req.body);
-  const payload = { ...parsed, client_id: parsed.client_id ?? clientId(req) };
+  // client_id derived server-side from scope, never from body (SECURITY_AUDIT H-2).
+  const payload = { ...parsed, client_id: clientId(req) };
   res.status(201).json(await stampOwnerName(await dealsSvc.createDeal(orgId(req), payload, userId(req))));
 }));
 deals.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await dealsSvc.getDeal(orgId(req), req.params.id)))));
