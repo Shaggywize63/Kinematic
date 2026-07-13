@@ -425,6 +425,24 @@ async function stripHiddenLeadFields(
   return stripped;
 }
 
+// Roles permitted to assign a record to an arbitrary owner. Reps (executive /
+// field_executive / hr) may not — for them a client-supplied owner_id is
+// dropped so the server's assignment rules apply (they normally become the
+// owner). This closes the owner_id half of the mass-assignment finding
+// (SECURITY_AUDIT_2026-07.md H-2): a low-privilege rep could otherwise reassign
+// or hide records from their manager's owner-scoped view. Adjust the set to
+// match your assignment policy.
+const OWNER_ASSIGN_ROLES = new Set([
+  'super_admin', 'admin', 'main_admin', 'sub_admin', 'city_manager', 'supervisor', 'client',
+]);
+
+/** Strip a client-supplied owner_id unless the caller is allowed to assign owners. */
+function sanitizeOwnerId<T extends object>(req: Request, payload: T): void {
+  if (!payload || !('owner_id' in payload)) return;
+  const role = String((req as AuthRequest).user?.role || '').toLowerCase();
+  if (!OWNER_ASSIGN_ROLES.has(role)) delete (payload as Record<string, unknown>).owner_id;
+}
+
 /**
  * Build the subject line for the auto-spawned site_visit activity. Carries
  * the lead's display name so the timeline / activities list reads like
@@ -676,6 +694,7 @@ leads.post('/', wrap(async (req, res) => {
   await enforceLeadRequiredFields(orgId(req), payload.client_id as string | null ?? null, payload, 'create');
   // Data minimisation: never store built-in fields the admin has hidden.
   await stripHiddenLeadFields(orgId(req), payload.client_id as string | null ?? null, payload);
+  sanitizeOwnerId(req, payload); // reps can't self-assign an arbitrary owner (H-2)
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
 
   // Auto-log site visit: the previous version inserted a completed
@@ -1041,6 +1060,7 @@ leads.patch('/:id', wrap(async (req, res) => {
   await enforceLeadRequiredFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>, 'update');
   // Data minimisation: never store built-in fields the admin has hidden.
   await stripHiddenLeadFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>);
+  sanitizeOwnerId(req, rest as Record<string, unknown>); // reps can't reassign owner (H-2)
   const lead = await leadsSvc.updateLead(orgId(req), req.params.id, rest, userId(req));
   // Same revert as the leads.post handler: don't auto-insert the
   // activity. Echo a prefill block back so the client can open the
@@ -1184,11 +1204,15 @@ contacts.get('/', wrap(async (req, res) => {
 contacts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
+  sanitizeOwnerId(req, payload);
   res.status(201).json(await stampOwnerName(await crud.create('crm_contacts', orgId(req), payload, userId(req))));
 }));
 contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id, true, clientScope(req).id)))));
-contacts.patch('/:id', wrap(async (req, res) =>
-  res.json(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, parse(v.contactSchema.partial(), req.body), userId(req), clientScope(req).id)))));
+contacts.patch('/:id', wrap(async (req, res) => {
+  const payload = parse(v.contactSchema.partial(), req.body) as Record<string, unknown>;
+  sanitizeOwnerId(req, payload);
+  res.json(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, payload, userId(req), clientScope(req).id)));
+}));
 contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 contacts.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
@@ -1223,11 +1247,15 @@ accounts.get('/', wrap(async (req, res) => {
 accounts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
+  sanitizeOwnerId(req, payload);
   res.status(201).json(await stampOwnerName(await crud.create('crm_accounts', orgId(req), payload, userId(req))));
 }));
 accounts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id)))));
-accounts.patch('/:id', wrap(async (req, res) =>
-  res.json(await stampOwnerName(await crud.update('crm_accounts', orgId(req), req.params.id, parse(v.accountSchema.partial(), req.body), userId(req), clientScope(req).id)))));
+accounts.patch('/:id', wrap(async (req, res) => {
+  const payload = parse(v.accountSchema.partial(), req.body) as Record<string, unknown>;
+  sanitizeOwnerId(req, payload);
+  res.json(await stampOwnerName(await crud.update('crm_accounts', orgId(req), req.params.id, payload, userId(req), clientScope(req).id)));
+}));
 accounts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_accounts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
   await crud.list('crm_contacts', orgId(req), { account_id: req.params.id, ...req.query })
@@ -1415,11 +1443,15 @@ deals.post('/', wrap(async (req, res) => {
   const parsed = parse(v.dealSchema, req.body);
   // client_id derived server-side from scope, never from body (SECURITY_AUDIT H-2).
   const payload = { ...parsed, client_id: clientId(req) };
+  sanitizeOwnerId(req, payload);
   res.status(201).json(await stampOwnerName(await dealsSvc.createDeal(orgId(req), payload, userId(req))));
 }));
 deals.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await dealsSvc.getDeal(orgId(req), req.params.id)))));
-deals.patch('/:id', wrap(async (req, res) =>
-  res.json(await stampOwnerName(await dealsSvc.updateDeal(orgId(req), req.params.id, parse(v.dealUpdateSchema, req.body), userId(req))))));
+deals.patch('/:id', wrap(async (req, res) => {
+  const payload = parse(v.dealUpdateSchema, req.body);
+  sanitizeOwnerId(req, payload);
+  res.json(await stampOwnerName(await dealsSvc.updateDeal(orgId(req), req.params.id, payload, userId(req))));
+}));
 deals.delete('/:id', wrap(async (req, res) => { await dealsSvc.deleteDeal(orgId(req), req.params.id); res.status(204).end(); }));
 deals.post('/:id/move-stage', wrap(async (req, res) => {
   const { stage_id } = parse(v.moveStageSchema, req.body);
