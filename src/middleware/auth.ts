@@ -27,6 +27,16 @@ const authCache = new Map<string, CachedAuth>();
 // as the demo user across every module.
 const DEMO_EMAIL = 'demo@kinematic.com';
 
+// Demo mode grants super_admin via a guessable static token / email and is a
+// finding for any pen-test (SECURITY_AUDIT_2026-07.md H-1). It is scoped to the
+// sentinel DEMO_ORG_ID (fixture data only), but we still make it secure-by-default:
+// DISABLED in production unless an operator explicitly opts in with DEMO_MODE=on.
+// In non-production it stays on for developer convenience.
+// NOTE for ops: if the live customer-facing demo login relies on this in prod,
+// set DEMO_MODE=on on the production server — otherwise demo login is rejected.
+const DEMO_MODE_ENABLED =
+  process.env.NODE_ENV !== 'production' || process.env.DEMO_MODE === 'on';
+
 // Permissions/role payload applied to the demo account. Kept identical to
 // the placeholder-token branch below so the two paths produce equivalent
 // req.user objects.
@@ -180,7 +190,8 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const token = authHeader.split(' ')[1].replace(/['"]+/g, '').trim();
 
   // --- DEMO TOKEN BYPASS ---
-  if (token === 'demo-token-jwt-placeholder') {
+  if (DEMO_MODE_ENABLED && token === 'demo-token-jwt-placeholder') {
+    logger.warn(`[Auth] Demo token accepted (demo mode enabled) from ${req.ip}`);
     req.user = {
       id: DEMO_USER_ID,
       org_id: DEMO_ORG_ID,
@@ -246,7 +257,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // instead of querying the empty demo-org rows. Promote to the same payload
   // the placeholder-token bypass produces above.
   const callerEmail = (verified.email || profile.email || '').toLowerCase();
-  const isDemoEmail = callerEmail === DEMO_EMAIL;
+  const isDemoEmail = DEMO_MODE_ENABLED && callerEmail === DEMO_EMAIL;
   if (isDemoEmail) {
     profile.org_id = DEMO_ORG_ID;
     profile.role = 'super_admin';

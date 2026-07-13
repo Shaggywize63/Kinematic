@@ -220,10 +220,20 @@ const limiter = rateLimit({
 });
 
 app.use('/api', limiter);
-app.use('/api/v1/auth/login', loginLimiter);                   // composite (IP + email) brute-force throttle
+// NOTE: loginLimiter is mounted AFTER express.json() below — its keyGenerator
+// reads req.body.email, which is undefined until the body is parsed. Mounting it
+// here (pre-parse) silently degraded it to an IP-only limiter. See SECURITY_AUDIT
+// finding R-1.
 
 // ── HTTP logging ─────────────────────────────────────
-app.use(morgan('combined', {
+// Redact secrets/tokens that ride in query strings (e.g. /f/:id?key=…,
+// /crm/unsubscribe?t=…) before they land in the persistent access log.
+// SECURITY_AUDIT finding P-1.
+const REDACT_QS = /([?&](?:key|t|token|secret|password|access_token|refresh_token|api_key|apikey|sig|signature)=)[^&#]*/gi;
+morgan.token('safeurl', (req: any) => String(req.originalUrl || req.url || '').replace(REDACT_QS, '$1[REDACTED]'));
+const COMBINED_SAFE =
+  ':remote-addr - :remote-user [:date[clf]] ":method :safeurl HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent"';
+app.use(morgan(COMBINED_SAFE, {
   stream: { write: (msg) => logger.http(msg.trim()) },
   skip: (req) => req.path === '/health',
 }));
@@ -241,6 +251,7 @@ app.use(express.json({
   verify: (req, _res, buf) => { (req as unknown as { rawBody?: Buffer }).rawBody = buf; },
 }));
 app.use(express.urlencoded({ extended: false, limit: '256kb' }));
+app.use('/api/v1/auth/login', loginLimiter);                   // composite (IP + email) brute-force throttle — after body parse so req.body.email is available
 app.use(strictJson);                                            // mutating routes must send JSON
 app.use(prototypePoll);                                         // block __proto__ / constructor injection
 app.use(auditAll);                                              // log every state change after the response finishes

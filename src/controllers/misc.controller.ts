@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { clearEmailProjectCache } from '../lib/projects';
-import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID } from '../utils';
+import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID, scopeOwnOrg } from '../utils';
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlerts, getMockUsers, getMockGrievances } from '../utils/demoData';
@@ -17,11 +17,7 @@ export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('date', date);
 
   const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
-  if (targetCid && isUUID(targetCid)) {
-    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    query = query.eq('org_id', user.org_id);
-  }
+  query = scopeOwnOrg(query, user.org_id, targetCid);
   if (user.role === 'executive') query = query.eq('executive_id', user.id);
   if (user.role === 'supervisor') query = query.eq('visitor_id', user.id);
   const { data, error } = await query
@@ -94,11 +90,7 @@ export const getAllGrievances = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*, submitted_by_user:submitted_by(id, name, zone_id)', { count: 'exact' });
 
   const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
-  if (targetCid && isUUID(targetCid)) {
-    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    query = query.eq('org_id', user.org_id);
-  }
+  query = scopeOwnOrg(query, user.org_id, targetCid);
   if (status) query = query.eq('status', status as string);
   const { data, error, count } = await query
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
@@ -112,11 +104,7 @@ export const updateGrievance = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('id', req.params.id);
 
   const targetCid = req.user!.client_id;
-  if (targetCid && isUUID(targetCid)) {
-    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    query = query.eq('org_id', req.user!.org_id);
-  }
+  query = scopeOwnOrg(query, req.user!.org_id, targetCid);
   const { data, error } = await query.select().single()
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   sendSuccess(res, data, 'Grievance updated')
@@ -472,11 +460,17 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   // New users are created active — enforce the org's active-user cap.
   await assertActiveUserCap(admin.org_id, email);
 
-  // Check for duplication
+  // Check for duplication. Scope to the caller's org (this was a cross-org
+  // existence oracle) and strip PostgREST filter metacharacters from the
+  // interpolated values so neither can break out of the .or() predicate.
+  // SECURITY_AUDIT_2026-07.md finding M-2.
+  const safeMobile = String(mobile ?? '').replace(/[(),"\\]/g, '');
+  const safeEmail = email ? String(email).trim().replace(/[(),"\\]/g, '') : '';
   const { data: existingUser, error: checkErr } = await supabaseAdmin
     .from('users')
     .select('id, name, mobile, email')
-    .or(`mobile.eq.${mobile}${email ? `,email.eq.${email.trim()}` : ''}`)
+    .eq('org_id', admin.org_id)
+    .or(`mobile.eq.${safeMobile}${safeEmail ? `,email.eq.${safeEmail}` : ''}`)
     .maybeSingle();
 
   if (existingUser) {
@@ -764,11 +758,7 @@ export const getZones = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*').eq('is_active', true);
 
   const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
-  if (targetCid && isUUID(targetCid)) {
-    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    query = query.eq('org_id', user.org_id);
-  }
+  query = scopeOwnOrg(query, user.org_id, targetCid);
 
   if (user.role === 'city_manager' && user.assigned_cities?.length) {
     query = query.in('city', user.assigned_cities);
@@ -828,11 +818,7 @@ export const updateZone = asyncHandler<AuthRequest>(async (req, res) => {
   
   let query = supabaseAdmin.from('zones').update(updates).eq('id', id);
   const targetCid = user.client_id;
-  if (targetCid && isUUID(targetCid)) {
-    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    query = query.eq('org_id', user.org_id);
-  }
+  query = scopeOwnOrg(query, user.org_id, targetCid);
   
   const { data, error } = await query.select().single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -846,11 +832,7 @@ export const deleteZone = asyncHandler<AuthRequest>(async (req, res) => {
   
   let query = supabaseAdmin.from('zones').delete().eq('id', id);
   const targetCid = user.client_id;
-  if (targetCid && isUUID(targetCid)) {
-    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    query = query.eq('org_id', user.org_id);
-  }
+  query = scopeOwnOrg(query, user.org_id, targetCid);
   
   const { error } = await query;
   if (error) {
@@ -865,10 +847,7 @@ export const getDashboardSummary = asyncHandler<AuthRequest>(async (req, res) =>
   const user = req.user!
   const date = (req.query.date as string) || todayDate()
   const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
-  const applyFilter = (q: any) => {
-    if (targetCid && isUUID(targetCid)) return q.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-    return q.eq('org_id', user.org_id);
-  };
+  const applyFilter = (q: any) => scopeOwnOrg(q, user.org_id, targetCid);
 
   let attQ = applyFilter(supabaseAdmin.from('attendance').select('user_id, status', { count: 'exact' })).eq('date', date)
   let subQ = applyFilter(supabaseAdmin.from('form_submissions').select('id, is_converted', { count: 'exact' })).gte('submitted_at', date + 'T00:00:00+05:30').lte('submitted_at', date + 'T23:59:59+05:30')
@@ -892,10 +871,7 @@ export const getDashboardSummary = asyncHandler<AuthRequest>(async (req, res) =>
 export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
   const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
-  const applyFilter = (q: any) => {
-    if (targetCid && isUUID(targetCid)) return q.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-    return q.eq('org_id', user.org_id);
-  };
+  const applyFilter = (q: any) => scopeOwnOrg(q, user.org_id, targetCid);
 
   let aQ = applyFilter(supabaseAdmin.from('attendance').select('id, user_id, status, checkin_at, checkout_at, checkin_selfie_url, checkout_selfie_url, users!attendance_user_id_fkey(name, zones(name))'));
   let fQ = applyFilter(supabaseAdmin.from('form_submissions').select('id, user_id, submitted_at, is_converted, outlet_name, users!user_id(name)'));
@@ -957,11 +933,7 @@ export const resolveSOS = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('id', req.params.id);
 
   const targetCid = req.user!.client_id;
-  if (targetCid && isUUID(targetCid)) {
-    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    query = query.eq('org_id', req.user!.org_id);
-  }
+  query = scopeOwnOrg(query, req.user!.org_id, targetCid);
   const { data, error } = await query.select().single()
 
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
