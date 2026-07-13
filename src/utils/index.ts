@@ -65,6 +65,32 @@ export function sendPaginated(res: Response, data: any[], total: number, page: n
 
 export const isUUID = (id: any): boolean => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id));
 
+/**
+ * Tenant-safe scoping for field-force tables that carry both `org_id` and `client_id`.
+ *
+ * ALWAYS constrains the query to the caller's own (JWT/impersonation-verified) `org_id`
+ * — never a client-supplied value — then optionally narrows to a specific `client_id`
+ * *within that org*. A super-admin viewing another org still goes through the audited
+ * `X-Org-Id` impersonation path, which sets `ownOrgId` to the target org.
+ *
+ * This closes the cross-tenant IDOR (SECURITY_AUDIT_2026-07.md finding C-1) where a
+ * caller-supplied `?client_id=<other-org-uuid>` was interpolated straight into an
+ * `org_id.eq.<attacker>` PostgREST filter, returning another tenant's rows.
+ *
+ * Replaces the unsafe `.or(`client_id.eq.${x},org_id.eq.${x}`)` pattern.
+ */
+export function scopeOwnOrg<T extends { eq: (k: string, v: any) => T }>(
+  q: T,
+  ownOrgId: string,
+  pickedClientId?: unknown,
+): T {
+  let scoped = q.eq('org_id', ownOrgId);
+  if (typeof pickedClientId === 'string' && isUUID(pickedClientId)) {
+    scoped = scoped.eq('client_id', pickedClientId);
+  }
+  return scoped;
+}
+
 // ── DEFINITIVE IST UTILS ──
 
 /**
