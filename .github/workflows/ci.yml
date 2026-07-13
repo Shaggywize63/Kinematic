@@ -1,0 +1,30 @@
+name: CI
+
+# Typecheck + build gate so a TypeScript error can't reach main again.
+# (The DSAR TS2589 error that broke the Railway deploy would have been caught
+#  here before merge — see SECURITY_AUDIT_2026-07.md.)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    name: Typecheck & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # No package-lock.json is committed (it is gitignored), so `npm ci` is not
+      # usable here; `npm install` resolves the declared ranges.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck & build (tsc)
+        run: npm run build
