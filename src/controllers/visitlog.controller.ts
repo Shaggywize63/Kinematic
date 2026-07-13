@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, ok, created, badRequest, isUUID } from '../utils';
+import { asyncHandler, ok, created, badRequest, isUUID, scopeOwnOrg } from '../utils';
 import { DEMO_ORG_ID, isDemo, getMockVisitLogs } from '../utils/demoData';
 
 const visitSchema = z.object({
@@ -164,12 +164,8 @@ export const getTeamVisits = asyncHandler<AuthRequest>(async (req, res) => {
     .select(ALL_COLUMNS)
     .eq('date', date);
 
-  const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
-  if (targetCid && isUUID(targetCid)) {
-    query = query.or(`client_id.eq.${targetCid},org_id.eq.${targetCid}`);
-  } else {
-    query = query.eq('org_id', user.org_id);
-  }
+  const pickedCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
+  query = scopeOwnOrg(query, user.org_id, pickedCid);
 
   const { data, error } = await query.order('visited_at', { ascending: false });
   if (error) return badRequest(res, error.message);

@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess, todayDate, dbToday, isoDate, isUUID, parseAppDate, formatAppDate } from '../utils';
+import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess, todayDate, dbToday, isoDate, isUUID, scopeOwnOrg, parseAppDate, formatAppDate } from '../utils';
 import { isWithinGeofence } from '../lib/haversine';
 import { DEMO_ORG_ID, isDemo, getMockAttendanceToday, getMockAttendanceHistory } from '../utils/demoData';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
@@ -411,12 +411,8 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
 
   // Auth / Org Filtering
   if (!isGlobal) {
-    if (client_id && isUUID(client_id)) {
-      // If a client is selected, show records matching that client_id OR records where the org_id is the client
-      query = query.or(`client_id.eq.${client_id},org_id.eq.${client_id}`);
-    } else {
-      query = query.eq('org_id', user.org_id);
-    }
+    // Always scope to the caller's own org; narrow to a client only within that org.
+    query = scopeOwnOrg(query, user.org_id, (client_id && isUUID(client_id)) ? client_id : undefined);
   }
 
   // Additional Property Filters

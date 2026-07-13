@@ -164,6 +164,12 @@ export const login = asyncHandler<Request>(async (req, res) => {
 
   if (isMobile || isAppEmail) {
     const mobile = isMobile ? email.trim() : email.replace('@kinematic.app', '').trim();
+    // The @kinematic.app local-part is not digit-validated upstream; ensure only
+    // digits reach the interpolated PostgREST .or() so it cannot break out of the
+    // predicate. This runs pre-auth. SECURITY_AUDIT_2026-07.md finding M-1.
+    if (!/^\d{6,15}$/.test(mobile)) {
+      return res.status(401).json({ success: false, error: 'No account found for this mobile number. Contact your admin.' });
+    }
     const { data: userLookup } = await supabaseAdmin
       .from('users')
       .select('email, mobile')
