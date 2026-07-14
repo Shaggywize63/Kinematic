@@ -142,6 +142,44 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
 });
 
 /**
+ * Default entitlement for a brand-new client when the caller doesn't pass an
+ * explicit `modules` list: the whole CRM package (non-universal modules whose
+ * package = 'crm'). This prevents the "no grants → universal-modules-only →
+ * every client-scoped user is locked out of CRM" trap that blocked the SRS
+ * sub-admins on Tata Tiscon. An explicit `modules` list always wins over this.
+ */
+async function defaultClientModuleIds(): Promise<string[]> {
+  const { data } = await supabaseAdmin
+    .from('modules')
+    .select('id')
+    .eq('package', 'crm')
+    .eq('is_universal', false);
+  return (data || []).map((m) => m.id as string);
+}
+
+/**
+ * Mirror a client's module grants into the legacy per-user `user_module_permissions`
+ * table for EVERY user of the client — not just the `role='client'` owner. The
+ * client-level entitlement is what actually gates access, but keeping the
+ * per-user fallback in sync for sub_admins and other roles means "module access
+ * as per assigned modules" holds no matter which code path reads it.
+ */
+async function syncClientUserModulePermissions(clientId: string, moduleIds: string[]): Promise<void> {
+  const { data: clientUsers } = await supabaseAdmin
+    .from('users')
+    .select('id')
+    .eq('client_id', clientId);
+  const userIds = (clientUsers || []).map((u) => u.id);
+  if (userIds.length === 0) return;
+
+  // Replace the whole set for these users.
+  await supabaseAdmin.from('user_module_permissions').delete().in('user_id', userIds);
+  if (moduleIds.length === 0) return;
+  const payload = userIds.flatMap((uid) => moduleIds.map((m) => ({ user_id: uid, module_id: m })));
+  await supabaseAdmin.from('user_module_permissions').insert(payload);
+}
+
+/**
  * POST /api/v1/clients
  * Admin only: Create a new client
  */
@@ -250,9 +288,20 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
     }
   }
 
-  // Add module access if provided
-  if (modules && Array.isArray(modules) && modules.length > 0) {
-    const accessPayload = modules.map(m => ({
+  // Module access. An explicit `modules` list wins; otherwise a new client
+  // defaults to the CRM package so its users aren't locked out of everything
+  // but the universal modules (the trap that blocked the SRS sub-admins).
+  const requestedModules: string[] = (modules && Array.isArray(modules) && modules.length > 0)
+    ? modules
+    : await defaultClientModuleIds();
+
+  // Filter against real module ids to prevent FK violations from bad input.
+  const { data: validModules } = await supabaseAdmin.from('modules').select('id');
+  const validIds = new Set((validModules || []).map((m) => m.id));
+  const grantedModules = requestedModules.filter((m) => validIds.has(m));
+
+  if (grantedModules.length > 0) {
+    const accessPayload = grantedModules.map((m) => ({
       client_id: client.id,
       module_id: m,
       enabled: true,
@@ -264,23 +313,9 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
       .upsert(accessPayload, { onConflict: 'client_id,module_id' });
     clearEntitlementCache(client.id);
 
-    // Sync to user_module_permissions if we have an authId (administrator account)
-    const { data: adminUser } = await supabaseAdmin
-      .from('users')
-      .select('id')
-      .eq('client_id', client.id)
-      .eq('role', 'client')
-      .maybeSingle();
-
-    if (adminUser) {
-      const userPermissionsPayload = modules.map(m => ({
-        user_id: adminUser.id,
-        module_id: m
-      }));
-      // Delete old permissions and insert new ones
-      await supabaseAdmin.from('user_module_permissions').delete().eq('user_id', adminUser.id);
-      await supabaseAdmin.from('user_module_permissions').insert(userPermissionsPayload);
-    }
+    // Propagate to per-user permissions for ALL client users (at create time
+    // that's just the owner, but the helper stays correct as users are added).
+    await syncClientUserModulePermissions(client.id, grantedModules);
   }
 
   // Per-org active-user cap (optional). Written to the org that holds this
@@ -617,27 +652,10 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     }
     clearEntitlementCache(id);
 
-    // 4. Sync User-Level Permissions for ALL Client Administrators/Users
-    const { data: clientUsers } = await supabaseAdmin
-      .from('users')
-      .select('id')
-      .eq('client_id', id)
-      .eq('role', 'client');
-
-    if (clientUsers && clientUsers.length > 0) {
-      const allUserIds = clientUsers.map(u => u.id);
-      
-      // Delete old permissions for all these users
-      await supabaseAdmin.from('user_module_permissions').delete().in('user_id', allUserIds);
-      
-      if (filteredModules.length > 0) {
-        const userPermissionsPayload = allUserIds.flatMap(uid => 
-          filteredModules.map(m => ({ user_id: uid, module_id: m }))
-        );
-        console.log(`[DEBUG] Syncing ${userPermissionsPayload.length} user-level perms for ${allUserIds.length} users.`);
-        await supabaseAdmin.from('user_module_permissions').insert(userPermissionsPayload);
-      }
-    }
+    // 4. Mirror the grant into per-user permissions for EVERY user of the client
+    // (not just the role='client' owner) so sub_admins and other roles stay in
+    // sync with the assigned modules.
+    await syncClientUserModulePermissions(id, filteredModules);
   }
 
   // 5. Cross-project ceiling sync: if this client is linked to a client in
