@@ -19,7 +19,10 @@ import { complete as aiComplete } from './ai/aiClient';
 import { findOrCreateLead, type NormalizedLead } from './integrations/dedup.orchestrator';
 
 const CANONICAL_FIELDS = [
-  'first_name','last_name','email','phone','company','title','source','country','city','industry','notes','owner_email',
+  'first_name','last_name','email','phone','alternate_mobiles','company','title','industry',
+  'source','owner_email','status','city','state','district','block','country','postal_code',
+  'address_line1','address_line2','date_of_birth','gender','preferred_contact_method',
+  'marketing_consent','whatsapp_consent','is_b2c','latitude','longitude','notes','tags',
 ];
 
 // Cap on rows persisted to crm_import_jobs.data so the JSONB column stays
@@ -225,6 +228,10 @@ async function runCommitInBackground(
   // so every import attributes its leads consistently. Reports and
   // assignment rules can then target this source by name.
   const source_id = await getOrCreateImportSource(org_id, user_id, client_id);
+  // If the CSV maps a `source` column, resolve each value to an existing lead
+  // source (org-level or this client's) by name; unmatched rows keep the
+  // default import source above. We never auto-create new sources here.
+  const sourceByName = await buildSourceNameMap(org_id, client_id);
 
   // Resolve the CSV's `owner_email` column to user ids up front. One query
   // for the whole org (tens of users, not thousands) → an email→id map,
@@ -253,6 +260,16 @@ async function runCommitInBackground(
     await Promise.all(chunk.map(async (rawRow, j) => {
       const i = chunkStart + j;
       const mapped = mapRow(rawRow, mapping);
+      // Custom-field columns are mapped with a `custom_fields.<key>` target and
+      // collected into the jsonb bag; createLead validates/coerces them against
+      // the client's crm_custom_field_defs.
+      const custom_fields: Record<string, unknown> = {};
+      for (const [dest, val] of Object.entries(mapped)) {
+        if (dest.startsWith('custom_fields.')) {
+          const cfKey = dest.slice('custom_fields.'.length);
+          if (cfKey) custom_fields[cfKey] = val;
+        }
+      }
       const normalized: NormalizedLead = {
         first_name: textOrNull(mapped.first_name),
         last_name:  textOrNull(mapped.last_name),
@@ -263,7 +280,25 @@ async function runCommitInBackground(
         industry:   textOrNull(mapped.industry),
         country:    textOrNull(mapped.country),
         city:       textOrNull(mapped.city),
+        state:      textOrNull(mapped.state),
         notes:      textOrNull(mapped.notes),
+        date_of_birth:            textOrNull(mapped.date_of_birth),
+        gender:                   textOrNull(mapped.gender),
+        preferred_contact_method: textOrNull(mapped.preferred_contact_method),
+        address_line1:            textOrNull(mapped.address_line1),
+        address_line2:            textOrNull(mapped.address_line2),
+        postal_code:              textOrNull(mapped.postal_code),
+        district:                 textOrNull(mapped.district),
+        block:                    textOrNull(mapped.block),
+        status:                   textOrNull(mapped.status),
+        tags:              splitList(mapped.tags),
+        alternate_mobiles: splitList(mapped.alternate_mobiles),
+        is_b2c:            parseBool(mapped.is_b2c),
+        marketing_consent: parseBool(mapped.marketing_consent),
+        whatsapp_consent:  parseBool(mapped.whatsapp_consent),
+        latitude:          parseNum(mapped.latitude),
+        longitude:         parseNum(mapped.longitude),
+        custom_fields: Object.keys(custom_fields).length ? custom_fields : undefined,
       };
 
       if (!normalized.email && !normalized.phone && !normalized.first_name && !normalized.last_name) {
@@ -276,9 +311,11 @@ async function runCommitInBackground(
       // default owner) takes over as before.
       const ownerEmail = textOrNull(mapped.owner_email);
       const owner_id = ownerEmail ? (ownerByEmail.get(ownerEmail.toLowerCase()) ?? null) : null;
+      const srcName = textOrNull(mapped.source);
+      const rowSourceId = (srcName && sourceByName.get(srcName.toLowerCase())) || source_id;
       try {
         const r = await findOrCreateLead({
-          org_id, source_id, normalized, owner_id,
+          org_id, source_id: rowSourceId, normalized, owner_id,
           integration_id: null, raw_event_id: null, user_id,
           client_id: client_id ?? undefined,
         });
@@ -433,6 +470,51 @@ function textOrNull(v: unknown): string | null {
   if (v == null) return null;
   const s = String(v).trim();
   return s.length === 0 ? null : s;
+}
+
+// Split a delimited cell (comma / semicolon / pipe) into a trimmed string list.
+// Returns undefined when the cell is empty so the field is left untouched.
+function splitList(v: unknown): string[] | undefined {
+  const s = textOrNull(v);
+  if (!s) return undefined;
+  const arr = s.split(/[;,|]/).map((x) => x.trim()).filter(Boolean);
+  return arr.length ? arr : undefined;
+}
+
+// Parse a spreadsheet boolean. Returns undefined for anything unrecognised so
+// the column is only set when the CSV clearly says true/false.
+function parseBool(v: unknown): boolean | undefined {
+  const s = textOrNull(v);
+  if (s == null) return undefined;
+  const t = s.toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on'].includes(t)) return true;
+  if (['false', '0', 'no', 'n', 'off'].includes(t)) return false;
+  return undefined;
+}
+
+function parseNum(v: unknown): number | undefined {
+  const s = textOrNull(v);
+  if (s == null) return undefined;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+// name(lowercased) → source id for this org's lead sources visible to the
+// client (org-level or client-scoped). Used to resolve a mapped `source`
+// column to an existing source; unmatched values fall back to the import
+// source. Never creates new sources.
+async function buildSourceNameMap(org_id: string, client_id: string | null): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const { data } = await supabaseAdmin
+    .from('crm_lead_sources')
+    .select('id, name, client_id')
+    .eq('org_id', org_id);
+  for (const s of (data ?? []) as Array<{ id: string; name: string | null; client_id: string | null }>) {
+    if (s.client_id && client_id && s.client_id !== client_id) continue; // other client's source
+    const name = String(s.name ?? '').toLowerCase().trim();
+    if (name && !map.has(name)) map.set(name, s.id);
+  }
+  return map;
 }
 
 function extractJson(s: string): string {
