@@ -20,7 +20,7 @@ import { findOrCreateLead, type NormalizedLead } from './integrations/dedup.orch
 
 const CANONICAL_FIELDS = [
   'first_name','last_name','email','phone','alternate_mobiles','company','title','industry',
-  'source','owner_email','status','city','state','district','block','country','postal_code',
+  'source','owner_email','owner_name','status','city','state','district','block','country','postal_code',
   'address_line1','address_line2','date_of_birth','gender','preferred_contact_method',
   'marketing_consent','whatsapp_consent','is_b2c','latitude','longitude','notes','tags',
 ];
@@ -239,6 +239,7 @@ async function runCommitInBackground(
   // this, owner_email was silently dropped and every lead fell back to the
   // importer as owner.
   const ownerByEmail = await buildOwnerEmailMap(org_id);
+  const ownerByName = await buildOwnerNameMap(org_id);
 
   let created = 0;
   let merged  = 0;
@@ -309,8 +310,12 @@ async function runCommitInBackground(
       // lead is assigned to that user; when absent or unmatched, owner_id
       // stays null and createLead's assignment chain (rule → creator →
       // default owner) takes over as before.
-      const ownerEmail = textOrNull(mapped.owner_email);
-      const owner_id = ownerEmail ? (ownerByEmail.get(ownerEmail.toLowerCase()) ?? null) : null;
+      // Owner can be given as an email OR a name column — and either column
+      // may actually contain the other, so try both lookups on whatever value
+      // is present. Email wins when both columns are mapped.
+      const ownerVal = textOrNull(mapped.owner_email) ?? textOrNull(mapped.owner_name);
+      const ownerKey = ownerVal ? ownerVal.toLowerCase() : null;
+      const owner_id = ownerKey ? (ownerByEmail.get(ownerKey) ?? ownerByName.get(ownerKey) ?? null) : null;
       const srcName = textOrNull(mapped.source);
       const rowSourceId = (srcName && sourceByName.get(srcName.toLowerCase())) || source_id;
       try {
@@ -408,6 +413,24 @@ async function buildOwnerEmailMap(org_id: string): Promise<Map<string, string>> 
     const email = (u as { email?: string | null }).email;
     if (email) map.set(String(email).toLowerCase().trim(), (u as { id: string }).id);
   }
+  return map;
+}
+
+// name(lowercased) → user id for this org. So a CSV can assign an owner by
+// NAME as well as by email. Names aren't unique, so a name shared by two users
+// is treated as ambiguous and dropped (the lead falls back to the normal
+// assignment chain) rather than assigned to an arbitrary one.
+async function buildOwnerNameMap(org_id: string): Promise<Map<string, string>> {
+  const { data: users } = await supabaseAdmin.from('users')
+    .select('id, name').eq('org_id', org_id);
+  const seen = new Map<string, string | null>();
+  for (const u of users ?? []) {
+    const name = String((u as { name?: string | null }).name ?? '').toLowerCase().trim();
+    if (!name) continue;
+    seen.set(name, seen.has(name) ? null : (u as { id: string }).id); // 2nd sighting → ambiguous
+  }
+  const map = new Map<string, string>();
+  for (const [name, id] of seen) if (id) map.set(name, id);
   return map;
 }
 
