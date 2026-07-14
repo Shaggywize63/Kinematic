@@ -2618,60 +2618,114 @@ peopleDir.post('/bulk-import', wrap(async (req, res) => {
   const cid = clientId(req);
   if (!cid) throw new AppError(400, 'A client must be selected to import People Directory rows', 'CLIENT_REQUIRED');
   const org_id = orgId(req);
-  let added = 0, updated = 0, skipped = 0;
-  for (const row of body.rows) {
-    const first_name = row.first_name?.trim() || null;
-    const last_name  = row.last_name?.trim()  || null;
-    const mobile     = row.mobile?.trim()     || null;
-    const email      = row.email?.trim()      || null;
-    const address    = row.address?.trim()    || null;
-    const personType = row.type?.trim()       || null;
-    const city       = row.city?.trim()       || null;
-    // CSV `id` column lands here as `code` server-side — see
-    // the dashboard's import mapper.
-    const code       = row.code?.trim()       || null;
-    if (!first_name && !last_name && !mobile && !email) { skipped++; continue; }
+  const uid = userId(req) ?? null;
 
-    // Dedup: match on the user-facing ID (`code`) when present, then
-    // fall back to mobile / email. All three are independently
-    // indexed so the probe stays O(log n).
-    let existingId: string | null = null;
-    if (code) {
-      const r = await supabaseAdmin.from('people_directory').select('id')
-        .eq('org_id', org_id).eq('client_id', cid).eq('code', code)
-        .is('deleted_at', null).limit(1).maybeSingle();
-      existingId = (r.data?.id as string) ?? null;
+  // Normalise every row once; drop rows with no identifying field.
+  type PdRow = {
+    first_name: string | null; last_name: string | null; mobile: string | null;
+    email: string | null; address: string | null; type: string | null;
+    city: string | null; code: string | null;
+  };
+  const norm: PdRow[] = [];
+  let skipped = 0;
+  for (const row of body.rows) {
+    const r: PdRow = {
+      first_name: row.first_name?.trim() || null,
+      last_name:  row.last_name?.trim()  || null,
+      mobile:     row.mobile?.trim()     || null,
+      email:      row.email?.trim()      || null,
+      address:    row.address?.trim()    || null,
+      // CSV `id` column lands here as `code` server-side — see the
+      // dashboard's import mapper.
+      type:       row.type?.trim()       || null,
+      city:       row.city?.trim()       || null,
+      code:       row.code?.trim()       || null,
+    };
+    if (!r.first_name && !r.last_name && !r.mobile && !r.email) { skipped++; continue; }
+    norm.push(r);
+  }
+
+  // Dedup SET-BASED rather than the old row-by-row 3-SELECTs-then-write loop.
+  // That loop issued ~4 round-trips per row, so a large import outran the
+  // gateway timeout — surfacing in the browser as a generic "Load failed",
+  // and on retry producing duplicate rows (the next request's per-row probe
+  // ran before the first request had committed). Here we resolve every key in
+  // a bounded number of `.in()` lookups, then do one bulk insert.
+  const uniq = (xs: (string | null)[]) =>
+    [...new Set(xs.filter((x): x is string => !!x))];
+  const codes   = uniq(norm.map((r) => r.code));
+  const mobiles = uniq(norm.map((r) => r.mobile));
+  const emails  = uniq(norm.map((r) => r.email));
+
+  const byCode   = new Map<string, string>();
+  const byMobile = new Map<string, string>();
+  const byEmail  = new Map<string, string>();
+  const LOOKUP_CHUNK = 200; // guard PostgREST URL length on very large batches
+  const lookup = async (col: 'code' | 'mobile' | 'email', vals: string[], into: Map<string, string>) => {
+    for (let i = 0; i < vals.length; i += LOOKUP_CHUNK) {
+      const slice = vals.slice(i, i + LOOKUP_CHUNK);
+      const { data } = await supabaseAdmin.from('people_directory')
+        .select(`id, ${col}`)
+        .eq('org_id', org_id).eq('client_id', cid).is('deleted_at', null)
+        .in(col, slice);
+      for (const d of (data ?? []) as Array<Record<string, string>>) {
+        const key = d[col];
+        if (key && !into.has(key)) into.set(key, d.id);
+      }
     }
-    if (!existingId && mobile) {
-      const r = await supabaseAdmin.from('people_directory').select('id')
-        .eq('org_id', org_id).eq('client_id', cid).eq('mobile', mobile)
-        .is('deleted_at', null).limit(1).maybeSingle();
-      existingId = (r.data?.id as string) ?? null;
-    }
-    if (!existingId && email) {
-      const r = await supabaseAdmin.from('people_directory').select('id')
-        .eq('org_id', org_id).eq('client_id', cid)
-        .ilike('email', email).is('deleted_at', null).limit(1).maybeSingle();
-      existingId = (r.data?.id as string) ?? null;
-    }
+  };
+  if (codes.length)   await lookup('code', codes, byCode);
+  if (mobiles.length) await lookup('mobile', mobiles, byMobile);
+  if (emails.length)  await lookup('email', emails, byEmail);
+
+  // Partition into inserts vs updates. `seen*` guards against two rows in the
+  // SAME batch sharing a key (only the first should insert).
+  const seenCode = new Set<string>(), seenMobile = new Set<string>(), seenEmail = new Set<string>();
+  const toInsert: Array<Record<string, unknown>> = [];
+  const toUpdate: Array<{ id: string; r: PdRow }> = [];
+  let added = 0, updated = 0;
+
+  for (const r of norm) {
+    const existingId =
+      (r.code && byCode.get(r.code)) ||
+      (r.mobile && byMobile.get(r.mobile)) ||
+      (r.email && byEmail.get(r.email)) || null;
 
     if (existingId) {
-      if (body.on_duplicate === 'skip') { skipped++; continue; }
-      await supabaseAdmin.from('people_directory').update({
-        first_name, last_name, mobile, email, address, type: personType, city, code,
-        updated_at: new Date().toISOString(),
-        updated_by: userId(req) ?? null,
-      }).eq('id', existingId);
-      updated++;
-    } else {
-      await supabaseAdmin.from('people_directory').insert({
-        org_id, client_id: cid,
-        first_name, last_name, mobile, email, address, type: personType, city, code,
-        created_by: userId(req) ?? null,
-      });
-      added++;
+      if (body.on_duplicate === 'update') toUpdate.push({ id: existingId, r });
+      else skipped++;
+      continue;
     }
+    if ((r.code && seenCode.has(r.code)) ||
+        (r.mobile && seenMobile.has(r.mobile)) ||
+        (r.email && seenEmail.has(r.email))) { skipped++; continue; }
+    if (r.code)   seenCode.add(r.code);
+    if (r.mobile) seenMobile.add(r.mobile);
+    if (r.email)  seenEmail.add(r.email);
+    toInsert.push({
+      org_id, client_id: cid,
+      first_name: r.first_name, last_name: r.last_name, mobile: r.mobile,
+      email: r.email, address: r.address, type: r.type, city: r.city, code: r.code,
+      created_by: uid,
+    });
   }
+
+  if (toInsert.length) {
+    const { error } = await supabaseAdmin.from('people_directory').insert(toInsert);
+    if (error) throw new AppError(500, `People Directory import failed: ${error.message}`, 'IMPORT_FAILED');
+    added = toInsert.length;
+  }
+  if (toUpdate.length) {
+    const now = new Date().toISOString();
+    await Promise.all(toUpdate.map(({ id, r }) =>
+      supabaseAdmin.from('people_directory').update({
+        first_name: r.first_name, last_name: r.last_name, mobile: r.mobile,
+        email: r.email, address: r.address, type: r.type, city: r.city, code: r.code,
+        updated_at: now, updated_by: uid,
+      }).eq('id', id)));
+    updated = toUpdate.length;
+  }
+
   res.json({ added, updated, skipped, total: body.rows.length });
 }));
 
