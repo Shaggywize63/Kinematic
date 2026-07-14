@@ -4003,8 +4003,14 @@ router.use('/ai', ai);
 // Read-only dashboard views of the public website chatbot's conversations and
 // the leads it captured. Ingestion is the public keyed route at
 // /api/v1/kini/public/web-chat (mounted before requireAuth in app.ts).
-router.get('/web-chats', webChatCtrl.list);
-router.get('/web-chats/:id', webChatCtrl.detail);
+//
+// These transcripts are Kinematic's own inbound sales conversations and must
+// be visible ONLY to the platform owner (super_admin), never to tenant/client
+// staff who happen to share the org — the endpoints scope by org_id alone, so
+// without this role gate any org user could read every website chat. Gated to
+// super_admin per product requirement.
+router.get('/web-chats', requireRole('super_admin'), webChatCtrl.list);
+router.get('/web-chats/:id', requireRole('super_admin'), webChatCtrl.detail);
 
 // ---------- ERROR HANDLER (CRM-scoped) -------------------------------
 router.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
