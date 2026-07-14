@@ -43,6 +43,24 @@ export interface NormalizedLead {
   notes?: string | null;
   tags?: string[];
   custom_fields?: Record<string, unknown>;
+  // Additional built-in lead columns, wired so bulk import (CSV) can map the
+  // full New-Lead-form field set. All optional + only applied when present, so
+  // webhook / web-form ingestion is unchanged.
+  alternate_mobiles?: string[];
+  date_of_birth?: string | null;
+  gender?: string | null;
+  preferred_contact_method?: string | null;
+  address_line1?: string | null;
+  address_line2?: string | null;
+  postal_code?: string | null;
+  district?: string | null;
+  block?: string | null;
+  status?: string | null;
+  is_b2c?: boolean;
+  marketing_consent?: boolean;
+  whatsapp_consent?: boolean;
+  latitude?: number | null;
+  longitude?: number | null;
   utm_source?: string | null;
   utm_medium?: string | null;
   utm_campaign?: string | null;
@@ -165,6 +183,23 @@ export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOr
   if (normalized.referrer_url) extras.referrer_url = normalized.referrer_url;
   if (normalized.landing_page) extras.landing_page = normalized.landing_page;
   if (normalized.state)        extras.state        = normalized.state;
+  // Extra built-in columns from bulk import (only set when the CSV provided
+  // them, so integration ingestion behaviour is unchanged).
+  if (normalized.alternate_mobiles?.length) extras.alternate_mobiles = normalized.alternate_mobiles;
+  if (normalized.date_of_birth)             extras.date_of_birth = normalized.date_of_birth;
+  if (normalized.gender)                    extras.gender = normalized.gender;
+  if (normalized.preferred_contact_method)  extras.preferred_contact_method = normalized.preferred_contact_method;
+  if (normalized.address_line1)             extras.address_line1 = normalized.address_line1;
+  if (normalized.address_line2)             extras.address_line2 = normalized.address_line2;
+  if (normalized.postal_code)               extras.postal_code = normalized.postal_code;
+  if (normalized.district)                  extras.district = normalized.district;
+  if (normalized.block)                     extras.block = normalized.block;
+  if (normalized.status)                    extras.status = normalized.status;
+  if (typeof normalized.is_b2c === 'boolean')            extras.is_b2c = normalized.is_b2c;
+  if (typeof normalized.marketing_consent === 'boolean') extras.marketing_consent = normalized.marketing_consent;
+  if (typeof normalized.whatsapp_consent === 'boolean')  extras.whatsapp_consent = normalized.whatsapp_consent;
+  if (typeof normalized.latitude === 'number')           extras.latitude = normalized.latitude;
+  if (typeof normalized.longitude === 'number')          extras.longitude = normalized.longitude;
 
   const lead = await createLead({
     org_id,
