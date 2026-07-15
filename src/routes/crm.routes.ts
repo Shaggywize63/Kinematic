@@ -867,14 +867,93 @@ leads.get('/export', wrap(async (req, res) => {
 // Officer with data_scope='own' pulls only their own leads; a CRM Admin with
 // 'all' pulls the whole tenant) and additionally restricted to those two org
 // roles, since it is their operational report.
+// ───────────────────────────────────────────────────────────────────────
+// Steel-dealer CSV reports (SRS / Tata Tiscon + BMW, and any future tenant
+// configured with the same lead / activity schema). These are tenant-
+// AGNOSTIC: every value is keyed off custom_fields field_keys (block /
+// dealer / brand / ring_test / dealer_name / …) or plain columns — never a
+// hard-coded org id — so both dealer tenants get all four reports for free.
+// All four gate on the same designations as the original SRS lead export.
+// ───────────────────────────────────────────────────────────────────────
 const SRS_REPORT_ROLES = ['Area Sales Officer', 'CRM Admin'];
-leads.get('/export-srs-report', wrap(async (req, res) => {
-  const me = (req as AuthRequest).user;
-  const role = (me?.org_role_name ?? '').trim();
+
+// Role gate. Returns true when the caller may run the report; otherwise it
+// writes the 403 and returns false so the handler can bail immediately.
+function srsReportAllowed(req: Request, res: Response): boolean {
+  const role = ((req as AuthRequest).user?.org_role_name ?? '').trim();
   if (!SRS_REPORT_ROLES.includes(role)) {
     res.status(403).json({ success: false, error: 'This report is available to the Area Sales Officer and CRM Admin roles only.' });
-    return;
+    return false;
   }
+  return true;
+}
+
+// CSV cell escape — identical rule to the inline escape() the other export
+// handlers use (quote when the value carries a comma / quote / newline).
+function csvEscape(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+const csvDateOnly = (v: unknown): string => (v ? String(v).slice(0, 10) : '');
+
+// Shared CSV writer: builds `<header>\n<rows>\n`, sets the download headers
+// and sends. Filename is `<base>-YYYY-MM-DD.csv`.
+function sendReportCsv<T>(res: Response, base: string, cols: Array<{ label: string; get: (r: T) => unknown }>, rows: T[]): void {
+  const header = cols.map((c) => c.label).join(',');
+  const body = rows.map((r) => cols.map((c) => csvEscape(c.get(r))).join(',')).join('\n');
+  const csv = `${header}\n${body}\n`;
+  const filename = `${base}-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}
+
+// Truthy test for the boolean-ish custom fields (ring_test / weighment_test):
+// they persist as a real JSON boolean today but tolerate the 'Yes'/'true'/'1'
+// string forms older / CSV-imported rows carry.
+function isTruthyFlag(v: unknown): boolean {
+  if (v === true) return true;
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    return s === 'true' || s === 'yes' || s === 'y' || s === '1';
+  }
+  return false;
+}
+const yesNo = (v: unknown): string => (isTruthyFlag(v) ? 'Yes' : 'No');
+
+// Extract the lookup UUID a custom-field jsonb value points at, whether it's
+// a bare UUID string or the `{ id, label }` picker object. Non-UUID /
+// label-only values return null (caller falls back to the inline label).
+function lookupRefId(v: unknown): string | null {
+  if (typeof v === 'string') return UUID_RE.test(v) ? v : null;
+  if (v && typeof v === 'object') {
+    const id = (v as { id?: unknown }).id;
+    return typeof id === 'string' && UUID_RE.test(id) ? id : null;
+  }
+  return null;
+}
+
+// Batch users → display-name map (name, else email). Ids filtered to UUIDs.
+async function userNameMap(ids: Array<string | null | undefined>): Promise<Map<string, string>> {
+  const set = Array.from(new Set(ids.filter((id): id is string => !!id && UUID_RE.test(id))));
+  const m = new Map<string, string>();
+  if (!set.length) return m;
+  const { data } = await supabaseAdmin.from('users').select('id, name, email').in('id', set);
+  for (const u of (data ?? []) as any[]) m.set(u.id, (u.name as string) || (u.email as string) || '');
+  return m;
+}
+
+// Paginated, fully-scoped lead fetch shared by the Lead Report and the Test
+// Report. Same scope math as the original SRS export: client scope, effective
+// city set, hierarchy subtree (when the client opted in), own-only for
+// data_scope='own' designations. Returns rows already stamped with owner
+// names and with custom_fields flattened onto custom__<key> (lookup UUIDs
+// resolved to labels — so Block reads "Godda", Dealer reads the person name).
+async function fetchScopedReportLeads(req: Request): Promise<any[]> {
+  const me = (req as AuthRequest).user;
   const scope = clientScope(req);
   const effectiveCities = rbac.getEffectiveCityNames(me);
   let visibleOwnerIds: string[] | null = null;
@@ -885,7 +964,6 @@ leads.get('/export-srs-report', wrap(async (req, res) => {
   // ASO (own) → only their leads; CRM Admin (all) → everything.
   const ownOnly = dataScope === 'own';
   const includeNullCity = dataScope === 'all' || hierOn;
-
   const PAGE = 200;
   const MAX = 10000;
   const rows: any[] = [];
@@ -901,12 +979,106 @@ leads.get('/export-srs-report', wrap(async (req, res) => {
   }
   const leadRows = rows.slice(0, MAX);
   const stamped = await stampOwnerNames(leadRows);
-
-  // Flatten custom_fields → custom__<key> and resolve lookup UUIDs to labels
-  // (so Block reads "Godda" from crm_blocks, not a UUID).
   const customCols = await listCustomFieldColumns(orgId(req), 'lead');
   const lookupLabels = await resolveLookupLabels(stamped as any[], customCols);
-  const enriched = stampCustomFieldValues(stamped as any[], customCols, lookupLabels);
+  return stampCustomFieldValues(stamped as any[], customCols, lookupLabels);
+}
+
+// Lifetime visit / call counts per lead from crm_activities. supabase-js has
+// no GROUP BY, so we pull (lead_id, type) for the lead set — chunked to keep
+// the IN() list inside URL limits — and tally in memory. Visits = site_visit
+// / meeting / visit; Calls = call; every other type (task, …) is ignored.
+async function leadVisitCallCounts(org_id: string, leadIds: string[]): Promise<Map<string, { visits: number; calls: number }>> {
+  const out = new Map<string, { visits: number; calls: number }>();
+  const ids = leadIds.filter((id) => UUID_RE.test(id));
+  const VISIT_TYPES = new Set(['site_visit', 'meeting', 'visit']);
+  for (let i = 0; i < ids.length; i += 500) {
+    const batch = ids.slice(i, i + 500);
+    const { data } = await supabaseAdmin.from('crm_activities')
+      .select('lead_id, type').eq('org_id', org_id).is('deleted_at', null).in('lead_id', batch);
+    for (const a of (data ?? []) as any[]) {
+      if (!a.lead_id) continue;
+      const cur = out.get(a.lead_id) ?? { visits: 0, calls: 0 };
+      const t = String(a.type ?? '').toLowerCase();
+      if (t === 'call') cur.calls++;
+      else if (VISIT_TYPES.has(t)) cur.visits++;
+      out.set(a.lead_id, cur);
+    }
+  }
+  return out;
+}
+
+// Owner-id scope for the two activity-based reports. Mirrors the lead scope:
+//   data_scope 'own'  → just the caller
+//   hierarchy RBAC on → the caller's role-tree subtree (null = tenant-wide
+//                       role, i.e. no owner restriction)
+//   otherwise ('all') → null (no owner restriction; client scope still binds)
+async function activityReportOwnerIds(req: Request): Promise<string[] | null> {
+  const me = (req as AuthRequest).user;
+  if (await hierarchy.useHierarchyRbac(req as AuthRequest)) {
+    return hierarchy.subtreeUserIds(req as AuthRequest);
+  }
+  const dataScope = me?.org_role_data_scope ?? 'all';
+  if (dataScope === 'own') return me?.id ? [me.id] : [];
+  return null;
+}
+
+// Paginated crm_activities fetch for the activity reports. Applies org +
+// client scope, the owner-id scope from activityReportOwnerIds (matched on
+// owner_id OR assigned_to), and an optional from/to window on
+// coalesce(activity_date, created_at). Ordered by a stable (activity_date,id)
+// key so range pagination never overlaps or skips. Capped at MAX rows.
+async function fetchScopedReportActivities(req: Request, ownerIds: string[] | null): Promise<any[]> {
+  const org_id = orgId(req);
+  const scope = clientScope(req);
+  const from = sanitiseDate(req.query.from);
+  const to = sanitiseDate(req.query.to);
+  const PAGE = 1000;
+  const MAX = 10000;
+  // Owner scope resolves to an empty set → the caller can see nothing.
+  const ownerList = ownerIds === null ? null : ownerIds.filter((id) => UUID_RE.test(id));
+  if (ownerList !== null && ownerList.length === 0) return [];
+  const out: any[] = [];
+  for (let offset = 0; out.length < MAX; offset += PAGE) {
+    let q = supabaseAdmin.from('crm_activities')
+      .select('id, type, subject, body, activity_date, created_at, lead_id, owner_id, assigned_to, custom_fields')
+      .eq('org_id', org_id).is('deleted_at', null);
+    if (scope.id) {
+      q = scope.strict ? q.eq('client_id', scope.id) : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+    }
+    if (ownerList !== null) {
+      const list = ownerList.join(',');
+      q = q.or(`owner_id.in.(${list}),assigned_to.in.(${list})`);
+    }
+    // Range on coalesce(activity_date, created_at): activity_date carries the
+    // canonical timestamp (populated for every row today), fall back to
+    // created_at only for the rare NULL-activity_date row.
+    if (from || to) {
+      const lo = from ?? '0001-01-01';
+      const hi = to ?? '9999-12-31';
+      q = q.or([
+        `and(activity_date.gte.${lo},activity_date.lte.${hi})`,
+        `and(activity_date.is.null,created_at.gte.${lo},created_at.lte.${hi})`,
+      ].join(','));
+    }
+    q = q.order('activity_date', { ascending: false, nullsFirst: false })
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE - 1);
+    const { data, error } = await q;
+    if (error) break;
+    const chunk = (data ?? []) as any[];
+    out.push(...chunk);
+    if (chunk.length < PAGE) break;
+  }
+  return out.slice(0, MAX);
+}
+
+// ─── Report 1: Lead Report (the SRS lead export). ───────────────────────
+leads.get('/export-srs-report', wrap(async (req, res) => {
+  if (!srsReportAllowed(req, res)) return;
+  const org_id = orgId(req);
+  // stampSourceNames resolves source_id → source_name for the Lead Source col.
+  const enriched = await stampSourceNames(await fetchScopedReportLeads(req));
 
   // Batch-join the converted deal for Deal Tonnage + Deal Amount.
   const dealIds = Array.from(new Set(enriched.map((r: any) => r.converted_deal_id).filter(Boolean))) as string[];
@@ -921,22 +1093,28 @@ leads.get('/export-srs-report', wrap(async (req, res) => {
     }
   }
 
-  const dateOnly = (v: unknown): string => (v ? String(v).slice(0, 10) : '');
+  // Lifetime Total Visits / Total Calls per lead.
+  const vc = await leadVisitCallCounts(org_id, enriched.map((r: any) => r.id).filter(Boolean) as string[]);
+
   const cols: Array<{ label: string; get: (r: any) => unknown }> = [
     { label: 'Lead Name', get: (r) => [r.first_name, r.last_name].filter(Boolean).join(' ').trim() },
     { label: 'Phone Number', get: (r) => r.phone ?? '' },
     { label: 'Address', get: (r) => [r.address_line1, r.address_line2, r.city].filter(Boolean).join(', ') },
-    // resolveLookupLabels now turns block UUIDs into names; a handful of
-    // legacy rows persisted the literal string "[object Object]" (a broken
-    // client serialise) — blank those rather than print the noise.
+    // resolveLookupLabels turns block UUIDs into names; a handful of legacy
+    // rows persisted the literal "[object Object]" — blank those.
     { label: 'Block', get: (r) => { const b = r['custom__block']; return (b == null || b === '[object Object]') ? '' : b; } },
+    { label: 'City', get: (r) => r.city ?? '' },
     { label: 'Pincode', get: (r) => r.postal_code ?? '' },
     { label: 'Occupation', get: (r) => r['custom__conusmer_occupation'] ?? '' },
     { label: 'Area sq ft', get: (r) => r['custom__construction_area'] ?? '' },
     { label: 'Construction Stage', get: (r) => r['custom__construction_stage'] ?? '' },
-    { label: 'Owner Name', get: (r) => r.owner_name ?? '' },
-    { label: 'Creation Date', get: (r) => dateOnly(r.created_at) },
-    { label: 'Latest Activity Date', get: (r) => dateOnly(r.last_activity_at) },
+    { label: 'Lead Source', get: (r) => r.source_name ?? '' },
+    { label: 'Dealer Name', get: (r) => r['custom__dealer'] ?? '' },
+    { label: 'Brand', get: (r) => r['custom__brand'] ?? '' },
+    { label: 'Creation Date', get: (r) => csvDateOnly(r.created_at) },
+    { label: 'Latest Activity Date', get: (r) => csvDateOnly(r.last_activity_at) },
+    { label: 'Total Visits', get: (r) => { const c = vc.get(r.id); return c && c.visits ? c.visits : ''; } },
+    { label: 'Total Calls', get: (r) => { const c = vc.get(r.id); return c && c.calls ? c.calls : ''; } },
     { label: 'Estimated Qty', get: (r) => r['custom__estimated_tonnage'] ?? '' },
     { label: 'Deal Tonnage', get: (r) => {
         const d = r.converted_deal_id ? dealById.get(r.converted_deal_id) : undefined;
@@ -946,20 +1124,31 @@ leads.get('/export-srs-report', wrap(async (req, res) => {
         const d = r.converted_deal_id ? dealById.get(r.converted_deal_id) : undefined;
         return d && d.amount != null ? d.amount : '';
       } },
+    { label: 'Owner Name', get: (r) => r.owner_name ?? '' },
   ];
-  const escape = (v: unknown): string => {
-    if (v === null || v === undefined) return '';
-    const s = String(v);
-    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-    return s;
-  };
-  const header = cols.map((c) => c.label).join(',');
-  const body = enriched.map((r: any) => cols.map((c) => escape(c.get(r))).join(',')).join('\n');
-  const csv = `${header}\n${body}\n`;
-  const filename = `srs-lead-report-${new Date().toISOString().slice(0, 10)}.csv`;
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(csv);
+  sendReportCsv(res, 'srs-lead-report', cols, enriched as any[]);
+}));
+
+// ─── Report 3: Test Report (Ring / Weighment test leads). ───────────────
+// Same scoped lead fetch as the Lead Report, filtered to leads that have a
+// truthy ring_test OR weighment_test flag.
+leads.get('/export-test-report', wrap(async (req, res) => {
+  if (!srsReportAllowed(req, res)) return;
+  const enriched = (await fetchScopedReportLeads(req)).filter((r: any) => {
+    const cf = (r.custom_fields ?? {}) as Record<string, unknown>;
+    return isTruthyFlag(cf.ring_test) || isTruthyFlag(cf.weighment_test);
+  });
+  const cols: Array<{ label: string; get: (r: any) => unknown }> = [
+    { label: 'Owner Name', get: (r) => r.owner_name ?? '' },
+    { label: 'Lead Name', get: (r) => [r.first_name, r.last_name].filter(Boolean).join(' ').trim() },
+    { label: 'Phone Number', get: (r) => r.phone ?? '' },
+    { label: 'Address', get: (r) => [r.address_line1, r.address_line2, r.city].filter(Boolean).join(', ') },
+    { label: 'Creation Date', get: (r) => csvDateOnly(r.created_at) },
+    { label: 'Ring Test', get: (r) => yesNo((r.custom_fields ?? {}).ring_test) },
+    { label: 'Weighment Test', get: (r) => yesNo((r.custom_fields ?? {}).weighment_test) },
+    { label: 'Attendees', get: (r) => (r.custom_fields ?? {}).attendees ?? '' },
+  ];
+  sendReportCsv(res, 'test-report', cols, enriched as any[]);
 }));
 // Geo points for the dashboard map — every lead that carries real
 // coordinates, with just the fields the map needs. The list endpoint caps at
@@ -2158,6 +2347,269 @@ activities.get('/export', wrap(async (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(csv);
+}));
+
+// ─── Report 2: Activity Report. ─────────────────────────────────────────
+// One row per activity in scope, joined out to the linked lead (name /
+// phone / address / block / city / creation date), the activity's Directory
+// (custom_fields.dealer_name → people_directory), and the owner.
+activities.get('/export-activity-report', wrap(async (req, res) => {
+  if (!srsReportAllowed(req, res)) return;
+  const ownerIds = await activityReportOwnerIds(req);
+  const acts = await fetchScopedReportActivities(req, ownerIds);
+
+  // Batch-join leads for name / phone / address / city / creation date and
+  // the lead's Block (custom_fields.block → crm_blocks name).
+  const leadIds = Array.from(new Set(acts.map((a) => a.lead_id).filter((x): x is string => typeof x === 'string' && UUID_RE.test(x))));
+  type LeadInfo = { name: string; phone: string; addr: string; city: string; created_at: string | null; blockId: string | null; blockLabel: string | null };
+  const leadInfo = new Map<string, LeadInfo>();
+  const blockIds = new Set<string>();
+  for (let i = 0; i < leadIds.length; i += 500) {
+    const batch = leadIds.slice(i, i + 500);
+    const { data } = await supabaseAdmin.from('crm_leads')
+      .select('id, first_name, last_name, phone, address_line1, address_line2, city, created_at, custom_fields').in('id', batch);
+    for (const l of (data ?? []) as any[]) {
+      const cf = (l.custom_fields ?? {}) as Record<string, unknown>;
+      const b = cf.block;
+      let blockId: string | null = null;
+      let blockLabel: string | null = null;
+      if (typeof b === 'string') { if (UUID_RE.test(b)) blockId = b; else if (b && b !== '[object Object]') blockLabel = b; }
+      else if (b && typeof b === 'object') { const o = b as { id?: string; label?: string }; if (o.label) blockLabel = o.label; else if (o.id && UUID_RE.test(o.id)) blockId = o.id; }
+      if (blockId) blockIds.add(blockId);
+      leadInfo.set(l.id, {
+        name: [l.first_name, l.last_name].filter(Boolean).join(' ').trim(),
+        phone: l.phone ?? '',
+        addr: [l.address_line1, l.address_line2, l.city].filter(Boolean).join(', '),
+        city: l.city ?? '',
+        created_at: l.created_at ?? null,
+        blockId, blockLabel,
+      });
+    }
+  }
+  const blockNames = new Map<string, string>();
+  if (blockIds.size) {
+    const { data } = await supabaseAdmin.from('crm_blocks').select('id, name').in('id', Array.from(blockIds));
+    for (const bl of (data ?? []) as any[]) blockNames.set(bl.id, (bl.name as string) || '');
+  }
+  const blockOf = (li: LeadInfo | undefined): string =>
+    li ? (li.blockLabel ?? (li.blockId ? (blockNames.get(li.blockId) ?? '') : '')) : '';
+
+  // Batch-join the activity's Directory (custom_fields.dealer_name →
+  // people_directory). Blank for the vast majority of rows today (none carry
+  // dealer_name) — that's expected.
+  const dirIds = Array.from(new Set(acts.map((a) => lookupRefId((a.custom_fields ?? {}).dealer_name)).filter((x): x is string => !!x)));
+  const dirInfo = new Map<string, { type: string; name: string; phone: string }>();
+  if (dirIds.length) {
+    const { data } = await supabaseAdmin.from('people_directory').select('id, first_name, last_name, mobile, type').in('id', dirIds);
+    for (const p of (data ?? []) as any[]) {
+      dirInfo.set(p.id, { type: p.type ?? '', name: [p.first_name, p.last_name].filter(Boolean).join(' ').trim() || (p.mobile ?? ''), phone: p.mobile ?? '' });
+    }
+  }
+  const dirOf = (a: any): { type: string; name: string; phone: string } => {
+    const v = (a.custom_fields ?? {}).dealer_name;
+    const id = lookupRefId(v);
+    if (id && dirInfo.has(id)) return dirInfo.get(id)!;
+    if (v && typeof v === 'object' && (v as any).label) return { type: '', name: String((v as any).label), phone: '' };
+    return { type: '', name: '', phone: '' };
+  };
+
+  const ownerNames = await userNameMap(acts.flatMap((a) => [a.assigned_to, a.owner_id]));
+
+  const cols: Array<{ label: string; get: (a: any) => unknown }> = [
+    { label: 'Lead Name', get: (a) => leadInfo.get(a.lead_id)?.name ?? '' },
+    { label: 'Phone Number', get: (a) => leadInfo.get(a.lead_id)?.phone ?? '' },
+    { label: 'Address', get: (a) => leadInfo.get(a.lead_id)?.addr ?? '' },
+    { label: 'Block', get: (a) => blockOf(leadInfo.get(a.lead_id)) },
+    { label: 'City', get: (a) => leadInfo.get(a.lead_id)?.city ?? '' },
+    { label: 'Lead Creation Date', get: (a) => csvDateOnly(leadInfo.get(a.lead_id)?.created_at) },
+    { label: 'Activity Date', get: (a) => csvDateOnly(a.activity_date ?? a.created_at) },
+    { label: 'Activity Type', get: (a) => a.type ?? '' },
+    { label: 'Activity Subject', get: (a) => a.subject ?? '' },
+    { label: 'Directory Type', get: (a) => dirOf(a).type },
+    { label: 'Directory Name', get: (a) => dirOf(a).name },
+    { label: 'Directory Phone', get: (a) => dirOf(a).phone },
+    { label: 'Description', get: (a) => a.body ?? '' },
+    { label: 'Owner Name', get: (a) => ownerNames.get((a.assigned_to ?? a.owner_id) as string) ?? '' },
+  ];
+  sendReportCsv(res, 'activity-report', cols, acts);
+}));
+
+// ─── Report 4: Overall Day-Wise Report. ─────────────────────────────────
+//
+// Interpretations of the sample spreadsheet (documented per the task spec):
+//  • One row per (owner, day). Owner = assigned_to ?? owner_id of the
+//    activity; day = date of coalesce(activity_date, created_at).
+//  • Every activity lands in EXACTLY ONE visit/call bucket, so the four
+//    buckets always sum to Total Activity:
+//       type 'call'                                → Lead Call
+//       has a resolved Directory of a dealer type  → Dealer Visit
+//       has any other (non-dealer / unresolved)
+//         Directory                                → Other Visit
+//       otherwise                                  → Lead Visit
+//    ("dealer type" = people_directory.type contains 'dealer', case-insens.)
+//    An activity whose dealer_name can't be resolved to a directory row is
+//    treated as a non-dealer Directory (Other Visit) since we can't confirm
+//    the type.
+//  • Deals = crm_deals created_by that owner with created_at on that day;
+//    Tonnage (MT) = sum of those deals' custom_fields.volume_kg / 1000.
+//    Deals only surface on (owner, day) rows that already have ≥1 activity —
+//    a deal booked on a day the owner logged no activity won't appear.
+//  • Hierarchy = the owner's org-role name (users.org_role_id →
+//    org_roles.name).
+//  • City = the owner's users.city when set; this tenant leaves users.city
+//    empty, so in practice it falls back to the most-frequent lead city
+//    among that owner+day's activities.
+//  • Unique Lead in the Grand Total row is the SUM of the per-row unique
+//    counts (not a global distinct), matching "numeric columns summed".
+//  • Day is computed from the UTC timestamp (both activity_date and deal
+//    created_at are sliced the same way, so their days align).
+activities.get('/export-daywise-report', wrap(async (req, res) => {
+  if (!srsReportAllowed(req, res)) return;
+  const org_id = orgId(req);
+  const ownerIds = await activityReportOwnerIds(req);
+  const acts = await fetchScopedReportActivities(req, ownerIds);
+
+  // Directory type map (for dealer-vs-other bucketing).
+  const dirIds = Array.from(new Set(acts.map((a) => lookupRefId((a.custom_fields ?? {}).dealer_name)).filter((x): x is string => !!x)));
+  const dirType = new Map<string, string>();
+  if (dirIds.length) {
+    const { data } = await supabaseAdmin.from('people_directory').select('id, type').in('id', dirIds);
+    for (const p of (data ?? []) as any[]) dirType.set(p.id, String(p.type ?? ''));
+  }
+
+  // Lead → city map (for the City fallback).
+  const leadIds = Array.from(new Set(acts.map((a) => a.lead_id).filter((x): x is string => typeof x === 'string' && UUID_RE.test(x))));
+  const leadCity = new Map<string, string>();
+  for (let i = 0; i < leadIds.length; i += 500) {
+    const batch = leadIds.slice(i, i + 500);
+    const { data } = await supabaseAdmin.from('crm_leads').select('id, city').in('id', batch);
+    for (const l of (data ?? []) as any[]) leadCity.set(l.id, (l.city as string) || '');
+  }
+
+  type Agg = { owner: string; day: string; total: number; leads: Set<string>; leadVisit: number; leadCall: number; dealerVisit: number; otherVisit: number; city: Map<string, number> };
+  const groups = new Map<string, Agg>();
+  for (const a of acts) {
+    const owner = (a.assigned_to ?? a.owner_id) as string | null;
+    if (!owner) continue; // orphan activity with no owner at all — skip
+    const day = csvDateOnly(a.activity_date ?? a.created_at);
+    const key = `${owner}|${day}`;
+    let g = groups.get(key);
+    if (!g) { g = { owner, day, total: 0, leads: new Set(), leadVisit: 0, leadCall: 0, dealerVisit: 0, otherVisit: 0, city: new Map() }; groups.set(key, g); }
+    g.total++;
+    if (a.lead_id) g.leads.add(a.lead_id);
+    const t = String(a.type ?? '').toLowerCase();
+    const dv = (a.custom_fields ?? {}).dealer_name;
+    const dirId = lookupRefId(dv);
+    const hasDir = dirId != null
+      || (!!dv && typeof dv === 'object' && !!(dv as any).label)
+      || (typeof dv === 'string' && dv.trim() !== '');
+    const dt = dirId ? (dirType.get(dirId) ?? '') : '';
+    if (t === 'call') g.leadCall++;
+    else if (hasDir && dt && /dealer/i.test(dt)) g.dealerVisit++;
+    else if (hasDir) g.otherVisit++;
+    else g.leadVisit++;
+    const city = a.lead_id ? (leadCity.get(a.lead_id) ?? '') : '';
+    if (city) g.city.set(city, (g.city.get(city) ?? 0) + 1);
+  }
+
+  // Owner meta: display name, users.city, and org-role name (Hierarchy).
+  const ownerSet = Array.from(new Set(Array.from(groups.values()).map((g) => g.owner)));
+  const ownerName = new Map<string, string>();
+  const ownerCity = new Map<string, string>();
+  const ownerRoleId = new Map<string, string | null>();
+  if (ownerSet.length) {
+    const { data } = await supabaseAdmin.from('users').select('id, name, email, city, org_role_id').in('id', ownerSet);
+    for (const u of (data ?? []) as any[]) {
+      ownerName.set(u.id, (u.name as string) || (u.email as string) || '');
+      ownerCity.set(u.id, (u.city as string) || '');
+      ownerRoleId.set(u.id, (u.org_role_id as string) ?? null);
+    }
+  }
+  const roleIds = Array.from(new Set(Array.from(ownerRoleId.values()).filter((x): x is string => !!x)));
+  const roleName = new Map<string, string>();
+  if (roleIds.length) {
+    const { data } = await supabaseAdmin.from('org_roles').select('id, name').in('id', roleIds);
+    for (const r of (data ?? []) as any[]) roleName.set(r.id, (r.name as string) || '');
+  }
+
+  // Deals per (owner, day): created_by the owner, created_at on that day.
+  const dealAgg = new Map<string, { deals: number; tonnageKg: number }>();
+  if (ownerSet.length) {
+    const { data } = await supabaseAdmin.from('crm_deals')
+      .select('created_by, created_at, custom_fields').eq('org_id', org_id).is('deleted_at', null).in('created_by', ownerSet);
+    for (const d of (data ?? []) as any[]) {
+      if (!d.created_by) continue;
+      const day = csvDateOnly(d.created_at);
+      const key = `${d.created_by}|${day}`;
+      const cur = dealAgg.get(key) ?? { deals: 0, tonnageKg: 0 };
+      cur.deals++;
+      const vk = Number((d.custom_fields ?? {}).volume_kg);
+      if (Number.isFinite(vk)) cur.tonnageKg += vk;
+      dealAgg.set(key, cur);
+    }
+  }
+
+  const mostFrequentCity = (m: Map<string, number>): string => {
+    let best = '';
+    let bestN = -1;
+    // Sort by name first so ties resolve deterministically.
+    for (const [c, n] of Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (n > bestN) { best = c; bestN = n; }
+    }
+    return best;
+  };
+
+  type Row = { owner: string; hierarchy: string; city: string; total: number; unique: number; leadVisit: number; leadCall: number; dealerVisit: number; otherVisit: number; deals: number; tonnage: number; date: string };
+  const rows: Row[] = Array.from(groups.values()).map((g) => {
+    const dk = dealAgg.get(`${g.owner}|${g.day}`);
+    const uCity = ownerCity.get(g.owner) || '';
+    return {
+      owner: ownerName.get(g.owner) || '',
+      hierarchy: roleName.get(ownerRoleId.get(g.owner) ?? '') || '',
+      city: uCity || mostFrequentCity(g.city),
+      total: g.total,
+      unique: g.leads.size,
+      leadVisit: g.leadVisit,
+      leadCall: g.leadCall,
+      dealerVisit: g.dealerVisit,
+      otherVisit: g.otherVisit,
+      deals: dk?.deals ?? 0,
+      tonnage: dk ? Math.round((dk.tonnageKg / 1000) * 100) / 100 : 0,
+      date: g.day,
+    };
+  });
+  rows.sort((a, b) => (a.owner.localeCompare(b.owner)) || a.date.localeCompare(b.date));
+
+  // Grand Total: sum the numeric columns; Hierarchy / City / Date blank.
+  const sum = (pick: (r: Row) => number): number => rows.reduce((s, r) => s + pick(r), 0);
+  const gt: Row = {
+    owner: 'Grand Total', hierarchy: '', city: '',
+    total: sum((r) => r.total),
+    unique: sum((r) => r.unique),
+    leadVisit: sum((r) => r.leadVisit),
+    leadCall: sum((r) => r.leadCall),
+    dealerVisit: sum((r) => r.dealerVisit),
+    otherVisit: sum((r) => r.otherVisit),
+    deals: sum((r) => r.deals),
+    tonnage: Math.round(sum((r) => r.tonnage) * 100) / 100,
+    date: '',
+  };
+
+  const cols: Array<{ label: string; get: (r: Row) => unknown }> = [
+    { label: 'Owner Name', get: (r) => r.owner },
+    { label: 'Hierarchy', get: (r) => r.hierarchy },
+    { label: 'City', get: (r) => r.city },
+    { label: 'Total Activity', get: (r) => r.total },
+    { label: 'Unique Lead', get: (r) => r.unique },
+    { label: 'Lead Visit', get: (r) => r.leadVisit },
+    { label: 'Lead Call', get: (r) => r.leadCall },
+    { label: 'Dealer Visit', get: (r) => r.dealerVisit },
+    { label: 'Other Visit', get: (r) => r.otherVisit },
+    { label: 'Deals', get: (r) => r.deals },
+    { label: 'Tonnage (MT)', get: (r) => r.tonnage },
+    { label: 'Date', get: (r) => r.date },
+  ];
+  sendReportCsv(res, 'daywise-report', cols, [...rows, gt]);
 }));
 activities.post('/', wrap(async (req, res) => {
   const parsed = normalizeActivityPayload(parse(v.activitySchema, req.body));
