@@ -914,6 +914,12 @@ export async function convertLead(org_id: string, id: string, opts: {
     if (totalVolumeKg != null) cfOut.volume_kg = totalVolumeKg;
     else if (derivedVolumeKg != null) cfOut.volume_kg = derivedVolumeKg;
     if (Array.isArray(leadLines)) cfOut.product_lines = leadLines;
+    // Carry the lead's Dealer lookup onto the deal so the deal detail,
+    // listing, and CSV export show the dealer without joining back
+    // through the lead. Without this, every converted deal had an empty
+    // dealer even though the rep picked one on the lead form.
+    const leadDealer = leadCfMirror.dealer;
+    if (typeof leadDealer === 'string' && leadDealer.trim() !== '') cfOut.dealer = leadDealer;
     if (Object.keys(cfOut).length > 0) {
       dealInsert.custom_fields = cfOut;
     }
