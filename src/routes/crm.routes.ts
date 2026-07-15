@@ -1490,6 +1490,10 @@ deals.get('/:id', wrap(async (req, res) => {
 deals.patch('/:id', wrap(async (req, res) => {
   const payload = parse(v.dealUpdateSchema, req.body);
   sanitizeOwnerId(req, payload);
+  // Price lock — amount / product basket / volume are fixed at creation.
+  // Enforced here (not inside updateDeal) so winDeal's deliberate
+  // close-out amount still flows through the shared service path.
+  dealsSvc.stripLockedDealFields(payload);
   res.json(await stampOwnerName(await dealsSvc.updateDeal(orgId(req), req.params.id, payload, userId(req))));
 }));
 deals.delete('/:id', wrap(async (req, res) => { await dealsSvc.deleteDeal(orgId(req), req.params.id); res.status(204).end(); }));
