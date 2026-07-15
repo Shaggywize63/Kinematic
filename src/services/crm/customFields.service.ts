@@ -145,8 +145,21 @@ export async function validateAndStampCustomFields(
         // below recomputes them server-side from the current payload.
         delete input[key];
         break;
+      case 'lookup': {
+        // The web picker sends `{ id, label, target_table }`; mobile sends
+        // the bare id string. Canonicalise to the id — the old default
+        // branch String()'d the object and persisted the literal
+        // "[object Object]" (detail panels hydrate ids to labels via
+        // /lookup/search?ids=, so the bare id renders correctly everywhere).
+        const id = (raw && typeof raw === 'object' && typeof (raw as { id?: unknown }).id === 'string')
+          ? (raw as { id: string }).id
+          : null;
+        if (id) { input[key] = id; break; }
+        if (typeof raw === 'string') { input[key] = raw; break; }
+        throw new AppError(400, `custom_fields.${key}: expected a record id`, 'BAD_CUSTOM_FIELD');
+      }
       default:
-        // text / longtext / email / phone / url / lookup — store as string
+        // text / longtext / email / phone / url — store as string
         input[key] = typeof raw === 'string' ? raw : String(raw);
     }
   }
