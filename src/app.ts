@@ -194,6 +194,10 @@ app.use(cors({
     'Content-Type', 'Authorization', 'Idempotency-Key', 'X-Idempotency-Key',
     'x-org-id', 'x-client-id', 'X-Org-Id', 'X-Client-Id', 'X-Request-Id',
     'X-Kinematic-Project', 'x-kinematic-project',
+    // Master-admin user impersonation (see maybeImpersonateUser in
+    // middleware/auth.ts). Must be allowlisted or the browser's CORS
+    // preflight drops it and impersonation silently no-ops.
+    'X-Impersonate-User-Id', 'x-impersonate-user-id',
     // Demo-mode industry theming header (see withDemoIndustry middleware)
     // sent by the dashboard. Must be allowlisted or the browser's CORS
     // preflight rejects EVERY request (login included) for any session

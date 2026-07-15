@@ -27,6 +27,13 @@ const authCache = new Map<string, CachedAuth>();
 // as the demo user across every module.
 const DEMO_EMAIL = 'demo@kinematic.com';
 
+// Platform master admin. This ONE account may impersonate any user in its
+// Supabase project and drive the dashboard as them (their org / client /
+// role / data scope / permissions). The gate is the REAL caller's email —
+// see maybeImpersonateUser below. Security-sensitive: keep it a single
+// hard-coded email, never a role, so a mis-set role can't grant it.
+export const MASTER_ADMIN_EMAIL = 's@kinematicapp.com';
+
 // Demo mode grants super_admin via a guessable static token / email and is a
 // finding for any pen-test (SECURITY_AUDIT_2026-07.md H-1). It is scoped to the
 // sentinel DEMO_ORG_ID (fixture data only), but we still make it secure-by-default:
@@ -88,6 +95,127 @@ function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): AuthRequ
   if (!target || !ORG_UUID_RE.test(target) || target === (user as { org_id?: string }).org_id) return user;
   logger.info(`[Auth] super_admin acting as org ${target}`);
   return { ...(user as object), org_id: target } as AuthRequest['user'];
+}
+
+// Impersonation profile cache — keyed `impersonate:<project>:<targetId>`.
+// Separate from the token-keyed authCache so an impersonated identity is
+// NEVER written under the master's real token. Short TTL like authCache.
+const impersonateCache = new Map<string, CachedAuth>();
+
+/**
+ * Build the full `req.user` context for an arbitrary user id — the same
+ * shape requireAuth's cold path produces (profile + module permissions +
+ * assigned city names + entitlements + org-role name/data_scope/permissions).
+ * Used to load an IMPERSONATION TARGET. Returns null when the user is
+ * missing or deactivated. Deliberately omits the demo-elevation and
+ * act_org_id overlays — those are the master's own concerns, not the
+ * target's.
+ */
+export async function buildUserContext(userId: string): Promise<AuthRequest['user'] | null> {
+  const [profileRes, permsRes, citiesRes] = await Promise.all([
+    supabaseAdmin
+      .from('users')
+      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, active_session_id, active_session_device, org_role_id')
+      .eq('id', userId)
+      .single(),
+    supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', userId),
+    supabaseAdmin.from('user_city_assignments').select('city_id, cities!city_id(name)').eq('user_id', userId),
+  ]);
+
+  if (profileRes.error || !profileRes.data) return null;
+  const profile = profileRes.data;
+  if (!profile.is_active) return null;
+  if (profile.role) profile.role = profile.role.toLowerCase();
+
+  const entitlements = await resolveEntitlements({
+    role: profile.role,
+    clientId: profile.client_id,
+    orgId: profile.org_id,
+  });
+
+  const userCityIds: string[] = [];
+  const userCityNames: string[] = [];
+  for (const row of (citiesRes.data || []) as Array<{ city_id: string; cities: { name?: string } | { name?: string }[] | null }>) {
+    if (row.city_id) userCityIds.push(row.city_id);
+    const rel = Array.isArray(row.cities) ? row.cities[0] : row.cities;
+    if (rel?.name) userCityNames.push(rel.name);
+  }
+
+  let roleAssignedCities: string[] = [];
+  let orgRoleDataScope: 'own' | 'team' | 'all' = 'all';
+  let orgRoleName: string | undefined;
+  let rolePermissions: string[] | undefined;
+  let rolePermissionsWrite: string[] | undefined;
+  if (profile.org_role_id) {
+    const { data: roleRow } = await supabaseAdmin
+      .from('org_roles').select('name, assigned_cities, data_scope, permissions, permissions_write')
+      .eq('id', profile.org_role_id).single();
+    if (Array.isArray(roleRow?.assigned_cities)) {
+      roleAssignedCities = (roleRow!.assigned_cities as string[]).filter(Boolean);
+    }
+    if (roleRow?.data_scope === 'own' || roleRow?.data_scope === 'team') {
+      orgRoleDataScope = roleRow.data_scope as 'own' | 'team';
+    }
+    if (typeof roleRow?.name === 'string') orgRoleName = roleRow.name;
+    if (Array.isArray(roleRow?.permissions)) {
+      rolePermissions = (roleRow!.permissions as string[]).filter(Boolean);
+    }
+    if (Array.isArray(roleRow?.permissions_write)) {
+      rolePermissionsWrite = (roleRow!.permissions_write as string[]).filter(Boolean);
+    }
+  }
+
+  return {
+    ...profile,
+    permissions: permsRes.data?.map((p) => p.module_id) || [],
+    assigned_cities: userCityIds,
+    assigned_city_names: userCityNames,
+    role_assigned_cities: roleAssignedCities,
+    org_role_data_scope: orgRoleDataScope,
+    org_role_name: orgRoleName,
+    role_permissions: rolePermissions,
+    role_permissions_write: rolePermissionsWrite,
+    enabled_modules: entitlements.enabled_modules,
+    enabled_packages: entitlements.enabled_packages,
+  } as AuthRequest['user'];
+}
+
+/**
+ * Master-admin USER impersonation overlay. When the REAL caller is the
+ * platform master admin AND sends a valid `X-Impersonate-User-Id`, swap
+ * `req.user` to that target's full context so the whole dashboard behaves
+ * as them. Returns a NEW object (never mutates the cached master profile).
+ * Fails closed to the master's own identity if the target can't be loaded.
+ * Gated strictly on the real caller's email — a non-master sending the
+ * header is a no-op.
+ */
+async function maybeImpersonateUser(user: AuthRequest['user'], req: AuthRequest): Promise<AuthRequest['user']> {
+  if (!user || (user as { email?: string }).email?.toLowerCase() !== MASTER_ADMIN_EMAIL) return user;
+  const raw = req.headers['x-impersonate-user-id'];
+  const targetId = Array.isArray(raw) ? raw[0] : raw;
+  if (!targetId || !ORG_UUID_RE.test(targetId) || targetId === (user as { id?: string }).id) return user;
+
+  const cacheKey = `impersonate:${currentProjectKey()}:${targetId}`;
+  // Small dedicated cache (mirrors authCache TTL semantics).
+  const hit = impersonateCache.get(cacheKey);
+  let target: AuthRequest['user'] | null = hit && hit.expiresAt >= Date.now() ? hit.user : null;
+  if (!target) {
+    target = await buildUserContext(targetId);
+    if (!target) {
+      logger.warn(`[Auth] master ${(user as { email?: string }).email} tried to impersonate missing/inactive user ${targetId}`);
+      return user; // fail closed to the master's own identity
+    }
+    impersonateCache.set(cacheKey, { user: target, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+  }
+
+  logger.info(`[Auth] master ${(user as { id?: string }).id} impersonating user ${targetId}`);
+  return {
+    ...(target as object),
+    impersonated_by: {
+      id: (user as { id?: string }).id,
+      email: (user as { email?: string }).email,
+    },
+  } as unknown as AuthRequest['user'];
 }
 
 /** Invalidate every cached profile for a user — call this on role/permission changes. */
@@ -218,7 +346,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const cached = cacheGet(cacheKey);
   if (cached) {
     if (rejectIfStaleSession(req, res, cached)) return;
-    req.user = maybeImpersonate(cached, req);
+    req.user = await maybeImpersonateUser(maybeImpersonate(cached, req), req);
     req.accessToken = token;
     return next();
   }
@@ -350,7 +478,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (rejectIfStaleSession(req, res, user)) return;
 
   cacheSet(cacheKey, user, verified.exp);
-  req.user = maybeImpersonate(user, req);
+  req.user = await maybeImpersonateUser(maybeImpersonate(user, req), req);
   req.accessToken = token;
   next();
 }
