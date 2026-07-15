@@ -234,6 +234,18 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
 
 export async function updateDeal(org_id: string, id: string, payload: Partial<Deal>, user_id?: string) {
   const before = await getDeal(org_id, id);
+  // Price lock: a deal's amount, product basket and volume are captured at
+  // create/convert time and must NOT drift with later market-price changes
+  // (SRS/BMW requirement). Strip them from every generic PATCH — enforced
+  // here so no client (web/iOS/Android, old builds included) can bypass it.
+  // winDeal() keeps its own deliberate close-out amount path.
+  delete (payload as Record<string, unknown>).amount;
+  if (payload.custom_fields) {
+    const lockedCf = payload.custom_fields as Record<string, unknown>;
+    delete lockedCf.product_lines;
+    delete lockedCf.volume_kg;
+    delete lockedCf.line_items;
+  }
   // Per-type validate + stamp formulas. Merging the incoming patch on top
   // of the existing blob means a formula referencing fields the rep didn't
   // touch in this PATCH still recomputes against current state.
