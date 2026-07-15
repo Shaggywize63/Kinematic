@@ -1205,12 +1205,26 @@ contacts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
+  // Validate admin-defined contact custom fields (type coercion, lookup-id
+  // canonicalisation, formula stamping) — mirrors the lead/deal/activity paths.
+  if (payload.custom_fields !== undefined) {
+    payload.custom_fields = await validateAndStampCustomFields(
+      orgId(req), (payload.client_id as string | null) ?? null, 'contact',
+      payload.custom_fields as Record<string, unknown>,
+    );
+  }
   res.status(201).json(await stampOwnerName(await crud.create('crm_contacts', orgId(req), payload, userId(req))));
 }));
 contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id, true, clientScope(req).id)))));
 contacts.patch('/:id', wrap(async (req, res) => {
   const payload = parse(v.contactSchema.partial(), req.body) as Record<string, unknown>;
   sanitizeOwnerId(req, payload);
+  if (payload.custom_fields !== undefined) {
+    payload.custom_fields = await validateAndStampCustomFields(
+      orgId(req), clientScope(req).id ?? null, 'contact',
+      payload.custom_fields as Record<string, unknown>,
+    );
+  }
   res.json(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, payload, userId(req), clientScope(req).id)));
 }));
 contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
@@ -1248,12 +1262,24 @@ accounts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
+  if (payload.custom_fields !== undefined) {
+    payload.custom_fields = await validateAndStampCustomFields(
+      orgId(req), (payload.client_id as string | null) ?? null, 'account',
+      payload.custom_fields as Record<string, unknown>,
+    );
+  }
   res.status(201).json(await stampOwnerName(await crud.create('crm_accounts', orgId(req), payload, userId(req))));
 }));
 accounts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id)))));
 accounts.patch('/:id', wrap(async (req, res) => {
   const payload = parse(v.accountSchema.partial(), req.body) as Record<string, unknown>;
   sanitizeOwnerId(req, payload);
+  if (payload.custom_fields !== undefined) {
+    payload.custom_fields = await validateAndStampCustomFields(
+      orgId(req), clientScope(req).id ?? null, 'account',
+      payload.custom_fields as Record<string, unknown>,
+    );
+  }
   res.json(await stampOwnerName(await crud.update('crm_accounts', orgId(req), req.params.id, payload, userId(req), clientScope(req).id)));
 }));
 accounts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_accounts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
