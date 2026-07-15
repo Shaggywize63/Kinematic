@@ -204,6 +204,37 @@ export async function stampLinkedEntityNames<T extends Linked>(rows: T[]): Promi
 }
 
 // ---------------------------------------------------------------------------
+// Dealer-name decorator for deals. The steel-dealer tenants (SRS / BMW)
+// store the deal's dealer as a people_directory UUID in
+// custom_fields.dealer; stamp a `dealer_name` field so the deals list,
+// detail, and CSV export render the person's name without every client
+// resolving the lookup itself. One batched IN() query per call.
+// ---------------------------------------------------------------------------
+
+export async function stampDealerNames<T extends { custom_fields?: Record<string, unknown> | null; dealer_name?: string | null }>(
+  rows: T[],
+): Promise<T[]> {
+  if (!rows || rows.length === 0) return rows;
+  const ids = new Set<string>();
+  for (const r of rows) {
+    const d = r.custom_fields?.dealer;
+    if (typeof d === 'string' && UUID_RE.test(d)) ids.add(d);
+  }
+  if (!ids.size) return rows;
+  const { data } = await supabaseAdmin.from('people_directory')
+    .select('id, first_name, last_name, mobile').in('id', Array.from(ids));
+  const nameById = new Map((data ?? []).map((p: any) => [
+    p.id as string,
+    [p.first_name, p.last_name].filter(Boolean).join(' ').trim() || (p.mobile as string) || '',
+  ]));
+  return rows.map((r) => {
+    const d = r.custom_fields?.dealer;
+    const name = typeof d === 'string' ? nameById.get(d) : undefined;
+    return name ? { ...r, dealer_name: name } : r;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Custom-field CSV columns. Admin-defined fields live in
 // crm_custom_field_defs (one row per field per entity) and each row's value
 // is stored under row.custom_fields[field_key]. The CSV export routes call

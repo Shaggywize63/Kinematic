@@ -51,7 +51,7 @@ import * as targetsSvc from '../services/crm/targets.service';
 import * as homeSvc from '../services/crm/home.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
-import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
+import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
 
@@ -1317,7 +1317,10 @@ deals.get('/', wrap(async (req, res) => {
     dealsSvc.listDealsWithCount(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
     dealsSvc.dealsTotals(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
   ]);
-  const stamped = await stampOwnerNames(rows);
+  // Decorate with owner + linked-lead name/phone + dealer name so the
+  // deals list (web + mobile) can render "Dealer: Ravi Kumar · Lead:
+  // 98765 43210" without resolving UUIDs client-side.
+  const stamped = await stampDealerNames(await stampLinkedEntityNames(await stampOwnerNames(rows) as never[]) as never[]);
   res.json({
     success: true,
     data: stamped,
@@ -1342,15 +1345,18 @@ deals.get('/export', wrap(async (req, res) => {
   const PAGE = 200;
   const MAX  = 10000;
   const rows: any[] = [];
+  // Date-wise by default: newest deals first, so a lead's multiple deals
+  // read chronologically in the sheet. An explicit ?sort= still wins.
+  const exportSort = (req.query.sort as string) ? {} : { sort: 'created_at', order: 'desc' };
   for (let page = 1; rows.length < MAX; page++) {
     const { rows: chunk } = await dealsSvc.listDealsWithCount(
-      orgId(req), { ...req.query, limit: PAGE, page }, scope.id, { strictClient: scope.strict, visibleOwnerIds },
+      orgId(req), { ...req.query, ...exportSort, limit: PAGE, page }, scope.id, { strictClient: scope.strict, visibleOwnerIds },
     );
     rows.push(...(chunk as any[]));
     if ((chunk as any[]).length < PAGE) break;
   }
   const limited = rows.slice(0, MAX);
-  const stamped = await stampOwnerNames(limited);
+  const stamped = await stampDealerNames(await stampOwnerNames(limited) as never[]);
   // Reuse the shared linked-entity decorator so the CSV reads
   // "Acme Steel" instead of a UUID. Deals' primary-contact column is
   // named `primary_contact_id` though, while the decorator expects
@@ -1434,6 +1440,7 @@ deals.get('/export', wrap(async (req, res) => {
     { key: 'expected_close_date', label: 'Expected Close Date' },
     { key: 'lead_name',           label: 'Source Lead' },
     { key: 'lead_phone',          label: 'Source Lead Phone' },
+    { key: 'dealer_name',         label: 'Dealer' },
     { key: 'account_name',        label: 'Account' },
     { key: 'contact_name',        label: 'Primary Contact' },
     { key: 'owner_name',          label: 'Owner' },
@@ -1472,7 +1479,14 @@ deals.post('/', wrap(async (req, res) => {
   sanitizeOwnerId(req, payload);
   res.status(201).json(await stampOwnerName(await dealsSvc.createDeal(orgId(req), payload, userId(req))));
 }));
-deals.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await dealsSvc.getDeal(orgId(req), req.params.id)))));
+deals.get('/:id', wrap(async (req, res) => {
+  // Same decorations as the list: linked-lead name/phone + dealer name,
+  // so the deal detail page shows the lead's mobile + dealer without
+  // extra client-side fetches.
+  const deal = await stampOwnerName(await dealsSvc.getDeal(orgId(req), req.params.id));
+  const [decorated] = await stampDealerNames(await stampLinkedEntityNames([deal] as never[]) as never[]);
+  res.json(decorated);
+}));
 deals.patch('/:id', wrap(async (req, res) => {
   const payload = parse(v.dealUpdateSchema, req.body);
   sanitizeOwnerId(req, payload);
@@ -2066,10 +2080,36 @@ activities.get('/export', wrap(async (req, res) => {
   // decorator the list endpoint uses — keeps the two paths in lockstep.
   const enriched = await stampLinkedEntityNames(stamped as any[]);
 
+  // Deal-linked activities carry no lead_id of their own — resolve the
+  // deal's source lead so Lead / Lead Phone aren't blank for those rows.
+  const orphanDealIds = Array.from(new Set(
+    (enriched as any[]).filter((r) => !r.lead_id && r.deal_id).map((r) => r.deal_id as string),
+  ));
+  if (orphanDealIds.length > 0) {
+    const { data: dealLeads } = await supabaseAdmin.from('crm_deals')
+      .select('id, lead_id').eq('org_id', orgId(req)).in('id', orphanDealIds);
+    const leadByDeal = new Map((dealLeads ?? []).filter((d: any) => d.lead_id).map((d: any) => [d.id as string, d.lead_id as string]));
+    const fallbackLeadIds = Array.from(new Set(Array.from(leadByDeal.values())));
+    if (fallbackLeadIds.length > 0) {
+      const { data: leadRows } = await supabaseAdmin.from('crm_leads')
+        .select('id, first_name, last_name, company, phone').in('id', fallbackLeadIds);
+      const info = new Map((leadRows ?? []).map((l: any) => [l.id as string, {
+        name: [l.first_name, l.last_name].filter(Boolean).join(' ').trim() || (l.company as string) || '',
+        phone: (l.phone as string) || '',
+      }]));
+      for (const r of enriched as any[]) {
+        if (r.lead_id || !r.deal_id) continue;
+        const lid = leadByDeal.get(r.deal_id);
+        const li = lid ? info.get(lid) : undefined;
+        if (li) { r.lead_name = r.lead_name || li.name; r.lead_phone = r.lead_phone || li.phone; }
+      }
+    }
+  }
+
   const cols: Array<{ key: string; label: string }> = [
     { key: 'type',             label: 'Type' },
     { key: 'subject',          label: 'Subject' },
-    { key: 'body',             label: 'Body' },
+    { key: 'body',             label: 'Notes' },
     { key: 'status',           label: 'Status' },
     { key: 'priority',         label: 'Priority' },
     { key: 'direction',        label: 'Direction' },
