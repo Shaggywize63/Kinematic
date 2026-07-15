@@ -232,13 +232,15 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
   return data as Deal;
 }
 
-export async function updateDeal(org_id: string, id: string, payload: Partial<Deal>, user_id?: string) {
-  const before = await getDeal(org_id, id);
-  // Price lock: a deal's amount, product basket and volume are captured at
-  // create/convert time and must NOT drift with later market-price changes
-  // (SRS/BMW requirement). Strip them from every generic PATCH — enforced
-  // here so no client (web/iOS/Android, old builds included) can bypass it.
-  // winDeal() keeps its own deliberate close-out amount path.
+/**
+ * Price lock: a deal's amount, product basket and volume are captured at
+ * create/convert time and must NOT drift with later market-price changes
+ * (SRS/BMW requirement). Applied by the PATCH /deals/:id ROUTE to every
+ * external payload so no client (web/iOS/Android, old builds included) can
+ * bypass it — but NOT inside updateDeal itself, because winDeal() routes
+ * its deliberate close-out amount through updateDeal and must keep working.
+ */
+export function stripLockedDealFields(payload: Partial<Deal>) {
   delete (payload as Record<string, unknown>).amount;
   if (payload.custom_fields) {
     const lockedCf = payload.custom_fields as Record<string, unknown>;
@@ -246,6 +248,11 @@ export async function updateDeal(org_id: string, id: string, payload: Partial<De
     delete lockedCf.volume_kg;
     delete lockedCf.line_items;
   }
+  return payload;
+}
+
+export async function updateDeal(org_id: string, id: string, payload: Partial<Deal>, user_id?: string) {
+  const before = await getDeal(org_id, id);
   // Per-type validate + stamp formulas. Merging the incoming patch on top
   // of the existing blob means a formula referencing fields the rep didn't
   // touch in this PATCH still recomputes against current state.
@@ -433,7 +440,12 @@ export async function moveStage(org_id: string, id: string, stage_id: string, us
   return updateDeal(org_id, id, { stage_id }, user_id);
 }
 
-export async function winDeal(org_id: string, id: string, payload: { actual_close_date?: string | null; amount?: number }, user_id?: string) {
+export async function winDeal(
+  org_id: string,
+  id: string,
+  payload: { actual_close_date?: string | null; amount?: number; create_balance_deal?: boolean },
+  user_id?: string,
+) {
   const deal = await getDeal(org_id, id);
   const { data: wonStage } = await supabaseAdmin.from('crm_deal_stages')
     .select('id').eq('pipeline_id', deal.pipeline_id).eq('stage_type', 'won').limit(1).single();
@@ -447,7 +459,60 @@ export async function winDeal(org_id: string, id: string, payload: { actual_clos
   if (nextAmount == null) {
     nextAmount = await computeClosedAmount(org_id, deal) ?? deal.amount;
   }
-  return updateDeal(org_id, id, {
+
+  // Partial close: the deal closes for less than its full value and the
+  // remainder will be closed later (lead worth ₹100, first close ₹50).
+  // Stamp original_amount on the won deal — its `amount` is overwritten
+  // with the won figure below, so "won ₹X of ₹Y" needs the original kept —
+  // and, when the caller asks, spawn an open "(Balance)" deal for the
+  // remainder against the same lead / pipeline / owner so it can be worked
+  // and closed separately later.
+  const originalAmount = Number(deal.amount ?? 0);
+  const wonAmount = Number(nextAmount ?? 0);
+  const remainder = Math.round((originalAmount - wonAmount) * 100) / 100;
+  const isPartial = originalAmount > 0 && wonAmount > 0 && remainder > 0;
+  const wonCfExtra: Record<string, unknown> = {};
+  let balanceDeal: Deal | null = null;
+  if (isPartial) {
+    wonCfExtra.original_amount = originalAmount;
+    if (payload.create_balance_deal) {
+      // First open stage of the SAME pipeline (mirrors createDeal's
+      // default-stage pick) so the balance lands at the top of the funnel.
+      const { data: stageRows } = await supabaseAdmin.from('crm_deal_stages')
+        .select('id, stage_type, position').eq('pipeline_id', deal.pipeline_id)
+        .order('position', { ascending: true });
+      const firstOpen = (stageRows ?? []).find(
+        (s) => s.stage_type !== 'won' && s.stage_type !== 'lost',
+      );
+      const parentCf = ((deal as Deal & { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {}) as Record<string, unknown>;
+      const d = deal as Deal & {
+        client_id?: string | null; account_id?: string | null;
+        primary_contact_id?: string | null; lead_id?: string | null;
+        owner_id?: string | null; source_id?: string | null;
+      };
+      balanceDeal = await createDeal(org_id, {
+        client_id: d.client_id ?? null,
+        pipeline_id: deal.pipeline_id,
+        stage_id: firstOpen?.id,
+        name: `${deal.name} (Balance)`,
+        account_id: d.account_id ?? null,
+        primary_contact_id: d.primary_contact_id ?? null,
+        lead_id: d.lead_id ?? null,
+        amount: remainder,
+        owner_id: d.owner_id ?? null,
+        source_id: d.source_id ?? null,
+        custom_fields: {
+          // Carry the dealer so the balance deal stays attributed; link
+          // back to the parent so both directions are traceable.
+          ...(parentCf.dealer != null ? { dealer: parentCf.dealer } : {}),
+          balance_of: deal.id,
+        },
+      } as Partial<Deal>, user_id);
+      wonCfExtra.balance_deal_id = balanceDeal.id;
+    }
+  }
+
+  const won = await updateDeal(org_id, id, {
     stage_id: wonStage.id,
     // Explicit status flip so the deals list, dashboard filters, and
     // analytics that key on `status` (not stage_type) all see "won"
@@ -456,7 +521,11 @@ export async function winDeal(org_id: string, id: string, payload: { actual_clos
     status: 'won',
     actual_close_date: payload.actual_close_date ?? new Date().toISOString().slice(0, 10),
     amount: nextAmount,
+    // Merged into the stored blob server-side; unrelated keys survive.
+    ...(Object.keys(wonCfExtra).length ? { custom_fields: wonCfExtra } : {}),
   } as Partial<Deal>, user_id);
+  // Additive: clients that don't know about balance deals just ignore it.
+  return balanceDeal ? { ...(won as unknown as Record<string, unknown>), balance_deal: balanceDeal } : won;
 }
 
 /**

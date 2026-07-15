@@ -265,7 +265,13 @@ export const dealSchema = z.object({
 export const dealUpdateSchema = dealSchema.partial();
 
 export const moveStageSchema = z.object({ stage_id: uuid });
-export const winSchema = z.object({ actual_close_date: isoDate, amount: z.number().nonnegative().optional() });
+export const winSchema = z.object({
+  actual_close_date: isoDate,
+  amount: z.number().nonnegative().optional(),
+  // Partial close: when the won amount is less than the deal's amount,
+  // spawn an open "(Balance)" deal for the remainder (same lead/pipeline).
+  create_balance_deal: z.boolean().optional(),
+});
 export const loseSchema = z.object({ actual_close_date: isoDate, lost_reason: z.string().max(500).optional() });
 
 // Activity inner shape — kept separate from the refined wrapper so
