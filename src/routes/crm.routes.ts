@@ -898,10 +898,21 @@ function csvEscape(v: unknown): string {
 }
 const csvDateOnly = (v: unknown): string => (v ? String(v).slice(0, 10) : '');
 
-// Shared CSV writer: builds `<header>\n<rows>\n`, sets the download headers
-// and sends. Filename is `<base>-YYYY-MM-DD.csv`.
-function sendReportCsv<T>(res: Response, base: string, cols: Array<{ label: string; get: (r: T) => unknown }>, rows: T[]): void {
-  const header = cols.map((c) => c.label).join(',');
+// Shared report emitter. Default → downloadable CSV (`<header>\n<rows>\n`,
+// filename `<base>-YYYY-MM-DD.csv`). With `?format=json` → structured JSON
+// `{ columns, rows, count }` so the dashboard can "Run" a report and show the
+// data inline without downloading. Both paths reuse the exact same cols/rows.
+function sendReportCsv<T>(req: Request, res: Response, base: string, cols: Array<{ label: string; get: (r: T) => unknown }>, rows: T[]): void {
+  const columns = cols.map((c) => c.label);
+  if (String((req.query as Record<string, unknown>).format ?? '') === 'json') {
+    const data = rows.map((r) => cols.map((c) => {
+      const v = c.get(r);
+      return v === undefined ? '' : v;
+    }));
+    res.json({ success: true, data: { columns, rows: data, count: rows.length } });
+    return;
+  }
+  const header = columns.join(',');
   const body = rows.map((r) => cols.map((c) => csvEscape(c.get(r))).join(',')).join('\n');
   const csv = `${header}\n${body}\n`;
   const filename = `${base}-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -1126,7 +1137,7 @@ leads.get('/export-srs-report', wrap(async (req, res) => {
       } },
     { label: 'Owner Name', get: (r) => r.owner_name ?? '' },
   ];
-  sendReportCsv(res, 'srs-lead-report', cols, enriched as any[]);
+  sendReportCsv(req, res, 'srs-lead-report', cols, enriched as any[]);
 }));
 
 // ─── Report 3: Test Report (Ring / Weighment test leads). ───────────────
@@ -1148,7 +1159,7 @@ leads.get('/export-test-report', wrap(async (req, res) => {
     { label: 'Weighment Test', get: (r) => yesNo((r.custom_fields ?? {}).weighment_test) },
     { label: 'Attendees', get: (r) => (r.custom_fields ?? {}).attendees ?? '' },
   ];
-  sendReportCsv(res, 'test-report', cols, enriched as any[]);
+  sendReportCsv(req, res, 'test-report', cols, enriched as any[]);
 }));
 // Geo points for the dashboard map — every lead that carries real
 // coordinates, with just the fields the map needs. The list endpoint caps at
@@ -2431,7 +2442,7 @@ activities.get('/export-activity-report', wrap(async (req, res) => {
     { label: 'Description', get: (a) => a.body ?? '' },
     { label: 'Owner Name', get: (a) => ownerNames.get((a.assigned_to ?? a.owner_id) as string) ?? '' },
   ];
-  sendReportCsv(res, 'activity-report', cols, acts);
+  sendReportCsv(req, res, 'activity-report', cols, acts);
 }));
 
 // ─── Report 4: Overall Day-Wise Report. ─────────────────────────────────
@@ -2609,7 +2620,7 @@ activities.get('/export-daywise-report', wrap(async (req, res) => {
     { label: 'Tonnage (MT)', get: (r) => r.tonnage },
     { label: 'Date', get: (r) => r.date },
   ];
-  sendReportCsv(res, 'daywise-report', cols, [...rows, gt]);
+  sendReportCsv(req, res, 'daywise-report', cols, [...rows, gt]);
 }));
 activities.post('/', wrap(async (req, res) => {
   const parsed = normalizeActivityPayload(parse(v.activitySchema, req.body));
