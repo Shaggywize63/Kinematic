@@ -133,7 +133,7 @@ export async function suggestFromUpdate(
   try {
     const out = await aiComplete({
       org_id,
-      model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5-20251001',
+      model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
       system: SYSTEM,
       messages: [
         {

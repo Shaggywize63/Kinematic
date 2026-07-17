@@ -90,7 +90,7 @@ export async function compute(org_id: string, client_id: string | null, deal_id:
   try {
     const response = await aiComplete({
       org_id,
-      model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5-20251001',
+      model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: JSON.stringify(userPayload) }],
       max_tokens: 600,

@@ -123,7 +123,7 @@ export async function extractSignalsFromUpdate(input: ExtractSignalsInput): Prom
 
     const out = await aiComplete({
       org_id: input.org_id,
-      model: process.env.CRM_INTEL_MODEL || process.env.CRM_NBA_MODEL || 'claude-haiku-4-5-20251001',
+      model: process.env.CRM_INTEL_MODEL || process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
       system: SYSTEM,
       messages: [{ role: 'user', content: JSON.stringify({ note: text }) }],
       max_tokens: 500,

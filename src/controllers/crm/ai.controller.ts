@@ -59,7 +59,7 @@ export const nextBestAction = asyncHandler(async (req: AuthRequest, res: Respons
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 300,
       system: 'You are a sales coach. Reply ONLY with JSON: {"action":"string","priority":"high"|"medium"|"low","reason":"string","suggested_when":"string"}',
       messages: [{
@@ -87,7 +87,7 @@ export const winProbability = asyncHandler(async (req: AuthRequest, res: Respons
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 200,
       system: 'You are a sales analyst. Reply ONLY with JSON: {"probability":number,"reasoning":"string"}. probability is 0-100.',
       messages: [{
@@ -116,7 +116,7 @@ export const summarizeAccount = asyncHandler(async (req: AuthRequest, res: Respo
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 400,
       system: 'You are a CRM analyst. Reply ONLY with JSON: {"summary":"string","highlights":["string"]}',
       messages: [{
@@ -139,7 +139,7 @@ export const summarizeDeal = asyncHandler(async (req: AuthRequest, res: Response
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 300,
       system: 'Reply ONLY with JSON: {"summary":"string","highlights":["string"]}',
       messages: [{

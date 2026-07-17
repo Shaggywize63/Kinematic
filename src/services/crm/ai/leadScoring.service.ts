@@ -456,7 +456,7 @@ export async function rerankWithLlmV2(
     };
     const response = await aiComplete({
       org_id,
-      model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-haiku-4-5-20251001',
+      model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-haiku-4-5',
       system: base.profile === 'b2c' ? SYSTEM_PROMPT_B2C : SYSTEM_PROMPT_B2B,
       messages: [{ role: 'user', content: JSON.stringify(userPayload) }],
       max_tokens: 300,
