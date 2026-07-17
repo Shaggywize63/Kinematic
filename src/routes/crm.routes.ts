@@ -8,7 +8,7 @@
 import express, { Request, Response, NextFunction, Router } from 'express';
 import multer from 'multer';
 import { z, ZodError } from 'zod';
-import { requireAuth, requireRole } from '../middleware/auth';
+import { requireAuth, requireRole, MASTER_ADMIN_EMAIL } from '../middleware/auth';
 import { requireModule } from '../middleware/rbac';
 import * as rbac from '../middleware/rbac';
 import { AppError } from '../utils';
@@ -3543,9 +3543,21 @@ router.post('/custom-fields/reorder', wrap(async (req, res) => {
 // entity. The dashboard previews + edits them and creates each via the normal
 // /custom-fields path. Gated to the settings surface — same audience as the
 // rest of the custom-field admin.
+//
+// ACCESS: currently limited to the master admin (s@kinematicapp.com) only,
+// while the feature is in early rollout — every other admin gets a clean 403.
+// Flip `KINI_BUILDER_EMAILS` (or gate on a flag) to widen access later.
 const KINI_ENTITIES = new Set(['lead', 'contact', 'account', 'deal', 'activity']);
+const KINI_BUILDER_EMAILS = new Set<string>([MASTER_ADMIN_EMAIL]);
+function assertKiniBuilderAccess(req: Request) {
+  const email = ((req as AuthRequest).user?.email || '').toLowerCase();
+  if (!KINI_BUILDER_EMAILS.has(email)) {
+    throw new AppError(403, 'The KINI form builder is not enabled for your account.', 'FORBIDDEN');
+  }
+}
 
 router.post('/ai/lead-form/questions', rbac.requireModuleAccess('crm_settings'), wrap(async (req, res) => {
+  assertKiniBuilderAccess(req);
   const problemStatement = String(req.body?.problem_statement ?? req.body?.problemStatement ?? '').trim();
   const entityType = String(req.body?.entity_type ?? 'lead').trim().toLowerCase();
   if (!problemStatement) throw new AppError(400, 'problem_statement is required', 'VALIDATION');
@@ -3556,6 +3568,7 @@ router.post('/ai/lead-form/questions', rbac.requireModuleAccess('crm_settings'),
 }));
 
 router.post('/ai/lead-form/generate', rbac.requireModuleAccess('crm_settings'), wrap(async (req, res) => {
+  assertKiniBuilderAccess(req);
   const problemStatement = String(req.body?.problem_statement ?? req.body?.problemStatement ?? '').trim();
   const entityType = String(req.body?.entity_type ?? 'lead').trim().toLowerCase();
   if (!problemStatement) throw new AppError(400, 'problem_statement is required', 'VALIDATION');
