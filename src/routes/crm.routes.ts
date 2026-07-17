@@ -51,6 +51,7 @@ import * as targetsSvc from '../services/crm/targets.service';
 import * as homeSvc from '../services/crm/home.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
+import * as leadFormBuilder from '../services/crm/ai/leadFormBuilder.service';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
@@ -3534,6 +3535,57 @@ router.post('/custom-fields/reorder', wrap(async (req, res) => {
   }
   res.json({ ok: true, count: body.items.length });
 }));
+
+// ── KINI AI lead-form builder ───────────────────────────────────────────────
+// Two-step admin flow behind CRM Settings → Custom Fields: an admin writes a
+// plain-English problem statement, KINI asks clarifying (generic + industry)
+// questions, then proposes a comprehensive set of custom fields for the
+// entity. The dashboard previews + edits them and creates each via the normal
+// /custom-fields path. Gated to the settings surface — same audience as the
+// rest of the custom-field admin.
+const KINI_ENTITIES = new Set(['lead', 'contact', 'account', 'deal', 'activity']);
+
+router.post('/ai/lead-form/questions', rbac.requireModuleAccess('crm_settings'), wrap(async (req, res) => {
+  const problemStatement = String(req.body?.problem_statement ?? req.body?.problemStatement ?? '').trim();
+  const entityType = String(req.body?.entity_type ?? 'lead').trim().toLowerCase();
+  if (!problemStatement) throw new AppError(400, 'problem_statement is required', 'VALIDATION');
+  if (problemStatement.length > 4000) throw new AppError(400, 'problem_statement is too long (max 4000 chars)', 'VALIDATION');
+  if (!KINI_ENTITIES.has(entityType)) throw new AppError(400, 'invalid entity_type', 'VALIDATION');
+  const data = await leadFormBuilder.suggestQuestions({ problemStatement, entityType });
+  res.json({ success: true, data });
+}));
+
+router.post('/ai/lead-form/generate', rbac.requireModuleAccess('crm_settings'), wrap(async (req, res) => {
+  const problemStatement = String(req.body?.problem_statement ?? req.body?.problemStatement ?? '').trim();
+  const entityType = String(req.body?.entity_type ?? 'lead').trim().toLowerCase();
+  if (!problemStatement) throw new AppError(400, 'problem_statement is required', 'VALIDATION');
+  if (problemStatement.length > 4000) throw new AppError(400, 'problem_statement is too long (max 4000 chars)', 'VALIDATION');
+  if (!KINI_ENTITIES.has(entityType)) throw new AppError(400, 'invalid entity_type', 'VALIDATION');
+  const answers = Array.isArray(req.body?.answers)
+    ? req.body.answers
+        .map((a: unknown) => ({
+          question: String((a as { question?: unknown })?.question ?? '').trim().slice(0, 300),
+          answer: String((a as { answer?: unknown })?.answer ?? '').trim().slice(0, 500),
+        }))
+        .filter((a: { answer: string }) => a.answer)
+        .slice(0, 20)
+    : [];
+
+  // Existing keys for this entity+scope so KINI never re-proposes a field
+  // that already exists (the DB unique index would reject it anyway).
+  const scope = clientScope(req);
+  let q = supabaseAdmin.from('crm_custom_field_defs')
+    .select('field_key')
+    .eq('org_id', orgId(req))
+    .eq('entity_type', entityType);
+  if (scope.id) q = q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+  const { data: existingRows } = await q;
+  const existingKeys = (existingRows ?? []).map((r: { field_key: string }) => r.field_key);
+
+  const data = await leadFormBuilder.generateFields({ problemStatement, entityType, answers, existingKeys });
+  res.json({ success: true, data });
+}));
+
 attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false, clientScoped: true });
 attach('/product-categories', 'crm_product_categories', v.productCategorySchema, { defaultSort: { column: 'sort_order', ascending: true }, clientScoped: true });
 attach('/products', 'crm_products', v.productSchema, { searchColumns: ['name','sku','description'], clientScoped: true });
