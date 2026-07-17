@@ -57,6 +57,7 @@ async function gate(req: AuthRequest, res: Response): Promise<boolean> {
 
 // ── Chat ────────────────────────────────────────────────────────────────────
 export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
+ try {
   if (!(await gate(req, res))) return;
   const user = req.user as AuthUser;
   const { org_id, client_id, id: user_id, role, full_name, city } = user;
@@ -298,6 +299,22 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       cards: [],
       tool_calls: [],
       thread_id,
+    });
+  }
+ } catch (e: unknown) {
+    // Errors thrown BEFORE the model call (gate / quota / memory / context)
+    // would otherwise escape to the generic error envelope the clients render
+    // as the opaque "I apologize…" fallback. Surface the real reason to a
+    // super_admin so a broken chat is diagnosable.
+    if (res.headersSent) return;
+    const role = String((req.user as { role?: string } | undefined)?.role || '').toLowerCase();
+    const detail = (e as { message?: string })?.message || 'unknown error';
+    logger.error(`[kini.v2.chat] pre-flight error: ${detail}`);
+    return ok(res, {
+      text: role === 'super_admin' ? `KINI hit a server error: ${detail}` : 'I ran into a problem on my end — please try again.',
+      cards: [],
+      tool_calls: [],
+      thread_id: null,
     });
   }
 });

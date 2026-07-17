@@ -4548,6 +4548,7 @@ ai.get('/credits', wrap(async (req, res) => {
 }));
 
 ai.post('/chat', wrap(async (req, res) => {
+ try {
   const body = parse(z.object({
     messages: z.array(z.object({ role: z.enum(['user','assistant']), content: z.string() })).min(1),
     system: z.string().optional(),
@@ -4643,6 +4644,27 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
       success: true,
       data: {
         text: "I ran into a problem on my end — please try again. If this keeps happening, the team has been notified.",
+        cards: [],
+        tool_calls: [],
+      },
+    });
+  }
+ } catch (e: unknown) {
+    // Anything thrown BEFORE the model call (payload validation, quota lookup,
+    // client-scope resolution) would otherwise escape to the generic
+    // { success:false } error envelope, which the clients render as the opaque
+    // "I apologize…" fallback. Catch it here and surface the real reason to a
+    // super_admin so a broken chat is diagnosable instead of silent.
+    const reqUser = (req as Request & { user?: { role?: string } }).user;
+    const isSuper = String(reqUser?.role || '').toLowerCase() === 'super_admin';
+    const detail = (e as { message?: string })?.message || 'unknown error';
+    console.error('[kini.chat] pre-flight error:', detail, e);
+    res.json({
+      success: true,
+      data: {
+        text: isSuper
+          ? `KINI hit a server error: ${detail}`
+          : 'I ran into a problem on my end — please try again.',
         cards: [],
         tool_calls: [],
       },
