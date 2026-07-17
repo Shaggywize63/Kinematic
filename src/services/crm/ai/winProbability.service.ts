@@ -122,7 +122,7 @@ export async function compute(org_id: string, client_id: string | null, deal_id:
   try {
     const llm = await aiComplete({
       org_id,
-      model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5-20251001',
+      model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
       system: 'You explain win probability for a sales deal in 1-2 sentences. Be concrete. No JSON, plain text.',
       messages: [{ role: 'user', content: JSON.stringify({ deal: { name: deal.name, amount: deal.amount, age_days: ageDays, activities_30d: actCnt }, baseline }) }],
       max_tokens: 120,

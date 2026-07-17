@@ -40,7 +40,7 @@ const AI_FIELD_TYPE_SET = new Set<string>(AI_FIELD_TYPES);
 // code change; falls back to the repo-wide default if the primary errors
 // (e.g. an org key without Opus access) so the feature degrades gracefully.
 const BUILDER_MODEL = process.env.KINI_FORM_BUILDER_MODEL || 'claude-opus-4-8';
-const FALLBACK_MODEL = 'claude-haiku-4-5-20251001';
+const FALLBACK_MODEL = 'claude-haiku-4-5';
 
 const ENTITY_LABELS: Record<string, string> = {
   lead: 'lead', contact: 'contact', account: 'account',

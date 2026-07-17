@@ -13,7 +13,7 @@ import { AppError } from '../../../utils';
 // it 404'd as model_not_found, surfacing only as a generic "AI request
 // failed", which is why both the reply drafter and template generator
 // silently produced nothing. Override per-env with CRM_AUTO_RESPONSE_MODEL.
-const EMAIL_AI_MODEL = process.env.CRM_AUTO_RESPONSE_MODEL || 'claude-haiku-4-5-20251001';
+const EMAIL_AI_MODEL = process.env.CRM_AUTO_RESPONSE_MODEL || 'claude-haiku-4-5';
 
 export interface DraftReplyInput {
   org_id: string;

@@ -117,7 +117,7 @@ async function suggestMapping(org_id: string, headers: string[]): Promise<Record
   try {
     const reply = await aiComplete({
       org_id,
-      model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-haiku-4-5-20251001',
+      model: process.env.CRM_LEAD_SCORING_MODEL || 'claude-haiku-4-5',
       system: `You map CSV headers to canonical lead fields. Allowed: ${CANONICAL_FIELDS.join(', ')}. Output JSON {"<header>": "<canonical>" | null}. JSON only.`,
       messages: [{ role: 'user', content: JSON.stringify({ headers: unmapped }) }],
       max_tokens: 400,
