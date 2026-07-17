@@ -132,6 +132,13 @@ export const leadUpdateSchema = leadCreateSchema.partial().extend({
   // schema accepts it from clients but typical callers omit it).
   lost_reason: z.string().max(500).optional().nullable(),
   disqualified_at: isoDate,
+  // City is `.optional()` (non-null) on CREATE, but existing rows can legitimately
+  // have a null city — e.g. Kinematic inside-sales leads created without GPS/city.
+  // On PATCH the edit form echoes the stored value back, so a null-city lead would
+  // otherwise fail with "city: Expected string, received null" and become
+  // uneditable. Accept null here so those rows can be saved; forms that require
+  // city still send a real string, and the create path is unchanged.
+  city: z.string().min(1, { message: 'City is required' }).max(120).optional().nullable(),
 });
 
 export const leadConvertSchema = z.object({
