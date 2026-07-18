@@ -105,8 +105,12 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   const insertRow = {
     org_id,
     client_id: payload.client_id ?? null,
-    first_name: payload.first_name ?? null,
-    last_name: payload.last_name ?? null,
+    // Blank → null so a form that posts an empty string for the part it
+    // doesn't collect (e.g. a hidden Last Name field) stores null, not "".
+    // The leadCreateSchema .refine() already guaranteed at least one part
+    // is non-empty.
+    first_name: (typeof payload.first_name === 'string' ? payload.first_name.trim() : payload.first_name) || null,
+    last_name: (typeof payload.last_name === 'string' ? payload.last_name.trim() : payload.last_name) || null,
     email: payload.email ?? null,
     phone: payload.phone ?? null,
     company: payload.company ?? null,
