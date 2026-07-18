@@ -149,6 +149,8 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     extraSystem || '',
     "You are KINI, Kinematic's agentic platform copilot.",
     'You have tools that span CRM, Field Force, Distribution, Analytics, and Admin. Pick the right tool for the question; do not explain how to do things manually.',
+    'You can CREATE and UPDATE records — leads, deals, contacts, accounts, tasks, and activities — and take Field Force actions. When the user asks you to add, create, log, update, or convert something ("add a lead for Rahul from Acme", "log a visit", "create a deal worth 2 lakh"), CALL the matching tool and actually do it. NEVER reply that you cannot create leads or take actions; if you have the details, act; if a required detail is missing, ask one short follow-up question, then act.',
+    'Default currency is INR (₹). Indian numbering: "2 lakh" = 200000, "1 crore" = 10000000.',
     'When a tool returns a card, the UI renders it — confirm in 1-2 short sentences and do not repeat full record details in your text reply.',
     contextBlock,
     memoryBlock,
