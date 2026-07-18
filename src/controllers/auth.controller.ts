@@ -435,7 +435,21 @@ export const changePassword = asyncHandler<AuthRequest>(async (req, res) => {
   const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.user.id, {
     password: body.data.new_password,
   });
-  if (authErr) return serverError(res);
+  if (authErr) {
+    // Surface GoTrue's real reason instead of a blanket 500. The most common
+    // rejection here is leaked-password protection (HIBP), which 422s a
+    // breached/common password that passed our own validatePassword() checks
+    // (those don't consult a breach DB). Masking it as "internal server error"
+    // left users on the forced first-login change screen with no idea they just
+    // needed a stronger, unique password. Pass the 4xx + message through.
+    const status = authErr.status && authErr.status >= 400 && authErr.status < 500 ? authErr.status : 400;
+    logger.warn(`change-password rejected for ${req.user.id}: ${authErr.status ?? '—'} ${authErr.message}`);
+    return res.status(status).json({
+      success: false,
+      error: authErr.message || 'Could not update password. Please choose a different, stronger one.',
+      code: (authErr as { code?: string }).code || 'PASSWORD_UPDATE_FAILED',
+    });
+  }
 
   await supabaseAdmin.from('users').update({ must_change_password: false }).eq('id', req.user.id);
   invalidateAuthCache((u) => u?.id === req.user!.id);
