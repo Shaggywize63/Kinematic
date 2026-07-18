@@ -73,15 +73,20 @@ const b2cBase = {
   alternate_mobiles: z.array(z.string().min(3).max(40)).optional(),
 };
 
-export const leadCreateSchema = z.object({
+const leadCreateBase = z.object({
   client_id: optionalUuid,
-  first_name: z.string().min(1).max(120).optional().nullable(),
-  // Last name is mandatory on create — captured at every form entry
-  // point. The .optional().nullable() on leadUpdateSchema (via
-  // .partial() below) still lets PATCH skip the field for partial
-  // updates, so existing records without last_name don't fail on
-  // edit.
-  last_name: z.string().min(1, 'Last name is required').max(120),
+  // Name: a lead needs *a* name, but not specifically both parts. Many
+  // tenants (e.g. SRS retail construction customers) capture a single
+  // given name, and an admin can hide the Last Name field entirely via
+  // field overrides — in which case the mobile form never sends it. So
+  // both parts are individually optional here and the "at least one
+  // name" rule is enforced by the .refine() on leadCreateSchema below.
+  // (Forcing last_name at the schema level 400'd every single-name SRS
+  // submission with "last_name: Required".) Empty strings are tolerated
+  // (min length dropped) so a form that posts "" for the hidden part
+  // still validates; the service coerces blanks to null.
+  first_name: z.string().max(120).optional().nullable(),
+  last_name: z.string().max(120).optional().nullable(),
   email: z.string().email().optional().nullable(),
   // Indian mobile — exactly 10 digits. Tightened from the prior
   // free-form max(40) because reps were pasting in country codes /
@@ -125,7 +130,18 @@ export const leadCreateSchema = z.object({
   ...b2cBase,
 });
 
-export const leadUpdateSchema = leadCreateSchema.partial().extend({
+// A lead must carry at least one name part — but which part is up to the
+// tenant. This replaces the old hard-required last_name so single-name
+// entries (and tenants that hide the Last Name field) create cleanly,
+// while still rejecting an entirely nameless lead. Base object is kept
+// separate because .refine() returns a ZodEffects, which doesn't expose
+// .partial() for leadUpdateSchema below.
+export const leadCreateSchema = leadCreateBase.refine(
+  (l) => Boolean((l.first_name ?? '').trim() || (l.last_name ?? '').trim()),
+  { message: 'A lead name is required', path: ['last_name'] },
+);
+
+export const leadUpdateSchema = leadCreateBase.partial().extend({
   status: z.enum(['new','working','nurturing','qualified','unqualified','converted','lost']).optional(),
   // Reason captured when a rep moves a lead into 'unqualified' or 'lost'.
   // Service auto-stamps disqualified_at on the first transition (so the
