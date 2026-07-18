@@ -1,5 +1,5 @@
 /**
- * Pharmaceutical-vertical field-force demo fixtures — Eli Lilly India.
+ * Pharmaceutical-vertical field-force demo fixtures — Vireon Pharma India.
  *
  * Each function below mirrors the EXACT return shape of its generic twin in
  * `src/utils/demoData.ts` (same keys, same nesting, RAW payload — NOT wrapped
@@ -62,7 +62,7 @@ export const getMockTrends = () => {
 export const getMockFeed = () => [
   {
     id: '1',
-    outlet_name: 'Dr. Anil Mehta (Endocrinology) – Apollo Andheri',
+    outlet_name: 'Dr. Anil Mehta (Endocrinology) – Sunrise Andheri',
     submitted_at: new Date().toISOString(),
     is_converted: true,
     user: { name: 'Arjun Sharma', zones: { city: 'Mumbai', name: 'West' } },
@@ -71,11 +71,11 @@ export const getMockFeed = () => [
   },
   {
     id: '2',
-    outlet_name: 'Manipal Hospital — Bengaluru',
+    outlet_name: 'Meridian Hospital — Bengaluru',
     submitted_at: new Date(Date.now() - 3600000).toISOString(),
     is_converted: false,
     user: { name: 'Priya Patel', zones: { city: 'Bengaluru', name: 'South' } },
-    description: 'Priya Patel checked in at Manipal',
+    description: 'Priya Patel checked in at Meridian',
     form_name: 'Attendance'
   },
   {
@@ -93,11 +93,11 @@ export const getMockLocations = (today: string) => ({
   date: today,
   summary: { total: 15, active: 12, checked_out: 2, absent: 1 },
   locations: [
-    { id: 'fe1', name: 'Arjun Sharma', role: 'executive',        battery_percentage: 88, status: 'active',      lat: 12.9352, lng: 77.6245, address: 'Koramangala, Manipal Hospital' },
-    { id: 'fe2', name: 'Priya Patel',  role: 'executive',        battery_percentage: 46, status: 'active',      lat: 12.9279, lng: 77.6271, address: 'Indiranagar, Apollo Clinics' },
-    { id: 'fe3', name: 'Rahul Verma',  role: 'executive',        battery_percentage: 91, status: 'on_break',    lat: 12.9314, lng: 77.6189, address: '100 Ft Road, Fortis' },
-    { id: 'fe4', name: 'Sneha Rao',    role: 'executive',        battery_percentage: 18, status: 'active',      lat: 12.9401, lng: 77.6201, address: 'HSR Layout, MedPlus' },
-    { id: 'fe5', name: 'Amit Singh',   role: 'senior_executive', battery_percentage: 79, status: 'checked_out', lat: 12.9378, lng: 77.6305, address: 'BTM, Apollo Pharmacy' }
+    { id: 'fe1', name: 'Arjun Sharma', role: 'executive',        battery_percentage: 88, status: 'active',      lat: 12.9352, lng: 77.6245, address: 'Koramangala, Meridian Hospital' },
+    { id: 'fe2', name: 'Priya Patel',  role: 'executive',        battery_percentage: 46, status: 'active',      lat: 12.9279, lng: 77.6271, address: 'Indiranagar, Sunrise Clinics' },
+    { id: 'fe3', name: 'Rahul Verma',  role: 'executive',        battery_percentage: 91, status: 'on_break',    lat: 12.9314, lng: 77.6189, address: '100 Ft Road, Crescent' },
+    { id: 'fe4', name: 'Sneha Rao',    role: 'executive',        battery_percentage: 18, status: 'active',      lat: 12.9401, lng: 77.6201, address: 'HSR Layout, WellCare' },
+    { id: 'fe5', name: 'Amit Singh',   role: 'senior_executive', battery_percentage: 79, status: 'checked_out', lat: 12.9378, lng: 77.6305, address: 'BTM, Sunrise Pharmacy' }
   ]
 });
 
@@ -106,15 +106,15 @@ export const getMockAttendanceToday = (today: string) => ({
   summary: { total: 160, present: 148, on_break: 4, checked_out: 5, absent: 3, regularised: 0 },
   executives: [
     { id: 'att-1', user_id: 'fe1', status: 'checked_in',  date: today, checkin_at: `${today}T09:15:00Z`, total_hours: 4.5,
-      users: { name: 'Arjun Sharma', employee_id: 'LLY-001', role: 'executive',  zones: { name: 'Bengaluru — South' } } },
+      users: { name: 'Arjun Sharma', employee_id: 'VRN-001', role: 'executive',  zones: { name: 'Bengaluru — South' } } },
     { id: 'att-2', user_id: 'fe2', status: 'checked_out', date: today, checkin_at: `${today}T09:30:00Z`, checkout_at: `${today}T18:30:00Z`, total_hours: 9.0,
-      users: { name: 'Priya Patel',  employee_id: 'LLY-002', role: 'executive',  zones: { name: 'Mumbai — West' } } },
+      users: { name: 'Priya Patel',  employee_id: 'VRN-002', role: 'executive',  zones: { name: 'Mumbai — West' } } },
     { id: 'att-3', user_id: 'fe3', status: 'checked_in',  date: today, checkin_at: `${today}T09:00:00Z`, total_hours: 4.8,
-      users: { name: 'Rahul Verma',  employee_id: 'LLY-003', role: 'executive',  zones: { name: 'Delhi — Central' } } },
+      users: { name: 'Rahul Verma',  employee_id: 'VRN-003', role: 'executive',  zones: { name: 'Delhi — Central' } } },
     { id: 'att-4', user_id: 'fe4', status: 'checked_in',  date: today, checkin_at: `${today}T10:00:00Z`, total_hours: 3.7,
-      users: { name: 'Sneha Rao',    employee_id: 'LLY-004', role: 'supervisor', zones: { name: 'Hyderabad — South' } } },
+      users: { name: 'Sneha Rao',    employee_id: 'VRN-004', role: 'supervisor', zones: { name: 'Hyderabad — South' } } },
     { id: 'att-5', user_id: 'fe5', status: 'checked_out', date: today, checkin_at: `${today}T08:45:00Z`, checkout_at: `${today}T17:45:00Z`, total_hours: 9.0,
-      users: { name: 'Amit Singh',   employee_id: 'LLY-005', role: 'executive',  zones: { name: 'Pune — East' } } }
+      users: { name: 'Amit Singh',   employee_id: 'VRN-005', role: 'executive',  zones: { name: 'Pune — East' } } }
   ]
 });
 
@@ -131,16 +131,16 @@ export const getMockSubmissions = (today: string) => {
   ];
 
   const data = [
-    { id: 's1', user_id: 'fe1', submitted_at: `${today}T12:05:00Z`, outlet_name: 'Dr. Anil Mehta (Endocrinology) – Apollo Andheri', users: { name: 'Arjun Sharma', employee_id: 'LLY-001' }, activities: { name: 'Mounjaro Detailing' }, photo_url: pics[0] },
-    { id: 's2', user_id: 'fe2', submitted_at: `${today}T11:50:00Z`, outlet_name: 'Manipal Hospital — Bengaluru',                  users: { name: 'Priya Patel',  employee_id: 'LLY-002' }, activities: { name: 'Sampling' },           photo_url: pics[1] },
-    { id: 's3', user_id: 'fe3', submitted_at: `${today}T11:30:00Z`, outlet_name: 'Dr. Neha Gupta (Endocrinology) – AIIMS Delhi',  users: { name: 'Rahul Verma',  employee_id: 'LLY-003' }, activities: { name: 'Trulicity Detailing' }, photo_url: pics[2] },
-    { id: 's4', user_id: 'fe4', submitted_at: `${today}T10:15:00Z`, outlet_name: 'Apollo Pharmacy — Greams Road',                  users: { name: 'Sneha Rao',    employee_id: 'LLY-004' }, activities: { name: 'Pharmacy Audit' },     photo_url: pics[3] },
-    { id: 's5', user_id: 'fe5', submitted_at: `${today}T09:45:00Z`, outlet_name: 'Dr. Karan Verma (Neurology) – BLK-Max Delhi',    users: { name: 'Amit Singh',   employee_id: 'LLY-005' }, activities: { name: 'Sampling' },           photo_url: pics[4] },
-    { id: 's6', user_id: 'fe1', submitted_at: `${yesterday}T16:05:00Z`, outlet_name: 'Dr. R. K. Tandon — Tata Memorial Centre',    users: { name: 'Arjun Sharma', employee_id: 'LLY-001' }, activities: { name: 'CME Outreach' },        photo_url: pics[5] },
-    { id: 's7', user_id: 'fe2', submitted_at: `${yesterday}T14:40:00Z`, outlet_name: 'Apollo Pharmacy — Linking Road',             users: { name: 'Priya Patel',  employee_id: 'LLY-002' }, activities: { name: 'Pharmacy Audit' },     photo_url: pics[0] },
-    { id: 's8', user_id: 'fe3', submitted_at: `${yesterday}T10:30:00Z`, outlet_name: 'Dr. Manish Khanna (Oncology) – Kokilaben',    users: { name: 'Rahul Verma',  employee_id: 'LLY-003' }, activities: { name: 'Verzenio Detailing' }, photo_url: pics[1] },
-    { id: 's9', user_id: 'fe4', submitted_at: `${yesterday}T09:15:00Z`, outlet_name: 'Dr. Kavita Iyer (Oncology) – Manipal',        users: { name: 'Sneha Rao',    employee_id: 'LLY-004' }, activities: { name: 'CME Outreach' },        photo_url: pics[2] },
-    { id: 's10',user_id: 'fe5', submitted_at: `${yesterday}T13:25:00Z`, outlet_name: 'Dr. Suresh Kumar (Diabetology) – Ruby Hall', users: { name: 'Amit Singh',   employee_id: 'LLY-005' }, activities: { name: 'Mounjaro Detailing' }, photo_url: pics[3] },
+    { id: 's1', user_id: 'fe1', submitted_at: `${today}T12:05:00Z`, outlet_name: 'Dr. Anil Mehta (Endocrinology) – Sunrise Andheri', users: { name: 'Arjun Sharma', employee_id: 'VRN-001' }, activities: { name: 'Glucanova Detailing' }, photo_url: pics[0] },
+    { id: 's2', user_id: 'fe2', submitted_at: `${today}T11:50:00Z`, outlet_name: 'Meridian Hospital — Bengaluru',                  users: { name: 'Priya Patel',  employee_id: 'VRN-002' }, activities: { name: 'Sampling' },           photo_url: pics[1] },
+    { id: 's3', user_id: 'fe3', submitted_at: `${today}T11:30:00Z`, outlet_name: 'Dr. Neha Gupta (Endocrinology) – AIIMS Delhi',  users: { name: 'Rahul Verma',  employee_id: 'VRN-003' }, activities: { name: 'Diabextra Detailing' }, photo_url: pics[2] },
+    { id: 's4', user_id: 'fe4', submitted_at: `${today}T10:15:00Z`, outlet_name: 'Sunrise Pharmacy — Greams Road',                  users: { name: 'Sneha Rao',    employee_id: 'VRN-004' }, activities: { name: 'Pharmacy Audit' },     photo_url: pics[3] },
+    { id: 's5', user_id: 'fe5', submitted_at: `${today}T09:45:00Z`, outlet_name: 'Dr. Karan Verma (Neurology) – Northgate Delhi',    users: { name: 'Amit Singh',   employee_id: 'VRN-005' }, activities: { name: 'Sampling' },           photo_url: pics[4] },
+    { id: 's6', user_id: 'fe1', submitted_at: `${yesterday}T16:05:00Z`, outlet_name: 'Dr. R. K. Tandon — Metropolis Cancer Centre',    users: { name: 'Arjun Sharma', employee_id: 'VRN-001' }, activities: { name: 'CME Outreach' },        photo_url: pics[5] },
+    { id: 's7', user_id: 'fe2', submitted_at: `${yesterday}T14:40:00Z`, outlet_name: 'Sunrise Pharmacy — Linking Road',             users: { name: 'Priya Patel',  employee_id: 'VRN-002' }, activities: { name: 'Pharmacy Audit' },     photo_url: pics[0] },
+    { id: 's8', user_id: 'fe3', submitted_at: `${yesterday}T10:30:00Z`, outlet_name: 'Dr. Manish Khanna (Oncology) – Lakeview',    users: { name: 'Rahul Verma',  employee_id: 'VRN-003' }, activities: { name: 'Oncevia Detailing' }, photo_url: pics[1] },
+    { id: 's9', user_id: 'fe4', submitted_at: `${yesterday}T09:15:00Z`, outlet_name: 'Dr. Kavita Iyer (Oncology) – Meridian',        users: { name: 'Sneha Rao',    employee_id: 'VRN-004' }, activities: { name: 'CME Outreach' },        photo_url: pics[2] },
+    { id: 's10',user_id: 'fe5', submitted_at: `${yesterday}T13:25:00Z`, outlet_name: 'Dr. Suresh Kumar (Diabetology) – Emerald Clinic', users: { name: 'Amit Singh',   employee_id: 'VRN-005' }, activities: { name: 'Glucanova Detailing' }, photo_url: pics[3] },
   ];
 
   return {
@@ -154,7 +154,7 @@ export const getMockSubmissions = (today: string) => {
       address: 'Bandra Kurla Complex, Mumbai, MH, 400051',
       form_responses: [
         { builder_questions: { label: 'HCP Photo / Signature', qtype: 'camera' }, value_text: sub.photo_url },
-        { builder_questions: { label: 'Key Message Delivered', qtype: 'text' },   value_text: 'Mounjaro — A1c reduction + weight loss' },
+        { builder_questions: { label: 'Key Message Delivered', qtype: 'text' },   value_text: 'Glucanova — A1c reduction + weight loss' },
         { builder_questions: { label: 'Trial Rx Intent (0-10)', qtype: 'number' }, value_number: 8 }
       ]
     }))
@@ -165,13 +165,13 @@ export const getMockSubmissionDetails = (id: string) => ({
   id,
   submitted_at: new Date().toISOString(),
   is_converted: true,
-  outlet_name: 'Dr. Anil Mehta (Endocrinology) – Apollo Andheri',
+  outlet_name: 'Dr. Anil Mehta (Endocrinology) – Sunrise Andheri',
   address: 'Andheri West, Mumbai',
   latitude: 19.1360, longitude: 72.8260,
   check_in_gps: '19.1360,72.8260', check_out_gps: '19.1361,72.8261',
-  users: { name: 'Arjun Sharma', employee_id: 'LLY-001' },
+  users: { name: 'Arjun Sharma', employee_id: 'VRN-001' },
   builder_forms: { title: 'HCP Detailing Form' },
-  activities: { name: 'Mounjaro Detailing' },
+  activities: { name: 'Glucanova Detailing' },
   answers: [
     { label: 'Specialty',                qtype: 'text',     value: 'Endocrinology' },
     { label: 'Trial Rx Intent (0-10)',   qtype: 'number',   value: 8 },
@@ -186,11 +186,11 @@ export const getMockSubmissionDetails = (id: string) => ({
 });
 
 export const getMockVisitLogs = (today: string) => [
-  { id: 'v1', user_id: 'fe1', outlet_name: 'Dr. Anil Mehta (Endocrinology) – Apollo Andheri', check_in_at: `${today}T10:00:00Z`, check_out_at: `${today}T10:45:00Z`, duration_min: 45, status: 'completed', users: { name: 'Arjun Sharma' } },
-  { id: 'v2', user_id: 'fe1', outlet_name: 'Manipal Hospital — Bengaluru',                    check_in_at: `${today}T11:20:00Z`, check_out_at: `${today}T12:05:00Z`, duration_min: 45, status: 'completed', users: { name: 'Arjun Sharma' } },
-  { id: 'v3', user_id: 'fe2', outlet_name: 'Dr. Kavita Iyer (Oncology) – Manipal',            check_in_at: `${today}T09:45:00Z`, check_out_at: `${today}T10:30:00Z`, duration_min: 45, status: 'completed', users: { name: 'Priya Patel' } },
+  { id: 'v1', user_id: 'fe1', outlet_name: 'Dr. Anil Mehta (Endocrinology) – Sunrise Andheri', check_in_at: `${today}T10:00:00Z`, check_out_at: `${today}T10:45:00Z`, duration_min: 45, status: 'completed', users: { name: 'Arjun Sharma' } },
+  { id: 'v2', user_id: 'fe1', outlet_name: 'Meridian Hospital — Bengaluru',                    check_in_at: `${today}T11:20:00Z`, check_out_at: `${today}T12:05:00Z`, duration_min: 45, status: 'completed', users: { name: 'Arjun Sharma' } },
+  { id: 'v3', user_id: 'fe2', outlet_name: 'Dr. Kavita Iyer (Oncology) – Meridian',            check_in_at: `${today}T09:45:00Z`, check_out_at: `${today}T10:30:00Z`, duration_min: 45, status: 'completed', users: { name: 'Priya Patel' } },
   { id: 'v4', user_id: 'fe3', outlet_name: 'Dr. Neha Gupta (Endocrinology) – AIIMS Delhi',    check_in_at: `${today}T10:15:00Z`, check_out_at: `${today}T11:00:00Z`, duration_min: 45, status: 'completed', users: { name: 'Rahul Verma' } },
-  { id: 'v5', user_id: 'fe4', outlet_name: 'Apollo Pharmacy — Greams Road',                    check_in_at: `${today}T13:40:00Z`, check_out_at: `${today}T14:30:00Z`, duration_min: 50, status: 'completed', users: { name: 'Sneha Rao' } },
+  { id: 'v5', user_id: 'fe4', outlet_name: 'Sunrise Pharmacy — Greams Road',                    check_in_at: `${today}T13:40:00Z`, check_out_at: `${today}T14:30:00Z`, duration_min: 50, status: 'completed', users: { name: 'Sneha Rao' } },
 ];
 
 export const getMockActivities = () => [
@@ -201,8 +201,8 @@ export const getMockActivities = () => [
 ];
 
 export const getMockStores = () => [
-  { id: 'st1', name: 'Apollo Hospitals — Andheri (Dr. Mehta)',  city_id: 'c2', zone_id: 'z2', address: 'Andheri West, Mumbai',           is_active: true, cities: { name: 'Mumbai' },    zones: { name: 'Mumbai — West' } },
-  { id: 'st2', name: 'Manipal Hospital — Bengaluru (Dr. Iyer)', city_id: 'c1', zone_id: 'z1', address: 'HAL Old Airport Rd, Bengaluru', is_active: true, cities: { name: 'Bengaluru' }, zones: { name: 'Bengaluru — South' } }
+  { id: 'st1', name: 'Sunrise Hospitals — Andheri (Dr. Mehta)',  city_id: 'c2', zone_id: 'z2', address: 'Andheri West, Mumbai',           is_active: true, cities: { name: 'Mumbai' },    zones: { name: 'Mumbai — West' } },
+  { id: 'st2', name: 'Meridian Hospital — Bengaluru (Dr. Iyer)', city_id: 'c1', zone_id: 'z1', address: 'HAL Old Airport Rd, Bengaluru', is_active: true, cities: { name: 'Bengaluru' }, zones: { name: 'Bengaluru — South' } }
 ];
 
 export const getMockFormTemplates = () => [
@@ -227,7 +227,7 @@ export const getMockFormTemplates = () => [
     requires_photo: true,
     requires_gps: true,
     form_fields: [
-      { id: 'q4', label: 'Product Sample',  field_key: 'product', field_type: 'select', options: ['Mounjaro', 'Trulicity', 'Verzenio', 'Olumiant', 'Emgality'], is_required: true, sort_order: 1 },
+      { id: 'q4', label: 'Product Sample',  field_key: 'product', field_type: 'select', options: ['Glucanova', 'Diabextra', 'Oncevia', 'Rheumolex', 'Migranova'], is_required: true, sort_order: 1 },
       { id: 'q5', label: 'HCP Signature',   field_key: 'hcp_sig', field_type: 'signature', is_required: true, sort_order: 2 }
     ]
   }
@@ -238,7 +238,7 @@ export const getMockRoutePlans = (today: string) => [
     id: 'rp1',
     user_id: 'fe1',
     fe_name: 'Arjun Sharma',
-    fe_employee_id: 'LLY-001',
+    fe_employee_id: 'VRN-001',
     plan_date: today,
     status: 'partial',
     total_outlets: 5,
@@ -254,11 +254,11 @@ export const getMockRoutePlans = (today: string) => [
     co2_kg_planned: 1.32,
     co2_kg_actual: 0.59,
     outlets: [
-      { id: 'o1', store_id: 'st1', store_name: 'Apollo Hospitals — Andheri (Dr. Mehta)',  visit_order: 1, status: 'completed', store_address: 'Andheri West, Mumbai',  target_type: 'detailing',       visited_at: `${today}T10:00:00Z`, checkin_at: `${today}T10:00:00Z`, checkout_at: `${today}T10:30:00Z`, planned_duration_min: 30, actual_duration_min: 30, activities: [{ name: 'Mounjaro Detailing', status: 'completed' }] },
-      { id: 'o2', store_id: 'st2', store_name: 'Apollo Pharmacy — Linking Road',          visit_order: 2, status: 'completed', store_address: 'Linking Road, Mumbai',  target_type: 'pharmacy_audit', visited_at: `${today}T11:15:00Z`, checkin_at: `${today}T11:15:00Z`, checkout_at: `${today}T11:50:00Z`, planned_duration_min: 30, actual_duration_min: 35, activities: [{ name: 'Pharmacy Audit', status: 'completed' }] },
-      { id: 'o3', store_id: 'st3', store_name: 'Dr. Kavita Iyer (Oncology) – Manipal',    visit_order: 3, status: 'pending',                                         target_type: 'sampling',        planned_duration_min: 20, activities: [{ name: 'Sampling', status: 'pending' }] },
-      { id: 'o4', store_id: 'st4', store_name: 'Dr. Suresh Kumar (Diabetology) – Ruby',  visit_order: 4, status: 'pending',                                         target_type: 'detailing',       planned_duration_min: 45, activities: [{ name: 'Trulicity Detailing', status: 'pending' }] },
-      { id: 'o5', store_id: 'st5', store_name: 'Dr. R. K. Tandon — Tata Memorial',        visit_order: 5, status: 'pending',                                         target_type: 'cme_invite',     planned_duration_min: 30, activities: [{ name: 'CME Outreach', status: 'pending' }] }
+      { id: 'o1', store_id: 'st1', store_name: 'Sunrise Hospitals — Andheri (Dr. Mehta)',  visit_order: 1, status: 'completed', store_address: 'Andheri West, Mumbai',  target_type: 'detailing',       visited_at: `${today}T10:00:00Z`, checkin_at: `${today}T10:00:00Z`, checkout_at: `${today}T10:30:00Z`, planned_duration_min: 30, actual_duration_min: 30, activities: [{ name: 'Glucanova Detailing', status: 'completed' }] },
+      { id: 'o2', store_id: 'st2', store_name: 'Sunrise Pharmacy — Linking Road',          visit_order: 2, status: 'completed', store_address: 'Linking Road, Mumbai',  target_type: 'pharmacy_audit', visited_at: `${today}T11:15:00Z`, checkin_at: `${today}T11:15:00Z`, checkout_at: `${today}T11:50:00Z`, planned_duration_min: 30, actual_duration_min: 35, activities: [{ name: 'Pharmacy Audit', status: 'completed' }] },
+      { id: 'o3', store_id: 'st3', store_name: 'Dr. Kavita Iyer (Oncology) – Meridian',    visit_order: 3, status: 'pending',                                         target_type: 'sampling',        planned_duration_min: 20, activities: [{ name: 'Sampling', status: 'pending' }] },
+      { id: 'o4', store_id: 'st4', store_name: 'Dr. Suresh Kumar (Diabetology) – Ruby',  visit_order: 4, status: 'pending',                                         target_type: 'detailing',       planned_duration_min: 45, activities: [{ name: 'Diabextra Detailing', status: 'pending' }] },
+      { id: 'o5', store_id: 'st5', store_name: 'Dr. R. K. Tandon — Metropolis Cancer Centre',        visit_order: 5, status: 'pending',                                         target_type: 'cme_invite',     planned_duration_min: 30, activities: [{ name: 'CME Outreach', status: 'pending' }] }
     ]
   }
 ];
@@ -284,11 +284,11 @@ export const getMockOutletCoverage = () => ({
     { city: 'Delhi',     total_outlets: 260, covered: 224, percentage: 86 }
   ],
   outlets: [
-    { name: 'Apollo Hospitals — Andheri (Dr. Mehta)',           checkins: 14, tff: 10, city: 'Mumbai',    tff_rate: 71 },
-    { name: 'Manipal Hospital — Bengaluru (Dr. Iyer)',          checkins: 16, tff: 12, city: 'Bengaluru', tff_rate: 75 },
+    { name: 'Sunrise Hospitals — Andheri (Dr. Mehta)',           checkins: 14, tff: 10, city: 'Mumbai',    tff_rate: 71 },
+    { name: 'Meridian Hospital — Bengaluru (Dr. Iyer)',          checkins: 16, tff: 12, city: 'Bengaluru', tff_rate: 75 },
     { name: 'AIIMS Delhi (Dr. Gupta)',                          checkins: 12, tff:  9, city: 'Delhi',     tff_rate: 75 },
-    { name: 'Apollo Pharmacy — Greams Road',                     checkins:  9, tff:  6, city: 'Chennai',   tff_rate: 67 },
-    { name: 'Tata Memorial Centre — Mumbai',                     checkins: 11, tff:  8, city: 'Mumbai',    tff_rate: 73 }
+    { name: 'Sunrise Pharmacy — Greams Road',                     checkins:  9, tff:  6, city: 'Chennai',   tff_rate: 67 },
+    { name: 'Metropolis Cancer Centre — Mumbai',                     checkins: 11, tff:  8, city: 'Mumbai',    tff_rate: 73 }
   ]
 });
 
@@ -296,8 +296,8 @@ export const getMockMobileHome = () => ({
   attendance: { status: 'checked_in', time: '09:00 AM' },
   today_plan: { total: 6, visited: 2, pending: 4 },
   announcements: [
-    { title: 'Mounjaro India launch sprint', body: 'Mounjaro launched in India. Prioritise top-200 endo / diabetologist HCPs this cycle.' },
-    { title: 'Verzenio monarchE 5yr data',   body: 'Updated 5-year DFS slides available in the eDetailer. Use for adjuvant breast cancer detailing.' }
+    { title: 'Glucanova India launch sprint', body: 'Glucanova launched in India. Prioritise top-200 endo / diabetologist HCPs this cycle.' },
+    { title: 'Oncevia monarchE 5yr data',   body: 'Updated 5-year DFS slides available in the eDetailer. Use for adjuvant breast cancer detailing.' }
   ],
   kpis: {
     monthly_tff: 142,
@@ -307,16 +307,16 @@ export const getMockMobileHome = () => ({
 });
 
 export const getMockUsers = () => [
-  { id: 'fe1', name: 'Arjun Sharma', employee_id: 'LLY-001', role: 'executive',  city: 'Bengaluru', is_active: true, zones: { name: 'Bengaluru — South' } },
-  { id: 'fe2', name: 'Priya Patel',  employee_id: 'LLY-002', role: 'executive',  city: 'Mumbai',    is_active: true, zones: { name: 'Mumbai — West' } },
-  { id: 'fe3', name: 'Rahul Verma',  employee_id: 'LLY-003', role: 'executive',  city: 'Delhi',     is_active: true, zones: { name: 'Delhi — Central' } },
-  { id: 'fe4', name: 'Sneha Rao',    employee_id: 'LLY-004', role: 'supervisor', city: 'Hyderabad', is_active: true, zones: { name: 'Hyderabad — South' } },
-  { id: 'fe5', name: 'Amit Singh',   employee_id: 'LLY-005', role: 'executive',  city: 'Pune',      is_active: true, zones: { name: 'Pune — East' } }
+  { id: 'fe1', name: 'Arjun Sharma', employee_id: 'VRN-001', role: 'executive',  city: 'Bengaluru', is_active: true, zones: { name: 'Bengaluru — South' } },
+  { id: 'fe2', name: 'Priya Patel',  employee_id: 'VRN-002', role: 'executive',  city: 'Mumbai',    is_active: true, zones: { name: 'Mumbai — West' } },
+  { id: 'fe3', name: 'Rahul Verma',  employee_id: 'VRN-003', role: 'executive',  city: 'Delhi',     is_active: true, zones: { name: 'Delhi — Central' } },
+  { id: 'fe4', name: 'Sneha Rao',    employee_id: 'VRN-004', role: 'supervisor', city: 'Hyderabad', is_active: true, zones: { name: 'Hyderabad — South' } },
+  { id: 'fe5', name: 'Amit Singh',   employee_id: 'VRN-005', role: 'executive',  city: 'Pune',      is_active: true, zones: { name: 'Pune — East' } }
 ];
 
 export const getMockLearningMaterials = () => [
   { id: 'm1', title: 'IPMA Code Refresher 2026',                  description: 'Mandatory IPMA code refresher for all medical reps.', category: 'Compliance',     type: 'pdf',    file_url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf', thumbnail_url: 'https://images.unsplash.com/photo-1631815589968-fdb09a223b1e?auto=format&fit=crop&w=400&q=80', page_count: 28, is_mandatory: true },
-  { id: 'm2', title: 'Mounjaro — Detailing Guide',                description: 'Key messages, dose initiation, side-effect mitigation.', category: 'Product',      type: 'video',  file_url: 'https://vimeo.com/836444777', thumbnail_url: 'https://images.unsplash.com/photo-1576091160550-2173dba999ef?auto=format&fit=crop&w=400&q=80', duration_min: 18, is_mandatory: true },
+  { id: 'm2', title: 'Glucanova — Detailing Guide',                description: 'Key messages, dose initiation, side-effect mitigation.', category: 'Product',      type: 'video',  file_url: 'https://vimeo.com/836444777', thumbnail_url: 'https://images.unsplash.com/photo-1576091160550-2173dba999ef?auto=format&fit=crop&w=400&q=80', duration_min: 18, is_mandatory: true },
   { id: 'm3', title: 'Adverse Event Reporting SOP',               description: 'Pharmacovigilance — capture & escalate AE within 24h.',  category: 'Pharmacovigilance', type: 'slides', file_url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf', thumbnail_url: 'https://images.unsplash.com/photo-1583912267550-aae0d44dab4a?auto=format&fit=crop&w=400&q=80', is_mandatory: true },
-  { id: 'm4', title: 'Verzenio monarchE 5-yr Data Deep-Dive',     description: '5-year DFS data for adjuvant HR+ breast cancer.',         category: 'Clinical',     type: 'video',  file_url: 'https://vimeo.com/836444778', thumbnail_url: 'https://images.unsplash.com/photo-1584467735815-f778f274e296?auto=format&fit=crop&w=400&q=80', duration_min: 22, is_mandatory: false }
+  { id: 'm4', title: 'Oncevia monarchE 5-yr Data Deep-Dive',     description: '5-year DFS data for adjuvant HR+ breast cancer.',         category: 'Clinical',     type: 'video',  file_url: 'https://vimeo.com/836444778', thumbnail_url: 'https://images.unsplash.com/photo-1584467735815-f778f274e296?auto=format&fit=crop&w=400&q=80', duration_min: 22, is_mandatory: false }
 ];
