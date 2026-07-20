@@ -6,6 +6,7 @@ import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, toda
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlerts, getMockUsers, getMockGrievances } from '../utils/demoData';
+import * as hierarchy from '../services/crm/hierarchy.service';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -273,6 +274,28 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     if (ancestors.size > 0) {
       const ids = Array.from(ancestors).join(',');
       query = query.not('org_role_id', 'in', `(${ids})`);
+    }
+  }
+
+  // Owner/assignee-dropdown scoping for hierarchy-RBAC tenants. When a CRM
+  // owner or assignee picker requests ?scope=assignable, restrict the returned
+  // users to exactly the set the caller may own/assign to — their org-role
+  // subtree (self + descendants) when data_scope='team', themselves when
+  // 'own', and everyone (no restriction) when 'all'. This makes the owner
+  // filter match the leads the caller can actually see, so e.g. a Consumer
+  // Champion Manager stops seeing peers/managers (Distributor, CRM Admin, …)
+  // who aren't in their team.
+  //
+  // Purely additive and safe by default: maybeSubtreeOwnerIds returns null
+  // for every client WITHOUT hierarchy RBAC (the flag off — Kinematic and any
+  // non-opted-in tenant), so they are unaffected; and the Team Members
+  // directory omits the param, so its full-directory view is unchanged.
+  if (String(req.query.scope) === 'assignable') {
+    const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req);
+    if (visibleOwnerIds) {
+      // Belt-and-suspenders: always keep the caller so a manager can self-assign.
+      const ids = visibleOwnerIds.includes(user.id) ? visibleOwnerIds : [user.id, ...visibleOwnerIds];
+      query = query.in('id', ids);
     }
   }
 
