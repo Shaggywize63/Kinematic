@@ -339,6 +339,14 @@ export const activitySchemaBase = z.object({
 // they never surface in any timeline view and can leak past the
 // per-user city-scope filter (city lives on the lead/contact, not the
 // activity). Block at the validator.
+//
+// NOTE: the POST /crm/activities route now parses with
+// `activitySchemaBase` and enforces this rule itself, additionally
+// accepting a non-empty lookup-typed activity custom field (a Dealer /
+// People Directory link) as a valid anchor — steel-dealer reps log
+// visits against a directory entry with no lead attached. This refined
+// schema remains for callers that require a hard entity link (e.g. the
+// activity CSV import).
 export const activitySchema = activitySchemaBase.refine(
   (a) => Boolean(a.lead_id || a.contact_id || a.account_id || a.deal_id),
   {

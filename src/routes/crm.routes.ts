@@ -2624,7 +2624,36 @@ activities.get('/export-daywise-report', wrap(async (req, res) => {
   sendReportCsv(req, res, 'daywise-report', cols, [...rows, gt]);
 }));
 activities.post('/', wrap(async (req, res) => {
-  const parsed = normalizeActivityPayload(parse(v.activitySchema, req.body));
+  const parsed = normalizeActivityPayload(parse(v.activitySchemaBase, req.body));
+  // An activity must be anchored to SOMETHING. A CRM entity (lead /
+  // contact / account / deal) is the normal case — but steel-dealer
+  // tenants also log visits against a Dealer / People Directory entry
+  // alone, carried as a lookup-typed activity custom field (e.g. SRS's
+  // custom_fields.dealer_name → people_directory row). Accept those;
+  // keep rejecting true orphans (nothing linked at all), which never
+  // surface in any timeline view.
+  const hasEntityLink = Boolean(parsed.lead_id || parsed.contact_id || parsed.account_id || parsed.deal_id);
+  if (!hasEntityLink) {
+    const cf = (parsed.custom_fields ?? {}) as Record<string, unknown>;
+    const filledKeys = Object.keys(cf).filter((k) => {
+      const val = cf[k];
+      return val !== null && val !== undefined && String(val).trim() !== '';
+    });
+    let directoryLinked = false;
+    if (filledKeys.length) {
+      const { data: lookupDefs } = await supabaseAdmin
+        .from('crm_custom_field_defs')
+        .select('field_key')
+        .eq('org_id', orgId(req))
+        .eq('entity_type', 'activity')
+        .eq('field_type', 'lookup')
+        .in('field_key', filledKeys);
+      directoryLinked = !!lookupDefs?.length;
+    }
+    if (!directoryLinked) {
+      throw new AppError(400, 'Activity must be linked to a lead, contact, account, deal, or a directory entry', 'VALIDATION');
+    }
+  }
   // Derive client_id from the linked lead / contact / account / deal
   // when one is present, instead of blindly stamping clientId(req) from
   // the X-Client-Id header. NBA "Call the lead" / "Follow up" flows
@@ -2632,13 +2661,14 @@ activities.post('/', wrap(async (req, res) => {
   // on a different tenant when the suggestion fires, the activity
   // would otherwise land on the wrong client and become invisible on
   // the lead's detail page (the activities tab is scoped to the lead's
-  // client). The header value stays the fallback for orphan-style
-  // creates (no linked record, currently blocked by activitySchema but
-  // kept defensively).
+  // client). For directory-only creates there is no linked entity, so
+  // fall back to the header and then to the CREATOR's own client —
+  // otherwise a rep whose app sends no X-Client-Id would write a
+  // client_id NULL row that client-scoped list views never show.
   const linkedClientId = await resolveLinkedClientId(orgId(req), parsed);
   const payload: Record<string, unknown> = {
     ...parsed,
-    client_id: linkedClientId ?? clientId(req),
+    client_id: linkedClientId ?? clientId(req) ?? (req as AuthRequest).user?.client_id ?? null,
   };
   // Default owner to the creating user when not specified. Otherwise
   // a non-admin user could create an activity they're then not allowed
