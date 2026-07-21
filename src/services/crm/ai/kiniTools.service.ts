@@ -7,6 +7,7 @@ import { sanitisePostgrestSearch } from '../../../utils';
 import * as autoResponse from './autoResponse.service';
 import * as summarize from './summarize.service';
 import * as leadsSvc from '../leads.service';
+import { sendWhatsapp } from '../whatsapp.service';
 
 export interface KiniTool {
   name: string;
@@ -252,6 +253,54 @@ export const tools: KiniTool[] = [
         tone: (args.tone as 'friendly' | 'formal' | 'concise') ?? 'friendly',
       });
       return { card: { type: 'draft_email', data: draft }, data: draft };
+    },
+  },
+  {
+    name: 'crm_send_whatsapp',
+    description: 'ACTUALLY SEND a WhatsApp message to a lead or contact (or an explicit phone number) — not a draft. Identify the recipient by lead_id, contact_id, or a phone in "to", and provide the message text in "body". The message is logged to the CRM WhatsApp thread. Only call this when the user explicitly asks to SEND; otherwise draft the text in your reply and ask them to confirm.',
+    input_schema: { type: 'object', required: ['body'], properties: {
+      lead_id: { type: 'string' },
+      contact_id: { type: 'string' },
+      to: { type: 'string', description: 'Explicit phone number (E.164, e.g. +9198…) — use only when no lead_id/contact_id is available.' },
+      body: { type: 'string', description: 'The message text to send.' },
+    }},
+    exec: async (org_id, client_id, args) => {
+      const body = String(args.body ?? '').trim();
+      if (!body) return { data: { error: 'A message body is required to send a WhatsApp.' } };
+
+      let to = typeof args.to === 'string' ? args.to.trim() : '';
+      const leadId = (args.lead_id as string) ?? null;
+      const contactId = (args.contact_id as string) ?? null;
+
+      // Resolve the recipient phone + consent from the lead/contact when no
+      // explicit number was given. Hard client-scope guard so KINI can never
+      // message a record outside the caller's client.
+      const resolve = async (table: 'crm_leads' | 'crm_contacts', id: string) => {
+        const { data } = await supabaseAdmin.from(table)
+          .select('mobile, phone, whatsapp_consent, client_id')
+          .eq('id', id).eq('org_id', org_id).maybeSingle();
+        return data as { mobile?: string | null; phone?: string | null; whatsapp_consent?: boolean | null; client_id?: string | null } | null;
+      };
+      let consent: boolean | null | undefined;
+      if (!to && (leadId || contactId)) {
+        const table = leadId ? 'crm_leads' : 'crm_contacts';
+        const r = await resolve(table, (leadId || contactId) as string);
+        if (!r) return { data: { error: `${leadId ? 'Lead' : 'Contact'} not found in this scope.` } };
+        if (client_id && r.client_id && r.client_id !== client_id) {
+          return { data: { error: 'That record belongs to a different client; cannot message from this scope.' } };
+        }
+        to = (r.mobile || r.phone || '').trim();
+        consent = r.whatsapp_consent;
+      }
+
+      if (!to) return { data: { error: 'No phone number on file for that recipient — ask the user for a number, or add one to the record first.' } };
+      // Respect opt-out. null/undefined = consent not tracked → allowed.
+      if (consent === false) {
+        return { data: { error: 'This recipient has not opted in to WhatsApp (whatsapp_consent is off). Do not send — ask the user to obtain consent first.' } };
+      }
+
+      const { id } = await sendWhatsapp({ org_id, to, body_text: body, lead_id: leadId, contact_id: contactId });
+      return { data: { sent: true, to, log_id: id, message: `WhatsApp sent to ${to}.` } };
     },
   },
   {

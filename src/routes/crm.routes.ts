@@ -4629,6 +4629,7 @@ ai.post('/chat', wrap(async (req, res) => {
 You have CRM tools available. Use them to fetch real data — never invent leads, deals, or numbers.
 You are agentic: you can CREATE and UPDATE leads, deals, contacts, accounts, tasks, and activities. When the user asks you to add, create, log, update, or convert something, CALL the matching tool and actually do it — never reply that you cannot create leads or take actions. If a required detail is missing, ask one short follow-up, then act.
 You can also DRAFT messages for the user to review and send — an email, a WhatsApp/SMS message, or a call script. Drafting is just writing text: put a short, ready-to-send draft directly in your reply. Use the lookup tools only to find who it's for; you do NOT need a tool to write a draft, and a lookup returning an error is never a reason to refuse — draft it anyway and note any assumption.
+To actually SEND a WhatsApp, call crm_send_whatsapp (recipient by lead_id/contact_id or a phone in "to", plus the body) — but only when the user EXPLICITLY asks to send; otherwise draft first and ask them to confirm. Confirm in one short line after sending.
 When relevant, return cards via tool results so the UI can render them.
 Current route: ${body.context?.route ?? 'unknown'}.
 Current entity: ${JSON.stringify(body.context?.entity ?? {})}.
