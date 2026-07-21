@@ -35,12 +35,20 @@ export async function executeTool(
 ): Promise<KiniToolResult | null> {
   const v2Tool = ffTools.find((t) => t.name === name);
   if (v2Tool) {
-    const result = await v2Tool.exec(org_id, client_id, args);
-    if (typeof result === 'object' && result !== null && 'card' in result) {
-      const r = result as { data: unknown; card?: { type: string; data: unknown } };
-      return { tool: name, data: r.data, card: r.card };
+    try {
+      const result = await v2Tool.exec(org_id, client_id, args);
+      if (typeof result === 'object' && result !== null && 'card' in result) {
+        const r = result as { data: unknown; card?: { type: string; data: unknown } };
+        return { tool: name, data: r.data, card: r.card };
+      }
+      return { tool: name, data: result };
+    } catch (e) {
+      // Never let a Field-Force tool throw abort the whole turn (surfaces as the
+      // opaque "I hit an error"). Return the error as a tool result so the model
+      // can recover. Legacy CRM tools get the same treatment in executeCrmTool.
+      const msg = (e as { message?: string })?.message || 'Tool execution failed';
+      return { tool: name, data: { error: msg } };
     }
-    return { tool: name, data: result };
   }
   return executeCrmTool(org_id, client_id, name, args);
 }
