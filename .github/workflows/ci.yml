@@ -28,3 +28,22 @@ jobs:
 
       - name: Typecheck & build (tsc)
         run: npm run build
+
+  test:
+    name: Jest (integration + E2E)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # The Supabase client is mocked (data-layer tests) or bypassed via the
+      # demo token (HTTP E2E), so no live Supabase is needed. setupEnv.ts fills
+      # in placeholder Supabase env vars the app asserts at boot.
+      - name: Run tests
+        run: npm run test:ci
