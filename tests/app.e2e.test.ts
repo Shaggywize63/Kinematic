@@ -15,6 +15,19 @@
  *   - Reads return data and writes short-circuit to success-shaped responses.
  */
 import request from 'supertest';
+
+// The demo-token path serves fixtures without a database, but the global
+// `auditAll` middleware fires on every mutation and lazily constructs the real
+// Supabase client (which throws on Node < 22 because realtime-js needs a native
+// WebSocket). E2E must never dial a real client — stub the single seam so the
+// suite is environment-independent.
+jest.mock('../src/lib/supabase', () => {
+  const { createSupabaseMock } = require('./helpers/supabaseMock');
+  const m = createSupabaseMock();
+  return { supabaseAdmin: m.client, supabase: m.client, getUserClient: () => m.client };
+});
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 import app from '../src/app';
 
 const DEMO = 'demo-token-jwt-placeholder';
