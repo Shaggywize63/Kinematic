@@ -53,6 +53,33 @@ export interface ChatWithToolsOutput {
 }
 
 /**
+ * The chat clients (web / iOS / Android) are stateless — they resend their full
+ * conversation history every turn. Two shapes in that resent history make the
+ * Anthropic Messages API 400, which aborts the whole turn and surfaces to the
+ * user as the opaque "I hit an error processing that":
+ *   1. a message with EMPTY string content — e.g. a card-only assistant turn
+ *      (KINI drafts an email; the visible text bubble is empty), or a thread
+ *      row stored with no text.
+ *   2. a history slice that STARTS on an assistant turn — the API requires the
+ *      first message to be a user turn.
+ * Normalise both so a multi-turn conversation can't crash on resent history.
+ * Internal tool-loop turns (content is an array of blocks) are never empty and
+ * are left untouched.
+ */
+function sanitizeInboundMessages(
+  raw: Array<{ role: 'user' | 'assistant'; content: unknown }>,
+): Array<{ role: 'user' | 'assistant'; content: unknown }> {
+  const cleaned = raw.map((m) =>
+    typeof m.content === 'string' && m.content.trim() === ''
+      ? { ...m, content: m.role === 'assistant' ? '(shared the result above)' : '(no message)' }
+      : m,
+  );
+  let start = 0;
+  while (start < cleaned.length && cleaned[start].role === 'assistant') start++;
+  return cleaned.slice(start);
+}
+
+/**
  * Run a multi-turn conversation with Anthropic tool use. Loops until the model
  * stops emitting tool_use blocks (or max_turns is reached), then returns the
  * final assistant text plus any cards produced by tools.
@@ -63,7 +90,7 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
   const max_tokens = input.max_tokens ?? 1500;
   const max_turns = input.max_turns ?? 5;
 
-  const messages: Array<{ role: 'user' | 'assistant'; content: unknown }> = [...input.messages];
+  const messages: Array<{ role: 'user' | 'assistant'; content: unknown }> = [...sanitizeInboundMessages(input.messages)];
   const cards: Array<{ type: string; data: unknown }> = [];
   const tool_calls: Array<{ name: string; args: unknown; result: unknown }> = [];
 
