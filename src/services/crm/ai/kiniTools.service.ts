@@ -77,7 +77,23 @@ export const tools: KiniTool[] = [
         // can also produce hostile filter syntax via tool-use input, not
         // just direct user input.
         const s = sanitisePostgrestSearch(args.q);
-        if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%`);
+        if (s) {
+          // Match the whole phrase against each searchable column AND each word
+          // against the name columns. Names are stored SPLIT (first_name +
+          // last_name), so a full-name query like "Amit Batra" matches no single
+          // column as one term — without the per-word terms the search silently
+          // returned zero results and KINI wrongly reported the lead "not found".
+          const terms = [
+            `first_name.ilike.%${s}%`,
+            `last_name.ilike.%${s}%`,
+            `company.ilike.%${s}%`,
+            `email.ilike.%${s}%`,
+          ];
+          for (const w of s.split(/\s+/).filter((word) => word.length >= 2)) {
+            terms.push(`first_name.ilike.%${w}%`, `last_name.ilike.%${w}%`);
+          }
+          q = q.or(Array.from(new Set(terms)).join(','));
+        }
       }
       const { data } = await q.order('score', { ascending: false }).limit(Math.min(Number(args.limit ?? 10), 50));
       return { card: { type: 'lead_list', data: { leads: data ?? [] } }, data };
