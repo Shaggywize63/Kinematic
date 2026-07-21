@@ -535,10 +535,22 @@ export function toAnthropicTools() {
 export async function executeTool(org_id: string, client_id: string | null, name: string, args: Record<string, unknown>): Promise<KiniToolResult | null> {
   const tool = tools.find(t => t.name === name);
   if (!tool) return null;
-  const result = await tool.exec(org_id, client_id, args);
-  if (typeof result === 'object' && result !== null && 'card' in result) {
-    const r = result as unknown as { data: unknown; card?: { type: string; data: unknown } };
-    return { tool: name, data: r.data, card: r.card };
+  try {
+    const result = await tool.exec(org_id, client_id, args);
+    if (typeof result === 'object' && result !== null && 'card' in result) {
+      const r = result as unknown as { data: unknown; card?: { type: string; data: unknown } };
+      return { tool: name, data: r.data, card: r.card };
+    }
+    return { tool: name, data: result };
+  } catch (e) {
+    // A single tool throwing (e.g. "Lead not found", a cross-client scope
+    // guard, a failed downstream call) must NOT abort the whole KINI turn —
+    // that propagates to the chat handler's catch and surfaces as the opaque
+    // "I hit an error processing that." Instead, hand the error back to the
+    // model as a normal tool result so it can recover: ask a clarifying
+    // question, try another tool, or answer in plain text (e.g. still draft
+    // the message the user asked for).
+    const msg = (e as { message?: string })?.message || 'Tool execution failed';
+    return { tool: name, data: { error: msg } };
   }
-  return { tool: name, data: result };
 }
