@@ -241,7 +241,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
   console.log(`[DEBUG] Fetching profile for user ID: ${session.user.id}`);
   const { data: userProfile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select('id, org_id, client_id, name, email, role, is_active, is_read_only, must_change_password')
+    .select('id, org_id, client_id, name, email, role, is_active, is_read_only, must_change_password, org_role_id')
     .eq('id', session.user.id)
     .single();
 
@@ -260,7 +260,21 @@ export const login = asyncHandler<Request>(async (req, res) => {
     .select('module_id')
     .eq('user_id', userProfile.id);
 
-  const permissions = permsData?.map(p => p.module_id) || [];
+  // Granular module grants: prefer the user's org_role permissions (the source
+  // of truth the Roles UI configures); fall back to the legacy per-user list
+  // only when no role is attached. This MUST mirror /auth/me — the dashboard's
+  // landing-route picker (landingRouteFor) and the sidebar gate both read
+  // `permissions`. A role-only account with no user_module_permissions rows
+  // (e.g. a scoped "Lead Viewer") would otherwise log in with an EMPTY set and
+  // get bounced to the field-force overview instead of its CRM home.
+  let permissions = permsData?.map(p => p.module_id) || [];
+  if (userProfile.org_role_id) {
+    const { data: roleRow } = await supabaseAdmin
+      .from('org_roles').select('permissions').eq('id', userProfile.org_role_id).single();
+    if (Array.isArray(roleRow?.permissions)) {
+      permissions = (roleRow!.permissions as string[]).filter(Boolean);
+    }
+  }
   console.log(`[DEBUG] Login successful for ${email}. Permissions: ${permissions.length}`);
 
   // City NAMES the user is assigned to (resolved from user_city_assignments
