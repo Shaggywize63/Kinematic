@@ -25,6 +25,27 @@ function db() {
   return adminClientFor(OAUTH_PROJECT);
 }
 
+/**
+ * DB-visible diagnostic for the token-exchange path. Railway app logs aren't
+ * reachable from tooling, so we mirror each token-endpoint decision into
+ * oauth_action_audit (tool='token_debug') where it can be queried. Best-effort;
+ * never throws. Contains NO secrets — only presence flags / lengths / reasons.
+ */
+export async function recordTokenDebug(reason: string, detail: Record<string, unknown>): Promise<void> {
+  try {
+    await db().from('oauth_action_audit').insert({
+      client_id: (detail.clientId as string) ?? null,
+      tool: 'token_debug',
+      scopes: [],
+      request: detail,
+      outcome: reason.startsWith('success') ? 'ok' : 'error',
+      error: reason,
+    });
+  } catch (e: any) {
+    logger.warn(`[OAuth] token_debug insert failed: ${e?.message || e}`);
+  }
+}
+
 export function sha256(input: string): string {
   return crypto.createHash('sha256').update(input).digest('hex');
 }
@@ -175,12 +196,12 @@ export async function consumeAuthCode(args: {
     .select('id, client_id, user_id, project_key, org_id, redirect_uri, scopes, code_challenge, code_challenge_method, expires_at, consumed_at')
     .eq('code_hash', sha256(args.code))
     .maybeSingle();
-  if (error || !data) { logger.warn(`[OAuth] consume: code not found (err=${error?.message || 'none'})`); return null; }
-  if (data.consumed_at) { logger.warn('[OAuth] consume: code already consumed'); return null; }
-  if (new Date(data.expires_at).getTime() < Date.now()) { logger.warn('[OAuth] consume: code expired'); return null; }
-  if (data.client_id !== args.clientId) { logger.warn(`[OAuth] consume: client mismatch stored=${data.client_id} got=${args.clientId}`); return null; }
-  if (data.redirect_uri !== args.redirectUri) { logger.warn(`[OAuth] consume: redirect_uri mismatch stored="${data.redirect_uri}" got="${args.redirectUri}"`); return null; }
-  if (!verifyPkce(args.codeVerifier, data.code_challenge, data.code_challenge_method)) { logger.warn(`[OAuth] consume: PKCE verify failed method=${data.code_challenge_method} challengeLen=${(data.code_challenge || '').length} verifierLen=${args.codeVerifier.length}`); return null; }
+  if (error || !data) { logger.warn(`[OAuth] consume: code not found (err=${error?.message || 'none'})`); await recordTokenDebug('consume:code_not_found', { clientId: args.clientId, dbErr: error?.message ?? null }); return null; }
+  if (data.consumed_at) { logger.warn('[OAuth] consume: code already consumed'); await recordTokenDebug('consume:already_consumed', { clientId: args.clientId }); return null; }
+  if (new Date(data.expires_at).getTime() < Date.now()) { logger.warn('[OAuth] consume: code expired'); await recordTokenDebug('consume:expired', { clientId: args.clientId, expires_at: data.expires_at }); return null; }
+  if (data.client_id !== args.clientId) { logger.warn(`[OAuth] consume: client mismatch stored=${data.client_id} got=${args.clientId}`); await recordTokenDebug('consume:client_mismatch', { clientId: args.clientId, storedClient: data.client_id }); return null; }
+  if (data.redirect_uri !== args.redirectUri) { logger.warn(`[OAuth] consume: redirect_uri mismatch stored="${data.redirect_uri}" got="${args.redirectUri}"`); await recordTokenDebug('consume:redirect_mismatch', { clientId: args.clientId, storedRedirect: data.redirect_uri, gotRedirect: args.redirectUri }); return null; }
+  if (!verifyPkce(args.codeVerifier, data.code_challenge, data.code_challenge_method)) { logger.warn(`[OAuth] consume: PKCE verify failed method=${data.code_challenge_method} challengeLen=${(data.code_challenge || '').length} verifierLen=${args.codeVerifier.length}`); await recordTokenDebug('consume:pkce_fail', { clientId: args.clientId, method: data.code_challenge_method, challengeLen: (data.code_challenge || '').length, verifierLen: args.codeVerifier.length }); return null; }
 
   // Mark consumed; guard against a concurrent double-exchange by requiring the
   // row to still be unconsumed at update time.
