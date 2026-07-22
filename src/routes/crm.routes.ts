@@ -56,6 +56,7 @@ import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, sta
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
 import * as consentSvc from '../services/crm/consent.service';
+import { isMinor } from '../lib/age';
 
 const router: Router = express.Router();
 
@@ -1456,6 +1457,8 @@ contacts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
   const { _consent: consentInput, ...rest } = parsed;
   const payload: Record<string, unknown> = { ...rest, client_id: clientId(req) };
+  // DPDP §9 — flag minors at capture from DOB (excluded from profiling / sends).
+  payload.is_minor = isMinor(payload.date_of_birth as string | undefined);
   sanitizeOwnerId(req, payload);
   // Validate admin-defined contact custom fields (type coercion, lookup-id
   // canonicalisation, formula stamping) — mirrors the lead/deal/activity paths.

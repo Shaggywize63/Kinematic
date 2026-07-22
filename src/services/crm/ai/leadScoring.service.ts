@@ -37,6 +37,7 @@
 import { supabaseAdmin } from '../../../lib/supabase';
 import { createTtlCache } from '../../../utils/ttlCache';
 import { complete as aiComplete } from './aiClient';
+import { isMinor } from '../../../lib/age';
 import type { Lead, ScoreBreakdown } from '../../../types/crm.types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -403,12 +404,20 @@ export async function computeUnifiedScore(
     : force === 'b2b' ? 'b2b'
     : (((lead as any).is_b2c === true) ? 'b2c' : 'b2b');
 
+  // DPDP §9(3) — no behavioural monitoring of children. A lead identified as a
+  // minor is never scored on engagement signals; we force empty engagement so
+  // the heuristic reflects only static profile fit, and flag the breakdown so
+  // downstream (and the LLM rerank) can exclude it.
+  const minor = (lead as any).is_minor === true || isMinor((lead as any).date_of_birth);
+
   // Engagement — skip on creation (no activities yet), fetch otherwise
-  // unless the caller pre-loaded them.
-  const engagement: EngagementSignals = opts.engagement
-    ?? (opts.skipEngagement || !lead.id
-      ? { ...EMPTY_ENGAGEMENT }
-      : await fetchEngagement(org_id, String(lead.id)));
+  // unless the caller pre-loaded them. Always empty for minors.
+  const engagement: EngagementSignals = minor
+    ? { ...EMPTY_ENGAGEMENT }
+    : (opts.engagement
+      ?? (opts.skipEngagement || !lead.id
+        ? { ...EMPTY_ENGAGEMENT }
+        : await fetchEngagement(org_id, String(lead.id))));
 
   const breakdown = profile === 'b2c'
     ? scoreB2C(lead, engagement, config.weights?.b2c ?? {})
@@ -416,6 +425,7 @@ export async function computeUnifiedScore(
 
   const score = sumBreakdown(breakdown);
   breakdown.total = score;
+  if (minor) (breakdown as any).minor = true;
   const grade = gradeFromScore(score, config.grade_thresholds);
   return { score, grade, breakdown, engagement, profile };
 }
@@ -437,6 +447,11 @@ export async function rerankWithLlmV2(
   lead: Partial<Lead>,
   base: { score: number; breakdown: ScoreBreakdown; engagement: EngagementSignals; profile: 'b2c' | 'b2b' },
 ): Promise<{ score: number; breakdown: ScoreBreakdown }> {
+  // DPDP §9(3)/(4) — do not send a child's profile to the LLM for behavioural
+  // profiling / targeted-outreach reranking. Return the heuristic base unchanged.
+  if ((lead as any).is_minor === true || isMinor((lead as any).date_of_birth)) {
+    return { score: base.score, breakdown: base.breakdown };
+  }
   try {
     const userPayload = {
       profile: base.profile,
