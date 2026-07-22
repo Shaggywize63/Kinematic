@@ -19,7 +19,7 @@ import {
 } from '../lib/projects';
 import {
   getClient, verifyClientSecret, redirectUriAllowed, createAuthCode, consumeAuthCode,
-  issueTokens, rotateRefreshToken, revokeToken,
+  issueTokens, rotateRefreshToken, revokeToken, createClient,
 } from '../lib/oauth/store';
 import {
   ALL_SCOPES, OAUTH_SCOPES, parseScopes, scopeLabels, type OAuthScope,
@@ -52,6 +52,10 @@ function clientCredentials(req: Request): { clientId: string; clientSecret?: str
 
 // RFC 8414 — MCP clients (ChatGPT Apps, Claude connectors) fetch this to
 // discover the authorize/token endpoints before starting the flow.
+// Dynamic Client Registration is on by default (MCP connectors self-register);
+// set OAUTH_ALLOW_DCR=off to require operators to register clients by hand.
+const DCR_ENABLED = process.env.OAUTH_ALLOW_DCR !== 'off';
+
 export const authorizationServerMetadata = (req: Request, res: Response) => {
   const base = publicBase(req);
   res.json({
@@ -59,6 +63,7 @@ export const authorizationServerMetadata = (req: Request, res: Response) => {
     authorization_endpoint: `${base}/oauth/authorize`,
     token_endpoint: `${base}/oauth/token`,
     revocation_endpoint: `${base}/oauth/revoke`,
+    ...(DCR_ENABLED ? { registration_endpoint: `${base}/oauth/register` } : {}),
     scopes_supported: ALL_SCOPES,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -66,6 +71,55 @@ export const authorizationServerMetadata = (req: Request, res: Response) => {
     token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
   });
 };
+
+/** A redirect_uri is acceptable if it's https, or http on localhost (dev). */
+function isValidRedirectUri(u: string): boolean {
+  try {
+    const url = new URL(u);
+    if (url.protocol === 'https:') return true;
+    return url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1');
+  } catch { return false; }
+}
+
+// POST /oauth/register — Dynamic Client Registration (RFC 7591). Lets an MCP
+// client (ChatGPT App, Claude connector) register itself and receive a
+// client_id (+ secret for confidential clients). The real protection is still
+// user login + consent + strict redirect_uri matching, so open registration is
+// safe; it can be disabled with OAUTH_ALLOW_DCR=off.
+export const register = asyncHandler<Request>(async (req, res) => {
+  if (!DCR_ENABLED) {
+    return res.status(403).json({ error: 'access_denied', error_description: 'Dynamic client registration is disabled.' });
+  }
+  const b = (req.body || {}) as Record<string, unknown>;
+
+  const name = String(b.client_name || 'MCP client').slice(0, 200);
+  const redirectUris = Array.isArray(b.redirect_uris) ? (b.redirect_uris as unknown[]).map(String) : [];
+  if (redirectUris.length === 0 || !redirectUris.every(isValidRedirectUri)) {
+    return res.status(400).json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be one or more https (or localhost) URLs.' });
+  }
+
+  const authMethod = String(b.token_endpoint_auth_method || 'client_secret_post');
+  const isConfidential = authMethod !== 'none';
+
+  // Requested scopes ∩ known scopes; default to all known scopes when omitted.
+  const requested = parseScopes(typeof b.scope === 'string' ? b.scope : '');
+  const allowedScopes = requested.length ? requested : [...ALL_SCOPES];
+
+  const created = await createClient({ name, redirectUris, allowedScopes, isConfidential });
+  logger.info(`[OAuth] registered client ${created.client_id} (${name}) redirect=[${redirectUris.join(' ')}]`);
+
+  res.status(201).json({
+    client_id: created.client_id,
+    ...(created.client_secret ? { client_secret: created.client_secret, client_secret_expires_at: 0 } : {}),
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    client_name: name,
+    redirect_uris: redirectUris,
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: isConfidential ? authMethod : 'none',
+    scope: allowedScopes.join(' '),
+  });
+});
 
 // --------------------------------------------------------------- authorize ---
 
