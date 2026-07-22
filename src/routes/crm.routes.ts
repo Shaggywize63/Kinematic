@@ -1495,6 +1495,10 @@ contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(awai
 contacts.patch('/:id', wrap(async (req, res) => {
   const { _consent: _dropConsent, ...parsed } = parse(v.contactSchema.partial(), req.body);
   const payload = parsed as Record<string, unknown>;
+  // DPDP §9 — keep the minor flag in sync when DOB is edited.
+  if (payload.date_of_birth !== undefined) {
+    payload.is_minor = isMinor(payload.date_of_birth as string | undefined);
+  }
   sanitizeOwnerId(req, payload);
   if (payload.custom_fields !== undefined) {
     payload.custom_fields = await validateAndStampCustomFields(

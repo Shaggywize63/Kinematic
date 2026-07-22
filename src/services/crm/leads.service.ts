@@ -434,6 +434,10 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
   if (enteringDisqualified && asRow(before).disqualified_at == null) {
     update.disqualified_at = nowIso;
   }
+  // DPDP §9 — keep the minor flag in sync when DOB is edited.
+  if ((payload as any).date_of_birth !== undefined) {
+    update.is_minor = isMinor((payload as any).date_of_birth as string | null | undefined);
+  }
 
   if (payload.status !== undefined && payload.status !== before.status) {
     update.stage_changed_at = nowIso;
