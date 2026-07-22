@@ -146,6 +146,16 @@ const leadCreateBase = z.object({
   // pops this key before persisting (it isn't a column) and only honours
   // it for clients that have the matching activity type configured.
   _auto_log_site_visit: z.boolean().optional(),
+  // DPDP §5/§6 — consent captured at collection for the lead's primary PII.
+  // Popped before the insert (not a crm_leads column) and written to the
+  // crm_consents ledger against the new lead id. `consented:false` records an
+  // explicit refusal. notice_version pins which notice text the principal saw.
+  _consent: z.object({
+    consented: z.boolean(),
+    method: z.enum(['in_app','web_form','verbal','imported','api']).optional(),
+    notice_version: z.string().max(50).optional().nullable(),
+    source: z.string().max(200).optional().nullable(),
+  }).optional(),
   // Accepted but ignored — the activity subject is now derived from the
   // existing first_visit_date custom field on the lead, so we no longer
   // need a separate flag. Kept in the schema only so older clients still

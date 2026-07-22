@@ -427,6 +427,22 @@ async function stripHiddenLeadFields(
   return stripped;
 }
 
+/**
+ * Whether this tenant HARD-GATES lead creation on captured consent (DPDP §6).
+ * Default false (record-only): the notice is shown and consent is captured, but
+ * a rep may still save. A tenant flips crm_settings.config.consent.lead_pii.required
+ * = true to refuse creation without affirmative consent. Mirrors the
+ * field-overrides settings-read so the two stay consistent.
+ */
+async function leadConsentRequired(org_id: string, client_id: string | null): Promise<boolean> {
+  let q = supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id);
+  q = client_id ? q.eq('client_id', client_id) : q.is('client_id', null);
+  const { data: rows } = await q.limit(1);
+  const cfg = (rows?.[0] as { config?: Record<string, unknown> } | undefined)?.config;
+  const consentCfg = cfg?.consent as { lead_pii?: { required?: boolean } } | undefined;
+  return consentCfg?.lead_pii?.required === true;
+}
+
 // Roles permitted to assign a record to an arbitrary owner. Reps (executive /
 // field_executive / hr) may not — for them a client-supplied owner_id is
 // dropped so the server's assignment rules apply (they normally become the
@@ -672,7 +688,7 @@ leads.post('/', wrap(async (req, res) => {
   // off before the lead insert (it's not a column on crm_leads), use it
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, ...rest } = parsed;
   // client_id is the tenant boundary — always derive it server-side from the
   // caller's scope (which honours a super-admin's X-Client-Id header), never from
   // the request body. See SECURITY_AUDIT_2026-07.md finding H-2.
@@ -697,7 +713,39 @@ leads.post('/', wrap(async (req, res) => {
   // Data minimisation: never store built-in fields the admin has hidden.
   await stripHiddenLeadFields(orgId(req), payload.client_id as string | null ?? null, payload);
   sanitizeOwnerId(req, payload); // reps can't self-assign an arbitrary owner (H-2)
+
+  // DPDP §6 consent: optionally HARD-GATE creation on affirmative consent (a
+  // per-tenant setting; default record-only). The notice is shown client-side.
+  if (await leadConsentRequired(orgId(req), payload.client_id as string | null ?? null)) {
+    if (!consentInput || consentInput.consented !== true) {
+      throw new AppError(400, 'Consent to collect the lead\'s personal data is required', 'CONSENT_REQUIRED');
+    }
+  }
+
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
+
+  // Record the consent event against the new lead in the crm_consents ledger
+  // (who/when/how/purpose), so consent is demonstrable — best-effort: a ledger
+  // write must never fail the create.
+  if (consentInput && lead?.id) {
+    try {
+      await consentSvc.recordConsent(
+        { orgId: orgId(req), clientId: payload.client_id as string | null ?? null },
+        {
+          subjectType: 'lead',
+          subjectId: lead.id,
+          purpose: 'lead_pii',
+          consented: consentInput.consented,
+          method: consentInput.method ?? 'web_form',
+          source: consentInput.source ?? 'lead_create',
+          noticeVersion: consentInput.notice_version ?? null,
+          actorUserId: userId(req) ?? null,
+        },
+      );
+    } catch (e) {
+      console.warn(`[consent] recordConsent on lead create failed: ${(e as Error).message}`);
+    }
+  }
 
   // Auto-log site visit: the previous version inserted a completed
   // site_visit activity behind the rep's back. The user asked us to
@@ -1236,7 +1284,8 @@ leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await 
 leads.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.leadUpdateSchema, req.body);
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
+  // _consent is dropped here (not a column); consent capture is wired on create.
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: _dropConsent, ...rest } = parsed;
   // Edit RBAC — across the whole hierarchy, only the rep who CREATED
   // the lead may edit it. owner_id / assigned_to grant view, but not
   // edit. ASOs viewing a Consumer Champion's lead can read it (it
