@@ -16,7 +16,9 @@ import { asyncHandler } from '../utils';
 import { logger } from '../lib/logger';
 import {
   resolveProjectForEmailAsync, anonClientFor, adminClientFor, runWithProject, isKnownProject,
+  getProjectConfig,
 } from '../lib/projects';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import {
   getClient, verifyClientSecret, redirectUriAllowed, createAuthCode, consumeAuthCode,
   issueTokens, rotateRefreshToken, revokeToken, createClient,
@@ -275,18 +277,26 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   // Resolve which Supabase project this user belongs to, then authenticate there.
   const project = await resolveProjectForEmailAsync(email);
   if (!isKnownProject(project)) {
+    logger.warn(`[OAuth] authorize: no known project for "${email}" (resolved "${project}")`);
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Invalid email or password.' }));
   }
 
   let userId: string | null = null;
   try {
-    const { data, error } = await anonClientFor(project).auth.signInWithPassword({ email, password });
+    // Use a FRESH, isolated client for the password check so no shared
+    // session/lock state on the cached anon singleton can interfere.
+    const cfg = getProjectConfig(project);
+    const authClient = createSupabaseClient(cfg.url, cfg.anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    });
+    const { data, error } = await authClient.auth.signInWithPassword({ email, password });
     if (error || !data?.user) {
+      logger.warn(`[OAuth] authorize sign-in rejected: email="${email}" project="${project}" pwLen=${password.length} err="${error?.message || 'no user'}" status=${(error as { status?: number })?.status ?? ''}`);
       return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Invalid email or password.' }));
     }
     userId = data.user.id;
   } catch (e: any) {
-    logger.error(`[OAuth] signIn failed for ${email}: ${e?.message || e}`);
+    logger.error(`[OAuth] signIn threw for "${email}" (project="${project}"): ${e?.message || e}`);
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Sign-in failed. Please try again.' }));
   }
 
