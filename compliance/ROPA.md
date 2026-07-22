@@ -45,11 +45,15 @@
 ### RPA-5 — AI features (profiling)
 - **Purpose:** Lead scoring, next-best-action, summaries, business-card OCR,
   call-recording intelligence.
-- **Categories:** Lead/contact context, card images, call transcripts.
-- **Recipients:** **Anthropic (US)** — sub-processor.
+- **Categories:** Lead/contact context, card images, call transcripts, **recorded
+  call audio**.
+- **Recipients:** **Anthropic (US)** (scoring/summaries/transcript analysis) and
+  **Sarvam AI** (speech-to-text; audio staged in **Azure Blob Storage**) — both
+  sub-processors.
 - **Notes:** Automated processing → provide **opt-out** and human review; confirm
   no solely-automated decisions with legal effect (GDPR Art. 22). Minimise PII in
-  prompts. **Lawful basis:** Legitimate interest.
+  prompts. **Children (DPDP §9): minors are excluded from AI scoring / LLM
+  reranking (`is_minor` gate).** **Lawful basis:** Legitimate interest.
 
 ### RPA-6 — Notifications
 - **Purpose:** Push/email notifications. **Categories:** Device tokens, email,
@@ -66,8 +70,14 @@
 
 ---
 ## Cross-cutting
-- **International transfers:** Sydney hosting + US sub-processors (Anthropic,
-  Firebase, possibly Railway/Vercel) → SCCs/adequacy required; DPDP §16 review
-  for Indian data.
+- **International transfers:** Sydney hosting (Supabase) + US sub-processors
+  (Anthropic, Firebase, Railway, Vercel) + Sarvam (India / Azure staging).
+  **DPDP §16 interim basis:** provider SCCs / Data Processing Terms incorporated
+  into each DPA (see `SUBPROCESSORS.md`); India-region Supabase for any
+  data-localisation-bound tenant. Confirm with counsel.
 - **DPIA required for:** RPA-2 (selfies), RPA-3 (GPS), RPA-5 (AI profiling).
-- **Data-subject requests:** actioned via `/api/v1/crm/gdpr/export` and `/erase`.
+- **Children (DPDP §9):** age derived from DOB at capture (`is_minor`); minors
+  excluded from AI profiling/LLM reranking; verifiable parental consent required
+  before processing a child's data.
+- **Data-subject requests:** actioned via `/api/v1/crm/gdpr/export` and `/erase`;
+  consent captured/withdrawn via `/api/v1/crm/consent` (crm_consents ledger).

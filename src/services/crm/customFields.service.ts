@@ -27,6 +27,7 @@ type FieldDef = {
   field_type: string;
   options?: string[] | null;
   formula?: string | null;
+  hidden?: boolean | null;
 };
 
 const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
@@ -37,7 +38,7 @@ const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
 async function loadDefs(orgId: string, clientId: string | null, entity: string): Promise<FieldDef[]> {
   let q = supabaseAdmin
     .from('crm_custom_field_defs')
-    .select('field_key, field_type, options, formula')
+    .select('field_key, field_type, options, formula, hidden')
     .eq('org_id', orgId)
     .eq('entity_type', entity)
     .eq('is_active', true);
@@ -111,6 +112,13 @@ export async function validateAndStampCustomFields(
   for (const [key, raw] of Object.entries(input)) {
     const def = byKey.get(key);
     if (!def) continue; // unknown key — free-form blob behaviour preserved
+    // Data minimisation (DPDP §6(1)): never persist a custom field the admin has
+    // hidden — mirrors stripHiddenLeadFields for built-ins. A stale client (or a
+    // direct API call) can still submit a hidden field; drop it server-side.
+    if (def.hidden === true) {
+      delete input[key];
+      continue;
+    }
     // Null / undefined / empty string → drop the key so the DB stores
     // `null` instead of "" (matches what the dashboard sends on clear).
     if (raw === null || raw === undefined || raw === '') {

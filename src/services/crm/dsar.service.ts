@@ -132,11 +132,28 @@ async function resolveSubject(loc: SubjectLocator, scope: Scope): Promise<{ lead
   return { lead, contact };
 }
 
+/**
+ * Recipients / sub-processors a subject's personal data may be shared with
+ * (DPDP §11(b) — "the identities of all Data Fiduciaries and Data Processors
+ * with whom the personal data has been shared"). Kept in sync with
+ * compliance/SUBPROCESSORS.md.
+ */
+const RECIPIENTS = [
+  { name: 'The customer’s authorised staff', role: 'Controller / tenant users', purpose: 'CRM access & sales workflow' },
+  { name: 'Supabase', role: 'Processor', purpose: 'Managed Postgres, Auth, Storage (ap-southeast-2)' },
+  { name: 'Railway', role: 'Processor', purpose: 'Backend API hosting (US)' },
+  { name: 'Vercel', role: 'Processor', purpose: 'Web dashboard hosting (US)' },
+  { name: 'Google Firebase (FCM)', role: 'Processor', purpose: 'Push notifications' },
+  { name: 'Anthropic', role: 'Processor', purpose: 'AI features — lead scoring, summaries, card scan, call intelligence (US)' },
+  { name: 'Sarvam AI', role: 'Processor', purpose: 'Speech-to-text for call recordings (audio staged in Azure)' },
+];
+
 /** Right of access + portability: assemble the subject's full personal-data bundle. */
 export async function exportSubject(loc: SubjectLocator, scope: Scope): Promise<{
   found: boolean;
   subject: { lead: any | null; contact: any | null };
   related: Record<string, any[]>;
+  recipients: Array<{ name: string; role: string; purpose: string }>;
   generatedForOrg: string;
 }> {
   const { lead, contact } = await resolveSubject(loc, scope);
@@ -159,6 +176,7 @@ export async function exportSubject(loc: SubjectLocator, scope: Scope): Promise<
     found: Boolean(lead || contact),
     subject: { lead, contact },
     related,
+    recipients: RECIPIENTS,
     generatedForOrg: scope.orgId,
   };
 }

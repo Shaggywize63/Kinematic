@@ -9,6 +9,7 @@ import * as assignment from './assignment.service';
 import { triggerEdgeFunction } from './edge.client';
 import * as automations from './automations.service';
 import { validateAndStampCustomFields } from './customFields.service';
+import { isMinor } from '../../lib/age';
 import type { Lead, LeadStatus } from '../../types/crm.types';
 
 // Helper: erase the structural-type-narrowing TS does on Lead so we can
@@ -138,6 +139,9 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
     // is_b2c=false (DB default) with a blank address. Persist them all.
     is_b2c:                   tenantIsB2c ?? (p.is_b2c as boolean | undefined) ?? undefined,
     date_of_birth:            (p.date_of_birth            as string  | undefined) ?? null,
+    // DPDP §9 — flag minors at capture (from DOB) so they're excluded from
+    // scoring/LLM profiling and from marketing sends.
+    is_minor:                 isMinor(p.date_of_birth as string | undefined),
     gender:                   (p.gender                   as string  | undefined) ?? null,
     address_line1:            (p.address_line1            as string  | undefined) ?? null,
     address_line2:            (p.address_line2            as string  | undefined) ?? null,
@@ -429,6 +433,10 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
   };
   if (enteringDisqualified && asRow(before).disqualified_at == null) {
     update.disqualified_at = nowIso;
+  }
+  // DPDP §9 — keep the minor flag in sync when DOB is edited.
+  if ((payload as any).date_of_birth !== undefined) {
+    update.is_minor = isMinor((payload as any).date_of_birth as string | null | undefined);
   }
 
   if (payload.status !== undefined && payload.status !== before.status) {
