@@ -12,6 +12,10 @@ export interface AuthUser {
   supervisor_id?: string;
   fcm_token?: string;
   is_active: boolean;
+  // When true, the read-only guard (middleware/readOnly.ts) blocks every write
+  // for this user while leaving all reads + the login-as view-switch intact.
+  // Used for cross-tenant "look but don't touch" super_admin viewers.
+  is_read_only?: boolean;
   client_id?: string;             // client enterprise ID
   permissions?: string[];       // legacy per-user grants from user_module_permissions
   assigned_cities?: string[];    // IDs of assigned cities

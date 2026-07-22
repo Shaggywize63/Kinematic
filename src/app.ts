@@ -13,6 +13,7 @@ import leadUpdatesRoutes from './routes/crm/lead-updates.routes';
 import { logger } from './lib/logger';
 import { notFoundHandler } from './middleware/errorHandler';
 import { requireAuth } from './middleware/auth';
+import { readOnlyGuard } from './middleware/readOnly';
 import { withDemoIndustry } from './middleware/withDemoIndustry';
 import { withProject, withIntegrationProject } from './middleware/withProject';
 import { auditAll } from './middleware/auditAll';
@@ -372,6 +373,12 @@ app.use(V1, (req, res, next) => {
   if (p === '/crm/unsubscribe') return next();
   return requireAuth(req as any, res, next);
 }, demoExtensionsMiddleware);
+
+// Read-only account guard. Runs once here (req.user is populated by the
+// catch-all above) so it applies to every protected /api/v1 route: blocks all
+// writes for users flagged users.is_read_only, while leaving reads and the
+// login-as/impersonate view-switch intact. No-op for everyone else.
+app.use(V1, readOnlyGuard);
 
 // Public/Auth routes (loginLimiter already applied at /auth/login above)
 app.use(`${V1}/auth`,          perRouteLimit({ windowMs: 60_000, max: 30 }), authRoutes);
