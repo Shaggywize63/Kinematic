@@ -54,6 +54,11 @@ export const uploadFile = asyncHandler(async (req: AuthRequest, res: Response) =
 
   if (error) return serverError(res);
 
+  // All buckets are PRIVATE (public=false). This URL is stored as a stable
+  // bucket+path *reference* — it is NOT directly fetchable. Display goes through
+  // GET /api/v1/media/sign (media.controller.ts), which parses this URL and
+  // returns a short-lived signed URL. Returning path+bucket alongside lets
+  // callers sign without re-parsing. (DPDP §8(5).)
   const { data: { publicUrl } } = supabaseAdmin.storage.from(bucket).getPublicUrl(path);
 
   return ok(res, { url: publicUrl, path, bucket });

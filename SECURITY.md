@@ -97,7 +97,7 @@ issues for security reports.
 |---|---|---|---|---|
 | 1 | **HIBP password check (HaveIBeenPwned)** | Medium | Ops | Not enabled in Supabase Auth dashboard. Toggle on at Auth → Settings → Password Protection. |
 | 2 | **Dockerfile build-args leak Supabase keys** | Medium | DevOps | The Railway-generated Dockerfile uses `ARG SUPABASE_*` + `ENV SUPABASE_*=$SUPABASE_*`, baking secrets into the image. Move to runtime env injection only. |
-| 3 | **`kinematic-selfies` and `kinematic-form-photos` are public buckets** | Medium | Backend | Selfies should be private at minimum. Flipping the public flag will break existing dashboard image displays — needs a coordinated cutover (sign URLs server-side or proxy through the API). |
+| 3 | ~~**`kinematic-selfies` and `kinematic-form-photos` are public buckets**~~ **RESOLVED** | — | Backend | **All storage buckets are now private** (`public=false`, live-verified on both prod projects). Display is served via short-lived signed URLs from `GET /api/v1/media/sign` (`media.controller.ts`); the stored object URL is used only as a bucket+path *reference*, not a fetchable public link. |
 | 4 | **Planogram tables: RLS enabled, no policies** | Low | Backend | Currently denies all anon/authenticated reads; backend service-role works. Add explicit policies if/when those tables need anon read access. |
 | 5 | **Refresh-token rotation** | Medium | Auth | Currently relies on Supabase Auth defaults. Verify rotation + revocation on logout in the mobile clients. |
 | 6 | **CSP `style-src 'unsafe-inline'`** | Low | Backend | Helmet defaults retain it; the API doesn't serve HTML so it's defence-in-depth only. Tighten when we ever serve a real HTML surface. |
@@ -136,6 +136,28 @@ issues for security reports.
    UPDATE public.users SET is_active=false WHERE id IN (...);
    ```
    Force-revoke tokens via Supabase Auth → Users → revoke session.
+7. **Assess whether personal data was affected** (the steps above are technical
+   containment; this step is the statutory trigger). If a **personal-data breach**
+   occurred — unauthorised processing, or accidental disclosure/access/loss/
+   alteration of personal data — proceed to notification below.
+
+### Personal-data breach — statutory notification (DPDP §8(6) / GDPR Art. 33-34)
+Owner: **Grievance Officer / DPO — Sagar Bhargava, s@kinematicapp.com,
++91 8802274880.** Do this in parallel with containment; do not wait for full
+root-cause.
+1. **Notify the Data Protection Board of India** of the personal-data breach in
+   the form/manner prescribed under DPDP §8(6) — **without delay**, on becoming
+   aware. (GDPR-analogue: notify the supervisory authority **within 72 hours**.)
+2. **Notify each affected Data Principal** — without delay, in the prescribed
+   manner: what happened, categories of data, likely consequences, and the
+   measures taken / that they can take.
+3. Where Kinematic acts as a **processor** for a business customer (controller),
+   also **notify that customer without undue delay** so they can meet their own
+   duties (per `compliance/DPA_TEMPLATE.md`).
+4. **Record** the breach, its effects, and remedial action in the incident log
+   (accountability) regardless of whether notification thresholds were met.
+5. If a **sub-processor** (Supabase, Anthropic, Sarvam, Firebase, Railway,
+   Vercel) is the source, obtain their breach report and fold it into 1-4.
 
 ### Routine
 - **Weekly**: run the Supabase security advisor (`get_advisors type=security`)

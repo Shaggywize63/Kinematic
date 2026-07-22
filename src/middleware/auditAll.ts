@@ -108,9 +108,14 @@ function describeRequest(method: string, originalUrl: string): { action: string;
 
 // Body fields used to build a human-readable summary for the activity log:
 // "leads.create — Acme Corp" beats a bare "leads.create".
+// NB: `email` / `phone` are deliberately EXCLUDED — extractSummary runs on the
+// RAW request body (before the after-body PII redaction), so including a direct
+// identifier here would write it to audit_log.metadata.summary in cleartext,
+// bypassing the redaction (DPDP §8(5) / audit finding S-2). Keep this list to
+// non-direct-identifier labels only.
 const SUMMARY_KEYS = [
   'name', 'full_name', 'title', 'subject', 'label',
-  'company', 'email', 'phone',
+  'company',
 ];
 
 function extractSummary(body: unknown): string | null {
