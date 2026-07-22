@@ -1052,9 +1052,17 @@ export const getClients = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('is_active', true)
     .order('name')
 
+  // Scoped cross-tenant VIEWER (non-super_admin with users.viewer_org_ids):
+  // the picker must list ONLY the orgs they may view (home + allow-list), never
+  // every tenant. This narrowing wins over the management all-access below.
+  const viewerOrgs = Array.isArray(user.viewer_org_ids) ? user.viewer_org_ids.filter(Boolean) : []
+  const isViewer = viewerOrgs.length > 0 && user.role?.toLowerCase() !== 'super_admin'
+
   // Platform admins and management roles can see all client names for dashboard attribution
   const isManagement = ['admin', 'super_admin', 'main_admin', 'sub_admin', 'platform_admin', 'hr', 'city_manager', 'supervisor'].includes(user.role?.toLowerCase())
-  if (!isManagement) {
+  if (isViewer) {
+    query = query.in('org_id', Array.from(new Set([user.org_id, ...viewerOrgs])))
+  } else if (!isManagement) {
     query = query.eq('org_id', user.org_id)
   }
 

@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
-import { currentProjectKey, verifyProjectToken } from '../lib/projects';
+import { currentProjectKey, verifyProjectToken, adminClientFor } from '../lib/projects';
 import { AuthRequest, UserRole } from '../types';
 import { DEMO_ORG_ID, DEMO_USER_ID, isDemo } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
@@ -97,6 +97,72 @@ function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): AuthRequ
   return { ...(user as object), org_id: target } as AuthRequest['user'];
 }
 
+// Per-request memo of client_id → org_id for the scoped-viewer org-derive
+// below, keyed by project so two projects can't share a client→org mapping.
+const viewerClientOrgCache = new Map<string, Promise<string | null>>();
+function lookupClientOrg(clientId: string): Promise<string | null> {
+  const key = `${currentProjectKey()}:${clientId}`;
+  const hit = viewerClientOrgCache.get(key);
+  if (hit) return hit;
+  const p = (async () => {
+    try {
+      const { data } = await adminClientFor(currentProjectKey())
+        .from('clients').select('org_id').eq('id', clientId).maybeSingle();
+      return ((data as { org_id?: string } | null)?.org_id) ?? null;
+    } catch { return null; }
+  })();
+  viewerClientOrgCache.set(key, p);
+  return p;
+}
+
+/**
+ * Scoped cross-tenant VIEWER support for NON-super_admins.
+ *
+ * A user with users.viewer_org_ids may VIEW a fixed allow-list of other orgs —
+ * and nothing else. When such a user carries an X-Client-Id whose client lives
+ * in an allowed org (or their own home org), we repoint req.user.org_id to that
+ * org so every downstream org scope (orgId(req), clientScope, scopeOwnOrg)
+ * targets the viewed tenant; the strict X-Client-Id filter keeps real isolation
+ * inside it. A client outside the allow-list is ignored (org unchanged → the
+ * mismatched client id then yields no rows, so nothing leaks).
+ *
+ * We also CAP the viewer's enabled_modules to its role's permitted modules,
+ * because a client_id-null user otherwise resolves to "all modules"
+ * (entitlements.ts) and would sail past every requireModule() gate. With the cap
+ * a Lead-Viewer role (permissions=['crm', 'crm_*']) is confined to CRM.
+ *
+ * No-op for anyone without viewer_org_ids, and for super_admin (which has its
+ * own broader maybeImpersonate path). Returns a CLONE — never mutates the cached
+ * profile object.
+ */
+async function maybeDeriveViewerOrg(user: AuthRequest['user'], req: AuthRequest): Promise<AuthRequest['user']> {
+  const u = user as (AuthRequest['user'] & {
+    viewer_org_ids?: string[]; role?: string; org_id?: string;
+    role_permissions?: string[]; enabled_modules?: string[];
+  }) | undefined;
+  if (!u || u.role === 'super_admin') return user;
+  const allow = Array.isArray(u.viewer_org_ids) ? u.viewer_org_ids : [];
+  if (allow.length === 0) return user;
+
+  // Cap modules to the viewer's role permissions (keeps requireModule gates
+  // meaningful despite the client_id-null "all modules" default).
+  const cappedModules = Array.isArray(u.role_permissions) && u.role_permissions.length > 0
+    ? (u.enabled_modules || []).filter((m) => u.role_permissions!.includes(m))
+    : u.enabled_modules;
+
+  // Derive the viewed org from the picked client, if that client is in scope.
+  let org = u.org_id as string;
+  const raw = req.headers['x-client-id'];
+  const clientId = Array.isArray(raw) ? raw[0] : raw;
+  if (clientId && ORG_UUID_RE.test(clientId.trim())) {
+    const clientOrg = await lookupClientOrg(clientId.trim());
+    if (clientOrg && (clientOrg === u.org_id || allow.includes(clientOrg))) org = clientOrg;
+  }
+
+  if (org === u.org_id && cappedModules === u.enabled_modules) return user;
+  return { ...(u as object), org_id: org, enabled_modules: cappedModules } as AuthRequest['user'];
+}
+
 // Impersonation profile cache — keyed `impersonate:<project>:<targetId>`.
 // Separate from the token-keyed authCache so an impersonated identity is
 // NEVER written under the master's real token. Short TTL like authCache.
@@ -115,7 +181,7 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
   const [profileRes, permsRes, citiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
-      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, active_session_id, active_session_device, org_role_id')
+      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, viewer_org_ids, active_session_id, active_session_device, org_role_id')
       .eq('id', userId)
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', userId),
@@ -346,7 +412,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const cached = cacheGet(cacheKey);
   if (cached) {
     if (rejectIfStaleSession(req, res, cached)) return;
-    req.user = await maybeImpersonateUser(maybeImpersonate(cached, req), req);
+    req.user = await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(cached, req), req), req);
     req.accessToken = token;
     return next();
   }
@@ -360,7 +426,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const [profileRes, permsRes, citiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
-      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, active_session_id, active_session_device, org_role_id')
+      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, viewer_org_ids, active_session_id, active_session_device, org_role_id')
       .eq('id', verified.sub)
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', verified.sub),
@@ -478,7 +544,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (rejectIfStaleSession(req, res, user)) return;
 
   cacheSet(cacheKey, user, verified.exp);
-  req.user = await maybeImpersonateUser(maybeImpersonate(user, req), req);
+  req.user = await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(user, req), req), req);
   req.accessToken = token;
   next();
 }
