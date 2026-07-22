@@ -9,6 +9,31 @@ const optionalUuid = uuid.nullish();
 const isoDate = z.string().datetime({ offset: true }).or(z.string().date()).optional().nullable();
 
 const contactMethod = z.enum(['email','phone','whatsapp','sms']).optional().nullable();
+
+// --- Consent ledger (DPDP §6/§7/§9) ---
+const consentSubjectType = z.enum(['lead','contact','employee']);
+const consentMethod = z.enum(['in_app','web_form','verbal','imported','api']);
+
+export const consentRecordSchema = z.object({
+  subject_type: consentSubjectType,
+  subject_id: uuid.nullish(),
+  purpose: z.string().min(1).max(64),
+  consented: z.boolean().optional(),
+  method: consentMethod,
+  source: z.string().max(200).nullish(),
+  notice_version: z.string().max(50).nullish(),
+  notes: z.string().max(1000).nullish(),
+});
+
+export const consentWithdrawSchema = z.object({
+  id: uuid.optional(),
+  subject_type: consentSubjectType.optional(),
+  subject_id: uuid.nullish(),
+  purpose: z.string().min(1).max(64).optional(),
+}).refine(
+  (val) => Boolean(val.id) || Boolean(val.subject_type && val.subject_id && val.purpose),
+  { message: 'Provide id, or subject_type + subject_id + purpose' },
+);
 const gender = z.enum(['male','female','other','prefer_not_to_say']).optional().nullable();
 const loyaltyTier = z.enum(['bronze','silver','gold','platinum','vip']).optional().nullable();
 

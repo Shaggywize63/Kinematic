@@ -55,6 +55,7 @@ import * as leadFormBuilder from '../services/crm/ai/leadFormBuilder.service';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
+import * as consentSvc from '../services/crm/consent.service';
 
 const router: Router = express.Router();
 
@@ -4810,5 +4811,58 @@ gdpr.post('/erase', wrap(async (req, res) => {
 }));
 
 router.use('/gdpr', requireRole('super_admin', 'admin', 'main_admin'), gdpr);
+
+// ---------------------------------------------------------------------------
+// Consent ledger (DPDP §6/§7/§9) — itemised, per-purpose, withdrawable consent.
+// Staff-facing (capture at collection). requireAuth is applied globally to /crm.
+// ---------------------------------------------------------------------------
+const consent = express.Router();
+
+function consentScope(req: Request): consentSvc.ConsentScope {
+  return { orgId: orgId(req), clientId: clientScope(req).id };
+}
+
+// POST /crm/consent — record a consent (or explicit refusal) event.
+consent.post('/', wrap(async (req, res) => {
+  const p = parse(v.consentRecordSchema, req.body);
+  const row = await consentSvc.recordConsent(consentScope(req), {
+    subjectType: p.subject_type,
+    subjectId: p.subject_id ?? null,
+    purpose: p.purpose,
+    consented: p.consented,
+    method: p.method,
+    source: p.source ?? null,
+    noticeVersion: p.notice_version ?? null,
+    notes: p.notes ?? null,
+    actorUserId: userId(req) ?? null,
+  });
+  res.status(201).json(row);
+}));
+
+// POST /crm/consent/withdraw — withdraw consent (§6(4)-(6)).
+consent.post('/withdraw', wrap(async (req, res) => {
+  const p = parse(v.consentWithdrawSchema, req.body);
+  const result = await consentSvc.withdrawConsent(consentScope(req), {
+    id: p.id ?? null,
+    subjectType: p.subject_type ?? null,
+    subjectId: p.subject_id ?? null,
+    purpose: p.purpose ?? null,
+    actorUserId: userId(req) ?? null,
+  });
+  res.json(result);
+}));
+
+// GET /crm/consent?subject_type=&subject_id=&purpose= — list consent events.
+consent.get('/', wrap(async (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  const subjectType = q.subject_type as consentSvc.ConsentSubjectType | undefined;
+  res.json(await consentSvc.listConsents(consentScope(req), {
+    subjectType: subjectType && ['lead', 'contact', 'employee'].includes(subjectType) ? subjectType : undefined,
+    subjectId: q.subject_id,
+    purpose: q.purpose,
+  }));
+}));
+
+router.use('/consent', consent);
 
 export default router;
