@@ -13,6 +13,10 @@
  * We reuse existing tables only — no schema migration required.
  */
 import { supabaseAdmin } from '../../lib/supabase';
+import { deleteStoredMedia } from '../../lib/storage';
+
+/** Bucket holding call-recording audio (conversation_recordings.audio_path is a bare key). */
+const CONVERSATION_AUDIO_BUCKET = 'conversation-audio';
 
 /** Direct-identifier / sensitive columns on crm_leads to null on erasure. */
 const LEAD_PII_COLUMNS = [
@@ -162,12 +166,20 @@ export async function exportSubject(loc: SubjectLocator, scope: Scope): Promise<
 /** Right to erasure: null identifier columns on the subject and remove personal-content child rows. */
 export async function eraseSubject(loc: SubjectLocator, scope: Scope): Promise<{
   found: boolean;
-  erased: { leadId: string | null; contactId: string | null; childRowsDeleted: number };
+  erased: { leadId: string | null; contactId: string | null; childRowsDeleted: number; storageObjectsDeleted: number };
+  storageErrors: string[];
 }> {
   const { lead, contact } = await resolveSubject(loc, scope);
-  if (!lead && !contact) return { found: false, erased: { leadId: null, contactId: null, childRowsDeleted: 0 } };
+  if (!lead && !contact) {
+    return { found: false, erased: { leadId: null, contactId: null, childRowsDeleted: 0, storageObjectsDeleted: 0 }, storageErrors: [] };
+  }
 
   let childRowsDeleted = 0;
+  // Media values whose underlying storage objects must be deleted, not just
+  // their DB columns nulled — otherwise the selfie/audio/avatar blob survives
+  // the erasure (DPDP §12 / §8(7)).
+  const mediaUrls: string[] = [];
+  const audioKeys: string[] = [];
 
   const nowIso = new Date().toISOString();
   const tombstone = (columns: string[]): Record<string, unknown> => {
@@ -180,6 +192,12 @@ export async function eraseSubject(loc: SubjectLocator, scope: Scope): Promise<{
   };
 
   if (lead?.id) {
+    if (lead.photo_url) mediaUrls.push(lead.photo_url as string);
+    // Collect call-recording audio keys before the rows are hard-deleted below.
+    const { data: recs } = await supabaseAdmin
+      .from('conversation_recordings').select('audio_path').eq('lead_id', lead.id);
+    for (const r of recs ?? []) if (r?.audio_path) audioKeys.push(r.audio_path as string);
+
     for (const { table, fk, mode } of LEAD_CHILDREN) {
       if (mode !== 'delete') continue; // business records reference the anonymised parent — leave in place
       const { count } = await supabaseAdmin.from(table).delete({ count: 'exact' }).eq(fk, lead.id);
@@ -189,6 +207,7 @@ export async function eraseSubject(loc: SubjectLocator, scope: Scope): Promise<{
   }
 
   if (contact?.id) {
+    if (contact.photo_url) mediaUrls.push(contact.photo_url as string);
     for (const { table, fk, mode } of CONTACT_CHILDREN) {
       if (mode !== 'delete') continue;
       const { count } = await supabaseAdmin.from(table).delete({ count: 'exact' }).eq(fk, contact.id);
@@ -197,12 +216,23 @@ export async function eraseSubject(loc: SubjectLocator, scope: Scope): Promise<{
     await supabaseAdmin.from('crm_contacts').update(tombstone(CONTACT_PII_COLUMNS)).eq('id', contact.id);
   }
 
+  // Delete the actual storage objects (avatars from their URL, call audio from
+  // its bare key in the conversation-audio bucket).
+  const storageErrors: string[] = [];
+  let storageObjectsDeleted = 0;
+  const urlResult = await deleteStoredMedia(mediaUrls);
+  const audioResult = await deleteStoredMedia(audioKeys, CONVERSATION_AUDIO_BUCKET);
+  storageObjectsDeleted = urlResult.deleted + audioResult.deleted;
+  storageErrors.push(...urlResult.errors, ...audioResult.errors);
+
   return {
     found: true,
     erased: {
       leadId: lead?.id ?? null,
       contactId: contact?.id ?? null,
       childRowsDeleted,
+      storageObjectsDeleted,
     },
+    storageErrors,
   };
 }

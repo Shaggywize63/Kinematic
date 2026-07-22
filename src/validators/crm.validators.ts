@@ -9,6 +9,40 @@ const optionalUuid = uuid.nullish();
 const isoDate = z.string().datetime({ offset: true }).or(z.string().date()).optional().nullable();
 
 const contactMethod = z.enum(['email','phone','whatsapp','sms']).optional().nullable();
+
+// --- Consent ledger (DPDP §6/§7/§9) ---
+const consentSubjectType = z.enum(['lead','contact','employee']);
+const consentMethod = z.enum(['in_app','web_form','verbal','imported','api']);
+
+export const consentRecordSchema = z.object({
+  subject_type: consentSubjectType,
+  subject_id: uuid.nullish(),
+  purpose: z.string().min(1).max(64),
+  consented: z.boolean().optional(),
+  method: consentMethod,
+  source: z.string().max(200).nullish(),
+  notice_version: z.string().max(50).nullish(),
+  notes: z.string().max(1000).nullish(),
+});
+
+// Inline consent block accepted on lead/contact CREATE (popped before insert,
+// written to the crm_consents ledger against the new row). DPDP §5/§6.
+export const consentInlineSchema = z.object({
+  consented: z.boolean(),
+  method: consentMethod.optional(),
+  notice_version: z.string().max(50).nullish(),
+  source: z.string().max(200).nullish(),
+});
+
+export const consentWithdrawSchema = z.object({
+  id: uuid.optional(),
+  subject_type: consentSubjectType.optional(),
+  subject_id: uuid.nullish(),
+  purpose: z.string().min(1).max(64).optional(),
+}).refine(
+  (val) => Boolean(val.id) || Boolean(val.subject_type && val.subject_id && val.purpose),
+  { message: 'Provide id, or subject_type + subject_id + purpose' },
+);
 const gender = z.enum(['male','female','other','prefer_not_to_say']).optional().nullable();
 const loyaltyTier = z.enum(['bronze','silver','gold','platinum','vip']).optional().nullable();
 
@@ -121,6 +155,11 @@ const leadCreateBase = z.object({
   // pops this key before persisting (it isn't a column) and only honours
   // it for clients that have the matching activity type configured.
   _auto_log_site_visit: z.boolean().optional(),
+  // DPDP §5/§6 — consent captured at collection for the lead's primary PII.
+  // Popped before the insert (not a crm_leads column) and written to the
+  // crm_consents ledger against the new lead id. `consented:false` records an
+  // explicit refusal. notice_version pins which notice text the principal saw.
+  _consent: consentInlineSchema.optional(),
   // Accepted but ignored — the activity subject is now derived from the
   // existing first_visit_date custom field on the lead, so we no longer
   // need a separate flag. Kept in the schema only so older clients still
@@ -240,6 +279,9 @@ export const contactSchema = z.object({
   total_orders: z.number().int().nonnegative().optional(),
   last_purchase_at: isoDate,
   referral_source: z.string().max(120).optional().nullable(),
+  // DPDP §5/§6 — consent captured at collection (popped before insert, recorded
+  // in crm_consents against the new contact).
+  _consent: consentInlineSchema.optional(),
 });
 
 export const accountSchema = z.object({

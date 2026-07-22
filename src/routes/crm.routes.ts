@@ -55,6 +55,7 @@ import * as leadFormBuilder from '../services/crm/ai/leadFormBuilder.service';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
+import * as consentSvc from '../services/crm/consent.service';
 
 const router: Router = express.Router();
 
@@ -426,6 +427,22 @@ async function stripHiddenLeadFields(
   return stripped;
 }
 
+/**
+ * Whether this tenant HARD-GATES lead creation on captured consent (DPDP §6).
+ * Default false (record-only): the notice is shown and consent is captured, but
+ * a rep may still save. A tenant flips crm_settings.config.consent.lead_pii.required
+ * = true to refuse creation without affirmative consent. Mirrors the
+ * field-overrides settings-read so the two stay consistent.
+ */
+async function leadConsentRequired(org_id: string, client_id: string | null): Promise<boolean> {
+  let q = supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id);
+  q = client_id ? q.eq('client_id', client_id) : q.is('client_id', null);
+  const { data: rows } = await q.limit(1);
+  const cfg = (rows?.[0] as { config?: Record<string, unknown> } | undefined)?.config;
+  const consentCfg = cfg?.consent as { lead_pii?: { required?: boolean } } | undefined;
+  return consentCfg?.lead_pii?.required === true;
+}
+
 // Roles permitted to assign a record to an arbitrary owner. Reps (executive /
 // field_executive / hr) may not — for them a client-supplied owner_id is
 // dropped so the server's assignment rules apply (they normally become the
@@ -671,7 +688,7 @@ leads.post('/', wrap(async (req, res) => {
   // off before the lead insert (it's not a column on crm_leads), use it
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, ...rest } = parsed;
   // client_id is the tenant boundary — always derive it server-side from the
   // caller's scope (which honours a super-admin's X-Client-Id header), never from
   // the request body. See SECURITY_AUDIT_2026-07.md finding H-2.
@@ -696,7 +713,39 @@ leads.post('/', wrap(async (req, res) => {
   // Data minimisation: never store built-in fields the admin has hidden.
   await stripHiddenLeadFields(orgId(req), payload.client_id as string | null ?? null, payload);
   sanitizeOwnerId(req, payload); // reps can't self-assign an arbitrary owner (H-2)
+
+  // DPDP §6 consent: optionally HARD-GATE creation on affirmative consent (a
+  // per-tenant setting; default record-only). The notice is shown client-side.
+  if (await leadConsentRequired(orgId(req), payload.client_id as string | null ?? null)) {
+    if (!consentInput || consentInput.consented !== true) {
+      throw new AppError(400, 'Consent to collect the lead\'s personal data is required', 'CONSENT_REQUIRED');
+    }
+  }
+
   const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
+
+  // Record the consent event against the new lead in the crm_consents ledger
+  // (who/when/how/purpose), so consent is demonstrable — best-effort: a ledger
+  // write must never fail the create.
+  if (consentInput && lead?.id) {
+    try {
+      await consentSvc.recordConsent(
+        { orgId: orgId(req), clientId: payload.client_id as string | null ?? null },
+        {
+          subjectType: 'lead',
+          subjectId: lead.id,
+          purpose: 'lead_pii',
+          consented: consentInput.consented,
+          method: consentInput.method ?? 'web_form',
+          source: consentInput.source ?? 'lead_create',
+          noticeVersion: consentInput.notice_version ?? null,
+          actorUserId: userId(req) ?? null,
+        },
+      );
+    } catch (e) {
+      console.warn(`[consent] recordConsent on lead create failed: ${(e as Error).message}`);
+    }
+  }
 
   // Auto-log site visit: the previous version inserted a completed
   // site_visit activity behind the rep's back. The user asked us to
@@ -1235,7 +1284,8 @@ leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await 
 leads.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.leadUpdateSchema, req.body);
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, ...rest } = parsed;
+  // _consent is dropped here (not a column); consent capture is wired on create.
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: _dropConsent, ...rest } = parsed;
   // Edit RBAC — across the whole hierarchy, only the rep who CREATED
   // the lead may edit it. owner_id / assigned_to grant view, but not
   // edit. ASOs viewing a Consumer Champion's lead can read it (it
@@ -1404,7 +1454,8 @@ contacts.get('/', wrap(async (req, res) => {
 }));
 contacts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
-  const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
+  const { _consent: consentInput, ...rest } = parsed;
+  const payload: Record<string, unknown> = { ...rest, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
   // Validate admin-defined contact custom fields (type coercion, lookup-id
   // canonicalisation, formula stamping) — mirrors the lead/deal/activity paths.
@@ -1414,11 +1465,33 @@ contacts.post('/', wrap(async (req, res) => {
       payload.custom_fields as Record<string, unknown>,
     );
   }
-  res.status(201).json(await stampOwnerName(await crud.create('crm_contacts', orgId(req), payload, userId(req))));
+  const contact = await crud.create('crm_contacts', orgId(req), payload, userId(req));
+  // DPDP §6 — record consent captured at collection against the new contact.
+  if (consentInput && contact?.id) {
+    try {
+      await consentSvc.recordConsent(
+        { orgId: orgId(req), clientId: payload.client_id as string | null ?? null },
+        {
+          subjectType: 'contact',
+          subjectId: contact.id,
+          purpose: 'lead_pii',
+          consented: consentInput.consented,
+          method: consentInput.method ?? 'web_form',
+          source: consentInput.source ?? 'contact_create',
+          noticeVersion: consentInput.notice_version ?? null,
+          actorUserId: userId(req) ?? null,
+        },
+      );
+    } catch (e) {
+      console.warn(`[consent] recordConsent on contact create failed: ${(e as Error).message}`);
+    }
+  }
+  res.status(201).json(await stampOwnerName(contact));
 }));
 contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id, true, clientScope(req).id)))));
 contacts.patch('/:id', wrap(async (req, res) => {
-  const payload = parse(v.contactSchema.partial(), req.body) as Record<string, unknown>;
+  const { _consent: _dropConsent, ...parsed } = parse(v.contactSchema.partial(), req.body);
+  const payload = parsed as Record<string, unknown>;
   sanitizeOwnerId(req, payload);
   if (payload.custom_fields !== undefined) {
     payload.custom_fields = await validateAndStampCustomFields(
@@ -4803,10 +4876,65 @@ gdpr.post('/erase', wrap(async (req, res) => {
     lead_id: result.erased.leadId,
     contact_id: result.erased.contactId,
     child_rows_deleted: result.erased.childRowsDeleted,
+    storage_objects_deleted: result.erased.storageObjectsDeleted,
+    storage_errors: result.storageErrors.length ? result.storageErrors : undefined,
   });
   res.json(result);
 }));
 
 router.use('/gdpr', requireRole('super_admin', 'admin', 'main_admin'), gdpr);
+
+// ---------------------------------------------------------------------------
+// Consent ledger (DPDP §6/§7/§9) — itemised, per-purpose, withdrawable consent.
+// Staff-facing (capture at collection). requireAuth is applied globally to /crm.
+// ---------------------------------------------------------------------------
+const consent = express.Router();
+
+function consentScope(req: Request): consentSvc.ConsentScope {
+  return { orgId: orgId(req), clientId: clientScope(req).id };
+}
+
+// POST /crm/consent — record a consent (or explicit refusal) event.
+consent.post('/', wrap(async (req, res) => {
+  const p = parse(v.consentRecordSchema, req.body);
+  const row = await consentSvc.recordConsent(consentScope(req), {
+    subjectType: p.subject_type,
+    subjectId: p.subject_id ?? null,
+    purpose: p.purpose,
+    consented: p.consented,
+    method: p.method,
+    source: p.source ?? null,
+    noticeVersion: p.notice_version ?? null,
+    notes: p.notes ?? null,
+    actorUserId: userId(req) ?? null,
+  });
+  res.status(201).json(row);
+}));
+
+// POST /crm/consent/withdraw — withdraw consent (§6(4)-(6)).
+consent.post('/withdraw', wrap(async (req, res) => {
+  const p = parse(v.consentWithdrawSchema, req.body);
+  const result = await consentSvc.withdrawConsent(consentScope(req), {
+    id: p.id ?? null,
+    subjectType: p.subject_type ?? null,
+    subjectId: p.subject_id ?? null,
+    purpose: p.purpose ?? null,
+    actorUserId: userId(req) ?? null,
+  });
+  res.json(result);
+}));
+
+// GET /crm/consent?subject_type=&subject_id=&purpose= — list consent events.
+consent.get('/', wrap(async (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  const subjectType = q.subject_type as consentSvc.ConsentSubjectType | undefined;
+  res.json(await consentSvc.listConsents(consentScope(req), {
+    subjectType: subjectType && ['lead', 'contact', 'employee'].includes(subjectType) ? subjectType : undefined,
+    subjectId: q.subject_id,
+    purpose: q.purpose,
+  }));
+}));
+
+router.use('/consent', consent);
 
 export default router;
