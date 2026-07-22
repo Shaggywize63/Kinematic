@@ -4803,6 +4803,8 @@ gdpr.post('/erase', wrap(async (req, res) => {
     lead_id: result.erased.leadId,
     contact_id: result.erased.contactId,
     child_rows_deleted: result.erased.childRowsDeleted,
+    storage_objects_deleted: result.erased.storageObjectsDeleted,
+    storage_errors: result.storageErrors.length ? result.storageErrors : undefined,
   });
   res.json(result);
 }));
