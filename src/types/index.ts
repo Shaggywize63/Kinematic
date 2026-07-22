@@ -16,6 +16,13 @@ export interface AuthUser {
   // for this user while leaving all reads + the login-as view-switch intact.
   // Used for cross-tenant "look but don't touch" super_admin viewers.
   is_read_only?: boolean;
+  // Scoped cross-tenant VIEW allow-list for NON-super_admins. When set, the
+  // user may VIEW these orgs (in addition to their home org_id) and nothing
+  // else — the auth middleware (maybeDeriveViewerOrg) repoints req.user.org_id
+  // to a viewed org when the request's X-Client-Id belongs to one of these
+  // orgs, and caps enabled_modules to the user's role_permissions. Used for a
+  // read-only "view SRS + BMW leads only" account that is NOT a super_admin.
+  viewer_org_ids?: string[];
   client_id?: string;             // client enterprise ID
   permissions?: string[];       // legacy per-user grants from user_module_permissions
   assigned_cities?: string[];    // IDs of assigned cities
