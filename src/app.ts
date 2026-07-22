@@ -192,7 +192,8 @@ app.get('/f/:id', cors({ origin: '*' }), withIntegrationProject, async function 
 // already authorised.
 app.use('/api/v1/integrations/webhook', cors({ origin: '*' }));
 
-app.use(cors({
+// Strict CORS for the dashboard/app API surface — origin must be allowlisted.
+const STRICT_CORS = {
   origin: corsOrigin,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -211,6 +212,25 @@ app.use(cors({
     'X-Demo-Industry', 'x-demo-industry',
   ],
   maxAge: 600,
+};
+
+// Public OAuth 2.0 + MCP endpoints must NOT be gated by the dashboard CORS
+// allowlist: they're hit cross-origin by external connectors (ChatGPT/Claude)
+// and by the login/consent form, whose Origin is the API's OWN host — which is
+// deliberately not in the dashboard allowlist. corsOrigin hard-rejects those
+// with a 500, so reflect any origin for these public paths instead.
+const PUBLIC_CORS = {
+  origin: true,
+  credentials: false,
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  maxAge: 600,
+};
+function isPublicAuthPath(p: string): boolean {
+  return p === '/mcp' || p.startsWith('/oauth') || p.startsWith('/.well-known/');
+}
+app.use(cors((req, cb) => {
+  const p = (req as express.Request).path || '';
+  cb(null, isPublicAuthPath(p) ? PUBLIC_CORS : STRICT_CORS);
 }));
 
 // ── Global rate limiting (broad ceiling). Per-route caps are applied below. ──
