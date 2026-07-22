@@ -21,7 +21,7 @@ import {
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import {
   getClient, verifyClientSecret, redirectUriAllowed, createAuthCode, consumeAuthCode,
-  issueTokens, rotateRefreshToken, revokeToken, createClient,
+  issueTokens, rotateRefreshToken, revokeToken, createClient, recordTokenDebug,
 } from '../lib/oauth/store';
 import {
   ALL_SCOPES, OAUTH_SCOPES, parseScopes, scopeLabels, type OAuthScope,
@@ -338,9 +338,20 @@ export const token = asyncHandler<Request>(async (req, res) => {
   const grantType = String(b.grant_type || '');
   const { clientId, clientSecret } = clientCredentials(req);
 
+  // DB-visible trace of what the client actually sent (no secrets).
+  await recordTokenDebug('received', {
+    clientId, grantType,
+    presentedSecret: !!clientSecret,
+    authHeader: req.headers.authorization ? (String(req.headers.authorization).startsWith('Basic ') ? 'basic' : 'other') : 'none',
+    hasCode: !!b.code, hasRedirect: !!b.redirect_uri, hasVerifier: !!b.code_verifier,
+    redirectUri: b.redirect_uri ? String(b.redirect_uri) : null,
+    verifierLen: b.code_verifier ? String(b.code_verifier).length : 0,
+  });
+
   const client = await getClient(clientId);
   if (!client) {
     logger.warn(`[OAuth] token: unknown client "${clientId}" grant=${grantType}`);
+    await recordTokenDebug('unknown_client', { clientId, grantType });
     return tokenError(res, 401, 'invalid_client');
   }
 
@@ -354,10 +365,12 @@ export const token = asyncHandler<Request>(async (req, res) => {
   if (grantType === 'authorization_code') {
     if (presentedSecret && !secretOk) {
       logger.warn(`[OAuth] token: bad client_secret client=${clientId} (authorization_code)`);
+      await recordTokenDebug('bad_secret', { clientId });
       return tokenError(res, 401, 'invalid_client');
     }
   } else if (!secretOk) {
     logger.warn(`[OAuth] token: client auth failed client=${clientId} grant=${grantType} confidential=${client.is_confidential} presented=${presentedSecret}`);
+    await recordTokenDebug('client_auth_failed', { clientId, grantType, confidential: client.is_confidential, presentedSecret });
     return tokenError(res, 401, 'invalid_client');
   }
 
@@ -379,6 +392,7 @@ export const token = asyncHandler<Request>(async (req, res) => {
     const tokens = await issueTokens({
       clientId, userId: grant.user_id, projectKey: grant.project_key, orgId: grant.org_id, scopes: grant.scopes,
     });
+    await recordTokenDebug('success:authorization_code', { clientId, userId: grant.user_id, projectKey: grant.project_key });
     res.setHeader('Cache-Control', 'no-store');
     return res.json(tokens);
   }
