@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { clearEmailProjectCache } from '../lib/projects';
-import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, ok, isUUID, scopeOwnOrg } from '../utils';
+import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlerts, getMockUsers, getMockGrievances } from '../utils/demoData';
@@ -11,7 +11,11 @@ import * as hierarchy from '../services/crm/hierarchy.service';
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
-  const date = (req.query.date as string) || todayDate()
+  // Normalise to YYYY-MM-DD: visit_logs.date is a real DATE column, so the
+  // legacy DD--MM--YYYY that todayDate() returns (and that the mobile app may
+  // send as ?date=) must be converted or Postgres rejects it ("date/time field
+  // value out of range").
+  const date = parseAppDate((req.query.date as string) || todayDate())
   let query = supabaseAdmin
     .from('visit_logs')
     .select('*, visitor:visitor_id(id, name, role), executive:executive_id(id, name, zone_id, zones!zone_id(name))')
@@ -35,9 +39,9 @@ export const createVisitLog = asyncHandler<AuthRequest>(async (req, res) => {
       client_id: user.client_id,
       executive_id: executive_id || user.id, 
       visitor_id: user.id, 
-      zone_id: user.zone_id, 
-      date: todayDate(), 
-      visited_at: new Date().toISOString(), 
+      zone_id: user.zone_id,
+      date: parseAppDate(todayDate()),
+      visited_at: new Date().toISOString(),
       rating, 
       remarks: remarks || null, 
       photo_url: photo_url || null, 
@@ -313,7 +317,7 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   })();
   const [attRes, permRes, cityRes, kiniRes] = await Promise.all([
     userIds.length > 0
-      ? supabaseAdmin.from('attendance').select('user_id, total_hours, status, checkin_at').eq('date', todayDate()).in('user_id', userIds)
+      ? supabaseAdmin.from('attendance').select('user_id, total_hours, status, checkin_at').eq('date', parseAppDate(todayDate())).in('user_id', userIds)
       : { data: [] },
     userIds.length > 0
       ? supabaseAdmin.from('user_module_permissions').select('user_id, module_id').in('user_id', userIds)
@@ -868,7 +872,9 @@ export const deleteZone = asyncHandler<AuthRequest>(async (req, res) => {
 // ANALYTICS
 export const getDashboardSummary = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!
-  const date = (req.query.date as string) || todayDate()
+  // Normalise to YYYY-MM-DD — attendance.date is a DATE column and this value
+  // is also interpolated into the form_submissions timestamp range below.
+  const date = parseAppDate((req.query.date as string) || todayDate())
   const targetCid = isUUID(req.query.client_id as string) ? (req.query.client_id as string) : user.client_id;
   const applyFilter = (q: any) => scopeOwnOrg(q, user.org_id, targetCid);
 

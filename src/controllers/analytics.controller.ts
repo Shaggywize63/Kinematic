@@ -463,7 +463,9 @@ export const getWeeklyContacts = asyncHandler(async (req: AuthRequest, res: Resp
 export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockLocations(todayDate()));
-  const today = todayDate();
+  // YYYY-MM-DD for the attendance.date (DATE column) filter below; raw
+  // todayDate() is DD--MM--YYYY, which Postgres rejects.
+  const today = parseAppDate(todayDate());
 
   const { city, city_id, zone_id, fe_id, user_id } = req.query as Record<string, string>;
 
