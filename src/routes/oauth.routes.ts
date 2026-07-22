@@ -12,6 +12,11 @@ import { perRouteLimit } from '../middleware/security';
 
 const router = Router();
 const form = express.urlencoded({ extended: false });
+const json = express.json();
+
+// Dynamic Client Registration (RFC 7591) — MCP connectors self-register.
+// Rate-limited since it is unauthenticated + creates rows.
+router.post('/register', perRouteLimit({ windowMs: 60_000, max: 10 }), json, ctrl.register);
 
 // Login + consent screen.
 router.get('/authorize', ctrl.authorize);

@@ -86,6 +86,39 @@ export function redirectUriAllowed(client: OAuthClient, redirectUri: string): bo
   return Array.isArray(client.redirect_uris) && client.redirect_uris.includes(redirectUri);
 }
 
+export interface NewClient {
+  name: string;
+  redirectUris: string[];
+  allowedScopes: OAuthScope[];
+  isConfidential: boolean;
+}
+
+export interface CreatedClient {
+  client_id: string;
+  client_secret?: string;   // returned ONCE, only for confidential clients
+}
+
+/**
+ * Register a new OAuth client (Dynamic Client Registration, RFC 7591). The
+ * client_id is public; the secret (confidential clients only) is returned once
+ * and only its SHA-256 hash is stored.
+ */
+export async function createClient(input: NewClient): Promise<CreatedClient> {
+  const clientId = `kin_${randomToken(16)}`;
+  const secret = input.isConfidential ? randomToken(32) : undefined;
+  const { error } = await db().from('oauth_clients').insert({
+    client_id: clientId,
+    client_secret_hash: secret ? sha256(secret) : null,
+    name: input.name,
+    redirect_uris: input.redirectUris,
+    allowed_scopes: input.allowedScopes,
+    is_confidential: input.isConfidential,
+    is_active: true,
+  });
+  if (error) throw new Error(`createClient: ${error.message}`);
+  return { client_id: clientId, ...(secret ? { client_secret: secret } : {}) };
+}
+
 // --------------------------------------------------------- authorization ----
 
 export interface NewAuthCode {
