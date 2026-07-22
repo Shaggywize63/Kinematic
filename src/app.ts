@@ -95,6 +95,8 @@ import distConsumerRegRoutes   from './routes/distribution/consumer-registration
 import distGstinRoutes         from './routes/distribution/gstin.routes';
 import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
+import oauthRoutes             from './routes/oauth.routes';
+import { authorizationServerMetadata } from './controllers/oauth.controller';
 import verifiedSendersRoutes   from './routes/crm/verified-senders.routes';
 import verifiedSendersPublicRoutes from './routes/crm/verified-senders-public.routes';
 import emailAlertsRoutes       from './routes/crm/email-alerts.routes';
@@ -344,6 +346,16 @@ app.use(`${V1}/kini/public`, kiniPublicRoutes);
 // don't get short-circuited by requireAuth (which would 401 on a
 // missing Supabase JWT).
 app.use(`${V1}/cron`, cronRoutes);
+
+// ── OAuth 2.0 authorization server (NO user JWT) ─────────────────
+// Powers "Connect your Kinematic account" for external assistants (ChatGPT
+// Apps, Claude connectors) via the MCP server. Mounted at ROOT (outside
+// /api/v1, so the auth catch-all never sees it) — /authorize + /token
+// authenticate the user themselves and issue OAuth tokens; the MCP server
+// (Phase 2) then validates those tokens with requireOAuth. The RFC 8414
+// discovery document lets MCP clients find these endpoints automatically.
+app.get('/.well-known/oauth-authorization-server', authorizationServerMetadata);
+app.use('/oauth', oauthRoutes);
 
 // ── Demo intercept for non-CRM modules ──────────────────────────
 // Mounted before the protected route handlers so demo-org requests get

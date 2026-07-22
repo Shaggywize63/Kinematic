@@ -65,6 +65,11 @@ export interface AuthUser {
 export type AuthRequest = Request & {
   user?: AuthUser;
   accessToken?: string;
+  // Present when the request was authenticated with an OAuth access token
+  // (external assistant via the MCP server) rather than a Supabase JWT. Carries
+  // the connecting client and the scopes the user consented to. Tool handlers
+  // intersect these scopes with the user's real RBAC before acting.
+  oauth?: { clientId: string; scopes: string[] };
   // Per-request CRM analytics visibility scope (assigned cities + role
   // hierarchy), computed once by the analytics router middleware. Structural
   // match for analytics.service AnalyticsScope (kept inline to avoid a
