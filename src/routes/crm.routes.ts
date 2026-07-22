@@ -56,6 +56,7 @@ import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, sta
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
 import * as consentSvc from '../services/crm/consent.service';
+import * as nomineeSvc from '../services/crm/nominee.service';
 import { isMinor } from '../lib/age';
 
 const router: Router = express.Router();
@@ -4943,5 +4944,47 @@ consent.get('/', wrap(async (req, res) => {
 }));
 
 router.use('/consent', consent);
+
+// ---------------------------------------------------------------------------
+// Nominee register (DPDP §14) — a Data Principal's nominee to exercise their
+// rights on death/incapacity. Staff-captured; requireAuth is global on /crm.
+// ---------------------------------------------------------------------------
+const nominees = express.Router();
+
+function nomineeScope(req: Request): nomineeSvc.NomineeScope {
+  return { orgId: orgId(req), clientId: clientScope(req).id };
+}
+
+// POST /crm/nominees — record a nominee.
+nominees.post('/', wrap(async (req, res) => {
+  const p = parse(v.nomineeRecordSchema, req.body);
+  const row = await nomineeSvc.recordNominee(nomineeScope(req), {
+    subjectType: p.subject_type,
+    subjectId: p.subject_id,
+    nomineeName: p.nominee_name,
+    nomineeRelationship: p.nominee_relationship ?? null,
+    nomineeContact: p.nominee_contact ?? null,
+    notes: p.notes ?? null,
+    actorUserId: userId(req) ?? null,
+  });
+  res.status(201).json(row);
+}));
+
+// GET /crm/nominees?subject_type=&subject_id= — list nominees.
+nominees.get('/', wrap(async (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  const subjectType = q.subject_type as nomineeSvc.NomineeSubjectType | undefined;
+  res.json(await nomineeSvc.listNominees(nomineeScope(req), {
+    subjectType: subjectType && ['lead', 'contact', 'employee'].includes(subjectType) ? subjectType : undefined,
+    subjectId: q.subject_id,
+  }));
+}));
+
+// POST /crm/nominees/:id/revoke — revoke a nominee.
+nominees.post('/:id/revoke', wrap(async (req, res) => {
+  res.json(await nomineeSvc.revokeNominee(nomineeScope(req), req.params.id, userId(req) ?? null));
+}));
+
+router.use('/nominees', nominees);
 
 export default router;

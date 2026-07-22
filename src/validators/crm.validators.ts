@@ -34,6 +34,16 @@ export const consentInlineSchema = z.object({
   source: z.string().max(200).nullish(),
 });
 
+// Nominee register (DPDP §14).
+export const nomineeRecordSchema = z.object({
+  subject_type: consentSubjectType,
+  subject_id: uuid,
+  nominee_name: z.string().min(1).max(200),
+  nominee_relationship: z.string().max(120).nullish(),
+  nominee_contact: z.string().max(200).nullish(),
+  notes: z.string().max(1000).nullish(),
+});
+
 export const consentWithdrawSchema = z.object({
   id: uuid.optional(),
   subject_type: consentSubjectType.optional(),
