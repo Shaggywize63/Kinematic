@@ -112,6 +112,36 @@ export function requireModuleAccess(moduleName: string) {
 }
 
 /**
+ * Pure predicate form of requireModuleAccess — same decision, no Express req/res.
+ * Used by the MCP server so an assistant tool enforces exactly the module gate
+ * the HTTP routes enforce (read vs write per the user's org_role). super_admin
+ * passes; the client entitlement is a necessary upper bound; role permissions
+ * (read/write) are authoritative when an org_role is attached, else the legacy
+ * per-user/entitlement fallback applies.
+ */
+export function moduleAccessAllowed(user: AuthRequest['user'], moduleName: string, isWrite: boolean): boolean {
+  if (!user) return false;
+  const role = user.role?.toLowerCase();
+  if (role === 'super_admin') return true;
+
+  const entitlements = user.enabled_modules || [];
+  if (entitlements.length > 0 && !entitlements.includes(moduleName)) return false;
+
+  if (hasRoleGovernedPerms(user)) {
+    const readPerms = user.role_permissions || [];
+    const writePerms = (user.role_permissions_write && user.role_permissions_write.length > 0)
+      ? user.role_permissions_write
+      : readPerms;
+    const perms = isWrite ? writePerms : readPerms;
+    return perms.includes(moduleName);
+  }
+
+  const permissions = user.permissions || [];
+  if (permissions.includes(moduleName)) return true;
+  return entitlements.includes(moduleName);
+}
+
+/**
  * Lenient variant — passes when the user has access to ANY of the
  * supplied modules (read or write depending on the request method).
  * Used by routes whose semantics span multiple modules (e.g. the

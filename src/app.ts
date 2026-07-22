@@ -97,6 +97,9 @@ import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
 import oauthRoutes             from './routes/oauth.routes';
 import { authorizationServerMetadata } from './controllers/oauth.controller';
+import { requireOAuth }         from './middleware/oauthAuth';
+import { mcpHandler, protectedResourceMetadata } from './mcp/server';
+import { AuthRequest }          from './types';
 import verifiedSendersRoutes   from './routes/crm/verified-senders.routes';
 import verifiedSendersPublicRoutes from './routes/crm/verified-senders-public.routes';
 import emailAlertsRoutes       from './routes/crm/email-alerts.routes';
@@ -356,6 +359,27 @@ app.use(`${V1}/cron`, cronRoutes);
 // discovery document lets MCP clients find these endpoints automatically.
 app.get('/.well-known/oauth-authorization-server', authorizationServerMetadata);
 app.use('/oauth', oauthRoutes);
+
+// ── MCP server (OAuth-protected) ─────────────────────────────────
+// The Streamable-HTTP endpoint external assistants (ChatGPT Apps, Claude
+// connectors) call once connected. requireOAuth validates the opaque token,
+// hydrates req.user, and runs the request in the token's project; each tool
+// then enforces scope ∩ RBAC + audit. RFC 9728 protected-resource metadata
+// points clients at the authorization server so the OAuth flow can start.
+const mcpPublicBase = (req: express.Request) =>
+  (process.env.API_PUBLIC_URL || '').replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`;
+app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'],
+  (req, res) => { res.json(protectedResourceMetadata(mcpPublicBase(req))); });
+app.post('/mcp',
+  express.json(),
+  (req, res, next) => {
+    res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${mcpPublicBase(req)}/.well-known/oauth-protected-resource"`);
+    next();
+  },
+  requireOAuth(),
+  (req, res) => { void mcpHandler(req as AuthRequest, res); });
+// Stateless server: GET (SSE) / DELETE (session end) are not used.
+app.all('/mcp', (_req, res) => { res.status(405).json({ error: 'method_not_allowed' }); });
 
 // ── Demo intercept for non-CRM modules ──────────────────────────
 // Mounted before the protected route handlers so demo-org requests get
