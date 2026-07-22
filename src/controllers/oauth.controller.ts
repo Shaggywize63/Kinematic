@@ -339,17 +339,42 @@ export const token = asyncHandler<Request>(async (req, res) => {
   const { clientId, clientSecret } = clientCredentials(req);
 
   const client = await getClient(clientId);
-  if (!client) return tokenError(res, 401, 'invalid_client');
-  if (!verifyClientSecret(client, clientSecret)) return tokenError(res, 401, 'invalid_client');
+  if (!client) {
+    logger.warn(`[OAuth] token: unknown client "${clientId}" grant=${grantType}`);
+    return tokenError(res, 401, 'invalid_client');
+  }
+
+  // Client authentication. For the authorization_code grant, a valid PKCE
+  // code_verifier already proves possession (OAuth 2.1 §4.1.3 / MCP auth spec),
+  // so a client that omits its secret is still allowed — PKCE is enforced in
+  // consumeAuthCode below. A *wrong* secret is always rejected. Every other
+  // grant (refresh_token) keeps strict client authentication.
+  const presentedSecret = !!clientSecret;
+  const secretOk = verifyClientSecret(client, clientSecret);
+  if (grantType === 'authorization_code') {
+    if (presentedSecret && !secretOk) {
+      logger.warn(`[OAuth] token: bad client_secret client=${clientId} (authorization_code)`);
+      return tokenError(res, 401, 'invalid_client');
+    }
+  } else if (!secretOk) {
+    logger.warn(`[OAuth] token: client auth failed client=${clientId} grant=${grantType} confidential=${client.is_confidential} presented=${presentedSecret}`);
+    return tokenError(res, 401, 'invalid_client');
+  }
 
   if (grantType === 'authorization_code') {
     const code = String(b.code || '');
     const redirectUri = String(b.redirect_uri || '');
     const codeVerifier = String(b.code_verifier || '');
-    if (!code || !redirectUri || !codeVerifier) return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
+    if (!code || !redirectUri || !codeVerifier) {
+      logger.warn(`[OAuth] token: missing code/redirect_uri/code_verifier client=${clientId} hasCode=${!!code} hasRedirect=${!!redirectUri} hasVerifier=${!!codeVerifier}`);
+      return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
+    }
 
     const grant = await consumeAuthCode({ code, clientId, redirectUri, codeVerifier });
-    if (!grant) return tokenError(res, 400, 'invalid_grant');
+    if (!grant) {
+      logger.warn(`[OAuth] token: invalid_grant client=${clientId} redirect="${redirectUri}" vlen=${codeVerifier.length} secretSent=${presentedSecret}`);
+      return tokenError(res, 400, 'invalid_grant');
+    }
 
     const tokens = await issueTokens({
       clientId, userId: grant.user_id, projectKey: grant.project_key, orgId: grant.org_id, scopes: grant.scopes,
