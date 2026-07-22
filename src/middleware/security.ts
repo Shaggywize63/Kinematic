@@ -247,6 +247,11 @@ export function strictJson(req: Request, res: Response, next: NextFunction) {
   const ct = String(req.headers['content-type'] || '');
   if (ct.startsWith('multipart/form-data') || ct === '') return next();
   if (ct.startsWith('application/json')) return next();
+  // OAuth 2.0 token / authorize / revoke endpoints use
+  // application/x-www-form-urlencoded per RFC 6749 / 7009 (the login-consent
+  // form and the connectors POST form-encoded). Allow it on the public /oauth
+  // paths only — they have their own urlencoded parser + strict validation.
+  if (ct.startsWith('application/x-www-form-urlencoded') && req.path.startsWith('/oauth')) return next();
   res.status(415).json({ success: false, error: 'Content-Type must be application/json', request_id: (req as any).id });
 }
 
