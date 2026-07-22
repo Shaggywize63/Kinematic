@@ -115,7 +115,7 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
   const [profileRes, permsRes, citiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
-      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, active_session_id, active_session_device, org_role_id')
+      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, active_session_id, active_session_device, org_role_id')
       .eq('id', userId)
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', userId),
@@ -360,7 +360,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const [profileRes, permsRes, citiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
-      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, active_session_id, active_session_device, org_role_id')
+      .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, active_session_id, active_session_device, org_role_id')
       .eq('id', verified.sub)
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', verified.sub),
