@@ -1454,7 +1454,8 @@ contacts.get('/', wrap(async (req, res) => {
 }));
 contacts.post('/', wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
-  const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
+  const { _consent: consentInput, ...rest } = parsed;
+  const payload: Record<string, unknown> = { ...rest, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
   // Validate admin-defined contact custom fields (type coercion, lookup-id
   // canonicalisation, formula stamping) — mirrors the lead/deal/activity paths.
@@ -1464,11 +1465,33 @@ contacts.post('/', wrap(async (req, res) => {
       payload.custom_fields as Record<string, unknown>,
     );
   }
-  res.status(201).json(await stampOwnerName(await crud.create('crm_contacts', orgId(req), payload, userId(req))));
+  const contact = await crud.create('crm_contacts', orgId(req), payload, userId(req));
+  // DPDP §6 — record consent captured at collection against the new contact.
+  if (consentInput && contact?.id) {
+    try {
+      await consentSvc.recordConsent(
+        { orgId: orgId(req), clientId: payload.client_id as string | null ?? null },
+        {
+          subjectType: 'contact',
+          subjectId: contact.id,
+          purpose: 'lead_pii',
+          consented: consentInput.consented,
+          method: consentInput.method ?? 'web_form',
+          source: consentInput.source ?? 'contact_create',
+          noticeVersion: consentInput.notice_version ?? null,
+          actorUserId: userId(req) ?? null,
+        },
+      );
+    } catch (e) {
+      console.warn(`[consent] recordConsent on contact create failed: ${(e as Error).message}`);
+    }
+  }
+  res.status(201).json(await stampOwnerName(contact));
 }));
 contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id, true, clientScope(req).id)))));
 contacts.patch('/:id', wrap(async (req, res) => {
-  const payload = parse(v.contactSchema.partial(), req.body) as Record<string, unknown>;
+  const { _consent: _dropConsent, ...parsed } = parse(v.contactSchema.partial(), req.body);
+  const payload = parsed as Record<string, unknown>;
   sanitizeOwnerId(req, payload);
   if (payload.custom_fields !== undefined) {
     payload.custom_fields = await validateAndStampCustomFields(

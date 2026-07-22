@@ -25,6 +25,15 @@ export const consentRecordSchema = z.object({
   notes: z.string().max(1000).nullish(),
 });
 
+// Inline consent block accepted on lead/contact CREATE (popped before insert,
+// written to the crm_consents ledger against the new row). DPDP §5/§6.
+export const consentInlineSchema = z.object({
+  consented: z.boolean(),
+  method: consentMethod.optional(),
+  notice_version: z.string().max(50).nullish(),
+  source: z.string().max(200).nullish(),
+});
+
 export const consentWithdrawSchema = z.object({
   id: uuid.optional(),
   subject_type: consentSubjectType.optional(),
@@ -150,12 +159,7 @@ const leadCreateBase = z.object({
   // Popped before the insert (not a crm_leads column) and written to the
   // crm_consents ledger against the new lead id. `consented:false` records an
   // explicit refusal. notice_version pins which notice text the principal saw.
-  _consent: z.object({
-    consented: z.boolean(),
-    method: z.enum(['in_app','web_form','verbal','imported','api']).optional(),
-    notice_version: z.string().max(50).optional().nullable(),
-    source: z.string().max(200).optional().nullable(),
-  }).optional(),
+  _consent: consentInlineSchema.optional(),
   // Accepted but ignored — the activity subject is now derived from the
   // existing first_visit_date custom field on the lead, so we no longer
   // need a separate flag. Kept in the schema only so older clients still
@@ -275,6 +279,9 @@ export const contactSchema = z.object({
   total_orders: z.number().int().nonnegative().optional(),
   last_purchase_at: isoDate,
   referral_source: z.string().max(120).optional().nullable(),
+  // DPDP §5/§6 — consent captured at collection (popped before insert, recorded
+  // in crm_consents against the new contact).
+  _consent: consentInlineSchema.optional(),
 });
 
 export const accountSchema = z.object({
