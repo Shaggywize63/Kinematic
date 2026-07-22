@@ -175,12 +175,12 @@ export async function consumeAuthCode(args: {
     .select('id, client_id, user_id, project_key, org_id, redirect_uri, scopes, code_challenge, code_challenge_method, expires_at, consumed_at')
     .eq('code_hash', sha256(args.code))
     .maybeSingle();
-  if (error || !data) return null;
-  if (data.consumed_at) return null;
-  if (new Date(data.expires_at).getTime() < Date.now()) return null;
-  if (data.client_id !== args.clientId) return null;
-  if (data.redirect_uri !== args.redirectUri) return null;
-  if (!verifyPkce(args.codeVerifier, data.code_challenge, data.code_challenge_method)) return null;
+  if (error || !data) { logger.warn(`[OAuth] consume: code not found (err=${error?.message || 'none'})`); return null; }
+  if (data.consumed_at) { logger.warn('[OAuth] consume: code already consumed'); return null; }
+  if (new Date(data.expires_at).getTime() < Date.now()) { logger.warn('[OAuth] consume: code expired'); return null; }
+  if (data.client_id !== args.clientId) { logger.warn(`[OAuth] consume: client mismatch stored=${data.client_id} got=${args.clientId}`); return null; }
+  if (data.redirect_uri !== args.redirectUri) { logger.warn(`[OAuth] consume: redirect_uri mismatch stored="${data.redirect_uri}" got="${args.redirectUri}"`); return null; }
+  if (!verifyPkce(args.codeVerifier, data.code_challenge, data.code_challenge_method)) { logger.warn(`[OAuth] consume: PKCE verify failed method=${data.code_challenge_method} challengeLen=${(data.code_challenge || '').length} verifierLen=${args.codeVerifier.length}`); return null; }
 
   // Mark consumed; guard against a concurrent double-exchange by requiring the
   // row to still be unconsumed at update time.
