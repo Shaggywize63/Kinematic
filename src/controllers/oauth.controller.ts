@@ -71,6 +71,8 @@ export const authorizationServerMetadata = (req: Request, res: Response) => {
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
+    // RFC 9207 — we return `iss` on every authorization response.
+    authorization_response_iss_parameter_supported: true,
   });
 };
 
@@ -211,11 +213,13 @@ function errorHtml(base: string, message: string): string {
 }
 
 /** Append an OAuth error to the client's redirect_uri and 302 there. */
-function redirectError(res: Response, redirectUri: string, error: string, state: string, description?: string) {
+function redirectError(res: Response, iss: string, redirectUri: string, error: string, state: string, description?: string) {
   const u = new URL(redirectUri);
   u.searchParams.set('error', error);
   if (description) u.searchParams.set('error_description', description);
   if (state) u.searchParams.set('state', state);
+  // RFC 9207 — issuer identification lets the client bind the response to this AS.
+  if (iss) u.searchParams.set('iss', iss);
   res.redirect(302, u.toString());
 }
 
@@ -223,27 +227,39 @@ function redirectError(res: Response, redirectUri: string, error: string, state:
 export const authorize = asyncHandler<Request>(async (req, res) => {
   const base = publicBase(req);
   const params = readAuthorizeParams(req.query as Record<string, unknown>);
+  await recordTokenDebug('authorize_get:received', {
+    clientId: params.clientId, redirect: params.redirectUri, responseType: params.responseType,
+    hasPkce: !!params.codeChallenge, scopeReq: params.scope, hasState: !!params.state,
+  });
 
   const client = await getClient(params.clientId);
   // Invalid client or redirect_uri: must NOT redirect (would be an open redirect).
-  if (!client) return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
+  if (!client) {
+    await recordTokenDebug('authorize_get:unknown_client', { clientId: params.clientId });
+    return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
+  }
   if (!params.redirectUri || !redirectUriAllowed(client, params.redirectUri)) {
+    await recordTokenDebug('authorize_get:bad_redirect', { clientId: params.clientId, redirect: params.redirectUri, allowed: client.redirect_uris });
     return sendHtml(res, 400, errorHtml(base, 'This application is not allowed to use that redirect address.'));
   }
   // From here, protocol errors are reported back to the client via redirect.
   if (params.responseType !== 'code') {
-    return redirectError(res, params.redirectUri, 'unsupported_response_type', params.state);
+    await recordTokenDebug('authorize_get:bad_response_type', { responseType: params.responseType });
+    return redirectError(res, base, params.redirectUri, 'unsupported_response_type', params.state);
   }
   if (!params.codeChallenge) {
-    return redirectError(res, params.redirectUri, 'invalid_request', params.state, 'PKCE code_challenge is required');
+    await recordTokenDebug('authorize_get:no_pkce', { clientId: params.clientId });
+    return redirectError(res, base, params.redirectUri, 'invalid_request', params.state, 'PKCE code_challenge is required');
   }
   const requested = parseScopes(params.scope);
   const allowed = new Set(client.allowed_scopes as OAuthScope[]);
   const scopes = requested.filter((s) => allowed.has(s));
   if (scopes.length === 0) {
-    return redirectError(res, params.redirectUri, 'invalid_scope', params.state, 'No permitted scopes requested');
+    await recordTokenDebug('authorize_get:invalid_scope', { scopeReq: params.scope, allowed: [...allowed] });
+    return redirectError(res, base, params.redirectUri, 'invalid_scope', params.state, 'No permitted scopes requested');
   }
 
+  await recordTokenDebug('authorize_get:ok', { clientId: params.clientId, scopeOk: scopes.length });
   sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes }));
 });
 
@@ -255,22 +271,33 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   const email = String((req.body as any)?.email || '').trim();
   const password = String((req.body as any)?.password || '');
 
+  await recordTokenDebug('authorize_post:received', {
+    clientId: params.clientId, decision, hasEmail: !!email, hasPassword: !!password, redirect: params.redirectUri,
+  });
+
   const client = await getClient(params.clientId);
-  if (!client) return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
+  if (!client) {
+    await recordTokenDebug('authorize_post:unknown_client', { clientId: params.clientId });
+    return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
+  }
   if (!params.redirectUri || !redirectUriAllowed(client, params.redirectUri)) {
+    await recordTokenDebug('authorize_post:bad_redirect', { clientId: params.clientId, redirect: params.redirectUri });
     return sendHtml(res, 400, errorHtml(base, 'This application is not allowed to use that redirect address.'));
   }
 
   const allowed = new Set(client.allowed_scopes as OAuthScope[]);
   const scopes = parseScopes(params.scope).filter((s) => allowed.has(s));
   if (scopes.length === 0) {
-    return redirectError(res, params.redirectUri, 'invalid_scope', params.state);
+    await recordTokenDebug('authorize_post:invalid_scope', { scopeReq: params.scope });
+    return redirectError(res, base, params.redirectUri, 'invalid_scope', params.state);
   }
 
   if (decision !== 'allow') {
-    return redirectError(res, params.redirectUri, 'access_denied', params.state, 'User denied the request');
+    await recordTokenDebug('authorize_post:denied', { decision });
+    return redirectError(res, base, params.redirectUri, 'access_denied', params.state, 'User denied the request');
   }
   if (!email || !password) {
+    await recordTokenDebug('authorize_post:missing_creds', { hasEmail: !!email, hasPassword: !!password });
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Enter your email and password.' }));
   }
 
@@ -319,8 +346,12 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   });
 
   logger.info(`[OAuth] issued code for user ${userId} (project=${project}) to client ${client.client_id} scopes=[${scopes.join(',')}]`);
+  await recordTokenDebug('authorize_post:code_issued', { clientId: client.client_id, userId, projectKey: project });
   const u = new URL(params.redirectUri);
   u.searchParams.set('code', code);
+  // RFC 9207 — some clients (incl. strict MCP connectors) require the issuer on
+  // the authorization response before they will exchange the code.
+  u.searchParams.set('iss', base);
   if (params.state) u.searchParams.set('state', params.state);
   res.redirect(302, u.toString());
 });
