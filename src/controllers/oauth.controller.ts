@@ -230,6 +230,9 @@ export const authorize = asyncHandler<Request>(async (req, res) => {
   await recordTokenDebug('authorize_get:received', {
     clientId: params.clientId, redirect: params.redirectUri, responseType: params.responseType,
     hasPkce: !!params.codeChallenge, scopeReq: params.scope, hasState: !!params.state,
+    // Capture EVERY query param the client sends (e.g. RFC 8707 `resource`) so
+    // ChatGPT-specific requirements are visible without guessing.
+    rawQuery: JSON.stringify(req.query),
   });
 
   const client = await getClient(params.clientId);
@@ -346,7 +349,10 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   });
 
   logger.info(`[OAuth] issued code for user ${userId} (project=${project}) to client ${client.client_id} scopes=[${scopes.join(',')}]`);
-  await recordTokenDebug('authorize_post:code_issued', { clientId: client.client_id, userId, projectKey: project });
+  await recordTokenDebug('authorize_post:code_issued', {
+    clientId: client.client_id, userId, projectKey: project,
+    iss: base, stateLen: params.state.length, redirect: params.redirectUri,
+  });
   const u = new URL(params.redirectUri);
   u.searchParams.set('code', code);
   // RFC 9207 — some clients (incl. strict MCP connectors) require the issuer on
