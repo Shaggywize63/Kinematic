@@ -1,6 +1,5 @@
 import app from './app';
 import { logger } from './lib/logger';
-import { adminClientFor } from './lib/projects';
 import { loadDynamicProjects } from './lib/platformProjects';
 import { runScheduledAutomations } from './services/crm/automations.service';
 import { runDueReportDigests } from './services/crm/reportSchedules.service';
@@ -14,22 +13,6 @@ const server = app.listen(PORT, () => {
   logger.info(`   Health      : http://localhost:${PORT}/health`);
   logger.info(`   API base    : http://localhost:${PORT}/api/v1`);
 });
-
-// Boot marker — record which commit is actually live in a table we can query,
-// so deploy status is verifiable from the DB when Railway logs aren't reachable
-// from tooling. Best-effort; never blocks startup.
-void (async () => {
-  try {
-    const sha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || 'unknown';
-    await adminClientFor('default').from('oauth_action_audit').insert({
-      tool: 'boot', scopes: [], outcome: 'ok',
-      request: { commit: sha, node_env: process.env.NODE_ENV || 'development', started_at: new Date().toISOString() },
-    });
-    logger.info(`[startup] boot marker recorded (commit=${sha})`);
-  } catch (e: any) {
-    logger.warn(`[startup] boot marker failed: ${e?.message ?? e}`);
-  }
-})();
 
 // Hydrate the dynamic project registry with any client projects created by the
 // onboarding provisioner. Non-fatal: a failure just means those tenants aren't
