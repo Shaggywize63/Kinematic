@@ -3030,6 +3030,30 @@ router.post('/automation-scheduler/run', wrap(async (req, res) => {
   if (role !== 'super_admin') throw new AppError(403, 'super_admin only', 'FORBIDDEN');
   res.json(await automationsSvc.runScheduledAutomations());
 }));
+// Query shim for the custom-fields catalogue. Registered BEFORE the generic
+// attach() router so both fixes apply to every verb:
+//  1. `entity` → `entity_type`. The column is entity_type, but the mobile
+//     clients still send the legacy `entity` param — the generic list helper
+//     .eq()s every non-reserved query key verbatim, so `?entity=lead` was
+//     500ing with `column crm_custom_field_defs.entity does not exist`
+//     (seen live in the Tata Postgres logs) and the app got no fields.
+//  2. GET defaults to ACTIVE definitions only. Deleting/reconciling a field
+//     tombstones it (is_active=false), but the generic list never filtered
+//     is_active, so "deleted" fields kept rendering on the mobile forms.
+//     Admin/tooling can pass include_inactive=1 to see tombstones.
+router.use('/custom-fields', (req, _res, next) => {
+  const q = req.query as Record<string, unknown>;
+  if (q.entity !== undefined) {
+    if (q.entity_type === undefined) q.entity_type = q.entity;
+    delete q.entity;
+  }
+  if (req.method === 'GET') {
+    const wantsInactive = q.include_inactive !== undefined && String(q.include_inactive) !== '0' && String(q.include_inactive) !== 'false';
+    delete q.include_inactive; // never let it reach the generic .eq() loop
+    if (!wantsInactive && q.is_active === undefined) q.is_active = 'true';
+  }
+  next();
+});
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
 
 // ── Scheduled report digests ───────────────────────────────────────────────
