@@ -21,7 +21,7 @@ import {
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import {
   getClient, verifyClientSecret, redirectUriAllowed, createAuthCode, consumeAuthCode,
-  issueTokens, rotateRefreshToken, revokeToken, createClient, recordTokenDebug,
+  issueTokens, rotateRefreshToken, revokeToken, createClient,
 } from '../lib/oauth/store';
 import {
   ALL_SCOPES, OAUTH_SCOPES, parseScopes, scopeLabels, type OAuthScope,
@@ -227,42 +227,27 @@ function redirectError(res: Response, iss: string, redirectUri: string, error: s
 export const authorize = asyncHandler<Request>(async (req, res) => {
   const base = publicBase(req);
   const params = readAuthorizeParams(req.query as Record<string, unknown>);
-  await recordTokenDebug('authorize_get:received', {
-    clientId: params.clientId, redirect: params.redirectUri, responseType: params.responseType,
-    hasPkce: !!params.codeChallenge, scopeReq: params.scope, hasState: !!params.state,
-    // Capture EVERY query param the client sends (e.g. RFC 8707 `resource`) so
-    // ChatGPT-specific requirements are visible without guessing.
-    rawQuery: JSON.stringify(req.query),
-  });
 
   const client = await getClient(params.clientId);
   // Invalid client or redirect_uri: must NOT redirect (would be an open redirect).
-  if (!client) {
-    await recordTokenDebug('authorize_get:unknown_client', { clientId: params.clientId });
-    return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
-  }
+  if (!client) return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
   if (!params.redirectUri || !redirectUriAllowed(client, params.redirectUri)) {
-    await recordTokenDebug('authorize_get:bad_redirect', { clientId: params.clientId, redirect: params.redirectUri, allowed: client.redirect_uris });
     return sendHtml(res, 400, errorHtml(base, 'This application is not allowed to use that redirect address.'));
   }
   // From here, protocol errors are reported back to the client via redirect.
   if (params.responseType !== 'code') {
-    await recordTokenDebug('authorize_get:bad_response_type', { responseType: params.responseType });
     return redirectError(res, base, params.redirectUri, 'unsupported_response_type', params.state);
   }
   if (!params.codeChallenge) {
-    await recordTokenDebug('authorize_get:no_pkce', { clientId: params.clientId });
     return redirectError(res, base, params.redirectUri, 'invalid_request', params.state, 'PKCE code_challenge is required');
   }
   const requested = parseScopes(params.scope);
   const allowed = new Set(client.allowed_scopes as OAuthScope[]);
   const scopes = requested.filter((s) => allowed.has(s));
   if (scopes.length === 0) {
-    await recordTokenDebug('authorize_get:invalid_scope', { scopeReq: params.scope, allowed: [...allowed] });
     return redirectError(res, base, params.redirectUri, 'invalid_scope', params.state, 'No permitted scopes requested');
   }
 
-  await recordTokenDebug('authorize_get:ok', { clientId: params.clientId, scopeOk: scopes.length });
   sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes }));
 });
 
@@ -274,33 +259,22 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   const email = String((req.body as any)?.email || '').trim();
   const password = String((req.body as any)?.password || '');
 
-  await recordTokenDebug('authorize_post:received', {
-    clientId: params.clientId, decision, hasEmail: !!email, hasPassword: !!password, redirect: params.redirectUri,
-  });
-
   const client = await getClient(params.clientId);
-  if (!client) {
-    await recordTokenDebug('authorize_post:unknown_client', { clientId: params.clientId });
-    return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
-  }
+  if (!client) return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
   if (!params.redirectUri || !redirectUriAllowed(client, params.redirectUri)) {
-    await recordTokenDebug('authorize_post:bad_redirect', { clientId: params.clientId, redirect: params.redirectUri });
     return sendHtml(res, 400, errorHtml(base, 'This application is not allowed to use that redirect address.'));
   }
 
   const allowed = new Set(client.allowed_scopes as OAuthScope[]);
   const scopes = parseScopes(params.scope).filter((s) => allowed.has(s));
   if (scopes.length === 0) {
-    await recordTokenDebug('authorize_post:invalid_scope', { scopeReq: params.scope });
     return redirectError(res, base, params.redirectUri, 'invalid_scope', params.state);
   }
 
   if (decision !== 'allow') {
-    await recordTokenDebug('authorize_post:denied', { decision });
     return redirectError(res, base, params.redirectUri, 'access_denied', params.state, 'User denied the request');
   }
   if (!email || !password) {
-    await recordTokenDebug('authorize_post:missing_creds', { hasEmail: !!email, hasPassword: !!password });
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Enter your email and password.' }));
   }
 
@@ -349,10 +323,6 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   });
 
   logger.info(`[OAuth] issued code for user ${userId} (project=${project}) to client ${client.client_id} scopes=[${scopes.join(',')}]`);
-  await recordTokenDebug('authorize_post:code_issued', {
-    clientId: client.client_id, userId, projectKey: project,
-    iss: base, stateLen: params.state.length, redirect: params.redirectUri,
-  });
   const u = new URL(params.redirectUri);
   u.searchParams.set('code', code);
   // RFC 9207 — some clients (incl. strict MCP connectors) require the issuer on
@@ -375,22 +345,8 @@ export const token = asyncHandler<Request>(async (req, res) => {
   const grantType = String(b.grant_type || '');
   const { clientId, clientSecret } = clientCredentials(req);
 
-  // DB-visible trace of what the client actually sent (no secrets).
-  await recordTokenDebug('received', {
-    clientId, grantType,
-    presentedSecret: !!clientSecret,
-    authHeader: req.headers.authorization ? (String(req.headers.authorization).startsWith('Basic ') ? 'basic' : 'other') : 'none',
-    hasCode: !!b.code, hasRedirect: !!b.redirect_uri, hasVerifier: !!b.code_verifier,
-    redirectUri: b.redirect_uri ? String(b.redirect_uri) : null,
-    verifierLen: b.code_verifier ? String(b.code_verifier).length : 0,
-  });
-
   const client = await getClient(clientId);
-  if (!client) {
-    logger.warn(`[OAuth] token: unknown client "${clientId}" grant=${grantType}`);
-    await recordTokenDebug('unknown_client', { clientId, grantType });
-    return tokenError(res, 401, 'invalid_client');
-  }
+  if (!client) return tokenError(res, 401, 'invalid_client');
 
   // Client authentication. For the authorization_code grant, a valid PKCE
   // code_verifier already proves possession (OAuth 2.1 §4.1.3 / MCP auth spec),
@@ -400,14 +356,8 @@ export const token = asyncHandler<Request>(async (req, res) => {
   const presentedSecret = !!clientSecret;
   const secretOk = verifyClientSecret(client, clientSecret);
   if (grantType === 'authorization_code') {
-    if (presentedSecret && !secretOk) {
-      logger.warn(`[OAuth] token: bad client_secret client=${clientId} (authorization_code)`);
-      await recordTokenDebug('bad_secret', { clientId });
-      return tokenError(res, 401, 'invalid_client');
-    }
+    if (presentedSecret && !secretOk) return tokenError(res, 401, 'invalid_client');
   } else if (!secretOk) {
-    logger.warn(`[OAuth] token: client auth failed client=${clientId} grant=${grantType} confidential=${client.is_confidential} presented=${presentedSecret}`);
-    await recordTokenDebug('client_auth_failed', { clientId, grantType, confidential: client.is_confidential, presentedSecret });
     return tokenError(res, 401, 'invalid_client');
   }
 
@@ -415,21 +365,14 @@ export const token = asyncHandler<Request>(async (req, res) => {
     const code = String(b.code || '');
     const redirectUri = String(b.redirect_uri || '');
     const codeVerifier = String(b.code_verifier || '');
-    if (!code || !redirectUri || !codeVerifier) {
-      logger.warn(`[OAuth] token: missing code/redirect_uri/code_verifier client=${clientId} hasCode=${!!code} hasRedirect=${!!redirectUri} hasVerifier=${!!codeVerifier}`);
-      return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
-    }
+    if (!code || !redirectUri || !codeVerifier) return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
 
     const grant = await consumeAuthCode({ code, clientId, redirectUri, codeVerifier });
-    if (!grant) {
-      logger.warn(`[OAuth] token: invalid_grant client=${clientId} redirect="${redirectUri}" vlen=${codeVerifier.length} secretSent=${presentedSecret}`);
-      return tokenError(res, 400, 'invalid_grant');
-    }
+    if (!grant) return tokenError(res, 400, 'invalid_grant');
 
     const tokens = await issueTokens({
       clientId, userId: grant.user_id, projectKey: grant.project_key, orgId: grant.org_id, scopes: grant.scopes,
     });
-    await recordTokenDebug('success:authorization_code', { clientId, userId: grant.user_id, projectKey: grant.project_key });
     res.setHeader('Cache-Control', 'no-store');
     return res.json(tokens);
   }
