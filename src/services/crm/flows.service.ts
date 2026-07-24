@@ -1,27 +1,24 @@
 /**
- * Phase 2 automation flows — ordered + time-aware execution engine.
+ * Phase 2 automation flows — ordered + time-aware + branching execution engine.
  *
- * A "flow" (crm_flows) = a trigger + shared conditions + an ordered set of
- * steps (crm_flow_steps). Unlike Phase-1 `crm_automations` (loose actions that
- * all fire at once), a flow runs its steps IN ORDER and can WAIT between them.
+ * A "flow" (crm_flows) = a trigger + shared conditions + a graph of steps
+ * (crm_flow_steps). Unlike Phase-1 `crm_automations` (loose actions that all
+ * fire at once), a flow walks its steps as a graph: default `next_step_id`
+ * edges, plus true/false edges on branch steps. When an edge id is null the
+ * engine falls through to the next step by `position` (so a plain linear flow
+ * authored without explicit edges just runs top-to-bottom).
  *
- * Steps covered so far:
- *   - kind='action' — runs an action via the SAME executors as Phase 1
- *     (`runSingleAction`); no logic duplicated.
- *   - kind='stop'   — ends the flow.
- *   - kind='delay'  — pauses the run: writes status='waiting' + resume_at, and
- *     the step-3 scheduler (`resumeWaitingFlowRuns`) picks it up once due and
- *     continues from the next step. Config: { amount:int, unit:'minutes'|'hours'|'days' }.
- *   - kind='branch' — parsed but still pass-through (step 4).
+ * Step kinds:
+ *   - action — run an action via the SAME executors as Phase 1 (`runSingleAction`).
+ *   - delay  — park the run (status='waiting' + resume_at); the scheduler
+ *              (`resumeWaitingFlowRuns`) continues it once due. {amount, unit}.
+ *   - branch — evaluate `branch.conditions`; follow branch_true_step_id when
+ *              all pass, else branch_false_step_id.
+ *   - stop   — end the flow.
  *
  * Multi-project: `supabaseAdmin` is project-aware (resolves the current project
- * per request). `fireFlowsForTrigger` runs inside a request, so it hits the
- * right tenant. `resumeWaitingFlowRuns` runs against whatever project the
- * caller is scoped to (the /flow-runs/resume endpoint uses the request's
- * project; the in-process interval uses the default project). On a project
- * without the tables (Tata, currently) every query errors → silent no-op.
- *
- * NOT wired into the live `fireForTrigger` path yet — see the PR notes.
+ * per request). On a project without the tables (Tata, currently) every query
+ * errors → silent no-op. NOT wired into the live `fireForTrigger` path yet.
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import {
@@ -48,6 +45,10 @@ interface StepRow {
   action_type: string | null;
   action_config: Record<string, unknown> | null;
   delay: { amount?: unknown; unit?: unknown } | null;
+  branch: Record<string, unknown> | null;
+  next_step_id: string | null;
+  branch_true_step_id: string | null;
+  branch_false_step_id: string | null;
 }
 
 interface FlowRunRow {
@@ -60,6 +61,8 @@ interface FlowRunRow {
 }
 
 const nowIso = () => new Date().toISOString();
+const STEP_COLS = 'id, flow_id, kind, position, action_type, action_config, delay, branch, next_step_id, branch_true_step_id, branch_false_step_id';
+const MAX_STEPS_PER_RUN = 1000; // loop guard for misconfigured edge cycles
 
 // ── Public: fire on a trigger ───────────────────────────────
 
@@ -98,17 +101,17 @@ export async function fireFlowsForTrigger(
   return { fired, matched: flows.length };
 }
 
-// ── Execution ───────────────────────────────────────────────
+// ── Execution (graph walk) ──────────────────────────────────
 
 async function loadSteps(flowId: string): Promise<StepRow[]> {
   const { data } = await supabaseAdmin.from('crm_flow_steps')
-    .select('id, flow_id, kind, position, action_type, action_config, delay')
+    .select(STEP_COLS)
     .eq('flow_id', flowId)
     .order('position', { ascending: true });
   return (data ?? []) as StepRow[];
 }
 
-/** Enrol a context into a flow: create the run row, execute from the top. */
+/** Enrol a context into a flow: create the run row, walk from the first step. */
 async function startFlow(flow: FlowRow, context: AutomationContext): Promise<void> {
   const steps = await loadSteps(flow.id);
   const { data: runRows } = await supabaseAdmin.from('crm_flow_runs')
@@ -120,52 +123,74 @@ async function startFlow(flow: FlowRow, context: AutomationContext): Promise<voi
     .select('id');
   const runId = runRows?.[0]?.id as string | undefined;
   if (!runId) return;
-  await executeSteps(runId, flow, context, steps, 0);
+  await executeFrom(runId, flow, context, steps, null);
   await supabaseAdmin.from('crm_flows')
     .update({ run_count: (flow.run_count ?? 0) + 1, last_run_at: nowIso() })
     .eq('id', flow.id);
 }
 
 /**
- * Execute steps from `startIdx`. On a `delay` step it parks the run
- * (status='waiting', resume_at, current_step_id = the NEXT step) and returns;
- * the scheduler resumes it. Otherwise walks to the end and marks the run done.
+ * Walk the step graph from `startStepId` (null = the first step by position).
+ * `action` runs; `branch` picks the true/false edge; `delay` parks the run and
+ * returns (the scheduler resumes from the stored next step); `stop`/no-next
+ * ends the run. A null edge falls through to the next step by position.
  */
-async function executeSteps(
-  runId: string, flow: FlowRow, context: AutomationContext, steps: StepRow[], startIdx: number,
+async function executeFrom(
+  runId: string, flow: FlowRow, context: AutomationContext, steps: StepRow[], startStepId: string | null,
 ): Promise<void> {
+  const byId = new Map(steps.map((s) => [s.id, s]));
+  const sorted = [...steps].sort((a, b) => a.position - b.position);
+  const posOf = new Map(sorted.map((s, i) => [s.id, i]));
+  const nextByPosition = (s: StepRow): StepRow | null => {
+    const i = posOf.get(s.id);
+    return i == null ? null : (sorted[i + 1] ?? null);
+  };
+  const edge = (s: StepRow, id: string | null): StepRow | null => (id ? (byId.get(id) ?? null) : nextByPosition(s));
+
+  let current: StepRow | null = startStepId ? (byId.get(startStepId) ?? null) : (sorted[0] ?? null);
   let failed = false;
   let lastError: string | null = null;
   let lastStepId: string | null = null;
+  let guard = 0;
 
-  for (let i = startIdx; i < steps.length; i++) {
-    const step = steps[i];
+  while (current && guard++ < MAX_STEPS_PER_RUN) {
+    const step = current;
     lastStepId = step.id;
     try {
-      if (step.kind === 'stop') break;
+      if (step.kind === 'stop') { current = null; break; }
 
       if (step.kind === 'delay') {
         const ms = delayMs(step.delay);
         if (ms > 0) {
+          const next = edge(step, step.next_step_id);
           await supabaseAdmin.from('crm_flow_runs').update({
             status: 'waiting',
             resume_at: new Date(Date.now() + ms).toISOString(),
-            current_step_id: steps[i + 1]?.id ?? null, // resume at the step after the delay
+            current_step_id: next?.id ?? null,
             updated_at: nowIso(),
           }).eq('id', runId);
-          return; // pause — the scheduler continues from here
+          return; // pause — scheduler resumes from `next`
         }
-        continue; // zero / invalid delay → no wait
+        current = edge(step, step.next_step_id);
+        continue;
+      }
+
+      if (step.kind === 'branch') {
+        // branch jsonb is { conditions:[...] } — reuse the same reader/eval.
+        const pass = evaluateConditions(readConditions(step.branch), context);
+        current = edge(step, pass ? step.branch_true_step_id : step.branch_false_step_id);
+        continue;
       }
 
       if (step.kind === 'action' && step.action_type) {
         await runSingleAction(step.action_type, step.action_config, context, `flow:${flow.id}`);
       }
-      // branch: pass-through until step 4.
+      current = edge(step, step.next_step_id);
     } catch (err) {
       failed = true;
       lastError = err instanceof Error ? err.message : String(err);
       console.error(`[flow] step ${step.id} of flow ${flow.id} failed:`, lastError);
+      current = edge(step, step.next_step_id); // continue past a failed action
     }
   }
 
@@ -225,12 +250,7 @@ async function resumeFlowRun(run: FlowRunRow): Promise<boolean> {
   if (!context) { await failRun(run.id, 'entity no longer exists'); return true; }
 
   const steps = await loadSteps(flow.id);
-  let startIdx = steps.length; // current_step_id null → nothing left → finishes
-  if (run.current_step_id) {
-    const found = steps.findIndex((s) => s.id === run.current_step_id);
-    startIdx = found < 0 ? steps.length : found;
-  }
-  await executeSteps(run.id, flow, context, steps, startIdx);
+  await executeFrom(run.id, flow, context, steps, run.current_step_id);
   return true;
 }
 
@@ -261,7 +281,7 @@ async function buildContext(
 
 /**
  * Manual QA (super-admin): run one flow against a real entity. Verifies ordered
- * execution (and delay parking) on Kinematic before the live cutover.
+ * execution, branching, and delay parking on Kinematic before the live cutover.
  */
 export async function testRunFlow(
   org_id: string, flow_id: string, entity: EntityKind, entity_id: string, user_id?: string,
