@@ -58,6 +58,7 @@ import integrationsPublicRoutes  from './routes/integrations-public.routes';
 import distIntegrationsRoutes    from './routes/distribution/integrations.routes';
 import tallyAgentPublicRoutes    from './routes/tally-agent-public.routes';
 import kiniPublicRoutes          from './routes/kini-public.routes';
+import appVersionRoutes          from './routes/app-version.routes';
 import orgSettingsRoutes         from './routes/org-settings.routes';
 import cronRoutes                from './routes/cron.routes';
 import { startTallyEnqueuePoller } from './services/distribution/integrations/enqueue.poller';
@@ -360,6 +361,13 @@ app.use(`${V1}/integrations/tally`, tallyAgentPublicRoutes);
 // shared secret (KINI_WEB_CHAT_KEY) checked in the controller. Mounted
 // BEFORE the auth catch-all so it never needs a Supabase JWT.
 app.use(`${V1}/kini/public`, kiniPublicRoutes);
+
+// ── Public app-version check (NO auth) ───────────────────────────────
+// The mobile apps poll this on cold start to learn the latest / minimum
+// supported build and prompt the user to update. Mounted BEFORE the
+// requireAuth catch-all so a logged-out (or old, token-less) install can
+// still learn it needs updating. See app-version.routes.ts.
+app.use(`${V1}/app`, appVersionRoutes);
 
 // ── Internal cron endpoints (NO user JWT) ───────────────────────
 // Invoked by pg_cron via a Supabase Edge Function. Each endpoint in
