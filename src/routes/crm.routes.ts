@@ -3048,6 +3048,14 @@ router.post('/flow-test-run', wrap(async (req, res) => {
   if (!flow_id || !entity_type || !entity_id) throw new AppError(400, 'flow_id, entity_type, entity_id required', 'BAD_REQUEST');
   res.json(await flowsSvc.testRunFlow(orgId(req), flow_id, entity_type as any, entity_id, (req as AuthRequest).user?.id));
 }));
+// Resume flow-runs whose delay is up (Phase-2 step 3). Scoped to this request's
+// project. Runs automatically in-process too (server.ts); this is the manual /
+// cron trigger. super_admin only.
+router.post('/flow-runs/resume', wrap(async (req, res) => {
+  const role = ((req as AuthRequest).user?.role ?? '').toLowerCase();
+  if (role !== 'super_admin') throw new AppError(403, 'super_admin only', 'FORBIDDEN');
+  res.json(await flowsSvc.resumeWaitingFlowRuns());
+}));
 // Query shim for the custom-fields catalogue. Registered BEFORE the generic
 // attach() router so both fixes apply to every verb:
 //  1. `entity` → `entity_type`. The column is entity_type, but the mobile

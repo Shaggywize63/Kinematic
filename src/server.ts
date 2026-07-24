@@ -2,6 +2,7 @@ import app from './app';
 import { logger } from './lib/logger';
 import { loadDynamicProjects } from './lib/platformProjects';
 import { runScheduledAutomations } from './services/crm/automations.service';
+import { resumeWaitingFlowRuns } from './services/crm/flows.service';
 import { runDueReportDigests } from './services/crm/reportSchedules.service';
 import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
 
@@ -39,6 +40,13 @@ if (String(process.env.CRM_AUTOMATION_SCHEDULER_ENABLED ?? 'true').toLowerCase()
     runScheduledAutomations()
       .then((r) => { if (r.fired) logger.info(`[automations] scheduled run fired ${r.fired}/${r.checked}`); })
       .catch((e) => logger.warn(`[automations] scheduled run failed: ${e?.message ?? e}`));
+    // Phase-2 flow delays: resume any waiting flow-run whose timer is up.
+    // Default-project scoped in-process (Tata has no flow tables yet → no-op);
+    // per-tenant resume is driven via POST /crm/flow-runs/resume with the
+    // project header until a project-aware scheduler lands.
+    resumeWaitingFlowRuns()
+      .then((r) => { if (r.resumed) logger.info(`[flows] resumed ${r.resumed} waiting run(s)`); })
+      .catch((e) => logger.warn(`[flows] resume run failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[automations] time-based scheduler enabled (every ${everyMs / 1000}s)`);
 }
