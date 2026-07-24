@@ -20,6 +20,7 @@ import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
 import * as automationsSvc from '../services/crm/automations.service';
+import * as flowsSvc from '../services/crm/flows.service';
 import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as leadsSvc from '../services/crm/leads.service';
@@ -3029,6 +3030,31 @@ router.post('/automation-scheduler/run', wrap(async (req, res) => {
   const role = ((req as AuthRequest).user?.role ?? '').toLowerCase();
   if (role !== 'super_admin') throw new AppError(403, 'super_admin only', 'FORBIDDEN');
   res.json(await automationsSvc.runScheduledAutomations());
+}));
+
+// ── Phase 2: ordered automation flows (crm_flows / crm_flow_steps) ──
+// Admin CRUD for flows + their steps. NOT yet wired into the live trigger
+// path (the shared backend also serves Tata, where these tables don't exist
+// yet); exercise a flow via /flow-test-run below until the live cutover.
+attach('/flows', 'crm_flows', v.flowSchema, { softDelete: false, clientScoped: true });
+// Steps belong to a flow (no client_id column) — org-scoped, not client-scoped.
+attach('/flow-steps', 'crm_flow_steps', v.flowStepSchema, { softDelete: false, clientScoped: false });
+// Manual QA (super_admin) — run one flow against a real entity and return the
+// step count executed. Verifies ordered execution before the live cutover.
+router.post('/flow-test-run', wrap(async (req, res) => {
+  const role = ((req as AuthRequest).user?.role ?? '').toLowerCase();
+  if (role !== 'super_admin') throw new AppError(403, 'super_admin only', 'FORBIDDEN');
+  const { flow_id, entity_type, entity_id } = (req.body ?? {}) as { flow_id?: string; entity_type?: string; entity_id?: string };
+  if (!flow_id || !entity_type || !entity_id) throw new AppError(400, 'flow_id, entity_type, entity_id required', 'BAD_REQUEST');
+  res.json(await flowsSvc.testRunFlow(orgId(req), flow_id, entity_type as any, entity_id, (req as AuthRequest).user?.id));
+}));
+// Resume flow-runs whose delay is up (Phase-2 step 3). Scoped to this request's
+// project. Runs automatically in-process too (server.ts); this is the manual /
+// cron trigger. super_admin only.
+router.post('/flow-runs/resume', wrap(async (req, res) => {
+  const role = ((req as AuthRequest).user?.role ?? '').toLowerCase();
+  if (role !== 'super_admin') throw new AppError(403, 'super_admin only', 'FORBIDDEN');
+  res.json(await flowsSvc.resumeWaitingFlowRuns());
 }));
 // Query shim for the custom-fields catalogue. Registered BEFORE the generic
 // attach() router so both fixes apply to every verb:
