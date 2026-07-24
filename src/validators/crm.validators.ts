@@ -559,6 +559,34 @@ export const automationSchema = z.object({
   is_active: z.boolean().optional(),
 });
 
+// ── Phase 2: ordered automation flows (crm_flows / crm_flow_steps) ──
+// A flow shares one trigger + conditions across an ordered set of steps.
+export const flowSchema = z.object({
+  name: z.string().min(1).max(200),
+  client_id: optionalUuid,
+  trigger_type: automationTriggerType,
+  trigger_config: z.object({
+    conditions: z.array(automationCondition).default([]),
+  }).passthrough().default({ conditions: [] }),
+  is_active: z.boolean().optional(),
+});
+
+// One step in a flow. `kind='action'` runs an action; delay/branch/stop are
+// accepted now (final table shape) though the engine executes only action/stop
+// in this pass.
+export const flowStepSchema = z.object({
+  flow_id: z.string().uuid(),
+  kind: z.enum(['action', 'delay', 'branch', 'stop']).default('action'),
+  position: z.number().int().min(0).default(0),
+  action_type: automationActionType.optional().nullable(),
+  action_config: z.record(z.unknown()).default({}),
+  delay: z.record(z.unknown()).optional().nullable(),   // {amount, unit}
+  branch: z.record(z.unknown()).optional().nullable(),  // {conditions:[...]}
+  next_step_id: optionalUuid,
+  branch_true_step_id: optionalUuid,
+  branch_false_step_id: optionalUuid,
+});
+
 export const customFieldSchema = z.object({
   entity_type: z.enum(['lead','contact','account','deal','activity']),
   field_key: z.string().min(1).max(80).regex(/^[a-z][a-z0-9_]*$/),

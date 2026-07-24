@@ -160,14 +160,14 @@ export async function fireForTrigger(
 
 // ── Condition evaluation ────────────────────────────────────
 
-function readConditions(trigger_config: Record<string, unknown> | null): Condition[] {
+export function readConditions(trigger_config: Record<string, unknown> | null): Condition[] {
   if (!trigger_config) return [];
   const raw = (trigger_config as Record<string, unknown>).conditions;
   if (!Array.isArray(raw)) return [];
   return raw as Condition[];
 }
 
-function evaluateConditions(conditions: Condition[], context: AutomationContext): boolean {
+export function evaluateConditions(conditions: Condition[], context: AutomationContext): boolean {
   // No conditions = always fire. Matches HubSpot's "any" behaviour for
   // workflow enrolments without filters.
   if (conditions.length === 0) return true;
@@ -206,19 +206,33 @@ function compare(left: unknown, op: Condition['op'], right: unknown): boolean {
 // ── Action execution ────────────────────────────────────────
 
 async function executeAction(automation: AutomationRow, context: AutomationContext) {
-  const cfg = (automation.action_config ?? {}) as Record<string, unknown>;
-  switch (automation.action_type as ActionType) {
-    case 'create_task':       return createTaskAction(cfg, context);
-    case 'create_activity':   return createActivityAction(cfg, context);
-    case 'update_lead':       return updateLeadAction(cfg, context);
-    case 'update_deal':       return updateDealAction(cfg, context);
-    case 'send_notification': return sendNotificationAction(cfg, context);
-    case 'send_email':        return sendEmailAction(cfg, context);
-    case 'send_whatsapp':     return sendWhatsappAction(cfg, context);
-    case 'assign_owner':      return assignOwnerAction(cfg, context);
-    case 'convert_lead':      return convertLeadAction(cfg, context);
+  return runSingleAction(automation.action_type, automation.action_config, context, automation.id);
+}
+
+/**
+ * Execute exactly one action by type. Exported so the Phase-2 flow engine
+ * (`flows.service`) reuses the identical executors rather than duplicating
+ * them — a flow step of kind `action` calls straight through here.
+ */
+export async function runSingleAction(
+  action_type: string,
+  action_config: Record<string, unknown> | null,
+  context: AutomationContext,
+  sourceId = 'flow',
+): Promise<void> {
+  const cfg = (action_config ?? {}) as Record<string, unknown>;
+  switch (action_type as ActionType) {
+    case 'create_task':       await createTaskAction(cfg, context); return;
+    case 'create_activity':   await createActivityAction(cfg, context); return;
+    case 'update_lead':       await updateLeadAction(cfg, context); return;
+    case 'update_deal':       await updateDealAction(cfg, context); return;
+    case 'send_notification': await sendNotificationAction(cfg, context); return;
+    case 'send_email':        await sendEmailAction(cfg, context); return;
+    case 'send_whatsapp':     await sendWhatsappAction(cfg, context); return;
+    case 'assign_owner':      await assignOwnerAction(cfg, context); return;
+    case 'convert_lead':      await convertLeadAction(cfg, context); return;
     default:
-      console.warn(`[automation] ${automation.id} unknown action_type=${automation.action_type}`);
+      console.warn(`[automation] ${sourceId} unknown action_type=${action_type}`);
   }
 }
 
