@@ -21,7 +21,7 @@ import {
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import {
   getClient, verifyClientSecret, redirectUriAllowed, createAuthCode, consumeAuthCode,
-  issueTokens, rotateRefreshToken, revokeToken, createClient,
+  issueTokens, rotateRefreshToken, revokeToken, createClient, oauthDiag,
 } from '../lib/oauth/store';
 import {
   ALL_SCOPES, OAUTH_SCOPES, parseScopes, scopeLabels, type OAuthScope,
@@ -323,6 +323,12 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   });
 
   logger.info(`[OAuth] issued code for user ${userId} (project=${project}) to client ${client.client_id} scopes=[${scopes.join(',')}]`);
+  void oauthDiag('code_issued', {
+    clientId: client.client_id, userId, projectKey: project, iss: base,
+    host: req.get('host') ?? null, proto: req.protocol,
+    envPublicUrl: (process.env.API_PUBLIC_URL || '') || null,
+    redirect: params.redirectUri, stateLen: params.state.length,
+  });
   const u = new URL(params.redirectUri);
   u.searchParams.set('code', code);
   // RFC 9207 — some clients (incl. strict MCP connectors) require the issuer on
@@ -345,19 +351,29 @@ export const token = asyncHandler<Request>(async (req, res) => {
   const grantType = String(b.grant_type || '');
   const { clientId, clientSecret } = clientCredentials(req);
 
-  const client = await getClient(clientId);
-  if (!client) return tokenError(res, 401, 'invalid_client');
+  void oauthDiag('token_received', {
+    clientId, grantType, presentedSecret: !!clientSecret,
+    authHeader: req.headers.authorization
+      ? (String(req.headers.authorization).startsWith('Basic ') ? 'basic' : 'other') : 'none',
+    hasCode: !!b.code, hasRedirect: !!b.redirect_uri, hasVerifier: !!b.code_verifier,
+    redirectUri: b.redirect_uri ? String(b.redirect_uri) : null,
+    verifierLen: b.code_verifier ? String(b.code_verifier).length : 0,
+  });
 
-  // Client authentication. For the authorization_code grant, a valid PKCE
-  // code_verifier already proves possession (OAuth 2.1 §4.1.3 / MCP auth spec),
-  // so a client that omits its secret is still allowed — PKCE is enforced in
-  // consumeAuthCode below. A *wrong* secret is always rejected. Every other
-  // grant (refresh_token) keeps strict client authentication.
-  const presentedSecret = !!clientSecret;
+  const client = await getClient(clientId);
+  if (!client) { void oauthDiag('token_unknown_client', { clientId, grantType }); return tokenError(res, 401, 'invalid_client'); }
+
+  // Client authentication.
+  //   authorization_code — the PKCE code_verifier ↔ code_challenge binding
+  //     already proves client possession (OAuth 2.1 §4.1.3 / MCP auth spec), so
+  //     we do NOT gate the exchange on the client_secret. Connectors that
+  //     re-register (Claude/ChatGPT DCR churn) can end up presenting a stale or
+  //     mismatched secret; that must never block a PKCE-valid exchange. PKCE is
+  //     enforced in consumeAuthCode below.
+  //   refresh_token — strict client authentication is still required.
   const secretOk = verifyClientSecret(client, clientSecret);
-  if (grantType === 'authorization_code') {
-    if (presentedSecret && !secretOk) return tokenError(res, 401, 'invalid_client');
-  } else if (!secretOk) {
+  if (grantType !== 'authorization_code' && !secretOk) {
+    void oauthDiag('token_client_auth_failed', { clientId, grantType, confidential: client.is_confidential, presentedSecret: !!clientSecret });
     return tokenError(res, 401, 'invalid_client');
   }
 
@@ -368,11 +384,12 @@ export const token = asyncHandler<Request>(async (req, res) => {
     if (!code || !redirectUri || !codeVerifier) return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
 
     const grant = await consumeAuthCode({ code, clientId, redirectUri, codeVerifier });
-    if (!grant) return tokenError(res, 400, 'invalid_grant');
+    if (!grant) { void oauthDiag('token_invalid_grant', { clientId, redirectUri, verifierLen: codeVerifier.length }); return tokenError(res, 400, 'invalid_grant'); }
 
     const tokens = await issueTokens({
       clientId, userId: grant.user_id, projectKey: grant.project_key, orgId: grant.org_id, scopes: grant.scopes,
     });
+    void oauthDiag('token_success', { clientId, userId: grant.user_id, projectKey: grant.project_key });
     res.setHeader('Cache-Control', 'no-store');
     return res.json(tokens);
   }
