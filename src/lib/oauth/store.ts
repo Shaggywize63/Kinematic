@@ -25,6 +25,20 @@ function db() {
   return adminClientFor(OAUTH_PROJECT);
 }
 
+/**
+ * Best-effort, DB-visible trace of the connect handshake, written to
+ * oauth_action_audit (tool='diag:<stage>'). Used to pinpoint where a connector
+ * flow breaks in production when server logs aren't reachable. Never throws.
+ * Safe to leave on: only fires on the (rare) OAuth token/authorize paths.
+ */
+export async function oauthDiag(stage: string, detail: Record<string, unknown>): Promise<void> {
+  try {
+    await db().from('oauth_action_audit').insert({
+      tool: `diag:${stage}`, scopes: [], request: detail, outcome: 'diag',
+    });
+  } catch { /* diagnostics must never affect the flow */ }
+}
+
 export function sha256(input: string): string {
   return crypto.createHash('sha256').update(input).digest('hex');
 }
@@ -170,17 +184,22 @@ export async function consumeAuthCode(args: {
   redirectUri: string;
   codeVerifier: string;
 }): Promise<ConsumedCode | null> {
+  const fail = (reason: string, extra?: Record<string, unknown>): null => {
+    void oauthDiag('consume_fail', { reason, clientId: args.clientId, ...extra });
+    return null;
+  };
+
   const { data, error } = await db()
     .from('oauth_authorization_codes')
     .select('id, client_id, user_id, project_key, org_id, redirect_uri, scopes, code_challenge, code_challenge_method, expires_at, consumed_at')
     .eq('code_hash', sha256(args.code))
     .maybeSingle();
-  if (error || !data) return null;
-  if (data.consumed_at) return null;
-  if (new Date(data.expires_at).getTime() < Date.now()) return null;
-  if (data.client_id !== args.clientId) return null;
-  if (data.redirect_uri !== args.redirectUri) return null;
-  if (!verifyPkce(args.codeVerifier, data.code_challenge, data.code_challenge_method)) return null;
+  if (error || !data) return fail('code_not_found', { dbError: error?.message });
+  if (data.consumed_at) return fail('already_consumed');
+  if (new Date(data.expires_at).getTime() < Date.now()) return fail('expired');
+  if (data.client_id !== args.clientId) return fail('client_mismatch', { stored: data.client_id });
+  if (data.redirect_uri !== args.redirectUri) return fail('redirect_mismatch', { stored: data.redirect_uri, got: args.redirectUri });
+  if (!verifyPkce(args.codeVerifier, data.code_challenge, data.code_challenge_method)) return fail('pkce_mismatch', { method: data.code_challenge_method, vlen: args.codeVerifier.length });
 
   // Mark consumed; guard against a concurrent double-exchange by requiring the
   // row to still be unconsumed at update time.
@@ -191,7 +210,7 @@ export async function consumeAuthCode(args: {
     .is('consumed_at', null)
     .select('id')
     .maybeSingle();
-  if (updErr || !upd) return null;   // lost the race → treat as invalid
+  if (updErr || !upd) return fail('consume_race', { updErr: updErr?.message });
 
   return {
     user_id: data.user_id,
