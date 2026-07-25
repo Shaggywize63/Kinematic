@@ -21,8 +21,9 @@ import {
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import {
   getClient, verifyClientSecret, redirectUriAllowed, createAuthCode, consumeAuthCode,
-  issueTokens, rotateRefreshToken, revokeToken, createClient, oauthDiag,
+  issueTokens, rotateRefreshToken, revokeToken, createClient,
 } from '../lib/oauth/store';
+import { isMcpConnectorEnabled, MCP_DISABLED_MESSAGE } from '../lib/oauth/mcpEntitlement';
 import {
   ALL_SCOPES, OAUTH_SCOPES, parseScopes, scopeLabels, type OAuthScope,
 } from '../lib/oauth/scopes';
@@ -60,7 +61,6 @@ const DCR_ENABLED = process.env.OAUTH_ALLOW_DCR !== 'off';
 
 export const authorizationServerMetadata = (req: Request, res: Response) => {
   const base = publicBase(req);
-  void oauthDiag('meta_as', { host: req.get('host') ?? null, proto: req.protocol, base, ua: String(req.headers['user-agent'] ?? '').slice(0, 70) });
   res.json({
     issuer: base,
     authorization_endpoint: `${base}/oauth/authorize`,
@@ -230,37 +230,27 @@ function redirectError(res: Response, iss: string, redirectUri: string, error: s
 export const authorize = asyncHandler<Request>(async (req, res) => {
   const base = publicBase(req);
   const params = readAuthorizeParams(req.query as Record<string, unknown>);
-  void oauthDiag('authorize_get', {
-    clientId: params.clientId, redirect: params.redirectUri, scope: params.scope,
-    hasPkce: !!params.codeChallenge, hasState: !!params.state, responseType: params.responseType,
-    ua: String(req.headers['user-agent'] ?? '').slice(0, 70), rawQuery: JSON.stringify(req.query).slice(0, 600),
-  });
 
   const client = await getClient(params.clientId);
   // Invalid client or redirect_uri: must NOT redirect (would be an open redirect).
-  if (!client) { void oauthDiag('authorize_reject', { reason: 'unknown_client', clientId: params.clientId }); return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.')); }
+  if (!client) return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
   if (!params.redirectUri || !redirectUriAllowed(client, params.redirectUri)) {
-    void oauthDiag('authorize_reject', { reason: 'bad_redirect', got: params.redirectUri, allowed: client.redirect_uris });
     return sendHtml(res, 400, errorHtml(base, 'This application is not allowed to use that redirect address.'));
   }
   // From here, protocol errors are reported back to the client via redirect.
   if (params.responseType !== 'code') {
-    void oauthDiag('authorize_reject', { reason: 'bad_response_type', responseType: params.responseType });
     return redirectError(res, base, params.redirectUri, 'unsupported_response_type', params.state);
   }
   if (!params.codeChallenge) {
-    void oauthDiag('authorize_reject', { reason: 'no_pkce' });
     return redirectError(res, base, params.redirectUri, 'invalid_request', params.state, 'PKCE code_challenge is required');
   }
   const requested = parseScopes(params.scope);
   const allowed = new Set(client.allowed_scopes as OAuthScope[]);
   const scopes = requested.filter((s) => allowed.has(s));
   if (scopes.length === 0) {
-    void oauthDiag('authorize_reject', { reason: 'no_scope', scope: params.scope, allowed: [...allowed] });
     return redirectError(res, base, params.redirectUri, 'invalid_scope', params.state, 'No permitted scopes requested');
   }
 
-  void oauthDiag('authorize_ok', { clientId: params.clientId, scopes: scopes.length });
   sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes }));
 });
 
@@ -271,7 +261,6 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   const decision = String((req.body as any)?.decision || '');
   const email = String((req.body as any)?.email || '').trim();
   const password = String((req.body as any)?.password || '');
-  void oauthDiag('authorize_post', { clientId: params.clientId, decision, hasEmail: !!email, hasPassword: !!password, email });
 
   const client = await getClient(params.clientId);
   if (!client) return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
@@ -296,7 +285,6 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   const project = await resolveProjectForEmailAsync(email);
   if (!isKnownProject(project)) {
     logger.warn(`[OAuth] authorize: no known project for "${email}" (resolved "${project}")`);
-    void oauthDiag('post_no_project', { email, project });
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Invalid email or password.' }));
   }
 
@@ -311,21 +299,26 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
     const { data, error } = await authClient.auth.signInWithPassword({ email, password });
     if (error || !data?.user) {
       logger.warn(`[OAuth] authorize sign-in rejected: email="${email}" project="${project}" pwLen=${password.length} err="${error?.message || 'no user'}" status=${(error as { status?: number })?.status ?? ''}`);
-      void oauthDiag('post_signin_rejected', { email, project, pwLen: password.length, err: error?.message ?? 'no user', status: (error as { status?: number })?.status ?? null });
       return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Invalid email or password.' }));
     }
     userId = data.user.id;
   } catch (e: any) {
     logger.error(`[OAuth] signIn threw for "${email}" (project="${project}"): ${e?.message || e}`);
-    void oauthDiag('post_signin_error', { email, project, msg: e?.message ?? String(e) });
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Sign-in failed. Please try again.' }));
   }
 
-  // Confirm the profile exists + is active in that project, and grab its org.
+  // Confirm the profile exists + is active in that project, and grab its org/role.
   const { data: profile } = await adminClientFor(project)
-    .from('users').select('org_id, is_active').eq('id', userId).maybeSingle();
+    .from('users').select('org_id, role, is_active').eq('id', userId).maybeSingle();
   if (!profile || profile.is_active === false) {
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'This account is not active.' }));
+  }
+
+  // AI-assistant entitlement (paid add-on). Gate token issuance so a non-entitled
+  // tenant can't connect at all; requireOAuth enforces it again at the tool layer.
+  if (!isMcpConnectorEnabled({ role: profile.role as string | null, orgId: (profile.org_id as string) ?? null })) {
+    logger.warn(`[OAuth] connector not enabled for org=${profile.org_id} (email="${email}", project=${project})`);
+    return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: MCP_DISABLED_MESSAGE }));
   }
 
   const code = await createAuthCode({
@@ -340,12 +333,6 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   });
 
   logger.info(`[OAuth] issued code for user ${userId} (project=${project}) to client ${client.client_id} scopes=[${scopes.join(',')}]`);
-  void oauthDiag('code_issued', {
-    clientId: client.client_id, userId, projectKey: project, iss: base,
-    host: req.get('host') ?? null, proto: req.protocol,
-    envPublicUrl: (process.env.API_PUBLIC_URL || '') || null,
-    redirect: params.redirectUri, stateLen: params.state.length,
-  });
   const u = new URL(params.redirectUri);
   u.searchParams.set('code', code);
   // RFC 9207 — some clients (incl. strict MCP connectors) require the issuer on
@@ -368,17 +355,8 @@ export const token = asyncHandler<Request>(async (req, res) => {
   const grantType = String(b.grant_type || '');
   const { clientId, clientSecret } = clientCredentials(req);
 
-  void oauthDiag('token_received', {
-    clientId, grantType, presentedSecret: !!clientSecret,
-    authHeader: req.headers.authorization
-      ? (String(req.headers.authorization).startsWith('Basic ') ? 'basic' : 'other') : 'none',
-    hasCode: !!b.code, hasRedirect: !!b.redirect_uri, hasVerifier: !!b.code_verifier,
-    redirectUri: b.redirect_uri ? String(b.redirect_uri) : null,
-    verifierLen: b.code_verifier ? String(b.code_verifier).length : 0,
-  });
-
   const client = await getClient(clientId);
-  if (!client) { void oauthDiag('token_unknown_client', { clientId, grantType }); return tokenError(res, 401, 'invalid_client'); }
+  if (!client) return tokenError(res, 401, 'invalid_client');
 
   // Client authentication.
   //   authorization_code — the PKCE code_verifier ↔ code_challenge binding
@@ -390,7 +368,6 @@ export const token = asyncHandler<Request>(async (req, res) => {
   //   refresh_token — strict client authentication is still required.
   const secretOk = verifyClientSecret(client, clientSecret);
   if (grantType !== 'authorization_code' && !secretOk) {
-    void oauthDiag('token_client_auth_failed', { clientId, grantType, confidential: client.is_confidential, presentedSecret: !!clientSecret });
     return tokenError(res, 401, 'invalid_client');
   }
 
@@ -401,12 +378,11 @@ export const token = asyncHandler<Request>(async (req, res) => {
     if (!code || !redirectUri || !codeVerifier) return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
 
     const grant = await consumeAuthCode({ code, clientId, redirectUri, codeVerifier });
-    if (!grant) { void oauthDiag('token_invalid_grant', { clientId, redirectUri, verifierLen: codeVerifier.length }); return tokenError(res, 400, 'invalid_grant'); }
+    if (!grant) return tokenError(res, 400, 'invalid_grant');
 
     const tokens = await issueTokens({
       clientId, userId: grant.user_id, projectKey: grant.project_key, orgId: grant.org_id, scopes: grant.scopes,
     });
-    void oauthDiag('token_success', { clientId, userId: grant.user_id, projectKey: grant.project_key });
     res.setHeader('Cache-Control', 'no-store');
     return res.json(tokens);
   }
