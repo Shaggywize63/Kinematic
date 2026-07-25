@@ -170,7 +170,9 @@ function consentPage(args: {
   label{display:block;font-size:13px;color:var(--dim);margin:12px 0 4px}
   input[type=email],input[type=password]{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9px;font-size:15px}
   input:focus{outline:none;border-color:var(--red)}
-  .row{display:flex;gap:10px;margin-top:20px}
+  /* row-reverse: "Allow access" is FIRST in the DOM (so Enter / implicit submit
+     triggers it, not Cancel) while still rendering on the right. */
+  .row{display:flex;flex-direction:row-reverse;gap:10px;margin-top:20px}
   button{flex:1;padding:11px 14px;border-radius:9px;font-size:15px;font-weight:600;cursor:pointer;border:1px solid var(--line)}
   .allow{background:var(--red);border-color:var(--red);color:#fff}
   .deny{background:#fff;color:var(--ink)}
@@ -194,8 +196,8 @@ function consentPage(args: {
     <label for="password">Password</label>
     <input id="password" name="password" type="password" required autocomplete="current-password">
     <div class="row">
-      <button class="deny" type="submit" name="decision" value="deny">Cancel</button>
       <button class="allow" type="submit" name="decision" value="allow">Allow access</button>
+      <button class="deny" type="submit" name="decision" value="deny" formnovalidate>Cancel</button>
     </div>
   </form>
   <p class="fine">The assistant will act with your permissions only. You can revoke this access at any time.</p>
