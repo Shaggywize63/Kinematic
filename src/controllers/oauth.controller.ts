@@ -60,6 +60,7 @@ const DCR_ENABLED = process.env.OAUTH_ALLOW_DCR !== 'off';
 
 export const authorizationServerMetadata = (req: Request, res: Response) => {
   const base = publicBase(req);
+  void oauthDiag('meta_as', { host: req.get('host') ?? null, proto: req.protocol, base, ua: String(req.headers['user-agent'] ?? '').slice(0, 70) });
   res.json({
     issuer: base,
     authorization_endpoint: `${base}/oauth/authorize`,
@@ -227,27 +228,37 @@ function redirectError(res: Response, iss: string, redirectUri: string, error: s
 export const authorize = asyncHandler<Request>(async (req, res) => {
   const base = publicBase(req);
   const params = readAuthorizeParams(req.query as Record<string, unknown>);
+  void oauthDiag('authorize_get', {
+    clientId: params.clientId, redirect: params.redirectUri, scope: params.scope,
+    hasPkce: !!params.codeChallenge, hasState: !!params.state, responseType: params.responseType,
+    ua: String(req.headers['user-agent'] ?? '').slice(0, 70), rawQuery: JSON.stringify(req.query).slice(0, 600),
+  });
 
   const client = await getClient(params.clientId);
   // Invalid client or redirect_uri: must NOT redirect (would be an open redirect).
-  if (!client) return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
+  if (!client) { void oauthDiag('authorize_reject', { reason: 'unknown_client', clientId: params.clientId }); return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.')); }
   if (!params.redirectUri || !redirectUriAllowed(client, params.redirectUri)) {
+    void oauthDiag('authorize_reject', { reason: 'bad_redirect', got: params.redirectUri, allowed: client.redirect_uris });
     return sendHtml(res, 400, errorHtml(base, 'This application is not allowed to use that redirect address.'));
   }
   // From here, protocol errors are reported back to the client via redirect.
   if (params.responseType !== 'code') {
+    void oauthDiag('authorize_reject', { reason: 'bad_response_type', responseType: params.responseType });
     return redirectError(res, base, params.redirectUri, 'unsupported_response_type', params.state);
   }
   if (!params.codeChallenge) {
+    void oauthDiag('authorize_reject', { reason: 'no_pkce' });
     return redirectError(res, base, params.redirectUri, 'invalid_request', params.state, 'PKCE code_challenge is required');
   }
   const requested = parseScopes(params.scope);
   const allowed = new Set(client.allowed_scopes as OAuthScope[]);
   const scopes = requested.filter((s) => allowed.has(s));
   if (scopes.length === 0) {
+    void oauthDiag('authorize_reject', { reason: 'no_scope', scope: params.scope, allowed: [...allowed] });
     return redirectError(res, base, params.redirectUri, 'invalid_scope', params.state, 'No permitted scopes requested');
   }
 
+  void oauthDiag('authorize_ok', { clientId: params.clientId, scopes: scopes.length });
   sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes }));
 });
 

@@ -99,6 +99,7 @@ import crmRoutes               from './routes/crm.routes';
 import oauthRoutes             from './routes/oauth.routes';
 import { authorizationServerMetadata } from './controllers/oauth.controller';
 import { requireOAuth }         from './middleware/oauthAuth';
+import { oauthDiag }            from './lib/oauth/store';
 import { mcpHandler, protectedResourceMetadata } from './mcp/server';
 import { AuthRequest }          from './types';
 import verifiedSendersRoutes   from './routes/crm/verified-senders.routes';
@@ -397,10 +398,14 @@ app.use('/oauth', oauthRoutes);
 const mcpPublicBase = (req: express.Request) =>
   (process.env.API_PUBLIC_URL || '').replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`;
 app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'],
-  (req, res) => { res.json(protectedResourceMetadata(mcpPublicBase(req))); });
+  (req, res) => {
+    void oauthDiag('meta_pr', { host: req.get('host') ?? null, proto: req.protocol, path: req.path, ua: String(req.headers['user-agent'] ?? '').slice(0, 70) });
+    res.json(protectedResourceMetadata(mcpPublicBase(req)));
+  });
 app.post('/mcp',
   express.json(),
   (req, res, next) => {
+    void oauthDiag('mcp_hit', { hasAuth: !!req.headers.authorization, ua: String(req.headers['user-agent'] ?? '').slice(0, 70) });
     res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${mcpPublicBase(req)}/.well-known/oauth-protected-resource"`);
     next();
   },
