@@ -307,16 +307,16 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Sign-in failed. Please try again.' }));
   }
 
-  // Confirm the profile exists + is active in that project, and grab its org/role.
+  // Confirm the profile exists + is active in that project, and grab its org.
   const { data: profile } = await adminClientFor(project)
-    .from('users').select('org_id, role, is_active').eq('id', userId).maybeSingle();
+    .from('users').select('org_id, is_active').eq('id', userId).maybeSingle();
   if (!profile || profile.is_active === false) {
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'This account is not active.' }));
   }
 
   // AI-assistant entitlement (paid add-on). Gate token issuance so a non-entitled
   // tenant can't connect at all; requireOAuth enforces it again at the tool layer.
-  if (!isMcpConnectorEnabled({ role: profile.role as string | null, orgId: (profile.org_id as string) ?? null })) {
+  if (!(await isMcpConnectorEnabled((profile.org_id as string) ?? null))) {
     logger.warn(`[OAuth] connector not enabled for org=${profile.org_id} (email="${email}", project=${project})`);
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: MCP_DISABLED_MESSAGE }));
   }

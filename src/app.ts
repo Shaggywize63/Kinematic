@@ -68,6 +68,7 @@ import activitiesRoutes   from './routes/activities.routes';
 import assetsRoutes       from './routes/assets.routes';
 import citiesRoutes       from './routes/cities.routes';
 import managementRoutes   from './routes/management.routes';
+import mcpConnectorRoutes from './routes/mcpConnector.routes';
 import skusRoutes         from './routes/skus.routes';
 import storesRoutes       from './routes/stores.routes';
 import warehouseRoutes    from './routes/warehouse.routes';
@@ -490,6 +491,9 @@ app.use(`${V1}/warehouse`,     requireAuth, requireModule('inventory'), warehous
 
 // ── Org-level admin settings (location-ping cadence today; more to come) ──
 app.use(`${V1}/org-settings`,  requireAuth, orgSettingsRoutes);
+
+// ── Platform admin: AI-assistant / MCP connector entitlement (super-admin) ──
+app.use(`${V1}/admin/mcp-connector`, requireAuth, mcpConnectorRoutes);
 
 // ── Distribution module ────────────────────────────────
 app.use(`${V1}/distribution/brands`,         requireAuth, requireModule('distribution_brands'),       distBrandsRoutes);
