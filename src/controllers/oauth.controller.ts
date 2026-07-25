@@ -269,6 +269,7 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   const decision = String((req.body as any)?.decision || '');
   const email = String((req.body as any)?.email || '').trim();
   const password = String((req.body as any)?.password || '');
+  void oauthDiag('authorize_post', { clientId: params.clientId, decision, hasEmail: !!email, hasPassword: !!password, email });
 
   const client = await getClient(params.clientId);
   if (!client) return sendHtml(res, 400, errorHtml(base, 'Unknown or inactive application.'));
@@ -293,6 +294,7 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
   const project = await resolveProjectForEmailAsync(email);
   if (!isKnownProject(project)) {
     logger.warn(`[OAuth] authorize: no known project for "${email}" (resolved "${project}")`);
+    void oauthDiag('post_no_project', { email, project });
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Invalid email or password.' }));
   }
 
@@ -307,11 +309,13 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
     const { data, error } = await authClient.auth.signInWithPassword({ email, password });
     if (error || !data?.user) {
       logger.warn(`[OAuth] authorize sign-in rejected: email="${email}" project="${project}" pwLen=${password.length} err="${error?.message || 'no user'}" status=${(error as { status?: number })?.status ?? ''}`);
+      void oauthDiag('post_signin_rejected', { email, project, pwLen: password.length, err: error?.message ?? 'no user', status: (error as { status?: number })?.status ?? null });
       return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Invalid email or password.' }));
     }
     userId = data.user.id;
   } catch (e: any) {
     logger.error(`[OAuth] signIn threw for "${email}" (project="${project}"): ${e?.message || e}`);
+    void oauthDiag('post_signin_error', { email, project, msg: e?.message ?? String(e) });
     return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Sign-in failed. Please try again.' }));
   }
 
