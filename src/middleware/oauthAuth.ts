@@ -47,9 +47,9 @@ export function requireOAuth(...requiredScopes: OAuthScope[]) {
       // AI-assistant entitlement (paid add-on): even with a valid token, the
       // user's org must be enabled for the connector. Defense-in-depth for
       // tokens issued before an org was disabled (authorize gates issuance too).
-      const u = user as { role?: string | null; orgId?: string | null };
-      if (!isMcpConnectorEnabled({ role: u.role, orgId: u.orgId ?? grant.org_id })) {
-        logger.warn(`[OAuth] connector disabled for org=${u.orgId ?? grant.org_id} (user=${grant.user_id})`);
+      const orgId = (user as { orgId?: string | null }).orgId ?? grant.org_id;
+      if (!(await isMcpConnectorEnabled(orgId))) {
+        logger.warn(`[OAuth] connector disabled for org=${orgId} (user=${grant.user_id})`);
         return forbidden(res, 'AI assistant access is not enabled for your organization.');
       }
 
