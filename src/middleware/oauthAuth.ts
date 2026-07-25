@@ -13,6 +13,7 @@ import { unauthorized, forbidden } from '../utils/response';
 import { runWithProject, isKnownProject } from '../lib/projects';
 import { buildUserContext } from './auth';
 import { validateAccessToken } from '../lib/oauth/store';
+import { isMcpConnectorEnabled } from '../lib/oauth/mcpEntitlement';
 import type { OAuthScope } from '../lib/oauth/scopes';
 import { logger } from '../lib/logger';
 
@@ -42,6 +43,15 @@ export function requireOAuth(...requiredScopes: OAuthScope[]) {
       // the ALS-bound supabaseAdmin, so it must run inside runWithProject).
       const user = await runWithProject(grant.project_key, () => buildUserContext(grant.user_id));
       if (!user) return unauthorized(res, 'Account not found or inactive');
+
+      // AI-assistant entitlement (paid add-on): even with a valid token, the
+      // user's org must be enabled for the connector. Defense-in-depth for
+      // tokens issued before an org was disabled (authorize gates issuance too).
+      const u = user as { role?: string | null; orgId?: string | null };
+      if (!isMcpConnectorEnabled({ role: u.role, orgId: u.orgId ?? grant.org_id })) {
+        logger.warn(`[OAuth] connector disabled for org=${u.orgId ?? grant.org_id} (user=${grant.user_id})`);
+        return forbidden(res, 'AI assistant access is not enabled for your organization.');
+      }
 
       req.user = user;
       req.oauth = { clientId: grant.client_id, scopes: grant.scopes };
