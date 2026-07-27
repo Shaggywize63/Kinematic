@@ -853,6 +853,18 @@ export const broadcastCreateSchema = z.object({
 export const broadcastPreviewSchema = z.object({
   audience: broadcastAudienceSchema.default({}),
   variable_map: broadcastVariableMapSchema.optional(),
+  template_id: optionalUuid,   // when present, the preview also returns a cost estimate
+});
+
+// Compliance + cost settings (frequency cap / quiet hours / opt-out / rates).
+export const broadcastSettingsSchema = z.object({
+  frequency_cap_max: z.number().int().min(1).max(100).optional().nullable(),
+  frequency_cap_window_days: z.number().int().min(1).max(365).optional(),
+  quiet_hours_start: z.number().int().min(0).max(23).optional().nullable(),
+  quiet_hours_end: z.number().int().min(0).max(23).optional().nullable(),
+  quiet_hours_tz: z.string().max(60).optional(),
+  opt_out_keywords: z.array(z.string().max(40)).max(50).optional().nullable(),
+  cost_rates: z.record(z.record(z.number())).optional().nullable(),
 });
 
 // People Directory — per-client address book of dealers / influencers /

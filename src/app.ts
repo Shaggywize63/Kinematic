@@ -69,6 +69,7 @@ import assetsRoutes       from './routes/assets.routes';
 import citiesRoutes       from './routes/cities.routes';
 import managementRoutes   from './routes/management.routes';
 import mcpConnectorRoutes from './routes/mcpConnector.routes';
+import broadcastEntitlementRoutes from './routes/broadcastEntitlement.routes';
 import skusRoutes         from './routes/skus.routes';
 import storesRoutes       from './routes/stores.routes';
 import warehouseRoutes    from './routes/warehouse.routes';
@@ -494,6 +495,9 @@ app.use(`${V1}/org-settings`,  requireAuth, orgSettingsRoutes);
 
 // ── Platform admin: AI-assistant / MCP connector entitlement (super-admin) ──
 app.use(`${V1}/admin/mcp-connector`, requireAuth, mcpConnectorRoutes);
+
+// ── Platform admin: WhatsApp Campaigns entitlement (super-admin) ──
+app.use(`${V1}/admin/broadcast-entitlement`, requireAuth, broadcastEntitlementRoutes);
 
 // ── Distribution module ────────────────────────────────
 app.use(`${V1}/distribution/brands`,         requireAuth, requireModule('distribution_brands'),       distBrandsRoutes);

@@ -35,10 +35,30 @@ export function makeCloudApiProvider(cfg: CloudApiConfig): WhatsappProvider {
         body: JSON.stringify(body),
       });
       const json = (await res.json().catch(() => ({}))) as any;
-      if (!res.ok) throw new Error(json?.error?.message || `WhatsApp Cloud API HTTP ${res.status}`);
+      if (!res.ok) throw providerError(json?.error?.message || `WhatsApp Cloud API HTTP ${res.status}`, res, json?.error?.code);
       return { message_id: json?.messages?.[0]?.id };
     },
   };
+}
+
+/**
+ * Enrich a provider failure with the HTTP status, Meta error code, and any
+ * Retry-After so the broadcast processor can classify transient (retry) vs
+ * permanent (fail) and honour rate-limit backoff. Shared by the Cloud API + BSP
+ * adapters.
+ */
+export interface ProviderError extends Error {
+  httpStatus?: number;
+  providerCode?: number;
+  retryAfterSec?: number;
+}
+export function providerError(message: string, res: Response, code?: number): ProviderError {
+  const err = new Error(message) as ProviderError;
+  err.httpStatus = res.status;
+  if (typeof code === 'number') err.providerCode = code;
+  const ra = Number(res.headers.get('retry-after'));
+  if (Number.isFinite(ra) && ra > 0) err.retryAfterSec = ra;
+  return err;
 }
 
 /** Positional body variables ({{1}},{{2}}…) → a Cloud API BODY component. */

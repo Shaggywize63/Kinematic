@@ -5,7 +5,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { resolveWhatsappProvider, fromPhoneFor } from './whatsappConnection.service';
-import { applyRecipientStatus } from './broadcast.service';
+import { applyRecipientStatus, handleInbound } from './broadcast.service';
 
 export interface SendWhatsappInput {
   org_id: string;
@@ -74,14 +74,20 @@ export async function sendWhatsapp(input: SendWhatsappInput) {
       provider_message_id: result.message_id ?? null,
       sent_at: new Date().toISOString(),
     }).eq('id', log.id);
-    return { id: log.id as string, provider_message_id: result.message_id ?? null, status: 'sent' as const, error: null };
+    return { id: log.id as string, provider_message_id: result.message_id ?? null, status: 'sent' as const, error: null, retryable: false, rate_limited: false, retry_after_sec: undefined as number | undefined };
   } catch (err) {
-    const message = (err as Error).message;
+    const e = err as { message?: string; httpStatus?: number; providerCode?: number; retryAfterSec?: number };
+    const message = e?.message ?? 'send error';
+    // Classify for the broadcast retry loop: a 429 (or Meta rate/spam codes) is
+    // rate-limited; a 429/5xx/network error is transient (worth retrying); any
+    // other 4xx (bad number, invalid template, opted-out at Meta) is permanent.
+    const rate_limited = e?.httpStatus === 429 || e?.providerCode === 130429 || e?.providerCode === 131048;
+    const retryable = rate_limited || e?.httpStatus === undefined || (typeof e?.httpStatus === 'number' && e.httpStatus >= 500);
     await supabaseAdmin.from('crm_whatsapp_logs').update({
       status: 'failed',
       error: message,
     }).eq('id', log.id);
-    return { id: log.id as string, provider_message_id: null, status: 'failed' as const, error: message };
+    return { id: log.id as string, provider_message_id: null, status: 'failed' as const, error: message, retryable, rate_limited, retry_after_sec: e?.retryAfterSec };
   }
 }
 
@@ -138,6 +144,10 @@ export async function recordInbound(payload: {
       status: 'replied', replied_at: new Date().toISOString(),
     }).eq('org_id', payload.org_id).eq('provider_message_id', payload.in_reply_to);
   }
+
+  // Broadcast hooks: STOP/opt-out → withdraw consent; otherwise attribute the
+  // reply to the lead's most recent campaign (reply-rate). Best-effort.
+  await handleInbound(payload.org_id, payload.from_phone, payload.body_text);
 }
 
 // Webhook entry: status update (delivered/read/failed) for a message we sent.
@@ -146,6 +156,7 @@ export async function recordStatusUpdate(payload: {
   provider_message_id: string;
   status: 'delivered' | 'read' | 'failed';
   error?: string;
+  pricing?: { category?: string | null; billable?: boolean | null };
 }) {
   const update: Record<string, unknown> = { status: payload.status };
   if (payload.status === 'delivered') update.delivered_at = new Date().toISOString();
@@ -155,8 +166,9 @@ export async function recordStatusUpdate(payload: {
     .eq('org_id', payload.org_id).eq('provider_message_id', payload.provider_message_id);
 
   // Mirror the delivery status onto any broadcast recipient that carries this
-  // provider_message_id, and roll up the broadcast's delivered/read/failed counts.
-  await applyRecipientStatus(payload.org_id, payload.provider_message_id, payload.status, payload.error);
+  // provider_message_id, and roll up the broadcast's delivered/read/failed counts
+  // (+ per-message billing category when Meta includes pricing on the webhook).
+  await applyRecipientStatus(payload.org_id, payload.provider_message_id, payload.status, payload.error, payload.pricing);
 }
 
 function renderBody(body: string, vars: Record<string, string>): string {
