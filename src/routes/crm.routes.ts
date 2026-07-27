@@ -38,6 +38,8 @@ import * as whatsappSvc from '../services/crm/whatsapp.service';
 import * as whatsappConn from '../services/crm/whatsappConnection.service';
 import * as broadcastSvc from '../services/crm/broadcast.service';
 import { isBroadcastEnabled, BROADCAST_DISABLED_MESSAGE } from '../lib/broadcastEntitlement';
+import * as emailCampaignSvc from '../services/crm/emailCampaign.service';
+import { isEmailCampaignEnabled, EMAIL_CAMPAIGN_DISABLED_MESSAGE } from '../lib/emailCampaignEntitlement';
 import * as productsSvc from '../services/crm/products.service';
 import * as nbaSvc from '../services/crm/ai/nextBestAction.service';
 import * as winSvc from '../services/crm/ai/winProbability.service';
@@ -4318,6 +4320,56 @@ broadcasts.post('/:id/test', waAdminOnly, broadcastEntitled, wrap(async (req, re
   res.json({ success: true, data: await broadcastSvc.testSend(bcastScope(req), req.params.id, body.phones ?? []) });
 }));
 router.use('/broadcasts', rbac.requireModuleAccess('crm_whatsapp'), broadcasts);
+
+// ── Email Campaigns (bulk email) ──
+// Segment leads → snapshot a saved email template → paced, tracked bulk send.
+// Reuses the shared sendEmail() (suppression + open/click tracking + one-click
+// unsubscribe). Reads open to any CRM user; mutations admin- + entitlement-gated
+// like WhatsApp broadcasts.
+const emailCampaigns = express.Router();
+const ecScope = (req: express.Request) => ({ orgId: orgId(req), clientId: clientId(req), userId: userId(req) });
+const emailCampaignEntitled = wrap(async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (await isEmailCampaignEnabled(orgId(req))) return next();
+  res.status(403).json({ success: false, error: EMAIL_CAMPAIGN_DISABLED_MESSAGE, code: 'EMAIL_CAMPAIGN_NOT_ENABLED' });
+});
+emailCampaigns.get('/', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.listCampaigns(ecScope(req), req.query) })));
+emailCampaigns.get('/entitlement', wrap(async (req, res) => res.json({ success: true, data: { enabled: await isEmailCampaignEnabled(orgId(req)) } })));
+emailCampaigns.get('/usage', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.getUsage(ecScope(req)) })));
+emailCampaigns.post('/preview', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => {
+  const body = parse(v.emailCampaignPreviewSchema, req.body);
+  res.json({ success: true, data: await emailCampaignSvc.previewCampaign(ecScope(req), {
+    template_id: body.template_id, subject: body.subject, body_html: body.body_html,
+    audience: body.audience as emailCampaignSvc.AudienceFilter,
+  }) });
+}));
+emailCampaigns.post('/', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => {
+  const body = parse(v.emailCampaignCreateSchema, req.body);
+  res.status(201).json({ success: true, data: await emailCampaignSvc.createCampaign(ecScope(req), {
+    name: body.name!,
+    template_id: body.template_id,
+    subject: body.subject,
+    body_html: body.body_html,
+    body_text: body.body_text,
+    from_email: body.from_email,
+    audience: body.audience as emailCampaignSvc.AudienceFilter,
+    throttle_per_min: body.throttle_per_min,
+  }) });
+}));
+emailCampaigns.get('/:id', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.getCampaign(ecScope(req), req.params.id) })));
+emailCampaigns.get('/:id/recipients', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.listRecipients(ecScope(req), req.params.id, req.query) })));
+emailCampaigns.get('/:id/analytics', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.getAnalytics(ecScope(req), req.params.id) })));
+emailCampaigns.get('/:id/recipients.csv', wrap(async (req, res) => {
+  const csv = await emailCampaignSvc.recipientsCsv(ecScope(req), req.params.id);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="email-campaign-${req.params.id}.csv"`);
+  res.send(csv);
+}));
+emailCampaigns.post('/:id/launch', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.launchCampaign(ecScope(req), req.params.id) })));
+emailCampaigns.post('/:id/pause', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.pauseCampaign(ecScope(req), req.params.id) })));
+emailCampaigns.post('/:id/resume', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.resumeCampaign(ecScope(req), req.params.id) })));
+emailCampaigns.post('/:id/cancel', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.cancelCampaign(ecScope(req), req.params.id) })));
+emailCampaigns.post('/:id/process', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.processCampaignBatch(orgId(req), req.params.id) })));
+router.use('/email-campaigns', emailCampaigns);
 
 const imp = express.Router();
 imp.post('/upload', upload.single('file'), wrap(async (req, res) => {

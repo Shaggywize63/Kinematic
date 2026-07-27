@@ -33,6 +33,9 @@ export interface SendEmailInput {
   lead_id?: string | null;
   contact_id?: string | null;
   deal_id?: string | null;
+  /** Groups this send under a bulk email campaign so open/click/bounce/
+   *  unsubscribe tracking rolls up to campaign analytics. Null for 1:1 sends. */
+  campaign_id?: string | null;
   /**
    * Skip the bounce + unsubscribe suppression check. Set this on
    * transactional flows where the recipient triggered the email
@@ -88,6 +91,7 @@ export async function sendEmail(input: SendEmailInput) {
       status: 'failed',
       error: `suppressed: ${suppressed}`,
       lead_id: input.lead_id ?? null, contact_id: input.contact_id ?? null, deal_id: input.deal_id ?? null,
+      campaign_id: input.campaign_id ?? null,
       sent_by: input.user_id ?? null, tracking_pixel_token: trackingToken,
     }).select('id').single();
     if (blockedErr) throw new AppError(500, blockedErr.message, 'DB_ERROR');
@@ -100,6 +104,7 @@ export async function sendEmail(input: SendEmailInput) {
     subject: input.subject, body_html: trackedHtml,
     provider: provider.name, status: 'queued',
     lead_id: input.lead_id ?? null, contact_id: input.contact_id ?? null, deal_id: input.deal_id ?? null,
+    campaign_id: input.campaign_id ?? null,
     sent_by: input.user_id ?? null, tracking_pixel_token: trackingToken,
   }).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -118,6 +123,8 @@ export async function sendEmail(input: SendEmailInput) {
 
   // pg_cron edge function will pick up `queued` rows; here we also do
   // an immediate provider call so dashboards see "sent" without waiting a minute.
+  let finalStatus: 'sent' | 'failed' = 'sent';
+  let sendError: string | null = null;
   try {
     const result = await provider.send({
       from: fromEmail, to: input.to, cc: input.cc, bcc: input.bcc,
@@ -128,11 +135,13 @@ export async function sendEmail(input: SendEmailInput) {
       status: 'sent', provider_message_id: result.message_id ?? null, sent_at: new Date().toISOString(),
     }).eq('id', log.id);
   } catch (err) {
+    finalStatus = 'failed';
+    sendError = (err as Error).message;
     await supabaseAdmin.from('crm_email_logs').update({
-      status: 'failed', error: (err as Error).message,
+      status: 'failed', error: sendError,
     }).eq('id', log.id);
   }
-  return { id: log.id, tracking_token: trackingToken };
+  return { id: log.id, tracking_token: trackingToken, status: finalStatus, error: sendError };
 }
 
 /**
