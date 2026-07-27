@@ -4,10 +4,7 @@
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
-import { stubWhatsappProvider } from './providers/stubWhatsapp.provider';
-import type { WhatsappProvider } from './providers/whatsappProvider.interface';
-
-const provider: WhatsappProvider = stubWhatsappProvider;
+import { resolveWhatsappProvider, fromPhoneFor } from './whatsappConnection.service';
 
 export interface SendWhatsappInput {
   org_id: string;
@@ -36,7 +33,8 @@ export async function sendWhatsapp(input: SendWhatsappInput) {
       renderedBody = renderBody(tpl.body_text, input.template_variables ?? {});
     }
   }
-  const fromPhone = process.env.CRM_WHATSAPP_FROM_PHONE || '+0000000000';
+  const provider = await resolveWhatsappProvider(input.org_id);
+  const fromPhone = (await fromPhoneFor(input.org_id)) || process.env.CRM_WHATSAPP_FROM_PHONE || '+0000000000';
 
   const { data: log, error } = await supabaseAdmin.from('crm_whatsapp_logs').insert({
     org_id: input.org_id,
@@ -113,6 +111,7 @@ export async function recordInbound(payload: {
     .eq('org_id', payload.org_id).eq('phone', payload.from_phone).is('deleted_at', null).maybeSingle();
 
   const status = payload.in_reply_to ? 'replied' : 'received';
+  const providerName = (await resolveWhatsappProvider(payload.org_id)).name;
   await supabaseAdmin.from('crm_whatsapp_logs').insert({
     org_id: payload.org_id,
     direction: 'inbound',
@@ -122,7 +121,7 @@ export async function recordInbound(payload: {
     media_url: payload.media_url ?? null,
     media_type: payload.media_type ?? null,
     status,
-    provider: provider.name,
+    provider: providerName,
     provider_message_id: payload.provider_message_id ?? null,
     contact_id: contact?.id ?? null,
     replied_at: payload.in_reply_to ? new Date().toISOString() : null,

@@ -35,6 +35,7 @@ import * as dashboardLayoutSvc from '../services/crm/dashboardLayout.service';
 import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
 import * as whatsappSvc from '../services/crm/whatsapp.service';
+import * as whatsappConn from '../services/crm/whatsappConnection.service';
 import * as productsSvc from '../services/crm/products.service';
 import * as nbaSvc from '../services/crm/ai/nextBestAction.service';
 import * as winSvc from '../services/crm/ai/winProbability.service';
@@ -4218,6 +4219,22 @@ whatsapp.post('/send', wrap(async (req, res) => {
   }));
 }));
 whatsapp.get('/logs', wrap(async (req, res) => res.json(await whatsappSvc.listLogs(orgId(req), req.query))));
+
+// ── Connection config (admin) — how this tenant connects to WhatsApp ──
+const WA_ADMIN_ROLES = new Set(['admin', 'super_admin', 'main_admin', 'master_admin', 'sub_admin', 'client']);
+const waAdminOnly = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const role = String((req as { user?: { role?: string } }).user?.role || '').toLowerCase();
+  if (WA_ADMIN_ROLES.has(role)) return next();
+  res.status(403).json({ success: false, error: 'Admin access required to configure WhatsApp.' });
+};
+whatsapp.get('/connection', wrap(async (req, res) => res.json({ success: true, data: await whatsappConn.getConnection(orgId(req)) })));
+whatsapp.put('/connection', waAdminOnly, wrap(async (req, res) => {
+  const body = parse(v.whatsappConnectionSchema, req.body);
+  res.json({ success: true, data: await whatsappConn.upsertConnection(orgId(req), { ...body, connection_type: body.connection_type!, updated_by: userId(req) }) });
+}));
+whatsapp.post('/connection/test', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await whatsappConn.testConnection(orgId(req)) })));
+whatsapp.post('/templates/sync', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await whatsappConn.syncTemplates(orgId(req)) })));
+
 router.use('/whatsapp', rbac.requireModuleAccess('crm_whatsapp'), whatsapp);
 
 const imp = express.Router();
