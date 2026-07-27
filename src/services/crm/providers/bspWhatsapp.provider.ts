@@ -8,7 +8,7 @@
  * Cloud-API-compatible majority. Built per-tenant from crm_whatsapp_connections.
  */
 import type { WhatsappProvider, WhatsappSendInput, WhatsappSendResult } from './whatsappProvider.interface';
-import { templateComponents } from './cloudApiWhatsapp.provider';
+import { templateComponents, providerError } from './cloudApiWhatsapp.provider';
 
 export interface BspConfig {
   baseUrl: string;   // e.g. https://waba-v2.360dialog.io
@@ -44,7 +44,7 @@ export function makeBspProvider(cfg: BspConfig): WhatsappProvider {
         body: JSON.stringify(body),
       });
       const json = (await res.json().catch(() => ({}))) as any;
-      if (!res.ok) throw new Error(json?.error?.message || json?.message || `WhatsApp BSP HTTP ${res.status}`);
+      if (!res.ok) throw providerError(json?.error?.message || json?.message || `WhatsApp BSP HTTP ${res.status}`, res, json?.error?.code);
       return { message_id: json?.messages?.[0]?.id || json?.id || json?.messageId };
     },
   };
