@@ -40,6 +40,7 @@ import * as broadcastSvc from '../services/crm/broadcast.service';
 import { isBroadcastEnabled, BROADCAST_DISABLED_MESSAGE } from '../lib/broadcastEntitlement';
 import * as emailCampaignSvc from '../services/crm/emailCampaign.service';
 import { isEmailCampaignEnabled, EMAIL_CAMPAIGN_DISABLED_MESSAGE } from '../lib/emailCampaignEntitlement';
+import * as googleContactsSvc from '../services/crm/googleContacts.service';
 import * as productsSvc from '../services/crm/products.service';
 import * as nbaSvc from '../services/crm/ai/nextBestAction.service';
 import * as winSvc from '../services/crm/ai/winProbability.service';
@@ -4335,6 +4336,10 @@ const emailCampaignEntitled = wrap(async (req: express.Request, res: express.Res
 emailCampaigns.get('/', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.listCampaigns(ecScope(req), req.query) })));
 emailCampaigns.get('/entitlement', wrap(async (req, res) => res.json({ success: true, data: { enabled: await isEmailCampaignEnabled(orgId(req)) } })));
 emailCampaigns.get('/usage', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.getUsage(ecScope(req)) })));
+// Connect Google → import the rep's Google contacts as leads (the directory the
+// audience picks from). Status is open; the sync is admin- + entitlement-gated.
+emailCampaigns.get('/google/status', wrap(async (req, res) => res.json({ success: true, data: await googleContactsSvc.getConnectionStatus(userId(req)) })));
+emailCampaigns.post('/google/sync', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await googleContactsSvc.syncContacts(ecScope(req)) })));
 emailCampaigns.post('/preview', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => {
   const body = parse(v.emailCampaignPreviewSchema, req.body);
   res.json({ success: true, data: await emailCampaignSvc.previewCampaign(ecScope(req), {

@@ -54,10 +54,16 @@ function stateSecret(): string {
 router.get('/google/authorize', wrap(async (req, res) => {
   if (!googleConfigured()) throw new AppError(500, 'Google OAuth is not configured', 'NOT_CONFIGURED');
   const u = reqUser(req);
+  // Optional dashboard path to return to after consent (e.g. the email-campaign
+  // composer). Restricted to in-app /dashboard/ paths so it can't be used as an
+  // open redirect. Defaults (in the callback) to the Activities calendar view.
+  const ret = typeof req.query.return === 'string' && req.query.return.startsWith('/dashboard/')
+    ? req.query.return
+    : undefined;
   // Sign user + org into the state so the callback can map the code
   // back to the right rep (no cookies survive Google's redirect).
   const state = jwt.sign(
-    { uid: u.id, oid: u.org_id, kind: 'google_oauth' },
+    { uid: u.id, oid: u.org_id, kind: 'google_oauth', ...(ret ? { ret } : {}) },
     stateSecret(),
     { expiresIn: '10m' },
   );

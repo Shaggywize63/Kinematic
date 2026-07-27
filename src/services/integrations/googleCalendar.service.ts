@@ -24,6 +24,13 @@ const CALENDAR_API_BASE = 'https://www.googleapis.com/calendar/v3';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/calendar.events',
+  // Read-only Google Contacts (People API) so a rep can import their address
+  // book into the CRM for email campaigns. Incremental — include_granted_scopes
+  // below merges it with any grant an existing calendar user already gave, so
+  // nothing that only needs calendar breaks; they just also grant contacts on
+  // their next (re)connect. NOTE: this is a Google "sensitive" scope — the OAuth
+  // app must be verified (or the user added as a test user) to use it in prod.
+  'https://www.googleapis.com/auth/contacts.readonly',
   'https://www.googleapis.com/auth/userinfo.email',
 ].join(' ');
 
@@ -201,6 +208,22 @@ export async function getStatus(userId: string): Promise<{ connected: boolean; e
   const row = await getIntegration(userId);
   if (!row) return { connected: false };
   return { connected: true, email: row.google_email };
+}
+
+/** A valid (auto-refreshed) access token + granted scopes for a connected
+ *  user, or null if they haven't connected Google. Used by the Google
+ *  Contacts sync so it can reuse this module's token plumbing rather than
+ *  re-implementing exchange/refresh. */
+export async function getAccess(userId: string): Promise<{ token: string; scopes: string; email: string } | null> {
+  const { data } = await supabaseAdmin
+    .from('user_google_integrations')
+    .select('user_id, google_email, access_token, refresh_token, token_expires_at, calendar_id, scopes')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (!data) return null;
+  const row = data as IntegrationRow;
+  const token = await getValidAccessToken(row);
+  return { token, scopes: String((data as { scopes?: string }).scopes ?? ''), email: data.google_email };
 }
 
 /** Disconnect — revoke the refresh token with Google (best-effort) and

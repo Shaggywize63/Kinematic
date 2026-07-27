@@ -324,29 +324,30 @@ app.get(`${V1}/integrations/google/callback`, async (req, res, next) => {
     const { default: jwt } = await import('jsonwebtoken');
     const { completeOAuth, isConfigured } = await import('./services/integrations/googleCalendar.service');
     const dashUrl = process.env.DASHBOARD_URL || 'http://localhost:3000';
-    // Bounce back to the Activities calendar view (where the banner
-    // lives) instead of the old standalone settings page.
-    const back = `${dashUrl}/dashboard/crm/activities?layout=calendar`;
+    // Where to land after consent. Default: the Activities calendar view (where
+    // the calendar banner lives). A `ret` path in the state (in-app /dashboard/
+    // only) overrides it — used by the email-campaign composer's Connect button.
+    const defaultBack = `${dashUrl}/dashboard/crm/activities?layout=calendar`;
+    const withParam = (base: string, k: string, v: string) =>
+      `${base}${base.includes('?') ? '&' : '?'}${k}=${encodeURIComponent(v)}`;
     if (!isConfigured()) {
-      return res.redirect(`${back}&error=not_configured`);
+      return res.redirect(withParam(defaultBack, 'error', 'not_configured'));
     }
     const code  = String(req.query.code || '');
     const state = String(req.query.state || '');
     const err   = String(req.query.error || '');
-    if (err) return res.redirect(`${back}&error=${encodeURIComponent(err)}`);
-    if (!code || !state) return res.redirect(`${back}&error=missing_params`);
     const secret = process.env.GOOGLE_OAUTH_STATE_SECRET || process.env.SUPABASE_JWT_SECRET || 'dev-only-secret-replace-me';
-    let payload: { uid: string; oid: string; kind: string };
-    try {
-      payload = jwt.verify(state, secret) as { uid: string; oid: string; kind: string };
-    } catch {
-      return res.redirect(`${back}&error=invalid_state`);
-    }
-    if (payload.kind !== 'google_oauth' || !payload.uid || !payload.oid) {
-      return res.redirect(`${back}&error=invalid_state`);
+    let payload: { uid: string; oid: string; kind: string; ret?: string } | null = null;
+    if (state) { try { payload = jwt.verify(state, secret) as typeof payload; } catch { payload = null; } }
+    const ret = payload && typeof payload.ret === 'string' && payload.ret.startsWith('/dashboard/') ? payload.ret : null;
+    const back = ret ? `${dashUrl}${ret}` : defaultBack;
+    if (err) return res.redirect(withParam(back, 'error', err));
+    if (!code || !state) return res.redirect(withParam(back, 'error', 'missing_params'));
+    if (!payload || payload.kind !== 'google_oauth' || !payload.uid || !payload.oid) {
+      return res.redirect(withParam(back, 'error', 'invalid_state'));
     }
     const { email } = await completeOAuth(payload.uid, payload.oid, code);
-    return res.redirect(`${back}&connected=${encodeURIComponent(email)}`);
+    return res.redirect(withParam(back, 'connected', email));
   } catch (e) { next(e); }
 });
 
