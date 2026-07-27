@@ -5,6 +5,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { resolveWhatsappProvider, fromPhoneFor } from './whatsappConnection.service';
+import { applyRecipientStatus } from './broadcast.service';
 
 export interface SendWhatsappInput {
   org_id: string;
@@ -55,7 +56,9 @@ export async function sendWhatsapp(input: SendWhatsappInput) {
   }).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
-  // Immediate provider call so dashboards see "sent" without a wait.
+  // Immediate provider call so dashboards see "sent" without a wait. We return
+  // the provider_message_id + final status so callers (e.g. broadcast recipient
+  // tracking) can correlate later delivery/read webhooks to this message.
   try {
     const result = await provider.send({
       to: input.to,
@@ -71,13 +74,15 @@ export async function sendWhatsapp(input: SendWhatsappInput) {
       provider_message_id: result.message_id ?? null,
       sent_at: new Date().toISOString(),
     }).eq('id', log.id);
+    return { id: log.id as string, provider_message_id: result.message_id ?? null, status: 'sent' as const, error: null };
   } catch (err) {
+    const message = (err as Error).message;
     await supabaseAdmin.from('crm_whatsapp_logs').update({
       status: 'failed',
-      error: (err as Error).message,
+      error: message,
     }).eq('id', log.id);
+    return { id: log.id as string, provider_message_id: null, status: 'failed' as const, error: message };
   }
-  return { id: log.id };
 }
 
 export async function listLogs(org_id: string, filters: Record<string, unknown> = {}) {
@@ -148,6 +153,10 @@ export async function recordStatusUpdate(payload: {
   if (payload.status === 'failed') update.error = payload.error ?? null;
   await supabaseAdmin.from('crm_whatsapp_logs').update(update)
     .eq('org_id', payload.org_id).eq('provider_message_id', payload.provider_message_id);
+
+  // Mirror the delivery status onto any broadcast recipient that carries this
+  // provider_message_id, and roll up the broadcast's delivered/read/failed counts.
+  await applyRecipientStatus(payload.org_id, payload.provider_message_id, payload.status, payload.error);
 }
 
 function renderBody(body: string, vars: Record<string, string>): string {

@@ -36,6 +36,7 @@ import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
 import * as whatsappSvc from '../services/crm/whatsapp.service';
 import * as whatsappConn from '../services/crm/whatsappConnection.service';
+import * as broadcastSvc from '../services/crm/broadcast.service';
 import * as productsSvc from '../services/crm/products.service';
 import * as nbaSvc from '../services/crm/ai/nextBestAction.service';
 import * as winSvc from '../services/crm/ai/winProbability.service';
@@ -4236,6 +4237,39 @@ whatsapp.post('/connection/test', waAdminOnly, wrap(async (req, res) => res.json
 whatsapp.post('/templates/sync', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await whatsappConn.syncTemplates(orgId(req)) })));
 
 router.use('/whatsapp', rbac.requireModuleAccess('crm_whatsapp'), whatsapp);
+
+// ── WhatsApp Broadcasts (campaigns) — Phase 1 ──
+// Segment leads → template → consent-gated paced send → per-recipient tracking.
+// Reads are open to any crm_whatsapp user; mutations (create/launch/pause/…) are
+// admin-gated like the connection config.
+const broadcasts = express.Router();
+const bcastScope = (req: express.Request) => ({ orgId: orgId(req), clientId: clientId(req), userId: userId(req) });
+broadcasts.get('/', wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.listBroadcasts(bcastScope(req), req.query) })));
+broadcasts.get('/:id', wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.getBroadcast(bcastScope(req), req.params.id) })));
+broadcasts.get('/:id/recipients', wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.listRecipients(bcastScope(req), req.params.id, req.query) })));
+broadcasts.post('/preview', waAdminOnly, wrap(async (req, res) => {
+  const body = parse(v.broadcastPreviewSchema, req.body);
+  res.json({ success: true, data: await broadcastSvc.previewBroadcast(
+    bcastScope(req), body.audience as broadcastSvc.AudienceFilter, body.variable_map as broadcastSvc.VariableMap | undefined) });
+}));
+broadcasts.post('/', waAdminOnly, wrap(async (req, res) => {
+  const body = parse(v.broadcastCreateSchema, req.body);
+  res.status(201).json({ success: true, data: await broadcastSvc.createBroadcast(bcastScope(req), {
+    ...body,
+    name: body.name!,
+    template_id: body.template_id!,
+    audience: body.audience as broadcastSvc.AudienceFilter,
+    variable_map: body.variable_map as broadcastSvc.VariableMap | undefined,
+  }) });
+}));
+broadcasts.post('/:id/launch', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.launchBroadcast(bcastScope(req), req.params.id) })));
+broadcasts.post('/:id/pause', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.pauseBroadcast(bcastScope(req), req.params.id) })));
+broadcasts.post('/:id/resume', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.resumeBroadcast(bcastScope(req), req.params.id) })));
+broadcasts.post('/:id/cancel', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.cancelBroadcast(bcastScope(req), req.params.id) })));
+// Drive one paced batch — polled by the campaign detail page while it's open;
+// the in-process scheduler is the backstop when no one is watching.
+broadcasts.post('/:id/process', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.processBroadcast(bcastScope(req), req.params.id) })));
+router.use('/broadcasts', rbac.requireModuleAccess('crm_whatsapp'), broadcasts);
 
 const imp = express.Router();
 imp.post('/upload', upload.single('file'), wrap(async (req, res) => {

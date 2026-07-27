@@ -817,6 +817,44 @@ export const whatsappConnectionSchema = z.object({
   is_active: z.boolean().optional(),
 });
 
+// ── WhatsApp Broadcast (campaigns) — Phase 1 ──────────────────────────────
+// Audience filter — an explicit lead_ids selection OR a set of lead attribute
+// filters. Everything is optional; an empty filter matches the whole (scoped)
+// lead book.
+export const broadcastAudienceSchema = z.object({
+  lead_ids: z.array(uuid).max(50000).optional(),
+  statuses: z.array(z.string().max(60)).max(50).optional(),
+  cities: z.array(z.string().max(120)).max(200).optional(),
+  states: z.array(z.string().max(120)).max(100).optional(),
+  countries: z.array(z.string().max(120)).max(100).optional(),
+  industries: z.array(z.string().max(120)).max(100).optional(),
+  tags: z.array(z.string().max(60)).max(100).optional(),
+  min_score: z.number().int().optional().nullable(),
+  search: z.string().max(200).optional().nullable(),
+});
+
+// Positional template variable ({{1}},{{2}}…) → a lead field or a literal.
+const broadcastVarSource = z.object({
+  type: z.enum(['field', 'literal']),
+  key: z.string().max(60).optional(),
+  value: z.string().max(1000).optional(),
+});
+export const broadcastVariableMapSchema = z.record(broadcastVarSource);
+
+export const broadcastCreateSchema = z.object({
+  name: z.string().min(1).max(160),
+  template_id: uuid,
+  audience: broadcastAudienceSchema.default({}),
+  variable_map: broadcastVariableMapSchema.optional(),
+  throttle_per_min: z.number().int().min(1).max(600).optional(),
+  scheduled_at: z.string().datetime({ offset: true }).optional().nullable(),
+});
+
+export const broadcastPreviewSchema = z.object({
+  audience: broadcastAudienceSchema.default({}),
+  variable_map: broadcastVariableMapSchema.optional(),
+});
+
 // People Directory — per-client address book of dealers / influencers /
 // referrers that aren't pipelined leads. At least one of first_name,
 // last_name, mobile or email must be present so we don't accept an
