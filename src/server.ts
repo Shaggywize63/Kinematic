@@ -6,6 +6,7 @@ import { resumeWaitingFlowRuns } from './services/crm/flows.service';
 import { runDueReportDigests } from './services/crm/reportSchedules.service';
 import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
 import { processDueBroadcastsAllProjects } from './services/crm/broadcast.service';
+import { processDueEmailCampaignsAllProjects } from './services/crm/emailCampaign.service';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -98,6 +99,19 @@ if (String(process.env.CRM_BROADCAST_SCHEDULER_ENABLED ?? 'true').toLowerCase() 
       .catch((e) => logger.warn(`[broadcast] scheduler run failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[broadcast] pacing scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Email campaign pacing. Same shape as WhatsApp broadcasts — one throttled batch
+// per in-flight campaign per tick (throttle_per_min emails/batch). Toggle with
+// CRM_EMAIL_CAMPAIGN_SCHEDULER_ENABLED=false; tune with CRM_EMAIL_CAMPAIGN_INTERVAL_SEC.
+if (String(process.env.CRM_EMAIL_CAMPAIGN_SCHEDULER_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(15, Number(process.env.CRM_EMAIL_CAMPAIGN_INTERVAL_SEC ?? 60)) * 1000;
+  setInterval(() => {
+    processDueEmailCampaignsAllProjects()
+      .then((r) => { if (r.sent) logger.info(`[email-campaign] paced ${r.sent} email(s) across ${r.processed} campaign(s)`); })
+      .catch((e) => logger.warn(`[email-campaign] scheduler run failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[email-campaign] pacing scheduler enabled (every ${everyMs / 1000}s)`);
 }
 
 // Graceful shutdown

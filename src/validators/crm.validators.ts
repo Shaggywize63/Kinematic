@@ -885,6 +885,37 @@ export const broadcastSettingsSchema = z.object({
   reply_creates_task: z.boolean().optional(),
 });
 
+// ── Email Campaigns (bulk email) ─────────────────────────────────────────────
+// Lead audience for a bulk email send. Empty = every lead in scope with an email.
+export const emailCampaignAudienceSchema = z.object({
+  lead_ids: z.array(uuid).max(50000).optional(),
+  marketing_consent: z.boolean().optional(),
+  status: z.array(z.string().max(60)).max(50).optional(),
+  source_ids: z.array(uuid).max(200).optional(),
+  city: z.array(z.string().max(120)).max(200).optional(),
+  state: z.array(z.string().max(120)).max(100).optional(),
+  tags: z.array(z.string().max(60)).max(100).optional(),
+  is_b2c: z.boolean().optional(),
+});
+
+export const emailCampaignPreviewSchema = z.object({
+  audience: emailCampaignAudienceSchema.default({}),
+  template_id: optionalUuid,
+  subject: z.string().max(300).optional(),
+  body_html: z.string().max(500000).optional(),
+});
+
+export const emailCampaignCreateSchema = z.object({
+  name: z.string().min(1).max(160),
+  template_id: optionalUuid,
+  subject: z.string().max(300).optional(),
+  body_html: z.string().max(500000).optional(),
+  body_text: z.string().max(500000).optional(),
+  from_email: z.string().email().max(200).optional(),
+  audience: emailCampaignAudienceSchema.default({}),
+  throttle_per_min: z.number().int().min(1).max(500).optional(),
+});
+
 // People Directory — per-client address book of dealers / influencers /
 // referrers that aren't pipelined leads. At least one of first_name,
 // last_name, mobile or email must be present so we don't accept an
