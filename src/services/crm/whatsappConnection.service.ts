@@ -205,6 +205,12 @@ export async function syncTemplates(org_id: string): Promise<{ synced: number }>
     const bodyC = comps.find((x) => x.type === 'BODY');
     const headerC = comps.find((x) => x.type === 'HEADER');
     const footerC = comps.find((x) => x.type === 'FOOTER');
+    const buttonsC = comps.find((x) => x.type === 'BUTTONS');
+    // Capture the template's buttons (quick-reply / URL / phone) so the campaign
+    // wizard can preview them; clicks come back as inbound button/interactive replies.
+    const buttons = Array.isArray(buttonsC?.buttons)
+      ? buttonsC.buttons.map((b: any) => ({ type: String(b?.type || ''), text: String(b?.text || '') })).filter((b: any) => b.text)
+      : null;
     const row = {
       org_id,
       meta_template_name: String(t.name),
@@ -214,6 +220,7 @@ export async function syncTemplates(org_id: string): Promise<{ synced: number }>
       body_text: String(bodyC?.text || ''),
       header_text: headerC?.format === 'TEXT' ? (headerC?.text ?? null) : null,
       footer_text: footerC?.text ?? null,
+      buttons: buttons && buttons.length ? buttons : null,
       provider_template_id: t.id ? String(t.id) : null,
       updated_at: new Date().toISOString(),
     };

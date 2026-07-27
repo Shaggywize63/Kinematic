@@ -856,6 +856,23 @@ export const broadcastPreviewSchema = z.object({
   template_id: optionalUuid,   // when present, the preview also returns a cost estimate
 });
 
+// Saved segment (reusable audience).
+export const broadcastSegmentSchema = z.object({
+  name: z.string().min(1).max(120),
+  audience: broadcastAudienceSchema.default({}),
+});
+
+// Suppression list add (bulk phone numbers).
+export const broadcastSuppressionSchema = z.object({
+  phones: z.array(z.string().max(40)).min(1).max(5000),
+  reason: z.string().max(120).optional().nullable(),
+});
+
+// Test send.
+export const broadcastTestSchema = z.object({
+  phones: z.array(z.string().min(5).max(40)).min(1).max(5),
+});
+
 // Compliance + cost settings (frequency cap / quiet hours / opt-out / rates).
 export const broadcastSettingsSchema = z.object({
   frequency_cap_max: z.number().int().min(1).max(100).optional().nullable(),
@@ -865,6 +882,7 @@ export const broadcastSettingsSchema = z.object({
   quiet_hours_tz: z.string().max(60).optional(),
   opt_out_keywords: z.array(z.string().max(40)).max(50).optional().nullable(),
   cost_rates: z.record(z.record(z.number())).optional().nullable(),
+  reply_creates_task: z.boolean().optional(),
 });
 
 // People Directory — per-client address book of dealers / influencers /

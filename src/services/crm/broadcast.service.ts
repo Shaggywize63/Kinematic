@@ -52,7 +52,7 @@ function retryDelayMs(attempts: number): number {
   return Math.min(30, Math.pow(2, Math.max(1, attempts))) * 60_000;
 }
 
-export type SkipReason = 'no_phone' | 'not_opted_in' | 'opted_out' | 'duplicate' | 'frequency_capped';
+export type SkipReason = 'no_phone' | 'not_opted_in' | 'opted_out' | 'duplicate' | 'frequency_capped' | 'suppressed';
 export type BroadcastStatus = 'draft' | 'scheduled' | 'sending' | 'paused' | 'completed' | 'cancelled' | 'failed';
 
 export interface BroadcastScope { orgId: string; clientId: string | null; userId?: string | null; }
@@ -142,11 +142,12 @@ export interface BroadcastSettings {
   quiet_hours_tz: string;
   opt_out_keywords: string[] | null;
   cost_rates: Record<string, Record<string, number>> | null;
+  reply_creates_task: boolean;
 }
 const EMPTY_SETTINGS: BroadcastSettings = {
   frequency_cap_max: null, frequency_cap_window_days: 7,
   quiet_hours_start: null, quiet_hours_end: null, quiet_hours_tz: 'Asia/Kolkata',
-  opt_out_keywords: null, cost_rates: null,
+  opt_out_keywords: null, cost_rates: null, reply_creates_task: true,
 };
 
 /** Resolve settings for a scope: a client-specific row overrides the org default. */
@@ -170,6 +171,7 @@ async function loadBroadcastSettings(orgId: string, clientId: string | null): Pr
       quiet_hours_tz: row.quiet_hours_tz || 'Asia/Kolkata',
       opt_out_keywords: row.opt_out_keywords ?? null,
       cost_rates: row.cost_rates ?? null,
+      reply_creates_task: row.reply_creates_task ?? true,
     };
   } catch { return EMPTY_SETTINGS; } // table absent on an unprovisioned project
 }
@@ -192,6 +194,7 @@ export async function upsertBroadcastSettings(scope: BroadcastScope, input: Part
     quiet_hours_tz: input.quiet_hours_tz || 'Asia/Kolkata',
     opt_out_keywords: input.opt_out_keywords ?? null,
     cost_rates: input.cost_rates ?? null,
+    reply_creates_task: input.reply_creates_task ?? true,
     updated_by: scope.userId ?? null,
     updated_at: new Date().toISOString(),
   };
@@ -259,7 +262,7 @@ function estimateCost(tally: Record<string, number>, category: string, rates?: R
 }
 
 // ── audience resolution ──────────────────────────────────────────────────
-async function queryCandidates(orgId: string, clientId: string | null, filter: AudienceFilter): Promise<LeadRow[]> {
+async function queryCandidates(orgId: string, clientId: string | null, filter: AudienceFilter, limitN = MAX_AUDIENCE): Promise<LeadRow[]> {
   let q = supabaseAdmin.from('crm_leads').select(LEAD_SELECT).eq('org_id', orgId).is('deleted_at', null);
   if (clientId) q = q.eq('client_id', clientId);
 
@@ -278,7 +281,7 @@ async function queryCandidates(orgId: string, clientId: string | null, filter: A
       if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,phone.ilike.%${s}%`);
     }
   }
-  const { data, error } = await q.limit(MAX_AUDIENCE);
+  const { data, error } = await q.limit(limitN);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return (data ?? []) as unknown as LeadRow[];
 }
@@ -308,9 +311,22 @@ export interface SkippedRecipient { lead_id: string; phone: string | null; skip_
 export interface AudienceResolution {
   eligible: ResolvedRecipient[];
   skipped: SkippedRecipient[];
-  counts: { candidates: number; eligible: number; no_phone: number; not_opted_in: number; opted_out: number; duplicate: number; frequency_capped: number };
+  counts: { candidates: number; eligible: number; no_phone: number; not_opted_in: number; opted_out: number; duplicate: number; frequency_capped: number; suppressed: number };
   sample: Array<{ lead_id: string; name: string; phone: string }>;
   countryTally: Record<string, number>;   // eligible leads bucketed IN / default (cost estimate)
+}
+
+const SEGMENTS = 'crm_broadcast_segments';
+const SUPPRESSIONS = 'crm_broadcast_suppressions';
+
+/** The org's manual suppression list, as a set of last-10-digit keys. */
+async function suppressionSet(orgId: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const { data } = await supabaseAdmin.from(SUPPRESSIONS).select('phone_digits').eq('org_id', orgId).limit(100000);
+    for (const r of (data ?? []) as Array<{ phone_digits: string }>) { const d = digits(r.phone_digits); if (d) out.add(d.slice(-10)); }
+  } catch { /* table absent on an unprovisioned project */ }
+  return out;
 }
 
 /** Leads that have already received >= cap broadcast sends within the window. */
@@ -335,10 +351,11 @@ export async function resolveAudience(orgId: string, clientId: string | null, fi
   const candidates = await queryCandidates(orgId, clientId, filter);
   const purposes = await optInPurposes(orgId);
   const { optedIn, optedOut } = await consentSets(orgId, candidates.map((l) => l.id), purposes);
+  const suppressed = await suppressionSet(orgId);
 
   let eligible: ResolvedRecipient[] = [];
   const skipped: SkippedRecipient[] = [];
-  const counts = { candidates: candidates.length, eligible: 0, no_phone: 0, not_opted_in: 0, opted_out: 0, duplicate: 0, frequency_capped: 0 };
+  const counts = { candidates: candidates.length, eligible: 0, no_phone: 0, not_opted_in: 0, opted_out: 0, duplicate: 0, frequency_capped: 0, suppressed: 0 };
   const seen = new Set<string>();
 
   for (const lead of candidates) {
@@ -346,6 +363,7 @@ export async function resolveAudience(orgId: string, clientId: string | null, fi
     if (d.length < 8) { skipped.push({ lead_id: lead.id, phone: lead.phone, skip_reason: 'no_phone' }); counts.no_phone++; continue; }
     if (seen.has(d)) { skipped.push({ lead_id: lead.id, phone: lead.phone, skip_reason: 'duplicate' }); counts.duplicate++; continue; }
     seen.add(d);
+    if (suppressed.has(d.slice(-10))) { skipped.push({ lead_id: lead.id, phone: lead.phone, skip_reason: 'suppressed' }); counts.suppressed++; continue; }
     if (optedOut.has(lead.id)) { skipped.push({ lead_id: lead.id, phone: lead.phone, skip_reason: 'opted_out' }); counts.opted_out++; continue; }
     const boolOptIn = lead.whatsapp_consent === true || lead.marketing_consent === true;
     if (!boolOptIn && !optedIn.has(lead.id)) { skipped.push({ lead_id: lead.id, phone: lead.phone, skip_reason: 'not_opted_in' }); counts.not_opted_in++; continue; }
@@ -865,14 +883,15 @@ export async function getUsage(scope: BroadcastScope): Promise<{ month: string; 
  *  2. Reply attribution — otherwise, stamp the lead's most recent broadcast
  *     recipient as replied and bump the campaign's reply_count (reply-rate).
  */
-export async function handleInbound(orgId: string, fromPhone: string, bodyText?: string | null): Promise<void> {
+export async function handleInbound(orgId: string, fromPhone: string, bodyText?: string | null, buttonPayload?: string | null): Promise<void> {
   try {
     const d = digits(fromPhone);
     if (d.length < 8) return;
     const last10 = d.slice(-10);
-    const { data: lead } = await supabaseAdmin.from('crm_leads').select('id')
+    const { data: lead } = await supabaseAdmin.from('crm_leads').select('id, owner_id, client_id')
       .eq('org_id', orgId).is('deleted_at', null).or(`phone.eq.${last10},phone.eq.${d}`).limit(1).maybeSingle();
-    const leadId = (lead as { id?: string } | null)?.id ?? null;
+    const l = lead as { id?: string; owner_id?: string | null; client_id?: string | null } | null;
+    const leadId = l?.id ?? null;
 
     const keywords = await resolveOptOutKeywords(orgId);
     if (isOptOutMessage(bodyText, keywords)) {
@@ -883,6 +902,12 @@ export async function handleInbound(orgId: string, fromPhone: string, bodyText?:
         }
         await supabaseAdmin.from('crm_leads').update({ whatsapp_consent: false, marketing_consent: false }).eq('org_id', orgId).eq('id', leadId);
       }
+      // Belt-and-suspenders: also add the number to the suppression list, so an
+      // opt-out sticks even for a phone that isn't (yet) a lead row.
+      await supabaseAdmin.from(SUPPRESSIONS).upsert(
+        { org_id: orgId, phone_digits: last10, lead_id: leadId, reason: 'opted_out' },
+        { onConflict: 'org_id,phone_digits' },
+      );
       logger.info(`[broadcast] opt-out from ${last10} (lead=${leadId ?? 'unknown'})`);
       return;
     }
@@ -894,10 +919,105 @@ export async function handleInbound(orgId: string, fromPhone: string, bodyText?:
     const r = rcpt as { id: string; broadcast_id: string; replied_at: string | null } | null;
     if (r?.id && !r.replied_at) {
       await supabaseAdmin.from(RECIPIENTS).update({ replied_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', r.id);
-      const { data: b } = await supabaseAdmin.from(BROADCASTS).select('reply_count').eq('id', r.broadcast_id).maybeSingle();
-      await supabaseAdmin.from(BROADCASTS).update({ reply_count: (((b as { reply_count?: number } | null)?.reply_count) ?? 0) + 1, updated_at: new Date().toISOString() }).eq('id', r.broadcast_id);
+      const { data: b } = await supabaseAdmin.from(BROADCASTS).select('name, reply_count').eq('id', r.broadcast_id).maybeSingle();
+      const bc = b as { name?: string; reply_count?: number } | null;
+      await supabaseAdmin.from(BROADCASTS).update({ reply_count: (bc?.reply_count ?? 0) + 1, updated_at: new Date().toISOString() }).eq('id', r.broadcast_id);
+
+      // Reply → follow-up: a to-do on the lead so a rep actually works the reply.
+      const settings = await loadBroadcastSettings(orgId, l?.client_id ?? null);
+      if (settings.reply_creates_task) {
+        await supabaseAdmin.from('crm_activities').insert({
+          org_id: orgId, client_id: l?.client_id ?? null, type: 'task', status: 'open', priority: 'high',
+          subject: `WhatsApp reply — ${bc?.name || 'campaign'}`,
+          body: (buttonPayload ? `[button: ${buttonPayload}] ` : '') + (bodyText || ''),
+          lead_id: leadId, owner_id: l?.owner_id ?? null, assigned_to: l?.owner_id ?? null,
+          due_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+          metadata: { source: 'broadcast_reply', broadcast_id: r.broadcast_id, button_payload: buttonPayload ?? null },
+        });
+      }
     }
   } catch (e: any) {
     logger.warn(`[broadcast] handleInbound failed: ${e?.message ?? e}`);
   }
+}
+
+// ── R1 · saved segments ─────────────────────────────────────────────────────
+export async function listSegments(scope: BroadcastScope) {
+  let q = supabaseAdmin.from(SEGMENTS).select('*').eq('org_id', scope.orgId);
+  if (scope.clientId) q = q.eq('client_id', scope.clientId);
+  const { data, error } = await q.order('name', { ascending: true });
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return data ?? [];
+}
+export async function createSegment(scope: BroadcastScope, input: { name: string; audience: AudienceFilter }) {
+  const { data, error } = await supabaseAdmin.from(SEGMENTS).insert({
+    org_id: scope.orgId, client_id: scope.clientId, name: input.name, audience: input.audience ?? {}, created_by: scope.userId ?? null,
+  }).select('*').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return data;
+}
+export async function deleteSegment(scope: BroadcastScope, id: string) {
+  const { error } = await supabaseAdmin.from(SEGMENTS).delete().eq('org_id', scope.orgId).eq('id', id);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return { deleted: true };
+}
+
+// ── R2 · suppression list ───────────────────────────────────────────────────
+export async function listSuppressions(scope: BroadcastScope, filters: Record<string, unknown> = {}) {
+  const limit = Math.min(Number(filters.limit ?? 200), 1000);
+  const page = Math.max(Number(filters.page ?? 1), 1);
+  const { data, error } = await supabaseAdmin.from(SUPPRESSIONS).select('*').eq('org_id', scope.orgId)
+    .order('created_at', { ascending: false }).range((page - 1) * limit, page * limit - 1);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return data ?? [];
+}
+/** Add phone numbers to the suppression list (deduped to last-10 digits). */
+export async function addSuppressions(scope: BroadcastScope, phones: string[], reason?: string | null): Promise<{ added: number }> {
+  const rows = phones.map((p) => digits(p)).filter((d) => d.length >= 8)
+    .map((d) => ({ org_id: scope.orgId, phone_digits: d.slice(-10), reason: reason ?? 'manual', created_by: scope.userId ?? null }));
+  // Dedupe within the batch (the unique index handles cross-batch).
+  const seen = new Set<string>();
+  const unique = rows.filter((r) => (seen.has(r.phone_digits) ? false : (seen.add(r.phone_digits), true)));
+  if (!unique.length) return { added: 0 };
+  const { error } = await supabaseAdmin.from(SUPPRESSIONS).upsert(unique, { onConflict: 'org_id,phone_digits' });
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return { added: unique.length };
+}
+export async function removeSuppression(scope: BroadcastScope, id: string) {
+  const { error } = await supabaseAdmin.from(SUPPRESSIONS).delete().eq('org_id', scope.orgId).eq('id', id);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return { deleted: true };
+}
+
+// ── R3 · test send ──────────────────────────────────────────────────────────
+function sampleVarsFromMap(map?: VariableMap | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, src] of Object.entries(map || {})) {
+    out[k] = src?.type === 'literal' ? String(src.value ?? '') : `[${src?.key || 'field'}]`;
+  }
+  return out;
+}
+/** Send the campaign's template to a few test numbers (no recipients, no counts). */
+export async function testSend(scope: BroadcastScope, id: string, phones: string[]): Promise<{ sent: number; results: Array<{ phone: string; status: string; error?: string | null }> }> {
+  const b = await loadBroadcast(scope.orgId, id);
+  if (!b) throw new AppError(404, 'Broadcast not found', 'NOT_FOUND');
+  const targets = phones.map((p) => p.trim()).filter(Boolean).slice(0, 5);
+  if (!targets.length) throw new AppError(400, 'Provide at least one test number', 'NO_PHONES');
+
+  // Personalise with a real sample lead when the audience has one; else placeholders.
+  let vars = sampleVarsFromMap(b.variable_map as VariableMap);
+  try {
+    const sample = await queryCandidates(b.org_id, b.client_id ?? null, (b.audience ?? {}) as AudienceFilter, 1);
+    if (sample[0]) vars = resolveVars(sample[0], b.variable_map as VariableMap);
+  } catch { /* fall back to placeholders */ }
+
+  const results: Array<{ phone: string; status: string; error?: string | null }> = [];
+  for (const phone of targets) {
+    const res = await sendWhatsapp({
+      org_id: b.org_id, user_id: scope.userId ?? undefined, to: phone,
+      template_id: b.template_id, template_variables: vars,
+    }).catch((e: any) => ({ status: 'failed' as const, error: e?.message ?? 'send error' }));
+    results.push({ phone, status: res.status, error: (res as { error?: string | null }).error ?? null });
+  }
+  return { sent: results.filter((r) => r.status === 'sent').length, results };
 }
