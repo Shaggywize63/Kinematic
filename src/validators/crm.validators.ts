@@ -800,6 +800,23 @@ export const sendWhatsappSchema = z.object({
   path: ['body_text'],
 });
 
+// WhatsApp Business connection config (Phase 0). Secrets (access_token,
+// bsp_api_key) are plaintext on the wire and encrypted at rest; omit them on a
+// plain edit to keep the stored value.
+export const whatsappConnectionSchema = z.object({
+  connection_type: z.enum(['cloud_api', 'bsp']),
+  bsp_name: z.string().max(60).optional().nullable(),
+  phone_number_id: z.string().max(120).optional().nullable(),
+  waba_id: z.string().max(120).optional().nullable(),
+  from_phone: z.string().max(30).optional().nullable(),
+  display_name: z.string().max(120).optional().nullable(),
+  bsp_base_url: z.string().url().max(300).optional().nullable(),
+  access_token: z.string().max(4000).optional().nullable(),
+  bsp_api_key: z.string().max(4000).optional().nullable(),
+  opt_in_purposes: z.array(z.string().max(40)).max(10).optional(),
+  is_active: z.boolean().optional(),
+});
+
 // People Directory — per-client address book of dealers / influencers /
 // referrers that aren't pipelined leads. At least one of first_name,
 // last_name, mobile or email must be present so we don't accept an
