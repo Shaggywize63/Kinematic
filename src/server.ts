@@ -5,6 +5,7 @@ import { runScheduledAutomations } from './services/crm/automations.service';
 import { resumeWaitingFlowRuns } from './services/crm/flows.service';
 import { runDueReportDigests } from './services/crm/reportSchedules.service';
 import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
+import { processDueBroadcastsAllProjects } from './services/crm/broadcast.service';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -80,6 +81,23 @@ if (String(process.env.CRM_DAILY_BRIEFING_ENABLED ?? 'true').toLowerCase() !== '
       .catch((e) => logger.warn(`[daily-briefing] run failed: ${e?.message ?? e}`));
   }, 3600 * 1000).unref();
   logger.info(`[daily-briefing] scheduler enabled (fires at ${briefingHour}:00 UTC)`);
+}
+
+// WhatsApp broadcast pacing. Short in-process tick that advances every in-flight
+// / due campaign one throttled batch per project. The token bucket (anchored on
+// last_batch_at) makes throughput converge to each campaign's throttle_per_min
+// regardless of tick frequency or overlapping instances; the dashboard also
+// polls /process while a campaign is open for smoother, live pacing. Toggle with
+// CRM_BROADCAST_SCHEDULER_ENABLED=false; tune with CRM_BROADCAST_INTERVAL_SEC
+// (default 60s).
+if (String(process.env.CRM_BROADCAST_SCHEDULER_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(15, Number(process.env.CRM_BROADCAST_INTERVAL_SEC ?? 60)) * 1000;
+  setInterval(() => {
+    processDueBroadcastsAllProjects()
+      .then((r) => { if (r.sent) logger.info(`[broadcast] paced ${r.sent} message(s) across ${r.processed} campaign(s)`); })
+      .catch((e) => logger.warn(`[broadcast] scheduler run failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[broadcast] pacing scheduler enabled (every ${everyMs / 1000}s)`);
 }
 
 // Graceful shutdown
