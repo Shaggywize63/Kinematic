@@ -113,6 +113,7 @@ export async function recordInbound(payload: {
   from_phone: string;
   to_phone?: string;
   body_text?: string;
+  button_payload?: string;
   media_url?: string;
   media_type?: string;
   provider_message_id?: string;
@@ -147,7 +148,7 @@ export async function recordInbound(payload: {
 
   // Broadcast hooks: STOP/opt-out → withdraw consent; otherwise attribute the
   // reply to the lead's most recent campaign (reply-rate). Best-effort.
-  await handleInbound(payload.org_id, payload.from_phone, payload.body_text);
+  await handleInbound(payload.org_id, payload.from_phone, payload.body_text, payload.button_payload);
 }
 
 // Webhook entry: status update (delivered/read/failed) for a message we sent.

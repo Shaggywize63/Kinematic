@@ -112,11 +112,16 @@ router.post('/webhooks/whatsapp', express.json({ limit: '2mb' }), async (req, re
       for (const change of entry?.changes ?? []) {
         const value = change?.value ?? {};
         for (const m of value.messages ?? []) {
+          // Text, template quick-reply button (m.button), or interactive
+          // list/button reply — all collapse to a body + optional payload.
+          const bodyText = m.text?.body ?? m.button?.text ?? m.interactive?.button_reply?.title ?? m.interactive?.list_reply?.title;
+          const buttonPayload = m.button?.payload ?? m.interactive?.button_reply?.id ?? m.interactive?.list_reply?.id;
           await whatsappSvc.recordInbound({
             org_id: orgId,
             from_phone: m.from,
             to_phone: value.metadata?.display_phone_number,
-            body_text: m.text?.body,
+            body_text: bodyText,
+            button_payload: buttonPayload,
             media_url: m.image?.id ?? m.document?.id ?? m.video?.id,
             media_type: m.type,
             provider_message_id: m.id,
@@ -4262,6 +4267,20 @@ broadcasts.put('/settings', waAdminOnly, broadcastEntitled, wrap(async (req, res
   const body = parse(v.broadcastSettingsSchema, req.body);
   res.json({ success: true, data: await broadcastSvc.upsertBroadcastSettings(bcastScope(req), body as Partial<broadcastSvc.BroadcastSettings>) });
 }));
+// Saved segments (reusable audiences) — static paths, before '/:id'.
+broadcasts.get('/segments', wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.listSegments(bcastScope(req)) })));
+broadcasts.post('/segments', waAdminOnly, broadcastEntitled, wrap(async (req, res) => {
+  const body = parse(v.broadcastSegmentSchema, req.body);
+  res.status(201).json({ success: true, data: await broadcastSvc.createSegment(bcastScope(req), { name: body.name!, audience: body.audience as broadcastSvc.AudienceFilter }) });
+}));
+broadcasts.delete('/segments/:sid', waAdminOnly, broadcastEntitled, wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.deleteSegment(bcastScope(req), req.params.sid) })));
+// Suppression list.
+broadcasts.get('/suppressions', wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.listSuppressions(bcastScope(req), req.query) })));
+broadcasts.post('/suppressions', waAdminOnly, broadcastEntitled, wrap(async (req, res) => {
+  const body = parse(v.broadcastSuppressionSchema, req.body);
+  res.status(201).json({ success: true, data: await broadcastSvc.addSuppressions(bcastScope(req), body.phones ?? [], body.reason) });
+}));
+broadcasts.delete('/suppressions/:sid', waAdminOnly, broadcastEntitled, wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.removeSuppression(bcastScope(req), req.params.sid) })));
 broadcasts.get('/:id', wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.getBroadcast(bcastScope(req), req.params.id) })));
 broadcasts.get('/:id/recipients', wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.listRecipients(bcastScope(req), req.params.id, req.query) })));
 broadcasts.get('/:id/analytics', wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.getAnalytics(bcastScope(req), req.params.id) })));
@@ -4293,6 +4312,11 @@ broadcasts.post('/:id/cancel', waAdminOnly, broadcastEntitled, wrap(async (req, 
 // Drive one paced batch — polled by the campaign detail page while it's open;
 // the in-process scheduler is the backstop when no one is watching.
 broadcasts.post('/:id/process', waAdminOnly, broadcastEntitled, wrap(async (req, res) => res.json({ success: true, data: await broadcastSvc.processBroadcast(bcastScope(req), req.params.id) })));
+// Test send — deliver the template to a few numbers without creating recipients.
+broadcasts.post('/:id/test', waAdminOnly, broadcastEntitled, wrap(async (req, res) => {
+  const body = parse(v.broadcastTestSchema, req.body);
+  res.json({ success: true, data: await broadcastSvc.testSend(bcastScope(req), req.params.id, body.phones ?? []) });
+}));
 router.use('/broadcasts', rbac.requireModuleAccess('crm_whatsapp'), broadcasts);
 
 const imp = express.Router();
