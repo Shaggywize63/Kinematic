@@ -112,3 +112,31 @@ We may update this policy; material changes will be notified. Questions or
 complaints: **Sagar Bhargava (Grievance Officer)**, s@kinematicapp.com, F-2587, 4th Floor, Ansal Esencia, Sector 67, Gurugram, Haryana 122101, India. EU data
 subjects may also complain to their local supervisory authority; Indian data
 principals may approach the Data Protection Board of India.
+
+## 13. Google user data (Google API Services)
+Connecting your Google account is an **optional** integration. When you enable it,
+Kaiyo Technology Labs accesses limited Google data solely to power features you
+explicitly turn on:
+
+- **Google Contacts** (`contacts.readonly`, read-only) — accessed only when you
+  choose "Import Google contacts", to copy your contacts into your CRM so you can
+  build email-campaign audiences.
+- **Google Calendar** (`calendar.events`) — to sync CRM activities and tasks you
+  create into your Google Calendar.
+- **Basic Google profile email** (`userinfo.email`) — to display which Google
+  account is connected.
+
+Kaiyo Technology Labs' use and transfer to any other app of information received
+from Google APIs will adhere to the [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy),
+including the **Limited Use** requirements. Google user data is used **only** to
+provide and improve these user-facing features; it is **not sold**, **not used for
+advertising**, and **not used to train generalized AI / ML models**. We do not
+allow humans to read this data except (a) with your consent, (b) where necessary
+for security or to comply with applicable law, or (c) where the data is aggregated
+and anonymised for internal operations.
+
+You can **disconnect Google at any time** from the integration screen; this revokes
+our access tokens with Google and stops further access. Contacts already imported
+become ordinary CRM records that you control and can delete. Access and refresh
+tokens are stored securely and used solely to perform the actions above on your
+behalf.
