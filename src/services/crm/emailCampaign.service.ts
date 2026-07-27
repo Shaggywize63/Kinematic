@@ -118,8 +118,12 @@ export async function resolveAudience(
       email,
       first_name: r.first_name ?? null,
       vars: {
-        first_name: r.first_name || '',
-        last_name: r.last_name || '',
+        // Graceful fallback so a "Hi {{first_name}}," greeting never renders as
+        // "Hi ," for a contact with no name. The display column above keeps the
+        // true value (null) for the recipients table / CSV; only the render var
+        // gets the friendly default.
+        first_name: (r.first_name && r.first_name.trim()) || 'there',
+        last_name: (r.last_name && r.last_name.trim()) || '',
         email,
       },
     });
