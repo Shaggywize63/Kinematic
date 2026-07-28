@@ -940,14 +940,20 @@ leads.get('/export', wrap(async (req, res) => {
 // hard-coded org id — so both dealer tenants get all four reports for free.
 // All four gate on the same designations as the original SRS lead export.
 // ───────────────────────────────────────────────────────────────────────
-const SRS_REPORT_ROLES = ['Area Sales Officer', 'CRM Admin'];
+// Consumer Champion Manager is a team-scope designation (org_roles
+// data_scope='team') that supervises a pod of Consumer Champions. It is
+// admitted here so the manager can pull the same reports for their team;
+// the data itself is already bounded to their role-tree subtree by
+// fetchScopedReportLeads / activityReportOwnerIds (hierarchy RBAC), so a
+// manager only ever sees their own champions, never the whole tenant.
+const SRS_REPORT_ROLES = ['Area Sales Officer', 'CRM Admin', 'Consumer Champion Manager'];
 
 // Role gate. Returns true when the caller may run the report; otherwise it
 // writes the 403 and returns false so the handler can bail immediately.
 function srsReportAllowed(req: Request, res: Response): boolean {
   const role = ((req as AuthRequest).user?.org_role_name ?? '').trim();
   if (!SRS_REPORT_ROLES.includes(role)) {
-    res.status(403).json({ success: false, error: 'This report is available to the Area Sales Officer and CRM Admin roles only.' });
+    res.status(403).json({ success: false, error: 'This report is available to the Area Sales Officer, CRM Admin and Consumer Champion Manager roles only.' });
     return false;
   }
   return true;

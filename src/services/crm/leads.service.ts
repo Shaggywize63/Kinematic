@@ -898,7 +898,12 @@ export async function convertLead(org_id: string, id: string, opts: {
 
     const dealInsert: Record<string, unknown> = {
       org_id, client_id: leadClientId, pipeline_id, stage_id,
-      name: opts.deal_name || `${lead.company || lead.email || 'New deal'} — Opportunity`,
+      // Deal name defaults to the lead's own name (no "Opportunity"
+      // suffix) so a converted deal reads the same as the lead it came
+      // from. Clients pass deal_name explicitly; this is the API fallback.
+      name: opts.deal_name
+        || [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim()
+        || lead.email || lead.company || 'New deal',
       account_id, primary_contact_id: contact_id, lead_id: id,
       amount, owner_id: lead.owner_id, source_id: lead.source_id,
       created_by: user_id ?? null,
