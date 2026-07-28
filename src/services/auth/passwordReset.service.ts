@@ -38,8 +38,24 @@ const FROM_EMAIL = process.env.PASSWORD_RESET_FROM_EMAIL || 'noreply@mail.kinema
  * preview URL in dev; falls back to a sensible default so a misconfig
  * doesn't strand the link.
  */
+const DASHBOARD_FALLBACK = 'https://dashboard.kinematicapp.com';
+
+// The reset page lives on the dashboard (Vercel: dashboard.kinematicapp.com),
+// never on a Railway backend domain. A stale DASHBOARD_URL pointing at a
+// *.up.railway.app host (an old/renamed backend URL) was stranding every reset
+// link with DNS_PROBE_FINISHED_NXDOMAIN — so ignore that value (or an
+// unparseable one) and fall back to the canonical dashboard host.
+function dashboardBase(): string {
+  const raw = (process.env.DASHBOARD_URL || '').trim().replace(/\/$/, '');
+  if (!raw) return DASHBOARD_FALLBACK;
+  let host = '';
+  try { host = new URL(raw).host; } catch { return DASHBOARD_FALLBACK; }
+  if (/\.up\.railway\.app$/i.test(host)) return DASHBOARD_FALLBACK;
+  return raw;
+}
+
 function buildWebLink(token: string, email: string): string {
-  const base = (process.env.DASHBOARD_URL || 'https://dashboard.kinematicapp.com').replace(/\/$/, '');
+  const base = dashboardBase();
   const t = encodeURIComponent(token);
   const e = encodeURIComponent(email);
   return `${base}/auth/reset-password?token=${t}&email=${e}`;
