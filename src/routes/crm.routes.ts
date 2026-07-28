@@ -1785,10 +1785,17 @@ deals.get('/:id', wrap(async (req, res) => {
 deals.patch('/:id', wrap(async (req, res) => {
   const payload = parse(v.dealUpdateSchema, req.body);
   sanitizeOwnerId(req, payload);
-  // Price lock — amount / product basket / volume are fixed at creation.
-  // Enforced here (not inside updateDeal) so winDeal's deliberate
-  // close-out amount still flows through the shared service path.
-  dealsSvc.stripLockedDealFields(payload);
+  // Price lock — a deal's amount / product basket / volume are fixed once it is
+  // CLOSED (won/lost) so captured close-out figures never drift. While the deal
+  // is still OPEN the rep may edit the Products of Interest basket and the header
+  // amount tracks the basket total. Enforced here (not inside updateDeal) so
+  // winDeal's deliberate close-out amount still flows through the shared service.
+  const existing = await dealsSvc.getDeal(orgId(req), req.params.id) as { status?: string | null };
+  if (dealsSvc.isDealClosed(existing?.status)) {
+    dealsSvc.stripLockedDealFields(payload);
+  } else {
+    dealsSvc.applyOpenDealBasketAmount(payload);
+  }
   res.json(await stampOwnerName(await dealsSvc.updateDeal(orgId(req), req.params.id, payload, userId(req))));
 }));
 deals.delete('/:id', wrap(async (req, res) => { await dealsSvc.deleteDeal(orgId(req), req.params.id); res.status(204).end(); }));

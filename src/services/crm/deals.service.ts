@@ -251,6 +251,32 @@ export function stripLockedDealFields(payload: Partial<Deal>) {
   return payload;
 }
 
+/** Whether a deal is CLOSED (won/lost) — its products + amount are locked from
+ *  that point on. Open (or status-less) deals stay editable. */
+export function isDealClosed(status: unknown): boolean {
+  const s = String(status ?? '').toLowerCase();
+  return s === 'won' || s === 'lost';
+}
+
+/**
+ * Open-deal basket sync: while a deal is still open a rep may edit its Products
+ * of Interest, and the header `amount` should track the basket total. When a
+ * PATCH carries an updated `product_lines`, size `amount` from the basket total
+ * the client already computed (custom_fields.estimated_amount), so the deal
+ * value follows the products the same way conversion first sized it. No-op when
+ * the update doesn't touch products or carries no positive total (e.g. a
+ * closed-quantity-only save), leaving the existing amount untouched.
+ */
+export function applyOpenDealBasketAmount(payload: Partial<Deal>) {
+  const cf = payload.custom_fields as Record<string, unknown> | undefined | null;
+  if (!cf || !('product_lines' in cf)) return payload;
+  const total = Number((cf as Record<string, unknown>).estimated_amount);
+  if (Number.isFinite(total) && total > 0) {
+    (payload as Record<string, unknown>).amount = total;
+  }
+  return payload;
+}
+
 export async function updateDeal(org_id: string, id: string, payload: Partial<Deal>, user_id?: string) {
   const before = await getDeal(org_id, id);
   // Per-type validate + stamp formulas. Merging the incoming patch on top
