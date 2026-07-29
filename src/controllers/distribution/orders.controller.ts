@@ -58,7 +58,9 @@ export const get = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getDemoOrder());
   const { data, error } = await supabaseAdmin.from('orders')
-    .select('*, order_items(*)')
+    // Embed the seller (distributor) so the mobile "Print Bill" receipt can show
+    // the company name + GSTIN on the header, not just the outlet.
+    .select('*, order_items(*), distributor:distributor_id(name, gstin, address, state_code, place_of_supply)')
     .eq('id', req.params.id).eq('org_id', user.org_id).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!data) return notFound(res, 'Order not found');
