@@ -27,11 +27,54 @@ interface ReportDef {
   run: (org_id: string, client_id: string | null, range: Range) => Promise<unknown>;
 }
 
+// Van-sales / distribution daily digest — orders, billing, collections and
+// outstanding for the client over the digest window. Returns a flat KPI object
+// the shape-agnostic renderer prints as a clean two-column table. Distribution
+// tenants have no leads/deals, so the CRM reports above would be empty for them.
+async function distributionDailySummary(
+  org_id: string,
+  client_id: string | null,
+  range: Range,
+): Promise<Record<string, unknown>> {
+  const from = range?.from ?? new Date(Date.now() - 86_400_000).toISOString();
+  const to = range?.to ?? new Date().toISOString();
+  const inr = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN');
+  const sum = (rows: Array<Record<string, unknown>> | null, key: string) =>
+    (rows ?? []).reduce((a, r) => a + Number(r[key] ?? 0), 0);
+
+  let oq = supabaseAdmin.from('orders').select('grand_total', { count: 'exact' })
+    .eq('org_id', org_id).gte('placed_at', from).lte('placed_at', to);
+  let iq = supabaseAdmin.from('invoices').select('grand_total', { count: 'exact' })
+    .eq('org_id', org_id).gte('issued_at', from).lte('issued_at', to);
+  let pq = supabaseAdmin.from('payments').select('amount', { count: 'exact' })
+    .eq('org_id', org_id).gte('received_at', from).lte('received_at', to);
+  let bq = supabaseAdmin.from('outlet_distribution_ext').select('current_balance')
+    .eq('org_id', org_id);
+  if (client_id) {
+    oq = oq.eq('client_id', client_id);
+    iq = iq.eq('client_id', client_id);
+    pq = pq.eq('client_id', client_id);
+    bq = bq.eq('client_id', client_id);
+  }
+  const [o, i, p, b] = await Promise.all([oq, iq, pq, bq]);
+
+  return {
+    orders_booked:      o.count ?? 0,
+    order_value:        inr(sum(o.data as Array<Record<string, unknown>> | null, 'grand_total')),
+    invoices_raised:    i.count ?? 0,
+    invoiced_value:     inr(sum(i.data as Array<Record<string, unknown>> | null, 'grand_total')),
+    payments_collected: p.count ?? 0,
+    amount_collected:   inr(sum(p.data as Array<Record<string, unknown>> | null, 'amount')),
+    total_outstanding:  inr(sum(b.data as Array<Record<string, unknown>> | null, 'current_balance')),
+  };
+}
+
 // Curated set of digestible reports. Each reuses an existing analytics service
 // fn (org-wide / client-scoped, no per-user scope — a manager digest). The
 // renderer below is shape-agnostic so adding a report here is a one-liner.
 const REPORTS: Record<string, ReportDef> = {
   summary:    { label: 'CRM summary (KPIs)',      run: (o, c, r) => analytics.dashboardSummary(o, r, c) },
+  distribution_daily: { label: 'Van sales daily summary', run: (o, c, r) => distributionDailySummary(o, c, r) },
   win_loss:   { label: 'Win / loss by rep',       run: (o, c, r) => analytics.winRate(o, 'rep', r, c) },
   forecast:   { label: 'Pipeline forecast',       run: (o, c, r) => analytics.forecast(o, 'quarter', r, c) },
   pipeline:   { label: 'Pipeline value by stage', run: (o, c)    => analytics.pipelineValue(o, undefined, c) },
