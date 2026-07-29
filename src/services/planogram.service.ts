@@ -32,6 +32,11 @@ export interface ExpectedSKU {
 export interface PlanogramLayout {
   shelves: Array<{ index: number; capacity?: number }>;
   expected_skus: ExpectedSKU[];
+  // Competitor SKUs the brand tracks (Veeba / Ching's / Maggi …). Stored on
+  // the planogram's `layout.competitors` jsonb and passed to the vision model
+  // so competitor detection is matched against an explicit list rather than
+  // inferred heuristically — this is what makes share-of-shelf reliable.
+  competitors: Array<{ sku_id: string; sku_name: string; brand?: string }>;
 }
 
 export interface ComplianceResult {
@@ -269,6 +274,7 @@ export class PlanogramService {
     return {
       shelves: data.layout?.shelves || [],
       expected_skus: data.expected_skus || [],
+      competitors: Array.isArray(data.layout?.competitors) ? data.layout.competitors : [],
     };
   }
 
@@ -326,6 +332,18 @@ export class PlanogramService {
 
     const layout = await this.loadPlanogramLayout(planogramId);
 
+    // Pass the store's trade format (modern_trade / general_trade / …) so the
+    // model calibrates for dense MT shelves vs sparse GT ones.
+    let storeFormat: string | undefined;
+    if (args.storeId) {
+      const { data: st } = await supabaseAdmin
+        .from('stores')
+        .select('store_type')
+        .eq('id', args.storeId)
+        .maybeSingle();
+      storeFormat = (st as { store_type?: string } | null)?.store_type || undefined;
+    }
+
     const recognition = await PlanogramVisionService.recognizeShelf({
       imageBase64: args.imageBase64,
       imageMediaType: args.imageMediaType,
@@ -333,6 +351,14 @@ export class PlanogramService {
         sku_id: s.sku_id,
         sku_name: s.sku_name,
       })),
+      // Explicit competitor list → reliable is_competitor flags → accurate
+      // share-of-shelf, instead of the model guessing which brands compete.
+      competitorSkus: (layout.competitors || []).map((c) => ({
+        sku_id: c.sku_id,
+        sku_name: c.sku_name,
+        brand: c.brand,
+      })),
+      storeFormat,
     });
 
     const result = this.scoreShelf({ recognition, layout });
