@@ -10,10 +10,15 @@ import {
   getMobileBroadcasts, getMobileLearning
 } from '../controllers/analytics.controller';
 
+import ffmAnalyticsRoutes from './ffm-analytics.routes';
+
 const router = Router();
 router.use(requireAuth);
 
 const checkAnalytics = requireModule('analytics');
+
+// Field-Force Management analytics widgets → /api/v1/analytics/ffm/*
+router.use('/ffm', ffmAnalyticsRoutes);
 
 // Short-lived per-user response cache. Most analytics aggregates only
 // change every few minutes; serving the same user the same answer for
