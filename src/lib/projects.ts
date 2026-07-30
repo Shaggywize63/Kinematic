@@ -336,6 +336,63 @@ export async function resolveProjectForEmailAsync(email?: string | null): Promis
   return fallbackProjectKey();
 }
 
+// Short TTL cache for token→project so a burst of header-less requests carrying
+// the same bearer token doesn't re-verify it against every project each time.
+// A token's owning project is immutable for the token's lifetime, so caching is
+// always safe; entries are bounded FIFO and expire on a short TTL regardless.
+const tokenProjectCache = new Map<string, { project: string | null; at: number }>();
+const TOKEN_PROJECT_TTL_MS = 5 * 60_000;
+const TOKEN_PROJECT_CACHE_MAX = 5000;
+
+/** Forget a cached token routing (rarely needed — tokens are immutable). */
+export function clearTokenProjectCache(token?: string | null): void {
+  if (token) tokenProjectCache.delete(token.trim());
+  else tokenProjectCache.clear();
+}
+
+/**
+ * Resolve which Supabase project minted a bearer token WITHOUT any DB probe, by
+ * verifying it against each non-default project's local signing keys. A token
+ * verifies against exactly one project's keys (each project has its own), so the
+ * first non-default project that accepts it is its true owner.
+ *
+ * Returns null when no non-default project accepts it — the token is either a
+ * default-project (Tata) token or not locally verifiable — so callers keep their
+ * existing default/fallback behaviour and Tata routing is NEVER altered. Only
+ * non-default projects are probed (the default is the fallback anyway), and a
+ * single-project deployment short-circuits to null with zero work.
+ *
+ * This is the authenticated-surface analogue of resolveProjectForEmailAsync
+ * (login) and resolveProjectForIntegrationAsync (webhooks): a header-less caller
+ * whose identity still pins it to a specific project. It is strictly fail-closed
+ * — an attacker cannot route to a project without a token its keys verify.
+ */
+export async function resolveProjectForTokenAsync(token?: string | null): Promise<string | null> {
+  const t = (token || '').trim();
+  if (!t) return null;
+
+  const nonDefault = knownProjectKeys().filter((k) => k !== DEFAULT_PROJECT);
+  if (nonDefault.length === 0) return null;
+
+  const cached = tokenProjectCache.get(t);
+  if (cached && Date.now() - cached.at < TOKEN_PROJECT_TTL_MS) return cached.project;
+
+  let resolved: string | null = null;
+  for (const key of nonDefault) {
+    try {
+      const res = await verifyProjectToken(key, t);
+      if (res?.payload?.sub) { resolved = key; break; }
+    } catch { /* not this project — try the next */ }
+  }
+
+  if (tokenProjectCache.size >= TOKEN_PROJECT_CACHE_MAX) {
+    const firstKey = tokenProjectCache.keys().next().value;
+    if (firstKey !== undefined) tokenProjectCache.delete(firstKey);
+  }
+  tokenProjectCache.set(t, { project: resolved, at: Date.now() });
+  return resolved;
+}
+
 // Short TTL cache for integration→project lookups so a burst of webhook hits
 // on the same integration doesn't probe every project DB each time.
 const integrationProjectCache = new Map<string, { project: string; at: number }>();
