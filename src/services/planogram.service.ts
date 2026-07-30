@@ -17,6 +17,7 @@ import {
   PlanogramVisionService,
   ShelfRecognition,
   DetectedSKU,
+  RecognizeArgs,
 } from './planogram-vision.service';
 
 export interface ExpectedSKU {
@@ -27,6 +28,7 @@ export interface ExpectedSKU {
   position?: number;            // left-to-right rank on shelf (optional)
   weight?: number;              // sales-weighted importance (default 1)
   competitor_ids?: string[];    // SKUs that may displace this one
+  ref_image_url?: string;       // front-facing pack shot → vision reference
 }
 
 export interface PlanogramLayout {
@@ -36,7 +38,7 @@ export interface PlanogramLayout {
   // the planogram's `layout.competitors` jsonb and passed to the vision model
   // so competitor detection is matched against an explicit list rather than
   // inferred heuristically — this is what makes share-of-shelf reliable.
-  competitors: Array<{ sku_id: string; sku_name: string; brand?: string }>;
+  competitors: Array<{ sku_id: string; sku_name: string; brand?: string; ref_image_url?: string }>;
 }
 
 export interface ComplianceResult {
@@ -297,6 +299,62 @@ export class PlanogramService {
     return row.planogram_id;
   }
 
+  /** Max reference pack shots to fetch per capture (keeps token cost bounded). */
+  private static readonly MAX_REFERENCE_IMAGES = 32;
+
+  /**
+   * Collect front-facing reference pack shots for a planogram's expected SKUs
+   * and tracked competitors (`ref_image_url` on each), fetch + base64 them, and
+   * shape them for the vision call. Best-effort: any missing/unreachable/oversized
+   * image is skipped, so a bad URL never blocks a capture. Returns `undefined`
+   * when there are no usable references (keeps the request identical to before).
+   */
+  private static async loadReferenceImages(
+    layout: PlanogramLayout,
+  ): Promise<RecognizeArgs['referenceImages']> {
+    const entries: Array<{ sku_id: string; sku_name: string; url: string; is_competitor: boolean }> = [];
+    for (const e of layout.expected_skus || []) {
+      if (e.ref_image_url) entries.push({ sku_id: e.sku_id, sku_name: e.sku_name, url: e.ref_image_url, is_competitor: false });
+    }
+    for (const c of layout.competitors || []) {
+      if (c.ref_image_url) entries.push({ sku_id: c.sku_id, sku_name: c.sku_name, url: c.ref_image_url, is_competitor: true });
+    }
+    const bounded = entries.slice(0, this.MAX_REFERENCE_IMAGES);
+
+    const out: NonNullable<RecognizeArgs['referenceImages']> = [];
+    for (const en of bounded) {
+      try {
+        const img = await this.fetchImageAsBase64(en.url);
+        if (img) {
+          out.push({
+            sku_id: en.sku_id,
+            sku_name: en.sku_name,
+            imageBase64: img.base64,
+            imageMediaType: img.mediaType,
+            is_competitor: en.is_competitor,
+          });
+        }
+      } catch {
+        /* unreachable reference — skip, never block the capture */
+      }
+    }
+    return out.length ? out : undefined;
+  }
+
+  /** Fetch an image URL and return base64 + a supported media type, or null. */
+  private static async fetchImageAsBase64(
+    url: string,
+  ): Promise<{ base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/webp' } | null> {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    const mediaType: 'image/jpeg' | 'image/png' | 'image/webp' =
+      ct.includes('png') ? 'image/png' : ct.includes('webp') ? 'image/webp' : 'image/jpeg';
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length === 0 || buf.length > 4_000_000) return null; // skip empty / oversized refs
+    return { base64: buf.toString('base64'), mediaType };
+  }
+
   /**
    * End-to-end pipeline: capture image → vision → compliance → persist.
    * Returns the persisted compliance row id along with the result payload.
@@ -344,6 +402,12 @@ export class PlanogramService {
       storeFormat = (st as { store_type?: string } | null)?.store_type || undefined;
     }
 
+    // Front-facing reference pack shots (from expected_skus[].ref_image_url and
+    // competitors[].ref_image_url), fetched + base64'd, so the model matches
+    // look-alike variants/sizes and competitor packs by packaging. Best-effort:
+    // any unreachable image is simply skipped.
+    const referenceImages = await this.loadReferenceImages(layout);
+
     const recognition = await PlanogramVisionService.recognizeShelf({
       imageBase64: args.imageBase64,
       imageMediaType: args.imageMediaType,
@@ -359,6 +423,7 @@ export class PlanogramService {
         brand: c.brand,
       })),
       storeFormat,
+      referenceImages,
     });
 
     const result = this.scoreShelf({ recognition, layout });

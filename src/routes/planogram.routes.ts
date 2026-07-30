@@ -123,7 +123,18 @@ const upsertPlanogramSchema = z.object({
   store_format: z.string().optional(),
   client_id: z.string().uuid().optional(),
   source_url: z.string().url().optional(),
-  layout: z.object({ shelves: z.array(z.object({ index: z.number(), capacity: z.number().optional() })) }).optional(),
+  layout: z.object({
+    shelves: z.array(z.object({ index: z.number(), capacity: z.number().optional() })),
+    category_definition: z.string().optional(),
+    // Tracked competitor SKUs (with optional reference pack shots) live on the
+    // planogram layout and are threaded into the vision call at capture time.
+    competitors: z.array(z.object({
+      sku_id: z.string(),
+      sku_name: z.string(),
+      brand: z.string().optional(),
+      ref_image_url: z.string().url().optional(),
+    })).optional(),
+  }).optional(),
   expected_skus: z.array(z.object({
     sku_id: z.string(),
     sku_name: z.string(),
@@ -131,6 +142,9 @@ const upsertPlanogramSchema = z.object({
     facings: z.number().int().min(1),
     position: z.number().int().optional(),
     weight: z.number().optional(),
+    brand: z.string().optional(),
+    // Front-facing pack shot URL → used as a vision reference for exact matching.
+    ref_image_url: z.string().url().optional(),
   })),
 });
 

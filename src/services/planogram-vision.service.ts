@@ -40,6 +40,21 @@ export interface RecognizeArgs {
   expectedSkus?: Array<{ sku_id: string; sku_name: string; brand?: string }>;
   competitorSkus?: Array<{ sku_id: string; sku_name: string; brand?: string }>;
   storeFormat?: 'modern_trade' | 'general_trade' | 'hyper' | string;
+  /**
+   * Optional front-facing reference pack images — one per SKU — so the model
+   * matches products on the shelf by packaging (flavour / size / colour)
+   * instead of by name alone. This is the single biggest accuracy lever for
+   * look-alike variants (e.g. six popping-boba flavours in an identical can,
+   * two gochujang sizes) and for telling competitor packs apart. Capped in
+   * `recognizeShelf`.
+   */
+  referenceImages?: Array<{
+    sku_id: string;
+    sku_name: string;
+    imageBase64: string;
+    imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp';
+    is_competitor?: boolean;
+  }>;
   model?: string;
 }
 
@@ -91,7 +106,12 @@ Rules:
 - If a SKU appears in "competitor_skus", set is_competitor = true.
 - Be conservative: if you cannot read a label, set sku_id = null and lower confidence accordingly.
 - Count facings carefully: a facing is one product front visible on the shelf.
-- shelf_index starts at 0 from the BOTTOM shelf.`;
+- shelf_index starts at 0 from the BOTTOM shelf.
+- You may be shown reference pack images BEFORE the shelf image, each labeled
+  "Reference - sku_id=...". Match products on the shelf to those references by
+  packaging (flavour / size / colour); prefer a confident reference match over
+  a name guess, and use them to distinguish look-alike variants and competitor
+  packs. A reference tagged "(competitor)" means is_competitor = true.`;
 
 const PARSE_SYSTEM_PROMPT = `You are a retail planogram-parsing expert. You receive an image of a brand
 planogram document (a diagrammatic shelf layout the brand publishes) and must
@@ -140,6 +160,27 @@ export class PlanogramVisionService {
       'Return JSON only.',
     ].join('\n');
 
+    // Prepend up to MAX_REFERENCE_IMAGES front-facing pack shots (each labelled
+    // with its sku_id) so the model matches shelf products by packaging. Bounded
+    // to keep token cost predictable.
+    const MAX_REFERENCE_IMAGES = 32;
+    const refs = (args.referenceImages || []).slice(0, MAX_REFERENCE_IMAGES);
+    if ((args.referenceImages?.length || 0) > MAX_REFERENCE_IMAGES) {
+      logger.warn(`[PlanogramVision] ${args.referenceImages!.length} reference images supplied; using first ${MAX_REFERENCE_IMAGES}`);
+    }
+
+    const content: Array<Record<string, unknown>> = [];
+    if (refs.length) {
+      content.push({ type: 'text', text: 'Reference pack images follow — each is the front of one SKU, labelled with its sku_id. Use them to identify that exact product (flavour / size / variant) and to tell competitor packs apart on the shelf image that comes after them.' });
+      for (const r of refs) {
+        content.push({ type: 'text', text: `Reference - sku_id=${r.sku_id}${r.is_competitor ? ' (competitor)' : ''}: ${r.sku_name}` });
+        content.push({ type: 'image', source: { type: 'base64', media_type: r.imageMediaType, data: r.imageBase64 } });
+      }
+      content.push({ type: 'text', text: 'End of references. Now analyze this SHELF image:' });
+    }
+    content.push({ type: 'image', source: { type: 'base64', media_type: args.imageMediaType, data: args.imageBase64 } });
+    content.push({ type: 'text', text: userText });
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -149,15 +190,9 @@ export class PlanogramVisionService {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 2000,
+        max_tokens: 3072,
         system: SYSTEM_PROMPT,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: args.imageMediaType, data: args.imageBase64 } },
-            { type: 'text', text: userText },
-          ],
-        }],
+        messages: [{ role: 'user', content }],
       }),
     });
 
