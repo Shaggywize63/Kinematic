@@ -351,21 +351,52 @@ export function clearTokenProjectCache(token?: string | null): void {
 }
 
 /**
- * Resolve which Supabase project minted a bearer token WITHOUT any DB probe, by
- * verifying it against each non-default project's local signing keys. A token
- * verifies against exactly one project's keys (each project has its own), so the
- * first non-default project that accepts it is its true owner.
+ * Read a JWT's `iss` (issuer) claim WITHOUT verifying the signature — a plain
+ * base64url decode of the payload segment. A Supabase access token's issuer is
+ * that project's auth URL (`https://<ref>.supabase.co/auth/v1`), so the issuer
+ * host identifies the minting project regardless of whether we hold that
+ * project's signing keys locally. Used only as a ROUTING hint; the real
+ * cryptographic verification still happens later in requireAuth, so an attacker
+ * cannot gain anything by forging `iss` (a forged token fails verification and
+ * 401s). Returns null on any malformed / missing-issuer token.
+ */
+function tokenIssuer(token: string): string | null {
+  const parts = token.split('.');
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as { iss?: unknown };
+    return typeof payload.iss === 'string' ? payload.iss : null;
+  } catch {
+    return null;
+  }
+}
+
+function sameHost(a: string, b: string): boolean {
+  try { return new URL(a).host === new URL(b).host; } catch { return false; }
+}
+
+/**
+ * Resolve which Supabase project minted a bearer token WITHOUT any DB probe.
+ * Two config-independent signals, in order:
+ *   1. Cryptographic: verify the token against each non-default project's local
+ *      signing keys (definitive when those keys are configured).
+ *   2. Issuer match: compare the token's `iss` host to each non-default
+ *      project's URL host. This works even when a project has only its URL /
+ *      service key configured and NO local JWKS / JWT secret (in which case (1)
+ *      can't verify) — the crypto check still runs later in requireAuth, so
+ *      routing by issuer stays strictly fail-closed.
  *
- * Returns null when no non-default project accepts it — the token is either a
- * default-project (Tata) token or not locally verifiable — so callers keep their
- * existing default/fallback behaviour and Tata routing is NEVER altered. Only
- * non-default projects are probed (the default is the fallback anyway), and a
- * single-project deployment short-circuits to null with zero work.
+ * A token verifies / issues against exactly one project, so the first
+ * non-default project it matches is its true owner. Returns null when no
+ * non-default project matches — the token is a default-project (Tata) token or
+ * unrecognisable — so callers keep their existing default/fallback behaviour
+ * and Tata routing is NEVER altered. Only non-default projects are probed (the
+ * default is the fallback anyway); a single-project deployment short-circuits
+ * to null with zero work.
  *
  * This is the authenticated-surface analogue of resolveProjectForEmailAsync
  * (login) and resolveProjectForIntegrationAsync (webhooks): a header-less caller
- * whose identity still pins it to a specific project. It is strictly fail-closed
- * — an attacker cannot route to a project without a token its keys verify.
+ * whose identity still pins it to a specific project.
  */
 export async function resolveProjectForTokenAsync(token?: string | null): Promise<string | null> {
   const t = (token || '').trim();
@@ -378,11 +409,27 @@ export async function resolveProjectForTokenAsync(token?: string | null): Promis
   if (cached && Date.now() - cached.at < TOKEN_PROJECT_TTL_MS) return cached.project;
 
   let resolved: string | null = null;
+
+  // 1. Cryptographic local verification (definitive when signing keys exist).
   for (const key of nonDefault) {
     try {
       const res = await verifyProjectToken(key, t);
       if (res?.payload?.sub) { resolved = key; break; }
     } catch { /* not this project — try the next */ }
+  }
+
+  // 2. Fallback: match the token issuer's host to a project URL. Rescues the
+  //    common prod setup where a non-default project is configured with only
+  //    its URL + service key (no local JWKS / JWT secret), so step 1 can't
+  //    verify but the project is still reachable and its data must be served.
+  if (!resolved) {
+    const iss = tokenIssuer(t);
+    if (iss) {
+      for (const key of nonDefault) {
+        const url = getProjectConfig(key)?.url;
+        if (url && sameHost(iss, url)) { resolved = key; break; }
+      }
+    }
   }
 
   if (tokenProjectCache.size >= TOKEN_PROJECT_CACHE_MAX) {
