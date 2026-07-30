@@ -12,9 +12,12 @@ export const routeToday = asyncHandler(async (req: AuthRequest, res: Response) =
   const today = new Date().toISOString().slice(0, 10);
 
   // Today's route plan + assigned outlets + outstanding balance + last order.
+  // route_plans stores the day in `plan_date` (not `date`); filtering the
+  // wrong column made PostgREST error and the endpoint silently returned an
+  // empty route ("Route plan is empty") for every rep.
   const { data: rp } = await supabaseAdmin.from('route_plans')
     .select('*, route_plan_outlets(*, stores!store_id(id, name, address, lat, lng))')
-    .eq('user_id', user.id).eq('date', today).maybeSingle();
+    .eq('user_id', user.id).eq('plan_date', today).maybeSingle();
 
   const outlets = (rp?.route_plan_outlets || []).map((rpo: any) => {
     const s = rpo.stores || {};
@@ -26,7 +29,7 @@ export const routeToday = asyncHandler(async (req: AuthRequest, res: Response) =
       lng: s.lng,
       route_visit_id: rpo.id,
       status: rpo.status || 'pending',
-      sequence: rpo.sequence || 0,
+      sequence: rpo.visit_order || 0,   // column is visit_order, not sequence
     };
   });
 
