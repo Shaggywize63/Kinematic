@@ -92,7 +92,10 @@ export const cartSuggest = asyncHandler(async (req: AuthRequest, res: Response) 
     supabaseAdmin.from('outlet_distribution_ext')
       .select('current_balance, credit_limit, customer_class').eq('outlet_id', outletId).maybeSingle(),
     supabaseAdmin.from('orders')
-      .select('id, order_no, placed_at, grand_total, order_items(sku_id, qty, sku_name, mrp)')
+      // Full order shape + order_items(*) so the mobile DistOrder/PricedLine
+      // decoder (which needs every line field) can parse last_orders; a narrow
+      // embed here silently failed the same way the salesman order list did.
+      .select('*, order_items(*)')
       .eq('outlet_id', outletId).eq('org_id', user.org_id)
       .order('placed_at', { ascending: false }).limit(3),
   ]);
@@ -124,7 +127,14 @@ export const myOrders = asyncHandler(async (req: AuthRequest, res: Response) => 
   if (isDemo(user)) return ok(res, getDemoOrderList());
   const status = req.query.status as string | undefined;
   let q = supabaseAdmin.from('orders')
-    .select('*, order_items(id, sku_id, sku_name, qty, total)')
+    // Return the FULL order_items shape. The mobile DistOrder/PricedLine decoder
+    // requires the complete line (uom, unit_price, mrp, taxable_value, gst_rate,
+    // cgst/sgst/igst/cess, …); a narrow embed omitted those keys and made the
+    // strict Swift decoder throw on the nested array, so the whole list silently
+    // decoded to empty ("No orders yet.") even though the rows exist. The admin
+    // list + order-detail endpoints already select order_items(*), so this just
+    // brings the salesman list to parity.
+    .select('*, order_items(*)')
     .eq('org_id', user.org_id).eq('salesman_id', user.id)
     .order('placed_at', { ascending: false }).limit(50);
   if (status) q = q.eq('status', status);
