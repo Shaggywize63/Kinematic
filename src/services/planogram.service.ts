@@ -11,6 +11,8 @@
  * scores, making analytics over time meaningful.
  */
 
+import fs from 'fs';
+import path from 'path';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../utils';
 import {
@@ -341,18 +343,45 @@ export class PlanogramService {
     return out.length ? out : undefined;
   }
 
+  private static mediaTypeFor(hint: string): 'image/jpeg' | 'image/png' | 'image/webp' {
+    const h = hint.toLowerCase();
+    return h.includes('png') ? 'image/png' : h.includes('webp') ? 'image/webp' : 'image/jpeg';
+  }
+
+  /**
+   * Read a reference pack image bundled with the API (public/planogram-refs,
+   * served at /assets/planogram-refs) straight off local disk. Reference URLs
+   * that point at our own asset path resolve here instead of a self-HTTP fetch,
+   * so recognition never depends on the API being able to reach its own public
+   * hostname (self-fetch / hairpin) — the demo's reference images always load.
+   * Returns null when the URL isn't one of ours (→ fall back to a real fetch).
+   */
+  private static readLocalReferenceImage(
+    url: string,
+  ): { base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/webp' } | null {
+    const m = url.match(/\/assets\/planogram-refs\/([A-Za-z0-9._-]+)$/);
+    if (!m) return null;
+    const file = path.join(process.cwd(), 'public', 'planogram-refs', m[1]);
+    try {
+      const buf = fs.readFileSync(file);
+      if (buf.length === 0 || buf.length > 4_000_000) return null;
+      return { base64: buf.toString('base64'), mediaType: this.mediaTypeFor(path.extname(file)) };
+    } catch {
+      return null; // not bundled — let the caller try the network
+    }
+  }
+
   /** Fetch an image URL and return base64 + a supported media type, or null. */
   private static async fetchImageAsBase64(
     url: string,
   ): Promise<{ base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/webp' } | null> {
+    const local = this.readLocalReferenceImage(url);
+    if (local) return local;
     const res = await fetch(url);
     if (!res.ok) return null;
-    const ct = (res.headers.get('content-type') || '').toLowerCase();
-    const mediaType: 'image/jpeg' | 'image/png' | 'image/webp' =
-      ct.includes('png') ? 'image/png' : ct.includes('webp') ? 'image/webp' : 'image/jpeg';
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length === 0 || buf.length > 4_000_000) return null; // skip empty / oversized refs
-    return { base64: buf.toString('base64'), mediaType };
+    return { base64: buf.toString('base64'), mediaType: this.mediaTypeFor(res.headers.get('content-type') || '') };
   }
 
   /**
