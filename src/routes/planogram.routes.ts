@@ -37,15 +37,29 @@ router.post('/parse', asyncHandler(async (req: AuthRequest, res: Response) => {
 
 // ── Capture + score (the field-rep flow) ───────────────────────────────
 
+// Optional UUID that tolerates junk: an empty string or a non-UUID value
+// (e.g. a client-side visit id that isn't a real UUID) is coerced to undefined
+// instead of hard-failing the WHOLE request with "Invalid request body". A bad
+// optional id must never block a shelf capture — it just isn't linked.
+const optionalUuid = z.preprocess(
+  (v) =>
+    typeof v === 'string' &&
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v)
+      ? v
+      : undefined,
+  z.string().uuid().optional(),
+);
+
 const captureSchema = z.object({
-  store_id: z.string().uuid().optional(),
-  visit_id: z.string().uuid().optional(),
-  planogram_id: z.string().uuid().optional(),
+  store_id: optionalUuid,
+  visit_id: optionalUuid,
+  planogram_id: optionalUuid,
   image_url: z.string().url(),
   image_base64: z.string().min(100),
   image_media_type: z.enum(['image/jpeg', 'image/png', 'image/webp']),
   capture_lat: z.number().optional(),
   capture_lng: z.number().optional(),
+  angle_score: z.number().optional(),   // client-side frame-alignment quality (0..1)
   device_meta: z.any().optional(),
 });
 

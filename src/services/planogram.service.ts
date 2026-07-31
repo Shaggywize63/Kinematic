@@ -13,6 +13,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../utils';
 import {
@@ -371,6 +372,55 @@ export class PlanogramService {
     }
   }
 
+  /** Public bucket (per project) that holds field-rep shelf capture photos. */
+  private static readonly CAPTURE_BUCKET = process.env.BUCKET_PLANOGRAM_CAPTURES || 'planogram-captures';
+
+  /** Ensure a bucket exists and is public (self-provision on first use). */
+  private static async ensurePublicBucket(bucket: string): Promise<void> {
+    const { data } = await supabaseAdmin.storage.getBucket(bucket);
+    if (data) {
+      if (!data.public) await supabaseAdmin.storage.updateBucket(bucket, { public: true });
+      return;
+    }
+    const { error } = await supabaseAdmin.storage.createBucket(bucket, {
+      public: true,
+      fileSizeLimit: 15 * 1024 * 1024,
+      allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+    });
+    if (error && !/exist/i.test(error.message)) throw error;
+  }
+
+  /**
+   * Persist the shelf photo into THIS capture's own project (a public bucket),
+   * from the base64 the client already sent. The app also uploads the photo via
+   * /upload separately, but that call can land in the wrong project (its request
+   * may resolve to the default tenant), leaving the capture row pointing at a
+   * photo the viewing project can't read — a blank image in history. Storing it
+   * here guarantees the photo lives with the capture and renders (public URL).
+   * Best-effort: returns null on any failure so the caller falls back.
+   */
+  private static async storeCaptureImage(
+    orgId: string,
+    base64: string,
+    mediaType: 'image/jpeg' | 'image/png' | 'image/webp',
+  ): Promise<string | null> {
+    try {
+      await this.ensurePublicBucket(this.CAPTURE_BUCKET);
+      const ext = mediaType === 'image/png' ? 'png' : mediaType === 'image/webp' ? 'webp' : 'jpg';
+      const key = `${orgId}/${randomUUID()}.${ext}`;
+      const buf = Buffer.from(base64, 'base64');
+      if (!buf.length) return null;
+      const { error } = await supabaseAdmin.storage
+        .from(this.CAPTURE_BUCKET)
+        .upload(key, buf, { contentType: mediaType, upsert: false });
+      if (error) return null;
+      const { data } = supabaseAdmin.storage.from(this.CAPTURE_BUCKET).getPublicUrl(key);
+      return data?.publicUrl || null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Fetch an image URL and return base64 + a supported media type, or null. */
   private static async fetchImageAsBase64(
     url: string,
@@ -457,6 +507,11 @@ export class PlanogramService {
 
     const result = this.scoreShelf({ recognition, layout });
 
+    // Store the shelf photo in this capture's own project so history can render
+    // it; fall back to the client-provided URL if the in-project upload fails.
+    const storedImageUrl =
+      (await this.storeCaptureImage(args.orgId, args.imageBase64, args.imageMediaType)) || args.imageUrl;
+
     // Persist capture
     const { data: cap, error: capErr } = await supabaseAdmin
       .from('planogram_captures')
@@ -467,7 +522,7 @@ export class PlanogramService {
         store_id: args.storeId ?? null,
         visit_id: args.visitId ?? null,
         planogram_id: planogramId,
-        image_url: args.imageUrl,
+        image_url: storedImageUrl,
         capture_lat: args.capture.lat ?? null,
         capture_lng: args.capture.lng ?? null,
         angle_score: recognition.quality.angle_score,
