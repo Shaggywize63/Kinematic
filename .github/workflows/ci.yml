@@ -47,3 +47,53 @@ jobs:
       # in placeholder Supabase env vars the app asserts at boot.
       - name: Run tests
         run: npm run test:ci
+
+  # ── Deploy to Railway ────────────────────────────────────────────────
+  # Ships to Railway only after BOTH gates above are green, and only for a
+  # push to main (i.e. a merge) — never on a PR. This is safer than Railway's
+  # own push-triggered auto-deploy, which ships even when the build/tests fail.
+  #
+  # Railway builds from the repo (railway.json → NIXPACKS, start `node
+  # dist/server.js`); `railway up` uploads this checked-out commit and streams
+  # the build, failing the job if the deploy fails.
+  #
+  # One-time setup — repo Settings → Secrets and variables → Actions:
+  #   • Secret   RAILWAY_TOKEN    — a Railway *project token*
+  #        (Railway → your project → Settings → Tokens → "Project Token",
+  #         scoped to the production environment).
+  #   • Variable RAILWAY_SERVICE  — the service to deploy, e.g. "Kinematic".
+  #        Omit only if the project has a single service.
+  # Then turn OFF the Railway service's "Deploy on push" (Settings → Source)
+  # so a merge doesn't deploy twice (once here, once by Railway directly).
+  deploy:
+    name: Deploy to Railway
+    needs: [build, test]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: railway-deploy-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Deploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "::error::RAILWAY_TOKEN secret is not set. Add a Railway project token in Settings → Secrets and variables → Actions (see the workflow comment)."
+            exit 1
+          fi
+          if [ -n "$RAILWAY_SERVICE" ]; then
+            railway up --ci --service "$RAILWAY_SERVICE"
+          else
+            railway up --ci
+          fi
