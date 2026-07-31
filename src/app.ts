@@ -373,6 +373,22 @@ app.use(`${V1}/kini/public`, kiniPublicRoutes);
 // still learn it needs updating. See app-version.routes.ts.
 app.use(`${V1}/app`, appVersionRoutes);
 
+// ── Public planogram reference-pack images (NO auth) ─────────────
+// Front-of-pack shots bundled with the API under public/planogram-refs
+// are the per-SKU reference images shelf-recognition matches against
+// (planograms.expected_skus[].ref_image_url). Served at a stable ROOT
+// path (outside /api/v1, so the requireAuth catch-all never gates them)
+// so those URLs resolve without a JWT. Long cache + immutable: the files
+// are content-addressed by sku_id and only change on a redeploy.
+app.use(
+  '/assets/planogram-refs',
+  express.static(path.join(process.cwd(), 'public', 'planogram-refs'), {
+    maxAge: '7d',
+    immutable: true,
+    fallthrough: false,
+  }),
+);
+
 // ── Internal cron endpoints (NO user JWT) ───────────────────────
 // Invoked by pg_cron via a Supabase Edge Function. Each endpoint in
 // this router enforces its own shared-secret bearer check (see
