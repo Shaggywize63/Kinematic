@@ -275,16 +275,24 @@ app.use(morgan(COMBINED_SAFE, {
 
 // ── Body parsing & misc ────────────────────────────────────
 app.use(compression({ threshold: 1024 }));   // skip gzip on payloads <1KB — saves CPU on small JSON
-app.use(express.json({
-  limit: '2mb',
-  strict: true,
-  // Stash the raw request body on `req.rawBody` so webhook providers can
-  // verify HMAC signatures (e.g. Meta Lead Ads' X-Hub-Signature-256 is a
-  // sha256 of the literal POST bytes — re-stringifying parsed JSON would
-  // break the digest). Kept only for the request lifetime; max 2MB so
-  // memory impact is bounded by the parser's own limit.
-  verify: (req, _res, buf) => { (req as unknown as { rawBody?: Buffer }).rawBody = buf; },
-}));
+// Stash the raw request body on `req.rawBody` so webhook providers can verify
+// HMAC signatures (e.g. Meta Lead Ads' X-Hub-Signature-256 is a sha256 of the
+// literal POST bytes — re-stringifying parsed JSON would break the digest).
+// Kept only for the request lifetime; bounded by each parser's own limit.
+const stashRawBody = (req: express.Request, _res: express.Response, buf: Buffer) => {
+  (req as unknown as { rawBody?: Buffer }).rawBody = buf;
+};
+// Default JSON cap is 2 MB. The planogram shelf-capture and brand-image "parse"
+// endpoints, though, carry a full photo inline as base64 (`image_base64`, ~1.33×
+// the file size) — a normal phone photo blows past 2 MB and 413s "request entity
+// too large". Give just those two paths a much larger cap; every other route
+// keeps the 2 MB limit so the rawBody buffer stays bounded on the general path.
+const standardJson  = express.json({ limit: '2mb',  strict: true, verify: stashRawBody });
+const largeImageJson = express.json({ limit: '25mb', strict: true, verify: stashRawBody });
+const LARGE_JSON_SUFFIXES = ['/planograms/captures', '/planograms/parse'];
+app.use((req, res, next) =>
+  (LARGE_JSON_SUFFIXES.some((s) => req.path.endsWith(s)) ? largeImageJson : standardJson)(req, res, next),
+);
 app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 app.use('/api/v1/auth/login', loginLimiter);                   // composite (IP + email) brute-force throttle — after body parse so req.body.email is available
 app.use(strictJson);                                            // mutating routes must send JSON
