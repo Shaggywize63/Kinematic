@@ -21,7 +21,32 @@ const BUCKET_MAP: Record<string, string> = {
   material: process.env.BUCKET_MATERIALS || 'kinematic-materials',
   avatar: process.env.BUCKET_AVATARS || 'kinematic-avatars',
   planogram: process.env.BUCKET_PLANOGRAMS || 'form-responses',
+  // Per-SKU reference pack shots for planogram shelf-recognition. Must live in
+  // a PUBLIC bucket — see PUBLIC_TYPES below.
+  planogram_ref: process.env.BUCKET_PLANOGRAM_REFS || 'planogram-refs',
 };
+
+// Upload types whose bucket must be PUBLIC (a directly fetchable URL, not a
+// signed one). Shelf-recognition fetches planogram reference images server-side
+// with a plain GET (planogram.service.fetchImageAsBase64), so a private/signed
+// URL would 401 and the reference would be silently skipped. The bucket is
+// self-provisioned on first use so it works in every project without manual setup.
+const PUBLIC_TYPES = new Set(['planogram_ref']);
+
+async function ensurePublicBucket(bucket: string): Promise<void> {
+  const { data } = await supabaseAdmin.storage.getBucket(bucket);
+  if (data) {
+    if (!data.public) await supabaseAdmin.storage.updateBucket(bucket, { public: true });
+    return;
+  }
+  const { error } = await supabaseAdmin.storage.createBucket(bucket, {
+    public: true,
+    fileSizeLimit: 8 * 1024 * 1024,
+    allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+  });
+  // Ignore a create race ("already exists") — another concurrent upload won.
+  if (error && !/exist/i.test(error.message)) throw error;
+}
 
 // POST /api/v1/upload/:type
 export const uploadFile = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -45,6 +70,10 @@ export const uploadFile = asyncHandler(async (req: AuthRequest, res: Response) =
   const path = `${user.org_id}/${user.id}/${uuidv4()}.${ext}`;
   const bucket = BUCKET_MAP[type];
 
+  // Public-bucket types (planogram reference packs) must resolve to a directly
+  // fetchable URL, so make sure the bucket exists and is public first.
+  if (PUBLIC_TYPES.has(type)) await ensurePublicBucket(bucket);
+
   const { error } = await supabaseAdmin.storage
     .from(bucket)
     .upload(path, req.file.buffer, {
@@ -54,11 +83,12 @@ export const uploadFile = asyncHandler(async (req: AuthRequest, res: Response) =
 
   if (error) return serverError(res);
 
-  // All buckets are PRIVATE (public=false). This URL is stored as a stable
-  // bucket+path *reference* — it is NOT directly fetchable. Display goes through
-  // GET /api/v1/media/sign (media.controller.ts), which parses this URL and
-  // returns a short-lived signed URL. Returning path+bucket alongside lets
-  // callers sign without re-parsing. (DPDP §8(5).)
+  // Most buckets are PRIVATE (public=false): this URL is a stable bucket+path
+  // *reference*, NOT directly fetchable — display goes through GET
+  // /api/v1/media/sign (media.controller.ts), which returns a short-lived signed
+  // URL. For PUBLIC_TYPES (planogram_ref) the bucket is public, so getPublicUrl
+  // returns a genuinely fetchable URL. Returning path+bucket lets callers sign
+  // without re-parsing. (DPDP §8(5).)
   const { data: { publicUrl } } = supabaseAdmin.storage.from(bucket).getPublicUrl(path);
 
   return ok(res, { url: publicUrl, path, bucket });
