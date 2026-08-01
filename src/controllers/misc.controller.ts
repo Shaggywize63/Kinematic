@@ -465,6 +465,29 @@ async function assertActiveUserCap(orgId: string | null | undefined, email?: str
   }
 }
 
+/**
+ * The full set of modules a caller effectively has — used by the sub_admin
+ * privilege-escalation guard on user create/update. A caller's access comes
+ * from three places and the guard must honour ALL of them, or a role-based
+ * admin (whose modules live on their org_role, not in user_module_permissions)
+ * is falsely told they "do not have" modules they plainly do:
+ *   - permissions            → explicit user_module_permissions grants
+ *   - role_permissions       → read modules inherited from their org_role
+ *   - role_permissions_write → write modules inherited from their org_role
+ *
+ * Bug this fixes: Hema (sub_admin + "CRM Admin" org_role) had
+ * explicit_permissions=['crm'] only; her CRM modules all live on the role.
+ * Assigning a hierarchy role that inherits crm_leads/…/leave was rejected as
+ * "Cannot assign modules you do not have" even though her role grants each one.
+ */
+function callerModuleSet(user: { permissions?: string[]; role_permissions?: string[]; role_permissions_write?: string[] }): Set<string> {
+  return new Set<string>([
+    ...(user.permissions || []),
+    ...(user.role_permissions || []),
+    ...(user.role_permissions_write || []),
+  ])
+}
+
 export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   const { name, mobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email, org_role_id } = req.body
   const admin = req.user!
@@ -571,7 +594,25 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
 
   const { permissions, assigned_cities } = req.body
 
-  // 4. Save Permissions and City Assignments
+  // 4. Privilege-escalation guard for sub_admins — runs BEFORE writing any
+  // rows, so a rejected request leaves nothing behind but the auth user we
+  // then delete. The caller's effective modules span explicit grants AND their
+  // org_role's inherited read/write permissions (callerModuleSet); checking
+  // only the explicit user_module_permissions set falsely rejected role-based
+  // admins whose modules live on the org_role (e.g. Hema / "CRM Admin", whose
+  // explicit grants are just ['crm']).
+  if (admin.role === 'sub_admin' && Array.isArray(permissions)) {
+    const adminModules = callerModuleSet(admin)
+    const unauthorized = permissions.filter((p: string) => !adminModules.has(p))
+    if (unauthorized.length > 0) {
+      await supabaseAdmin.auth.admin.deleteUser(authId)
+      throw new AppError(403, `Cannot assign modules you do not have: ${unauthorized.join(', ')}`, 'FORBIDDEN')
+    }
+  }
+
+  // 5. Save permissions and city assignments — a SINGLE insert each, stamped
+  // with org_id. (Previously each was inserted twice: once here with org_id and
+  // again below without it, leaving duplicate, org-less rows.)
   const tasks = [];
 
   if (Array.isArray(permissions) && permissions.length > 0) {
@@ -600,27 +641,6 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (tasks.length > 0) {
     await Promise.all(tasks);
-  }
-
-  // 5. Privilege escalation check for Sub-Admin
-  if (admin.role === 'sub_admin' && permissions) {
-    const unauthorized = permissions.filter((p: string) => !admin.permissions?.includes(p))
-    if (unauthorized.length > 0) {
-      await supabaseAdmin.auth.admin.deleteUser(authId)
-      throw new AppError(403, `Cannot assign modules you do not have: ${unauthorized.join(', ')}`, 'FORBIDDEN')
-    }
-  }
-
-  // 5. Insert permissions if provided
-  if (permissions && Array.isArray(permissions)) {
-    const pData = permissions.map((p: string) => ({ user_id: authId, module_id: p }))
-    await supabaseAdmin.from('user_module_permissions').insert(pData)
-  }
-
-  // 6. Insert city assignments if provided
-  if (assigned_cities && Array.isArray(assigned_cities)) {
-    const cData = assigned_cities.map((c: string) => ({ user_id: authId, city_id: c }))
-    await supabaseAdmin.from('user_city_assignments').insert(cData)
   }
 
   sendSuccess(res, { ...data, permissions: permissions || [], assigned_cities: assigned_cities || [] }, 'User created', 201)
@@ -722,7 +742,8 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
     if (permissions && Array.isArray(permissions)) {
       // Privilege escalation check
       if (req.user?.role === 'sub_admin') {
-        const unauthorized = permissions.filter((p: string) => !req.user!.permissions?.includes(p))
+        const adminModules = callerModuleSet(req.user)
+        const unauthorized = permissions.filter((p: string) => !adminModules.has(p))
         if (unauthorized.length > 0) throw new AppError(403, `Cannot assign modules you do not have: ${unauthorized.join(', ')}`, 'FORBIDDEN')
       }
       
