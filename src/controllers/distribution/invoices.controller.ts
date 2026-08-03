@@ -7,7 +7,15 @@ import { audit } from '../../utils/audit';
 import { generateIRN, EInvoicePayload } from '../../services/einvoice';
 import { getDemoInvoice } from '../../utils/demoDistribution';
 
-const issueSchema = z.object({ order_id: z.string().uuid() });
+const issueSchema = z.object({
+  order_id: z.string().uuid(),
+  // PMC DELTA — billing type + delivery crew captured at bill time. Optional at
+  // the API layer (the order→invoice flow may omit them); the dashboard bill
+  // dialog enforces B2B/B2C as a mandatory dropdown.
+  bill_type: z.enum(['B2B', 'B2C']).optional(),
+  driver_name: z.string().trim().max(120).optional(),
+  helper_name: z.string().trim().max(120).optional(),
+});
 
 // ── List ────────────────────────────────────────────────────────────────────
 export const list = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -113,6 +121,11 @@ export const issue = asyncHandler(async (req: AuthRequest, res: Response) => {
     cess: order.cess,
     round_off: order.round_off,
     grand_total: order.grand_total,
+    // PMC DELTA — persist B2B/B2C + driver/helper so they print on the bill and
+    // surface in reports. Null when the issuer didn't supply them.
+    bill_type: parsed.data.bill_type ?? null,
+    driver_name: parsed.data.driver_name ?? null,
+    helper_name: parsed.data.helper_name ?? null,
     issued_by: user.id,
     idempotency_key: idemKey ?? null,
   }).select().single();
