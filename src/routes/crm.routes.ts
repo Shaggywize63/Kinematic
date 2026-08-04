@@ -59,7 +59,19 @@ import * as homeSvc from '../services/crm/home.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 import * as leadFormBuilder from '../services/crm/ai/leadFormBuilder.service';
-import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
+import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, stampDirectoryNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
+
+// Enrich crm_activities rows with the owner, linked-entity (lead / contact /
+// deal / account) and People-Directory ("dealer_name") display names + phones
+// so every activity surface — timeline, list, detail, CSV, WhatsApp share
+// card — reads in plain English instead of dangling UUIDs. Idempotent and
+// safe on any rows (missing refs simply no-op). Callers that already stamp a
+// subset can still route through this; the helpers coalesce existing values.
+async function enrichActivities<T extends Record<string, any>>(rows: T[]): Promise<any[]> {
+  const withOwners = await stampOwnerNames(rows as any[]);
+  const withLinked = await stampLinkedEntityNames(withOwners as any[]);
+  return stampDirectoryNames(withLinked as any[]);
+}
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
 import * as consentSvc from '../services/crm/consent.service';
@@ -1361,13 +1373,13 @@ leads.get('/:id/activities', wrap(async (req, res) => {
   // any global geo filter would be redundant anyway; strip them.
   const { city: _c, state: _s, district: _d, block: _b, ...rest } = req.query as Record<string, unknown>;
   return res.json(
-    await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...rest }, {
+    await enrichActivities(await crud.list('crm_activities', orgId(req), { lead_id: req.params.id, ...rest }, {
       // Sort by the generated activity_date column (COALESCE of
       // completed_at, due_at, created_at) so the tab reads as a real
       // timeline regardless of whether rows are done or planned.
       defaultSort: { column: 'activity_date', ascending: false },
       ...visibilityOpts,
-    }),
+    }) as Record<string, any>[]),
   );
 }));
 leads.get('/:id/deals', wrap(async (req, res) => res.json(
@@ -1532,13 +1544,13 @@ contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_co
 contacts.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
   return res.json(
-    await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, {
+    await enrichActivities(await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, {
       // Sort by the generated activity_date column (COALESCE of
       // completed_at, due_at, created_at) so the tab reads as a real
       // timeline regardless of whether rows are done or planned.
       defaultSort: { column: 'activity_date', ascending: false },
       ...visibilityOpts,
-    }),
+    }) as Record<string, any>[]),
   );
 }));
 contacts.get('/:id/deals', wrap(async (req, res) => res.json(
@@ -1593,13 +1605,13 @@ accounts.get('/:id/deals', wrap(async (req, res) => res.json(
 accounts.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
   return res.json(
-    await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, {
+    await enrichActivities(await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, {
       // Sort by the generated activity_date column (COALESCE of
       // completed_at, due_at, created_at) so the tab reads as a real
       // timeline regardless of whether rows are done or planned.
       defaultSort: { column: 'activity_date', ascending: false },
       ...visibilityOpts,
-    }),
+    }) as Record<string, any>[]),
   );
 }));
 accounts.get('/:id/notes', wrap(async (req, res) => res.json(
@@ -1817,13 +1829,13 @@ deals.get('/:id/history', wrap(async (req, res) => res.json(await dealsSvc.dealH
 deals.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
   return res.json(
-    await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, {
+    await enrichActivities(await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, {
       // Sort by the generated activity_date column (COALESCE of
       // completed_at, due_at, created_at) so the tab reads as a real
       // timeline regardless of whether rows are done or planned.
       defaultSort: { column: 'activity_date', ascending: false },
       ...visibilityOpts,
-    }),
+    }) as Record<string, any>[]),
   );
 }));
 deals.get('/:id/contacts', wrap(async (req, res) => {
@@ -2156,8 +2168,7 @@ activities.get('/calendar', wrap(async (req, res) => {
     q = q.or(userScope.columns.map((c) => `${c}.eq.${userScope.user_id}`).join(','));
   }
   const { data } = await q.order('due_at', { ascending: true });
-  const stamped = await stampOwnerNames(data ?? []);
-  res.json(await stampLinkedEntityNames(stamped as any[]));
+  res.json(await enrichActivities((data ?? []) as Record<string, any>[]));
 }));
 activities.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
@@ -2274,12 +2285,12 @@ activities.get('/', wrap(async (req, res) => {
       extraFilters,
     },
   );
-  const stamped = await stampOwnerNames(rows as Record<string, unknown>[]);
-  // Decorate each activity with the linked entity's display name
-  // (lead/contact/account/deal) so the UI can render "Rakesh Sharma"
-  // instead of a generic "Lead" badge. Two extra batched lookups,
-  // one round-trip each, regardless of page size.
-  const enriched = await stampLinkedEntityNames(stamped as any[]);
+  // Decorate each activity with owner, linked-entity (lead/contact/account/
+  // deal) and People-Directory ("dealer_name") display names so the UI can
+  // render "Rakesh Sharma" / "Radha Traders · 9431188608" instead of a
+  // generic "Lead" badge or a dangling UUID. Batched lookups, one round-trip
+  // each, regardless of page size.
+  const enriched = await enrichActivities(rows as Record<string, any>[]);
   res.json({
     success: true,
     data: enriched,
@@ -2813,7 +2824,8 @@ activities.get('/:id', wrap(async (req, res) => {
   const row = await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, unknown>;
   const err = await activityAccessError(req as AuthRequest, row);
   if (err) throw err;
-  res.json(await stampOwnerName(row));
+  const [enriched] = await enrichActivities([row] as Record<string, any>[]);
+  res.json(enriched);
 }));
 activities.patch('/:id', wrap(async (req, res) => {
   const existing = await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, unknown>;

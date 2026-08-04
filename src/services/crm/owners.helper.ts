@@ -235,6 +235,54 @@ export async function stampDealerNames<T extends { custom_fields?: Record<string
 }
 
 // ---------------------------------------------------------------------------
+// Directory-name decorator for activities. SRS / BMW site-visit activities
+// link a People-Directory entry (dealer / distributor) through
+// custom_fields.dealer_name — a people_directory UUID (with
+// custom_fields.dealer as a legacy fallback). Stamp `directory_name` +
+// `directory_phone` so the activity timeline, detail and WhatsApp share
+// card render "Radha Traders · 9431188608" instead of a dangling UUID.
+// One batched IN() query per call. Safe on any rows: no directory ref → no-op.
+// ---------------------------------------------------------------------------
+
+export async function stampDirectoryNames<T extends {
+  custom_fields?: Record<string, unknown> | null;
+  directory_name?: string | null;
+  directory_phone?: string | null;
+}>(rows: T[]): Promise<T[]> {
+  if (!rows || rows.length === 0) return rows;
+  const dirId = (r: T): string | null => {
+    const cf = r.custom_fields;
+    if (!cf) return null;
+    const raw = (cf.dealer_name ?? cf.dealer) as unknown;
+    if (typeof raw === 'string' && UUID_RE.test(raw)) return raw;
+    if (raw && typeof raw === 'object') {
+      const o = raw as { id?: unknown };
+      if (typeof o.id === 'string' && UUID_RE.test(o.id)) return o.id;
+    }
+    return null;
+  };
+  const ids = new Set<string>();
+  for (const r of rows) { const id = dirId(r); if (id) ids.add(id); }
+  if (!ids.size) return rows;
+  const { data } = await supabaseAdmin.from('people_directory')
+    .select('id, first_name, last_name, mobile').in('id', Array.from(ids));
+  const byId = new Map((data ?? []).map((p: any) => [p.id as string, {
+    name: [p.first_name, p.last_name].filter(Boolean).join(' ').trim() || (p.mobile as string) || '',
+    phone: (p.mobile as string) || '',
+  }]));
+  return rows.map((r) => {
+    const id = dirId(r);
+    const hit = id ? byId.get(id) : undefined;
+    if (!hit) return r;
+    return {
+      ...r,
+      directory_name: hit.name || r.directory_name || null,
+      directory_phone: hit.phone || r.directory_phone || null,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Custom-field CSV columns. Admin-defined fields live in
 // crm_custom_field_defs (one row per field per entity) and each row's value
 // is stored under row.custom_fields[field_key]. The CSV export routes call
