@@ -83,6 +83,7 @@ import distOrdersRoutes        from './routes/distribution/orders.routes';
 import distSalesmanRoutes      from './routes/distribution/salesman.routes';
 import distUploadsRoutes       from './routes/distribution/uploads.routes';
 import distInvoicesRoutes      from './routes/distribution/invoices.routes';
+import distReportsRoutes       from './routes/distribution/reports.routes';
 import distDispatchesRoutes    from './routes/distribution/dispatches.routes';
 import distDeliveriesRoutes    from './routes/distribution/deliveries.routes';
 import distPaymentsRoutes      from './routes/distribution/payments.routes';
@@ -534,6 +535,7 @@ app.use(`${V1}/distribution/distributors`,   requireAuth, requireModule('distrib
 app.use(`${V1}/distribution/price-lists`,    requireAuth, requireModule('distribution_pricing'),      distPriceListsRoutes);
 app.use(`${V1}/distribution/orders`,         requireAuth, requireModule('distribution_orders'),       distOrdersRoutes);
 app.use(`${V1}/distribution/invoices`,       requireAuth, requireModule('distribution_invoicing'),    distInvoicesRoutes);
+app.use(`${V1}/distribution/reports`,        requireAuth, requireModule('reports'),                   distReportsRoutes);
 app.use(`${V1}/distribution/dispatches`,     requireAuth, requireModule('distribution_invoicing'),    distDispatchesRoutes);
 app.use(`${V1}/distribution/deliveries`,     requireAuth,                                              distDeliveriesRoutes);
 app.use(`${V1}/distribution/payments`,       requireAuth, requireModule('distribution_payments'),     distPaymentsRoutes);

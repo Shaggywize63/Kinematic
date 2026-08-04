@@ -4676,18 +4676,18 @@ router.use('/analytics', rbac.requireModuleAccess('crm_lead_analytics'), analyti
 // ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
 const layouts = express.Router();
 layouts.get('/:page', wrap(async (req, res) => {
-  const page = req.params.page as 'analytics' | 'overview';
-  if (!['analytics', 'overview'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics' or 'overview'", 'VALIDATION');
+  const page = req.params.page as dashboardLayoutSvc.LayoutPage;
+  if (!['analytics', 'overview', 'ffm'].includes(page)) {
+    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
   res.json(await dashboardLayoutSvc.getLayout(uid, orgId(req), page));
 }));
 layouts.put('/:page', wrap(async (req, res) => {
-  const page = req.params.page as 'analytics' | 'overview';
-  if (!['analytics', 'overview'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics' or 'overview'", 'VALIDATION');
+  const page = req.params.page as dashboardLayoutSvc.LayoutPage;
+  if (!['analytics', 'overview', 'ffm'].includes(page)) {
+    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
@@ -4704,9 +4704,9 @@ layouts.post('/overview/pin', wrap(async (req, res) => {
   res.json(await dashboardLayoutSvc.pinWidgetToOverview(uid, orgId(req), clientId(req), widget));
 }));
 layouts.delete('/:page/widgets/:widget_id', wrap(async (req, res) => {
-  const page = req.params.page as 'analytics' | 'overview';
-  if (!['analytics', 'overview'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics' or 'overview'", 'VALIDATION');
+  const page = req.params.page as dashboardLayoutSvc.LayoutPage;
+  if (!['analytics', 'overview', 'ffm'].includes(page)) {
+    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
