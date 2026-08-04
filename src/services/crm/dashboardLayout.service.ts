@@ -18,7 +18,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 
-export type LayoutPage = 'analytics' | 'overview';
+export type LayoutPage = 'analytics' | 'overview' | 'ffm';
 
 export interface WidgetInstance {
   id: string;
