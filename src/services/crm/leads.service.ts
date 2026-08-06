@@ -25,6 +25,22 @@ export interface CreateLeadInput {
   skipDedup?: boolean;
 }
 
+/**
+ * Stamp the org's sole client onto a lead that arrived without a client
+ * scope. A super-admin (client_id = null) creating leads would otherwise
+ * strand them with client_id = null — invisible to client-scoped views and
+ * unable to resolve a client-pinned pipeline on lead→deal convert. Only
+ * fires when the org has EXACTLY ONE active client; multi-client orgs (and
+ * any create that already carries a client_id) are left untouched.
+ */
+async function resolveSoleClientId(org_id: string, provided: string | null): Promise<string | null> {
+  if (provided) return provided;
+  const { data } = await supabaseAdmin.from('clients')
+    .select('id').eq('org_id', org_id).eq('is_active', true).limit(2);
+  const rows = (data ?? []) as Array<{ id: string }>;
+  return rows.length === 1 ? rows[0].id : null;
+}
+
 export async function createLead({ org_id, user_id, payload, skipDedup }: CreateLeadInput) {
   if (!skipDedup) {
     if (payload.email) {
@@ -43,6 +59,13 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
       }
     }
   }
+
+  // Single-client orgs: if the caller didn't scope the lead to a client
+  // (e.g. a super-admin whose own client_id is null), stamp the org's sole
+  // client so the lead isn't stranded with client_id = null — which hides
+  // it from client-scoped views and blocks lead→deal pipeline resolution.
+  // No-op for multi-client orgs and when a client_id was already supplied.
+  payload.client_id = await resolveSoleClientId(org_id, payload.client_id ?? null);
 
   // Owner resolution: explicit owner_id wins, then assignment rules, then
   // the creator (user_id), then the org-wide default, then null. Passing
