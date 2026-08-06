@@ -1059,10 +1059,16 @@ async function getDefaultPipelineId(org_id: string, client_id: string | null = n
     .select('id, is_default, client_id, created_at')
     .eq('org_id', org_id).eq('is_active', true).is('deleted_at', null)
     .order('created_at', { ascending: true });
+  // Eligible = org-wide (client_id NULL) pipelines plus this client's own.
+  // When there's NO client scope (e.g. a super-admin whose leads carry
+  // client_id = NULL), do NOT restrict to client_id IS NULL — fall back to
+  // ANY active pipeline in the org, exactly like
+  // deals.service.ts:resolveDefaultPipeline. The old `else` branch pinned
+  // the query to client_id IS NULL and threw NO_PIPELINE whenever the org's
+  // only live pipelines were client-pinned (org-wide ones deleted) — the
+  // "but a pipeline is clearly active" bug.
   if (client_id) {
     q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
-  } else {
-    q = q.is('client_id', null);
   }
   const { data } = await q;
   const list = (data ?? []) as Array<{ id: string; is_default: boolean; client_id: string | null }>;
