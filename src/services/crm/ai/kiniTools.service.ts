@@ -60,19 +60,35 @@ async function assertLeadInClientScope(org_id: string, client_id: string | null,
 export const tools: KiniTool[] = [
   {
     name: 'crm_search_leads',
-    description: 'Search CRM leads. Filter by status, minimum score, or text query.',
+    description: 'Search CRM leads. Filter by status, minimum score, text query, or creation-date range. For "today\'s leads" / "leads added this week" style questions, pass created_from (and optionally created_to) computed from the current IST date — results then include every matching lead with its created_at, so you can list them rather than guessing.',
     input_schema: { type: 'object', properties: {
       status: { type: 'string' },
       score_gte: { type: 'number' },
       q: { type: 'string' },
+      created_from: { type: 'string', description: 'ISO date/datetime lower bound on created_at (inclusive), e.g. 2026-08-06 for the start of today IST' },
+      created_to: { type: 'string', description: 'ISO date/datetime upper bound on created_at (inclusive)' },
       limit: { type: 'number', default: 10 },
     }},
     exec: async (org_id, client_id, args) => {
-      let q = supabaseAdmin.from('crm_leads').select('id, first_name, last_name, email, company, title, status, score, owner_id')
+      let q = supabaseAdmin.from('crm_leads').select('id, first_name, last_name, email, company, title, status, score, owner_id, created_at')
         .eq('org_id', org_id).is('deleted_at', null);
       q = scopeToClient(q, client_id);
       if (args.status) q = q.eq('status', String(args.status));
       if (args.score_gte) q = q.gte('score', Number(args.score_gte));
+      // Creation-date range — accept only well-formed ISO values so hostile /
+      // malformed tool input can't 500 the query. A bare date upper bound is
+      // widened to end-of-day so created_to=2026-08-06 includes that whole day.
+      const isoDate = (v: unknown): string | null => {
+        if (typeof v !== 'string') return null;
+        const s = v.trim();
+        if (!/^\d{4}-\d{2}-\d{2}([T ].*)?$/.test(s) || Number.isNaN(Date.parse(s))) return null;
+        return s;
+      };
+      const from = isoDate(args.created_from);
+      const to = isoDate(args.created_to);
+      const dateFiltered = !!(from || to);
+      if (from) q = q.gte('created_at', from);
+      if (to) q = q.lte('created_at', /^\d{4}-\d{2}-\d{2}$/.test(to) ? `${to}T23:59:59.999` : to);
       if (args.q) {
         // Sanitise — see utils/postgrest.ts for the threat model. The model
         // can also produce hostile filter syntax via tool-use input, not
@@ -96,7 +112,12 @@ export const tools: KiniTool[] = [
           q = q.or(Array.from(new Set(terms)).join(','));
         }
       }
-      const { data } = await q.order('score', { ascending: false }).limit(Math.min(Number(args.limit ?? 10), 50));
+      // Date-filtered queries read as a chronology ("today's leads"), so sort
+      // newest-first; score stays the default ranking otherwise.
+      const { data } = await (dateFiltered
+        ? q.order('created_at', { ascending: false })
+        : q.order('score', { ascending: false })
+      ).limit(Math.min(Number(args.limit ?? 10), 50));
       return { card: { type: 'lead_list', data: { leads: data ?? [] } }, data };
     },
   },

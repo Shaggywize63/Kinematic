@@ -3697,6 +3697,69 @@ router.get('/search', wrap(async (req, res) => {
     safe(has('crm_settings'), () => searchPeopleDirectory(req, org, scope.id, q, PER)),
   ]);
 
+  // ── Distribution + field-force fan-out ──────────────────────────────
+  // These live OUTSIDE the CRM router, so we mirror each entity's own list
+  // route exactly (same invariant as the CRM entities: search never shows a
+  // record the caller couldn't reach on that entity's page):
+  //   • distributors / brands / orders — org-scoped only (their list routes
+  //     apply no client filter on reads);
+  //   • users — org + client chain + city_manager city restriction;
+  //   • stores — org + STRICT client.
+  // Gated per-entity through rbac.moduleAccessAllowed (entitlements AND
+  // role permissions), matching requireModule on their mounts.
+  const sanitized = sanitisePostgrestSearch(q);
+  const ffAllowed = (m: string): boolean => rbac.moduleAccessAllowed(me, m, false);
+  const ilikeOr = (cols: string[]): string => cols.map((c) => `${c}.ilike.%${sanitized}%`).join(',');
+  const [distributorRows, brandRows, orderRows, userRows, storeRows] = await Promise.all([
+    safe(!!sanitized && ffAllowed('distribution_distributors'), async () => {
+      const { data, error } = await supabaseAdmin.from('distributors').select('*')
+        .eq('org_id', org)
+        .or(ilikeOr(['name', 'code', 'legal_name', 'contact_name', 'contact_mobile', 'email']))
+        .limit(PER);
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+      return (data ?? []) as Record<string, unknown>[];
+    }),
+    safe(!!sanitized && ffAllowed('distribution_brands'), async () => {
+      const { data, error } = await supabaseAdmin.from('brands').select('*')
+        .eq('org_id', org)
+        .or(ilikeOr(['name', 'code', 'legal_name']))
+        .limit(PER);
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+      return (data ?? []) as Record<string, unknown>[];
+    }),
+    safe(!!sanitized && ffAllowed('distribution_orders'), async () => {
+      const { data, error } = await supabaseAdmin.from('orders').select('*')
+        .eq('org_id', org)
+        .or(ilikeOr(['order_no', 'notes']))
+        .order('placed_at', { ascending: false })
+        .limit(PER);
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+      return (data ?? []) as Record<string, unknown>[];
+    }),
+    safe(!!sanitized && ffAllowed('users'), async () => {
+      let uq = supabaseAdmin.from('users').select('*')
+        .eq('org_id', org).is('deleted_at', null)
+        .or(ilikeOr(['name', 'employee_id', 'email', 'mobile']));
+      if (scope.id) uq = uq.eq('client_id', scope.id);
+      // City managers only see their assigned cities (mirrors GET /users).
+      if ((me?.role ?? '') === 'city_manager' && (me?.assigned_cities?.length ?? 0) > 0) {
+        uq = uq.in('city', me!.assigned_cities!);
+      }
+      const { data, error } = await uq.limit(PER);
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+      return (data ?? []) as Record<string, unknown>[];
+    }),
+    safe(!!sanitized && ffAllowed('stores'), async () => {
+      let sq = supabaseAdmin.from('stores').select('*')
+        .eq('org_id', org)
+        .or(ilikeOr(['name', 'store_code', 'address']));
+      if (scope.id) sq = sq.eq('client_id', scope.id); // strict — matches buildCRUD('stores')
+      const { data, error } = await sq.limit(PER);
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+      return (data ?? []) as Record<string, unknown>[];
+    }),
+  ]);
+
   const groups = globalSearch.orderGroups(
     [
       globalSearch.toGroup('lead', 'Leads', globalSearch.leadItems(leadRows as unknown as Record<string, unknown>[]), q, PER),
@@ -3706,8 +3769,13 @@ router.get('/search', wrap(async (req, res) => {
       globalSearch.toGroup('activity', 'Activities', globalSearch.activityItems(activityRows as Record<string, unknown>[]), q, PER),
       globalSearch.toGroup('product', 'Products', globalSearch.productItems(productRows as Record<string, unknown>[]), q, PER),
       globalSearch.toGroup('person', 'People', globalSearch.personItems(peopleRows as Record<string, unknown>[]), q, PER),
+      globalSearch.toGroup('distributor', 'Distributors', globalSearch.distributorItems(distributorRows), q, PER),
+      globalSearch.toGroup('brand', 'Brands', globalSearch.brandItems(brandRows), q, PER),
+      globalSearch.toGroup('order', 'Orders', globalSearch.orderItems(orderRows), q, PER),
+      globalSearch.toGroup('user', 'Team', globalSearch.userItems(userRows), q, PER),
+      globalSearch.toGroup('store', 'Stores', globalSearch.storeItems(storeRows), q, PER),
     ],
-    ['lead', 'deal', 'contact', 'account', 'activity', 'product', 'person'],
+    ['lead', 'deal', 'contact', 'account', 'activity', 'product', 'person', 'distributor', 'brand', 'order', 'user', 'store'],
   );
 
   const total = groups.reduce((n, g) => n + g.count, 0);
