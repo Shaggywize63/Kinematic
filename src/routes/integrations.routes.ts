@@ -23,6 +23,7 @@ import {
   disconnect as disconnectGoogle,
   getStatus as getGoogleStatus,
   isConfigured as googleConfigured,
+  pullEvents as pullGoogleEvents,
 } from '../services/integrations/googleCalendar.service';
 import { AppError } from '../utils';
 import { demoIntegrationsMiddleware } from '../utils/demoCrm';
@@ -81,6 +82,18 @@ router.delete('/google', wrap(async (req, res) => {
   const u = reqUser(req);
   await disconnectGoogle(u.id);
   res.status(204).end();
+}));
+
+// Pull the rep's recent + upcoming Google events into crm_activities
+// (the inbound half of the two-way sync). Idempotent — the dashboard calls
+// it when the activities view opens, and it can be triggered manually.
+router.post('/google/sync', wrap(async (req, res) => {
+  const u = reqUser(req);
+  if (!googleConfigured()) return res.json({ connected: false, configured: false, imported: 0, updated: 0, cancelled: 0 });
+  const status = await getGoogleStatus(u.id);
+  if (!status.connected) return res.json({ connected: false, configured: true, imported: 0, updated: 0, cancelled: 0 });
+  const counts = await pullGoogleEvents(u.org_id, u.id);
+  res.json({ connected: true, configured: true, ...counts });
 }));
 
 // ── Lead-source integrations CRUD ────────────────────────────────────────

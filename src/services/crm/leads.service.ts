@@ -23,9 +23,31 @@ export interface CreateLeadInput {
   user_id?: string;
   payload: Partial<Lead>;
   skipDedup?: boolean;
+  // Interactive create paths (the dashboard / mobile lead form) set this so
+  // required custom fields are enforced server-side — a mandatory field left
+  // blank is rejected instead of silently saved. Off by default so inbound
+  // webhooks, CSV imports and agentic (KINI) flows can still capture partial
+  // leads that a human completes later.
+  enforceRequired?: boolean;
 }
 
-export async function createLead({ org_id, user_id, payload, skipDedup }: CreateLeadInput) {
+/**
+ * Stamp the org's sole client onto a lead that arrived without a client
+ * scope. A super-admin (client_id = null) creating leads would otherwise
+ * strand them with client_id = null — invisible to client-scoped views and
+ * unable to resolve a client-pinned pipeline on lead→deal convert. Only
+ * fires when the org has EXACTLY ONE active client; multi-client orgs (and
+ * any create that already carries a client_id) are left untouched.
+ */
+async function resolveSoleClientId(org_id: string, provided: string | null): Promise<string | null> {
+  if (provided) return provided;
+  const { data } = await supabaseAdmin.from('clients')
+    .select('id').eq('org_id', org_id).eq('is_active', true).limit(2);
+  const rows = (data ?? []) as Array<{ id: string }>;
+  return rows.length === 1 ? rows[0].id : null;
+}
+
+export async function createLead({ org_id, user_id, payload, skipDedup, enforceRequired }: CreateLeadInput) {
   if (!skipDedup) {
     if (payload.email) {
       const dup = await dedup.findLeadByEmail(org_id, payload.email);
@@ -44,6 +66,13 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
     }
   }
 
+  // Single-client orgs: if the caller didn't scope the lead to a client
+  // (e.g. a super-admin whose own client_id is null), stamp the org's sole
+  // client so the lead isn't stranded with client_id = null — which hides
+  // it from client-scoped views and blocks lead→deal pipeline resolution.
+  // No-op for multi-client orgs and when a client_id was already supplied.
+  payload.client_id = await resolveSoleClientId(org_id, payload.client_id ?? null);
+
   // Owner resolution: explicit owner_id wins, then assignment rules, then
   // the creator (user_id), then the org-wide default, then null. Passing
   // user_id into assignOwner lets the rule engine still take precedence
@@ -54,6 +83,7 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   // formula that references custom_fields sees the cleaned values.
   payload.custom_fields = await validateAndStampCustomFields(
     org_id, payload.client_id ?? null, 'lead', payload.custom_fields,
+    { enforceRequired },
   );
 
   const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload, user_id));
@@ -1059,10 +1089,16 @@ async function getDefaultPipelineId(org_id: string, client_id: string | null = n
     .select('id, is_default, client_id, created_at')
     .eq('org_id', org_id).eq('is_active', true).is('deleted_at', null)
     .order('created_at', { ascending: true });
+  // Eligible = org-wide (client_id NULL) pipelines plus this client's own.
+  // When there's NO client scope (e.g. a super-admin whose leads carry
+  // client_id = NULL), do NOT restrict to client_id IS NULL — fall back to
+  // ANY active pipeline in the org, exactly like
+  // deals.service.ts:resolveDefaultPipeline. The old `else` branch pinned
+  // the query to client_id IS NULL and threw NO_PIPELINE whenever the org's
+  // only live pipelines were client-pinned (org-wide ones deleted) — the
+  // "but a pipeline is clearly active" bug.
   if (client_id) {
     q = q.or(`client_id.is.null,client_id.eq.${client_id}`);
-  } else {
-    q = q.is('client_id', null);
   }
   const { data } = await q;
   const list = (data ?? []) as Array<{ id: string; is_default: boolean; client_id: string | null }>;

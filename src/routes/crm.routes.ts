@@ -749,7 +749,12 @@ leads.post('/', wrap(async (req, res) => {
     }
   }
 
-  const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload });
+  // enforceRequired: this is the interactive create path (dashboard + mobile
+  // lead form), so a required *custom* field left blank must be rejected —
+  // mirroring enforceLeadRequiredFields above for built-ins. Inbound webhooks /
+  // CSV imports / KINI call createLead without this flag and still capture
+  // partial leads.
+  const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload, enforceRequired: true });
 
   // Record the consent event against the new lead in the crm_consents ledger
   // (who/when/how/purpose), so consent is demonstrable — best-effort: a ledger

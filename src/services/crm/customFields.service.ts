@@ -28,6 +28,9 @@ type FieldDef = {
   options?: string[] | null;
   formula?: string | null;
   hidden?: boolean | null;
+  required?: boolean | null;
+  label?: string | null;
+  org_role_ids?: string[] | null;
 };
 
 const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
@@ -38,7 +41,7 @@ const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
 async function loadDefs(orgId: string, clientId: string | null, entity: string): Promise<FieldDef[]> {
   let q = supabaseAdmin
     .from('crm_custom_field_defs')
-    .select('field_key, field_type, options, formula, hidden')
+    .select('field_key, field_type, options, formula, hidden, required, label, org_role_ids')
     .eq('org_id', orgId)
     .eq('entity_type', entity)
     .eq('is_active', true);
@@ -101,10 +104,16 @@ export async function validateAndStampCustomFields(
   clientId: string | null,
   entity: 'lead' | 'deal' | 'contact' | 'account' | 'activity',
   incoming: Record<string, unknown> | null | undefined,
+  // `enforceRequired` is opt-in and passed ONLY by the interactive create
+  // paths (the dashboard / mobile lead form). Inbound webhooks, CSV imports
+  // and agentic flows leave it off so a partial lead is still captured
+  // rather than 400'd — matching long-standing behaviour.
+  opts?: { enforceRequired?: boolean },
 ): Promise<Record<string, unknown>> {
   const input = { ...(incoming ?? {}) };
-  // Empty payload + no defs → nothing to do; skip the round trip.
-  if (Object.keys(input).length === 0) return input;
+  // Fast path: nothing sent AND not enforcing required-ness → skip the defs
+  // round trip entirely (preserves the original inbound/import behaviour).
+  if (Object.keys(input).length === 0 && !opts?.enforceRequired) return input;
   const defs = await loadDefs(orgId, clientId, entity);
   if (defs.length === 0) return input;
   const byKey = new Map(defs.map((d) => [d.field_key, d]));
@@ -169,6 +178,34 @@ export async function validateAndStampCustomFields(
       default:
         // text / longtext / email / phone / url — store as string
         input[key] = typeof raw === 'string' ? raw : String(raw);
+    }
+  }
+
+  // Enforce required fields — ONLY for interactive create paths that opt in
+  // (`enforceRequired`). The coercion loop above only visits keys that were
+  // SENT, and empties are dropped — so a client that omits a mandatory field
+  // (or sends nothing at all) used to slip through and the row saved without
+  // it. That's the "mandatory field bypassed on lead create" bug.
+  //
+  // We gate this behind the flag on purpose: inbound webhooks, CSV imports and
+  // agentic (KINI) flows call this helper too, and they legitimately capture
+  // partial leads that a human completes later — 400'ing those would silently
+  // drop real leads. Only the dashboard / mobile lead form (where the user is
+  // sitting in front of the fields) turns enforcement on.
+  //
+  // Role-restricted fields (org_role_ids set) are skipped here — this layer
+  // has no user-role context, so the client enforces those for the users who
+  // actually see them; global required fields are guaranteed server-side.
+  if (opts?.enforceRequired) {
+    for (const def of defs) {
+      if (def.required !== true || def.hidden === true || def.field_type === 'formula') continue;
+      if (Array.isArray(def.org_role_ids) && def.org_role_ids.length > 0) continue;
+      const v = input[def.field_key];
+      const missing = v === null || v === undefined || v === ''
+        || (Array.isArray(v) && v.length === 0);
+      if (missing) {
+        throw new AppError(400, `${def.label || def.field_key} is required.`, 'REQUIRED_CUSTOM_FIELD');
+      }
     }
   }
 
