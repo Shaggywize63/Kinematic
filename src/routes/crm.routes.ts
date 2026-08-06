@@ -5065,7 +5065,7 @@ ai.post('/summarize/deal/:id', wrap(async (req, res) => {
 ai.get('/tools', (_req, res) => res.json(kiniTools.toAnthropicTools()));
 ai.post('/tools/execute', wrap(async (req, res) => {
   const body = parse(z.object({ name: z.string(), args: z.record(z.unknown()) }), req.body);
-  const result = await kiniTools.executeTool(orgId(req), clientId(req), body.name, body.args);
+  const result = await kiniTools.executeTool(orgId(req), clientId(req), body.name, body.args, { user_id: userId(req) ?? null });
   if (!result) throw new AppError(404, `Tool ${body.name} not registered`, 'UNKNOWN_TOOL');
   res.json(result);
 }));
@@ -5144,7 +5144,7 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
       system: systemPrompt,
       tools,
       messages: body.messages.map(m => ({ role: m.role, content: m.content as unknown })),
-      onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>),
+      onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>, { user_id: userId(req) ?? null }),
       max_tokens: 1500,
     });
     const tokenUsage = (out as { usage?: { input?: number; output?: number } }).usage;

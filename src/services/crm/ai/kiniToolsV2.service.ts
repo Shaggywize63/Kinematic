@@ -8,6 +8,7 @@ import {
   tools as crmTools,
   executeTool as executeCrmTool,
   type KiniTool,
+  type KiniToolContext,
   type KiniToolResult,
 } from './kiniTools.service';
 import { ffTools } from './tools/ff.tools';
@@ -32,11 +33,12 @@ export async function executeTool(
   client_id: string | null,
   name: string,
   args: Record<string, unknown>,
+  ctx?: KiniToolContext,
 ): Promise<KiniToolResult | null> {
   const v2Tool = ffTools.find((t) => t.name === name);
   if (v2Tool) {
     try {
-      const result = await v2Tool.exec(org_id, client_id, args);
+      const result = await v2Tool.exec(org_id, client_id, args, ctx);
       if (typeof result === 'object' && result !== null && 'card' in result) {
         const r = result as { data: unknown; card?: { type: string; data: unknown } };
         return { tool: name, data: r.data, card: r.card };
@@ -50,5 +52,5 @@ export async function executeTool(
       return { tool: name, data: { error: msg } };
     }
   }
-  return executeCrmTool(org_id, client_id, name, args);
+  return executeCrmTool(org_id, client_id, name, args, ctx);
 }

@@ -154,9 +154,9 @@ export const summarizeDeal = asyncHandler(async (req: AuthRequest, res: Response
 });
 
 /**
- * KINI chat endpoint — agentic. Wires Anthropic tool-use into the 17 CRM tools
- * registered in kiniTools.service.ts so the model can search / create / update
- * CRM records during a conversation instead of just answering with text.
+ * KINI chat endpoint — agentic. Wires Anthropic tool-use into the 25 CRM tools
+ * registered in kiniTools.service.ts so the model can search / create / update /
+ * analyse CRM records during a conversation instead of just answering with text.
  *
  * The mobile + dashboard clients already render the returned `cards` array
  * (lead_list, deal_list, lead_created, etc.) — no client change required to
@@ -166,7 +166,7 @@ export const summarizeDeal = asyncHandler(async (req: AuthRequest, res: Response
  *   { text: string, cards: ToolCard[], tool_calls: { name, args }[] }
  */
 export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id, client_id } = req.user!;
+  const { org_id, client_id, id: user_id } = req.user!;
   const { messages, system, context } = req.body;
   if (!messages?.length) return badRequest(res, 'messages is required');
 
@@ -191,7 +191,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       tools: toAnthropicTools(),
       messages,
       onToolCall: async (name, args) => {
-        const r = await executeTool(org_id, client_id ?? null, name, args as Record<string, unknown>);
+        const r = await executeTool(org_id, client_id ?? null, name, args as Record<string, unknown>, { user_id });
         return r ?? { data: { error: `Unknown tool: ${name}` } };
       },
     });
