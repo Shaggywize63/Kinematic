@@ -152,3 +152,43 @@ export function personItems(rows: Row[]): RawItem[] {
     return { id: str(r.id), title, subtitle: distinct(title, [str(r.type), str(r.mobile), str(r.city)]) };
   });
 }
+
+// ── Distribution + field-force mappers ──────────────────────────────────────
+
+export function distributorItems(rows: Row[]): RawItem[] {
+  return rows.map((r) => {
+    const title = str(r.name) || str(r.code) || 'Distributor';
+    return { id: str(r.id), title, subtitle: distinct(title, [str(r.code), str(r.contact_name), str(r.contact_mobile), str(r.region)]) };
+  });
+}
+
+export function brandItems(rows: Row[]): RawItem[] {
+  return rows.map((r) => {
+    const title = str(r.name) || str(r.code) || 'Brand';
+    return { id: str(r.id), title, subtitle: distinct(title, [str(r.code), str(r.legal_name)]) };
+  });
+}
+
+export function orderItems(rows: Row[]): RawItem[] {
+  return rows.map((r) => {
+    const no = str(r.order_no);
+    const title = no ? `Order ${no}` : 'Order';
+    const placed = str(r.placed_at).slice(0, 10);
+    const subtitle = [str(r.status), placed].filter(Boolean).join(' · ') || undefined;
+    return { id: str(r.id), title, subtitle };
+  });
+}
+
+export function userItems(rows: Row[]): RawItem[] {
+  return rows.map((r) => {
+    const title = str(r.name) || str(r.employee_id) || str(r.email) || 'User';
+    return { id: str(r.id), title, subtitle: distinct(title, [str(r.employee_id), str(r.email), str(r.mobile), str(r.city)]) };
+  });
+}
+
+export function storeItems(rows: Row[]): RawItem[] {
+  return rows.map((r) => {
+    const title = str(r.name) || str(r.store_code) || 'Store';
+    return { id: str(r.id), title, subtitle: distinct(title, [str(r.store_code), snippet(str(r.address))]) };
+  });
+}
