@@ -19,6 +19,10 @@ import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
 import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { runDailyBriefings } from '../services/crm/ai/dailyBriefing.service';
 import { runRetentionPurge } from '../services/crm/retention.service';
+import {
+  pullEvents as pullGoogleEvents,
+  isConfigured as googleConfigured,
+} from '../services/integrations/googleCalendar.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -212,6 +216,49 @@ router.post('/purge-retention', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] purge-retention crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/sync-google-calendars
+ *
+ * Inbound half of the two-way Google Calendar sync: for every connected rep,
+ * pull their recent + upcoming Google events into crm_activities (idempotent,
+ * upsert-by-google_event_id). Push (CRM → Google) already happens inline on
+ * activity writes; this closes the loop so events booked directly in Google
+ * appear in Kinematic even when the rep never opens the activities page.
+ *
+ * Schedule via pg_cron + the edge-function caller like the other jobs (every
+ * few minutes). Body: { limit?: number } — reps processed per tick (default
+ * 200, cap 500). Sequential + best-effort per rep so one bad token never
+ * fails the batch.
+ */
+router.post('/sync-google-calendars', requireEdgeSecret, async (req, res) => {
+  try {
+    if (!googleConfigured()) {
+      return res.json({ success: true, data: { skipped: 'not_configured' } });
+    }
+    const limit = Math.min(500, Math.max(1, Number((req.body ?? {}).limit) || 200));
+    const { data: rows, error } = await supabaseAdmin
+      .from('user_google_integrations')
+      .select('user_id, org_id')
+      .limit(limit);
+    if (error) throw new Error(error.message);
+
+    let users = 0, imported = 0, updated = 0, cancelled = 0;
+    for (const row of (rows ?? []) as Array<{ user_id: string; org_id: string }>) {
+      try {
+        const r = await pullGoogleEvents(row.org_id, row.user_id);
+        users += 1;
+        imported += r.imported; updated += r.updated; cancelled += r.cancelled;
+      } catch (e: any) {
+        logger.warn(`[cron] google pull failed for ${row.user_id}: ${e?.message || e}`);
+      }
+    }
+    res.json({ success: true, data: { users, imported, updated, cancelled } });
+  } catch (err: any) {
+    logger.error(`[cron] sync-google-calendars crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });

@@ -376,3 +376,169 @@ export async function deleteActivity(
   // strict-mode unused checks don't complain.
   void orgId;
 }
+
+// ── Activity pull (Google → CRM) ───────────────────────────────────────────
+//
+// Completes the two-way sync: the push side above mirrors CRM activities into
+// Google; this side imports the rep's Google events back into crm_activities so
+// meetings they book directly in Google show up in Kinematic.
+//
+// Design (deliberately schema-free so it works for every tenant without a
+// migration): each pull re-scans a bounded window of the rep's primary
+// calendar and UPSERTS by `google_event_id`. It's fully idempotent —
+//   - an event we originally pushed comes back linked to its activity, so we
+//     just refresh it (last-write-wins; the Kinematic marker is stripped from
+//     the description first so it never pollutes the body);
+//   - a brand-new Google event with no linked activity is imported as a
+//     `meeting` owned by / assigned to the rep;
+//   - a cancelled event soft-deletes its linked activity.
+// No sync token or extra column needed; the window bounds the work.
+
+const IMPORT_WINDOW_PAST_DAYS = 1;
+const IMPORT_WINDOW_FUTURE_DAYS = 60;
+const KINEMATIC_MARKER = /\n*\[Synced from Kinematic CRM · activity [^\]]+\]\s*$/;
+
+interface GCalEvent {
+  id?: string;
+  status?: string;
+  summary?: string;
+  description?: string;
+  start?: { dateTime?: string; date?: string };
+}
+
+function eventStartIso(ev: GCalEvent): string | null {
+  if (ev.start?.dateTime) return ev.start.dateTime;
+  // All-day event → date only. Anchor it at local-ish midnight UTC so it lands
+  // on the right calendar day in the CRM timeline.
+  if (ev.start?.date) return `${ev.start.date}T00:00:00Z`;
+  return null;
+}
+
+function cleanDescription(desc?: string | null): string | null {
+  if (!desc) return null;
+  const cleaned = desc.replace(KINEMATIC_MARKER, '').trim();
+  return cleaned || null;
+}
+
+export interface PullResult { imported: number; updated: number; cancelled: number }
+
+/**
+ * Import a connected rep's recent + upcoming Google Calendar events into
+ * crm_activities. Best-effort and idempotent — safe to call on every activity
+ * page load and/or from a scheduler. No-op when Google isn't configured or the
+ * user hasn't connected.
+ */
+export async function pullEvents(orgId: string, userId: string): Promise<PullResult> {
+  const result: PullResult = { imported: 0, updated: 0, cancelled: 0 };
+  if (!isConfigured()) return result;
+  const row = await getIntegration(userId);
+  if (!row) return result;
+  // Tenant guard — never import into an org this integration doesn't belong to.
+  const { data: ok } = await supabaseAdmin
+    .from('user_google_integrations')
+    .select('user_id')
+    .eq('user_id', userId)
+    .eq('org_id', orgId)
+    .maybeSingle();
+  if (!ok) return result;
+
+  // Scope imported activities to the rep's client (nullable — personal calendar
+  // items aren't inherently client-scoped, but this keeps them visible in the
+  // rep's own client view when they have one).
+  const { data: u } = await supabaseAdmin
+    .from('users')
+    .select('client_id')
+    .eq('id', userId)
+    .maybeSingle();
+  const clientId = (u as { client_id?: string | null } | null)?.client_id ?? null;
+
+  try {
+    const accessToken = await getValidAccessToken(row);
+    const calId = encodeURIComponent(row.calendar_id || 'primary');
+    const timeMin = new Date(Date.now() - IMPORT_WINDOW_PAST_DAYS * 86_400_000).toISOString();
+    const timeMax = new Date(Date.now() + IMPORT_WINDOW_FUTURE_DAYS * 86_400_000).toISOString();
+
+    let pageToken: string | undefined;
+    let guard = 0;
+    do {
+      const params = new URLSearchParams({
+        timeMin, timeMax, singleEvents: 'true', showDeleted: 'true',
+        maxResults: '250', orderBy: 'startTime',
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const r = await calendarFetch(accessToken, `/calendars/${calId}/events?${params.toString()}`);
+      if (!r.ok) {
+        console.warn('[googleCalendar] pull list failed', r.status, await r.text());
+        break;
+      }
+      const j = await r.json() as { items?: GCalEvent[]; nextPageToken?: string };
+      for (const ev of j.items ?? []) {
+        await upsertFromEvent(orgId, userId, clientId, ev, result);
+      }
+      pageToken = j.nextPageToken;
+    } while (pageToken && ++guard < 20);
+  } catch (e) {
+    console.warn('[googleCalendar] pull failed', (e as Error).message);
+  }
+  return result;
+}
+
+async function upsertFromEvent(
+  orgId: string,
+  userId: string,
+  clientId: string | null,
+  ev: GCalEvent,
+  result: PullResult,
+): Promise<void> {
+  if (!ev.id) return;
+  const { data: existing } = await supabaseAdmin
+    .from('crm_activities')
+    .select('id, deleted_at')
+    .eq('org_id', orgId)
+    .eq('google_event_id', ev.id)
+    .maybeSingle();
+  const existingRow = existing as { id: string; deleted_at: string | null } | null;
+
+  // Cancelled on Google → soft-delete the linked CRM activity (once).
+  if (ev.status === 'cancelled') {
+    if (existingRow && !existingRow.deleted_at) {
+      await supabaseAdmin
+        .from('crm_activities')
+        .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', existingRow.id);
+      result.cancelled++;
+    }
+    return;
+  }
+
+  const startIso = eventStartIso(ev);
+  if (!startIso) return; // events without a start aren't timeline-able
+  const subject = (ev.summary || 'Google event').slice(0, 500);
+  const body = cleanDescription(ev.description);
+
+  if (existingRow) {
+    await supabaseAdmin.from('crm_activities').update({
+      subject,
+      body,
+      due_at: startIso,
+      updated_at: new Date().toISOString(),
+      // Un-delete if it was previously cancelled on Google and later restored.
+      ...(existingRow.deleted_at ? { deleted_at: null } : {}),
+    }).eq('id', existingRow.id);
+    result.updated++;
+  } else {
+    await supabaseAdmin.from('crm_activities').insert({
+      org_id: orgId,
+      client_id: clientId,
+      type: 'meeting',
+      subject,
+      body,
+      due_at: startIso,
+      status: 'planned',
+      assigned_to: userId,
+      owner_id: userId,
+      google_event_id: ev.id,
+    });
+    result.imported++;
+  }
+}
