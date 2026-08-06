@@ -23,6 +23,12 @@ export interface CreateLeadInput {
   user_id?: string;
   payload: Partial<Lead>;
   skipDedup?: boolean;
+  // Interactive create paths (the dashboard / mobile lead form) set this so
+  // required custom fields are enforced server-side — a mandatory field left
+  // blank is rejected instead of silently saved. Off by default so inbound
+  // webhooks, CSV imports and agentic (KINI) flows can still capture partial
+  // leads that a human completes later.
+  enforceRequired?: boolean;
 }
 
 /**
@@ -41,7 +47,7 @@ async function resolveSoleClientId(org_id: string, provided: string | null): Pro
   return rows.length === 1 ? rows[0].id : null;
 }
 
-export async function createLead({ org_id, user_id, payload, skipDedup }: CreateLeadInput) {
+export async function createLead({ org_id, user_id, payload, skipDedup, enforceRequired }: CreateLeadInput) {
   if (!skipDedup) {
     if (payload.email) {
       const dup = await dedup.findLeadByEmail(org_id, payload.email);
@@ -77,6 +83,7 @@ export async function createLead({ org_id, user_id, payload, skipDedup }: Create
   // formula that references custom_fields sees the cleaned values.
   payload.custom_fields = await validateAndStampCustomFields(
     org_id, payload.client_id ?? null, 'lead', payload.custom_fields,
+    { enforceRequired },
   );
 
   const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload, user_id));
