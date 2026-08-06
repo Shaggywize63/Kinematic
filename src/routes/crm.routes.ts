@@ -58,6 +58,7 @@ import * as targetsSvc from '../services/crm/targets.service';
 import * as homeSvc from '../services/crm/home.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
+import * as globalSearch from '../services/crm/globalSearch.service';
 import * as leadFormBuilder from '../services/crm/ai/leadFormBuilder.service';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, stampDirectoryNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
 
@@ -3596,6 +3597,122 @@ function genericDisplay(r: Record<string, unknown>): string {
   }
   return String(r.id ?? '').slice(0, 8) || 'Record';
 }
+
+// ---------- GLOBAL SEARCH -------------------------------------------
+// Unified, tenant-scoped omnisearch across the core CRM entities, powering the
+// dashboard's ⌘/Ctrl-K command palette. Every entity is queried in parallel
+// through the SAME scoping its own list route uses — org + strict-client +
+// hierarchy subtree + effective-city gate — so global search can never surface
+// a record the caller couldn't already reach on that entity's list page. Only
+// modules the tenant is entitled to are searched. Results are ranked by
+// relevance (globalSearch.service) and grouped by type. Degrades gracefully:
+// one entity's query failing yields an empty group, never a 500 for the whole
+// search.
+async function searchPeopleDirectory(
+  req: Request,
+  org: string,
+  clientId: string | null,
+  q: string,
+  cap: number,
+): Promise<Record<string, unknown>[]> {
+  let query = supabaseAdmin.from('people_directory').select('*').eq('org_id', org).is('deleted_at', null);
+  // People Directory is strict-client isolated (matches its list route).
+  if (clientId) query = query.eq('client_id', clientId);
+  // Per-user city gate: a Dhanbad Champion only searches Dhanbad people.
+  const cities = rbac.getEffectiveCityNames((req as AuthRequest).user);
+  if (cities !== null) {
+    if (cities.length === 0) return [];
+    query = query.in('city', cities);
+  }
+  const s = sanitisePostgrestSearch(q);
+  if (s) {
+    const cols = ['first_name', 'last_name', 'mobile', 'email', 'type', 'city', 'code'];
+    query = query.or(cols.map((c) => `${c}.ilike.%${s}%`).join(','));
+  }
+  const { data, error } = await query.limit(cap);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return (data ?? []) as Record<string, unknown>[];
+}
+
+router.get('/search', wrap(async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const org = orgId(req);
+  const scope = clientScope(req);
+  const me = (req as AuthRequest).user;
+  // A 1-char substring search is all noise — require 2+.
+  if (q.length < 2) {
+    return res.json({ success: true, data: { query: q, groups: [], total: 0 } });
+  }
+  const PER = 6;
+  // Entitlement gate: only search modules this tenant actually has. An empty
+  // enabled_modules list is a legacy full-access session, so search everything.
+  // (The finer per-user role-permission narrowing is intentionally left to the
+  // data-level scoping below — it already bounds which ROWS come back, so at
+  // worst an over-permitted section shows zero results, never another
+  // tenant's data.)
+  const ents = (me?.enabled_modules ?? []) as string[];
+  const has = (m: string): boolean => ents.length === 0 || ents.includes(m);
+
+  // Shared hierarchy / city scoping — computed once, mirrors the list routes.
+  const effectiveCities = rbac.getEffectiveCityNames(me);
+  const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
+  const subtreeIds = hierOn ? await hierarchy.subtreeUserIds(req as AuthRequest) : null;
+  const genericOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const selfOwnerId = me?.id ?? null;
+  const includeNullCity = ((me?.org_role_data_scope ?? 'all') === 'all') || hierOn;
+  const ownOnly = isFrontlineChampion(me);
+  const filters: Record<string, unknown> = { q, limit: PER };
+
+  // Guard each entity so one failing query can't 500 the whole search.
+  const safe = async <T>(cond: boolean, fn: () => Promise<T[]>): Promise<T[]> => {
+    if (!cond) return [];
+    try { return await fn(); }
+    catch (e) { console.warn(`[crm/search] entity query failed: ${(e as Error).message}`); return []; }
+  };
+
+  const [leadRows, dealRows, contactRows, accountRows, activityRows, productRows, peopleRows] = await Promise.all([
+    safe(has('crm_leads'), () => leadsSvc.listLeads(org, filters, scope.id, {
+      strictClient: scope.strict, effectiveCities, visibleOwnerIds: subtreeIds, selfOwnerId, includeNullCity, ownOnly,
+    })),
+    safe(has('crm_deals'), () => dealsSvc.listDeals(org, filters, scope.id, {
+      strictClient: scope.strict, visibleOwnerIds: subtreeIds,
+    })),
+    safe(has('crm_contacts'), () => crud.clientScopedList('crm_contacts', org, scope.id, filters, {
+      searchColumns: ['first_name', 'last_name', 'email', 'phone'], strictClient: scope.strict, visibleOwnerIds: genericOwnerIds,
+    })),
+    safe(has('crm_accounts'), () => crud.clientScopedList('crm_accounts', org, scope.id, filters, {
+      searchColumns: ['name', 'domain', 'industry'], strictClient: scope.strict, visibleOwnerIds: genericOwnerIds,
+    })),
+    safe(has('crm_activities'), () => crud.clientScopedList('crm_activities', org, scope.id, filters, {
+      searchColumns: ['subject', 'body'], strictClient: scope.strict,
+      ...(subtreeIds
+        ? { visibleOwnerIds: subtreeIds, ownerColumns: ['owner_id', 'assigned_to'] }
+        : { userScope: activityVisibilityScope(req) }),
+    })),
+    // Products are a shared+own catalogue (client_id NULL rows stay visible),
+    // matching the /products list route — so strictClient stays false here.
+    safe(has('crm_products'), () => crud.clientScopedList('crm_products', org, scope.id, filters, {
+      searchColumns: ['name', 'sku', 'description'], strictClient: false,
+    })),
+    safe(has('crm_settings'), () => searchPeopleDirectory(req, org, scope.id, q, PER)),
+  ]);
+
+  const groups = globalSearch.orderGroups(
+    [
+      globalSearch.toGroup('lead', 'Leads', globalSearch.leadItems(leadRows as unknown as Record<string, unknown>[]), q, PER),
+      globalSearch.toGroup('deal', 'Deals', globalSearch.dealItems(dealRows as unknown as Record<string, unknown>[]), q, PER),
+      globalSearch.toGroup('contact', 'Contacts', globalSearch.contactItems(contactRows as Record<string, unknown>[]), q, PER),
+      globalSearch.toGroup('account', 'Accounts', globalSearch.accountItems(accountRows as Record<string, unknown>[]), q, PER),
+      globalSearch.toGroup('activity', 'Activities', globalSearch.activityItems(activityRows as Record<string, unknown>[]), q, PER),
+      globalSearch.toGroup('product', 'Products', globalSearch.productItems(productRows as Record<string, unknown>[]), q, PER),
+      globalSearch.toGroup('person', 'People', globalSearch.personItems(peopleRows as Record<string, unknown>[]), q, PER),
+    ],
+    ['lead', 'deal', 'contact', 'account', 'activity', 'product', 'person'],
+  );
+
+  const total = groups.reduce((n, g) => n + g.count, 0);
+  res.json({ success: true, data: { query: q, groups, total } });
+}));
 
 // Dynamically lists every multi-tenant table (rows that carry an `org_id`)
 // so the custom-field Linked Record picker can include tables added in

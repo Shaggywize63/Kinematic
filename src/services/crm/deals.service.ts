@@ -2,7 +2,7 @@
  * Deal service: CRUD, stage moves, win/lose, history.
  */
 import { supabaseAdmin } from '../../lib/supabase';
-import { AppError } from '../../utils';
+import { AppError, sanitisePostgrestSearch } from '../../utils';
 import { validateAndStampCustomFields } from './customFields.service';
 import type { Deal } from '../../types/crm.types';
 import * as automations from './automations.service';
@@ -11,7 +11,7 @@ export async function listDeals(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean } = {},
+  options: { strictClient?: boolean; visibleOwnerIds?: string[] | null } = {},
 ) {
   const { rows } = await listDealsWithCount(org_id, filters, client_id, options);
   return rows;
@@ -52,7 +52,12 @@ export async function listDealsWithCount(
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.account_id) q = q.eq('account_id', String(filters.account_id));
   if (filters.status) q = q.eq('status', String(filters.status));
-  if (filters.q) q = q.ilike('name', `%${String(filters.q)}%`);
+  if (filters.q) {
+    // Search both the deal title and legacy name column (sanitised — the
+    // .or() form is injection-sensitive, unlike a single .ilike()).
+    const s = sanitisePostgrestSearch(filters.q);
+    if (s) q = q.or(`name.ilike.%${s}%,title.ilike.%${s}%`);
+  }
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
   // Sorting. An explicit whitelisted `sort` (+`order`) wins; otherwise fall back
@@ -105,7 +110,12 @@ export async function dealsTotals(
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.account_id) q = q.eq('account_id', String(filters.account_id));
   if (filters.status) q = q.eq('status', String(filters.status));
-  if (filters.q) q = q.ilike('name', `%${String(filters.q)}%`);
+  if (filters.q) {
+    // Search both the deal title and legacy name column (sanitised — the
+    // .or() form is injection-sensitive, unlike a single .ilike()).
+    const s = sanitisePostgrestSearch(filters.q);
+    if (s) q = q.or(`name.ilike.%${s}%,title.ilike.%${s}%`);
+  }
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
   // Cap so a pathological org can't pull unbounded rows; totals on a set
