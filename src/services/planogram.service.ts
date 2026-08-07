@@ -319,6 +319,28 @@ export class PlanogramService {
     }
     occupancy_score = clamp(0, 100, occupancy_score);
 
+    // Per-shelf occupancy audit rows: Σ facings on each shelf_index (INCLUDING
+    // competitors, matching the occupancy numerator) vs that shelf's capacity.
+    const shelfFacings = new Map<number, number>();
+    for (const d of detected) {
+      shelfFacings.set(d.shelf_index, (shelfFacings.get(d.shelf_index) || 0) + (d.facings || 0));
+    }
+    const occupancyRows: MethodologyRow[] = (layout.shelves || [])
+      .slice()
+      .sort((a, b) => a.index - b.index)
+      .map((sh) => {
+        const detected_facings = shelfFacings.get(sh.index) || 0;
+        const capacity = Number.isFinite(sh.capacity) ? (sh.capacity as number) : null;
+        const fill_pct =
+          capacity != null && capacity > 0 ? round1((detected_facings / capacity) * 100) : null;
+        return {
+          shelf: `Shelf ${sh.index} · ${zoneLabel(zoneFor(sh.index, shelfCount))}`,
+          detected_facings,
+          capacity,
+          fill_pct,
+        };
+      });
+
     // ── Category rollups ──────────────────────────────────────────────
     const category_breakdown = this.buildCategoryBreakdown(detected, expected, expectedById);
 
@@ -389,6 +411,8 @@ export class PlanogramService {
         occupancyDenominator,
         occupancyCalc,
         occupancyScore: occupancy_score,
+        occupancyRows,
+        categoryBreakdown: category_breakdown,
         presence: {
           presentWeight,
           totalWeight,
@@ -547,6 +571,8 @@ export class PlanogramService {
     occupancyDenominator: string;
     occupancyCalc: string;
     occupancyScore: number;
+    occupancyRows: MethodologyRow[];
+    categoryBreakdown: CategoryBreakdown[];
     presence: { presentWeight: number; totalWeight: number; score: number; rows: MethodologyRow[] };
     facing: { penalty: number; max: number; score: number; rows: MethodologyRow[] };
     position: { matches: number; total: number; score: number; rows: MethodologyRow[] };
@@ -629,6 +655,14 @@ export class PlanogramService {
         notes: `denominator: ${m.occupancyDenominator}. Clamped to 0..100.`,
         result: round1(m.occupancyScore),
         calc: m.occupancyCalc,
+        // Per-shelf drill-down: detected facings (own + competitor) vs capacity.
+        columns: [
+          { key: 'shelf', label: 'Shelf' },
+          { key: 'detected_facings', label: 'Detected' },
+          { key: 'capacity', label: 'Capacity' },
+          { key: 'fill_pct', label: 'Fill %' },
+        ],
+        rows: m.occupancyRows,
       },
       shelf_share: {
         formula: 'own or competitor facings / total detected facings × 100',
@@ -638,6 +672,41 @@ export class PlanogramService {
         calc: `own ${round1(m.shelfShare.own)} / total ${round1(m.shelfShare.total)} × 100 = ${round1(
           m.shelfShare.ownShare,
         )}% (competitor ${round1(m.shelfShare.competitorShare)}%)`,
+        // Own vs competitor drill-down.
+        columns: [
+          { key: 'group', label: 'Brand' },
+          { key: 'facings', label: 'Facings' },
+          { key: 'share_pct', label: 'Share %' },
+        ],
+        rows: [
+          { group: 'Own', facings: m.shelfShare.own, share_pct: round1(m.shelfShare.ownShare) },
+          {
+            group: 'Competitors',
+            facings: m.shelfShare.competitor,
+            share_pct: round1(m.shelfShare.competitorShare),
+          },
+        ],
+      },
+      category: {
+        formula: 'per-category facings and own/competitor share of that category',
+        inputs: ['detected_skus.category', 'detected_skus.facings', 'detected_skus.is_competitor'],
+        notes:
+          'category is resolved from the detection category, else the matched expected-SKU category, else Uncategorized. Own/competitor % are within each category (own or competitor facings / that category\'s total facings).',
+        // Per-category drill-down; no single headline result.
+        columns: [
+          { key: 'category', label: 'Category' },
+          { key: 'facings', label: 'Facings' },
+          { key: 'sku_count', label: 'SKUs' },
+          { key: 'own_share', label: 'Own %' },
+          { key: 'competitor_share', label: 'Competitor %' },
+        ],
+        rows: m.categoryBreakdown.map((c) => ({
+          category: c.category,
+          facings: c.facings,
+          sku_count: c.sku_count,
+          own_share: round1(c.own_share),
+          competitor_share: round1(c.competitor_share),
+        })),
       },
       zone: {
         formula: 'zone assigned by shelf_index vs shelf_count: bottom third → low, middle → eye, top → top',
@@ -1111,4 +1180,8 @@ function zoneFor(shelfIndex: number, shelfCount: number): ShelfZone {
   if (shelfIndex < third) return 'low';
   if (shelfIndex >= 2 * third) return 'top';
   return 'eye';
+}
+/** Human shelf-label word for a zone: low → bottom, eye → middle, top → top. */
+function zoneLabel(zone: ShelfZone): string {
+  return zone === 'low' ? 'bottom' : zone === 'top' ? 'top' : 'middle';
 }
