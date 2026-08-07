@@ -269,9 +269,13 @@ export class PlanogramService {
       occupancy_score = totalCapacity > 0 ? (totalFacings / totalCapacity) * 100 : 0;
       occupancyDenominator = 'layout.shelves[].capacity (Σ detected facings / Σ capacity × 100)';
     } else {
+      // bbox_area = w*h with w,h normalized to the WHOLE image, so `filled` is
+      // already the fraction of total image area covered by product (≈1.0 when
+      // the shelf is fully packed). Do NOT divide by shelfCount — that would
+      // understate occupancy by a factor of the shelf count.
       const filled = detected.reduce((s, d) => s + (d.bbox_area || 0), 0);
-      occupancy_score = (filled / shelfCount) * 100; // 1.0 normalized full-width unit per shelf
-      occupancyDenominator = 'normalized full width, 1.0 per shelf (Σ bbox_area / shelf_count × 100)';
+      occupancy_score = filled * 100; // Σ bbox_area over the full image
+      occupancyDenominator = 'total image area (Σ bbox_area × 100)';
     }
     occupancy_score = clamp(0, 100, occupancy_score);
 
