@@ -45,6 +45,25 @@ export const CONFIRM_REQUIRED_TOOLS: readonly string[] = [
   'crm_move_deal_stage',
   'crm_update_contact',
   'crm_update_account',
+  // wave 3 — bulk (mass mutation)
+  'crm_bulk_reassign_leads',
+  'crm_bulk_update_lead_status',
+  // wave 3 — delete + restore (soft-delete via deleted_at)
+  'crm_delete_lead',
+  'crm_delete_deal',
+  'crm_delete_contact',
+  'crm_delete_account',
+  'crm_restore_lead',
+  'crm_restore_deal',
+  'crm_restore_contact',
+  'crm_restore_account',
+  // wave 3 — admin / config (also ADMIN-only in-exec)
+  'crm_create_pipeline_stage',
+  'crm_create_custom_field',
+  // wave 3 — Field-Force writes
+  'ff_assign_visit',
+  'ff_approve_attendance',
+  'ff_approve_leave',
 ];
 
 const CONFIRM_SET = new Set<string>(CONFIRM_REQUIRED_TOOLS);
@@ -82,6 +101,22 @@ const TOOL_LABELS: Record<string, string> = {
   crm_move_deal_stage: 'Move deal stage',
   crm_update_contact: 'Update contact',
   crm_update_account: 'Update account',
+  // wave 3
+  crm_bulk_reassign_leads: 'Bulk reassign leads',
+  crm_bulk_update_lead_status: 'Bulk update lead status',
+  crm_delete_lead: 'Delete lead',
+  crm_delete_deal: 'Delete deal',
+  crm_delete_contact: 'Delete contact',
+  crm_delete_account: 'Delete account',
+  crm_restore_lead: 'Restore lead',
+  crm_restore_deal: 'Restore deal',
+  crm_restore_contact: 'Restore contact',
+  crm_restore_account: 'Restore account',
+  crm_create_pipeline_stage: 'Create pipeline stage',
+  crm_create_custom_field: 'Create custom field',
+  ff_assign_visit: 'Assign visit',
+  ff_approve_attendance: 'Approve attendance',
+  ff_approve_leave: 'Approve leave',
 };
 
 export function labelForTool(tool: string): string {
@@ -169,6 +204,40 @@ export function summarizePendingAction(tool: string, rawArgs: Record<string, unk
       const changes = fieldList(a, ['id']);
       return changes ? `Update account ${str(a.id)} (${changes})` : `Update account ${str(a.id)}`;
     }
+    case 'crm_bulk_reassign_leads': {
+      const filters = [
+        str(a.status) && `status ${str(a.status)}`,
+        str(a.city) && `in ${str(a.city)}`,
+        str(a.current_owner_id) && `owned by ${str(a.current_owner_id)}`,
+      ].filter(Boolean).join(', ');
+      return `Reassign leads${filters ? ` (${filters})` : ''} to owner ${str(a.new_owner_id) || 'a new owner'}`;
+    }
+    case 'crm_bulk_update_lead_status': {
+      const filters = [
+        str(a.status) && `status ${str(a.status)}`,
+        str(a.city) && `in ${str(a.city)}`,
+        str(a.owner_id) && `owned by ${str(a.owner_id)}`,
+      ].filter(Boolean).join(', ');
+      return `Update leads${filters ? ` (${filters})` : ''} to status "${str(a.new_status)}"`;
+    }
+    case 'crm_delete_lead':    return `Delete lead ${str(a.id)}`;
+    case 'crm_delete_deal':    return `Delete deal ${str(a.id)}`;
+    case 'crm_delete_contact': return `Delete contact ${str(a.id)}`;
+    case 'crm_delete_account': return `Delete account ${str(a.id)}`;
+    case 'crm_restore_lead':    return `Restore lead ${str(a.id)}`;
+    case 'crm_restore_deal':    return `Restore deal ${str(a.id)}`;
+    case 'crm_restore_contact': return `Restore contact ${str(a.id)}`;
+    case 'crm_restore_account': return `Restore account ${str(a.id)}`;
+    case 'crm_create_pipeline_stage':
+      return `Create pipeline stage "${str(a.name) || 'Untitled'}"`;
+    case 'crm_create_custom_field':
+      return `Create custom field "${str(a.label) || str(a.field_key)}" on ${str(a.entity_type) || 'an entity'}`;
+    case 'ff_assign_visit':
+      return `Assign a visit to store ${str(a.store_id)} for FE ${str(a.user_id)}${/^\d{4}-\d{2}-\d{2}$/.test(str(a.plan_date)) ? ` on ${str(a.plan_date)}` : ''}`;
+    case 'ff_approve_attendance':
+      return `${str(a.decision) === 'rejected' ? 'Reject' : 'Approve'} attendance request ${str(a.request_id)}`;
+    case 'ff_approve_leave':
+      return `${str(a.decision) === 'rejected' ? 'Reject' : 'Approve'} leave request ${str(a.request_id)}`;
     default: {
       const changes = fieldList(a, []);
       return changes ? `${labelForTool(tool)} (${changes})` : labelForTool(tool);
@@ -224,6 +293,22 @@ export function doneText(tool: string, data: unknown): string {
     crm_move_deal_stage: 'Deal moved to the new stage.',
     crm_update_contact: 'Contact updated.',
     crm_update_account: 'Account updated.',
+    // wave 3
+    crm_bulk_reassign_leads: 'Leads reassigned.',
+    crm_bulk_update_lead_status: 'Lead statuses updated.',
+    crm_delete_lead: 'Lead deleted.',
+    crm_delete_deal: 'Deal deleted.',
+    crm_delete_contact: 'Contact deleted.',
+    crm_delete_account: 'Account deleted.',
+    crm_restore_lead: 'Lead restored.',
+    crm_restore_deal: 'Deal restored.',
+    crm_restore_contact: 'Contact restored.',
+    crm_restore_account: 'Account restored.',
+    crm_create_pipeline_stage: 'Pipeline stage created.',
+    crm_create_custom_field: 'Custom field created.',
+    ff_assign_visit: 'Visit assigned.',
+    ff_approve_attendance: 'Attendance request decided.',
+    ff_approve_leave: 'Leave request decided.',
   };
   return DONE[tool] ?? 'Done.';
 }
