@@ -154,9 +154,11 @@ export const summarizeDeal = asyncHandler(async (req: AuthRequest, res: Response
 });
 
 /**
- * KINI chat endpoint — agentic. Wires Anthropic tool-use into the 25 CRM tools
+ * KINI chat endpoint — agentic. Wires Anthropic tool-use into the 38 CRM tools
  * registered in kiniTools.service.ts so the model can search / create / update /
- * analyse CRM records during a conversation instead of just answering with text.
+ * delete / bulk-edit / analyse CRM records during a conversation instead of just
+ * answering with text. (The agentic-v2 path adds the Field-Force tool module on
+ * top of these — see kiniToolsV2.service.ts.)
  *
  * The mobile + dashboard clients already render the returned `cards` array
  * (lead_list, deal_list, lead_created, etc.) — no client change required to

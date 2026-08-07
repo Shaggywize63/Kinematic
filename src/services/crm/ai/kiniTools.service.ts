@@ -192,6 +192,81 @@ const assertContactInClientScope = (org_id: string, client_id: string | null, co
 const assertAccountInClientScope = (org_id: string, client_id: string | null, account_id: string) =>
   assertRowInClientScope('crm_accounts', 'Account', org_id, client_id, account_id);
 
+// ── Wave-3 sensitive-tool role gates (in-exec) ──────────────────────────────
+//
+// KINI's ROLE_TOOL_POLICY (above) is permissive-by-default and keyed
+// role → allowed-tools, so it can't express "ONLY admins may call X" without
+// enumerating every other role. For the handful of high-blast-radius Wave-3
+// tools (bulk reassign / status, pipeline-stage / custom-field creation) we
+// therefore gate IN-EXEC — the Wave-3 contract explicitly allows "check role
+// in-exec". These tools are all confirm-required, so the actual mutation only
+// runs at POST /kini/v2/confirm (executeTool), which is exactly where this gate
+// fires — fully protecting the data. Defensive default: an empty/unknown role
+// is NOT treated as privileged. Role vocabulary mirrors the REST middleware
+// (requireRole / requireSupervisorOrAbove in middleware/auth.ts).
+const ADMIN_ROLES = new Set(['super_admin', 'admin', 'main_admin', 'sub_admin', 'org_admin', 'client']);
+const MANAGER_ROLES = new Set([...ADMIN_ROLES, 'city_manager', 'supervisor']);
+const roleOf = (ctx?: KiniToolContext): string => String(ctx?.role ?? '').toLowerCase().trim();
+
+/** Tool-error payload when the actor's role isn't in `allowed`, else null. */
+function roleGate(allowed: Set<string>, ctx: KiniToolContext | undefined, human: string): { data: { error: string } } | null {
+  const key = roleOf(ctx);
+  if (allowed.has(key)) return null;
+  return { data: { error: `This action requires a ${human} role — your role (${key || 'unknown'}) isn't permitted.` } };
+}
+
+// Hard cap on how many rows a single bulk mutation may touch. Keeps a runaway
+// "reassign everything" from rewriting an entire org in one confirm; the tool
+// reports when it capped so the caller can re-run to continue.
+const MAX_BULK = 500;
+
+// The four soft-deletable core entities share this shape for delete / restore.
+// deleted_at exists on all four (crm_leads / crm_deals / crm_contacts /
+// crm_accounts — see leads.service.deleteLead, deals.service.deleteDeal and the
+// crud.softDelete routes for contacts/accounts). Delete = stamp deleted_at;
+// restore = clear it. The cross-client guard runs first so a client-scoped actor
+// can never delete/restore a sibling client's row.
+const SOFT_DELETE_TARGETS: Record<'lead' | 'deal' | 'contact' | 'account', {
+  table: 'crm_leads' | 'crm_deals' | 'crm_contacts' | 'crm_accounts';
+  label: string;
+  assert: (org_id: string, client_id: string | null, id: string) => Promise<void>;
+}> = {
+  lead: { table: 'crm_leads', label: 'Lead', assert: assertLeadInClientScope },
+  deal: { table: 'crm_deals', label: 'Deal', assert: assertDealInClientScope },
+  contact: { table: 'crm_contacts', label: 'Contact', assert: assertContactInClientScope },
+  account: { table: 'crm_accounts', label: 'Account', assert: assertAccountInClientScope },
+};
+
+async function softDeleteOrRestore(
+  kind: 'lead' | 'deal' | 'contact' | 'account',
+  org_id: string,
+  client_id: string | null,
+  id: string,
+  restore: boolean,
+): Promise<{ data: unknown; card?: { type: string; data: unknown } }> {
+  const t = SOFT_DELETE_TARGETS[kind];
+  if (!isUuid(id)) return { data: { error: `A valid ${kind} id is required.` } };
+  // Cross-client guard — reads the target row's client_id and throws on a
+  // mismatch. Finds soft-deleted rows too (no deleted_at filter), so restore
+  // works on already-deleted rows.
+  await t.assert(org_id, client_id, id);
+  const patch = { deleted_at: restore ? null : new Date().toISOString() };
+  const { data, error } = await supabaseAdmin
+    .from(t.table)
+    .update(patch)
+    .eq('org_id', org_id)
+    .eq('id', id)
+    .select('id')
+    .maybeSingle();
+  if (error) return { data: { error: error.message } };
+  if (!data) return { data: { error: `${t.label} not found.` } };
+  const verb = restore ? 'restored' : 'deleted';
+  return {
+    card: { type: 'summary', data: { text: `${t.label} ${verb}.` } },
+    data: { id, [verb]: true, message: `${t.label} ${verb}.` },
+  };
+}
+
 export const tools: KiniTool[] = [
   {
     name: 'crm_search_leads',
@@ -1012,6 +1087,326 @@ export const tools: KiniTool[] = [
       );
       const rows = result.rows.slice(0, limit);
       return { card: { type: 'leaderboard', data: { ...result, rows } }, data: { ...result, rows } };
+    },
+  },
+  // ── Wave 3: bulk actions (mutations → confirm-gated + manager/admin RBAC) ──
+  {
+    name: 'crm_bulk_reassign_leads',
+    description:
+      'Bulk-reassign leads to a new owner. Select the leads with AT LEAST ONE filter — current status, city, and/or the current owner_id — then set new_owner_id on every match. Org + client scoped; capped at 500 leads per call (reports if it capped). Returns the number reassigned. Requires a manager/admin role.',
+    input_schema: { type: 'object', required: ['new_owner_id'], properties: {
+      new_owner_id: { type: 'string', description: 'User id to assign the matched leads to.' },
+      status: { type: 'string', description: 'Only leads currently in this status.' },
+      city: { type: 'string', description: 'Only leads in this city.' },
+      current_owner_id: { type: 'string', description: 'Only leads currently owned by this user.' },
+    }},
+    exec: async (org_id, client_id, args, ctx) => {
+      const denied = roleGate(MANAGER_ROLES, ctx, 'manager or admin');
+      if (denied) return denied;
+      const newOwner = String(args.new_owner_id ?? '');
+      if (!isUuid(newOwner)) return { data: { error: 'A valid new_owner_id is required.' } };
+      if (args.current_owner_id !== undefined && args.current_owner_id !== null && args.current_owner_id !== '' && !isUuid(String(args.current_owner_id))) {
+        return { data: { error: 'current_owner_id must be a valid id.' } };
+      }
+      const status = typeof args.status === 'string' ? args.status.trim() : '';
+      const city = typeof args.city === 'string' ? args.city.trim() : '';
+      const currentOwner = isUuid(args.current_owner_id) ? String(args.current_owner_id) : '';
+      if (!status && !city && !currentOwner) {
+        return { data: { error: 'Provide at least one filter (status, city, or current_owner_id) — refusing to reassign every lead in scope.' } };
+      }
+      // Resolve matching ids first (client-scoped, capped) so the count is exact
+      // and the batch can never exceed MAX_BULK. scopeToClient is strict-eq, so
+      // legacy null-client leads are intentionally left untouched by bulk writes.
+      let sel = supabaseAdmin.from('crm_leads').select('id').eq('org_id', org_id).is('deleted_at', null);
+      sel = scopeToClient(sel, client_id);
+      if (status) sel = sel.eq('status', status);
+      if (city) sel = sel.eq('city', city);
+      if (currentOwner) sel = sel.eq('owner_id', currentOwner);
+      const { data: matches, error: selErr } = await sel.limit(MAX_BULK + 1);
+      if (selErr) return { data: { error: selErr.message } };
+      const ids = (matches ?? []).map((r) => r.id as string);
+      if (ids.length === 0) {
+        return { card: { type: 'summary', data: { text: 'No leads matched those filters — nothing reassigned.' } }, data: { affected: 0, capped: false, message: 'No leads matched — nothing reassigned.' } };
+      }
+      const capped = ids.length > MAX_BULK;
+      const batch = ids.slice(0, MAX_BULK);
+      const { data: updated, error: updErr } = await supabaseAdmin.from('crm_leads')
+        .update({ owner_id: newOwner, updated_at: new Date().toISOString() })
+        .eq('org_id', org_id).in('id', batch).select('id');
+      if (updErr) return { data: { error: updErr.message } };
+      const affected = (updated ?? []).length;
+      const filterText = [status && `status=${status}`, city && `city=${city}`, currentOwner && `owner=${currentOwner}`].filter(Boolean).join(', ');
+      const text = `Reassigned ${affected} lead(s) [${filterText}] to owner ${newOwner}${capped ? ` — capped at ${MAX_BULK}; more matched, re-run to continue` : ''}.`;
+      return {
+        card: { type: 'summary', data: { text } },
+        data: { affected, capped, max: MAX_BULK, new_owner_id: newOwner, filter: { status: status || null, city: city || null, current_owner_id: currentOwner || null }, message: text },
+      };
+    },
+  },
+  {
+    name: 'crm_bulk_update_lead_status',
+    description:
+      'Bulk-update the status of leads that match a filter (current status, city, and/or owner_id) to new_status. Requires AT LEAST ONE filter. Org + client scoped; capped at 500 leads per call (reports if it capped). Returns the number updated. Requires a manager/admin role. Note: this sets the status column only — it does NOT run lead-conversion side effects, so avoid using it to mass-set "converted".',
+    input_schema: { type: 'object', required: ['new_status'], properties: {
+      new_status: { type: 'string', enum: ['new','working','nurturing','qualified','unqualified','converted','lost'] },
+      status: { type: 'string', description: 'Only leads currently in this status.' },
+      city: { type: 'string', description: 'Only leads in this city.' },
+      owner_id: { type: 'string', description: 'Only leads owned by this user.' },
+    }},
+    exec: async (org_id, client_id, args, ctx) => {
+      const denied = roleGate(MANAGER_ROLES, ctx, 'manager or admin');
+      if (denied) return denied;
+      const VALID = ['new','working','nurturing','qualified','unqualified','converted','lost'];
+      const newStatus = String(args.new_status ?? '').trim();
+      if (!VALID.includes(newStatus)) return { data: { error: `new_status must be one of: ${VALID.join(', ')}.` } };
+      if (args.owner_id !== undefined && args.owner_id !== null && args.owner_id !== '' && !isUuid(String(args.owner_id))) {
+        return { data: { error: 'owner_id must be a valid id.' } };
+      }
+      const curStatus = typeof args.status === 'string' ? args.status.trim() : '';
+      const city = typeof args.city === 'string' ? args.city.trim() : '';
+      const owner = isUuid(args.owner_id) ? String(args.owner_id) : '';
+      if (!curStatus && !city && !owner) {
+        return { data: { error: 'Provide at least one filter (status, city, or owner_id) — refusing to update every lead in scope.' } };
+      }
+      let sel = supabaseAdmin.from('crm_leads').select('id').eq('org_id', org_id).is('deleted_at', null);
+      sel = scopeToClient(sel, client_id);
+      if (curStatus) sel = sel.eq('status', curStatus);
+      if (city) sel = sel.eq('city', city);
+      if (owner) sel = sel.eq('owner_id', owner);
+      const { data: matches, error: selErr } = await sel.limit(MAX_BULK + 1);
+      if (selErr) return { data: { error: selErr.message } };
+      const ids = (matches ?? []).map((r) => r.id as string);
+      if (ids.length === 0) {
+        return { card: { type: 'summary', data: { text: 'No leads matched those filters — nothing updated.' } }, data: { affected: 0, capped: false, message: 'No leads matched — nothing updated.' } };
+      }
+      const capped = ids.length > MAX_BULK;
+      const batch = ids.slice(0, MAX_BULK);
+      const { data: updated, error: updErr } = await supabaseAdmin.from('crm_leads')
+        .update({ status: newStatus, updated_at: new Date().toISOString() })
+        .eq('org_id', org_id).in('id', batch).select('id');
+      if (updErr) return { data: { error: updErr.message } };
+      const affected = (updated ?? []).length;
+      const filterText = [curStatus && `status=${curStatus}`, city && `city=${city}`, owner && `owner=${owner}`].filter(Boolean).join(', ');
+      const text = `Updated ${affected} lead(s) [${filterText}] to status "${newStatus}"${capped ? ` — capped at ${MAX_BULK}; more matched, re-run to continue` : ''}.`;
+      return {
+        card: { type: 'summary', data: { text } },
+        data: { affected, capped, max: MAX_BULK, new_status: newStatus, filter: { status: curStatus || null, city: city || null, owner_id: owner || null }, message: text },
+      };
+    },
+  },
+  // ── Wave 3: delete + undo (soft-delete via deleted_at → confirm-gated) ─────
+  {
+    name: 'crm_delete_lead',
+    description: 'Delete a lead by id. Soft delete — sets deleted_at, so it can be brought back with crm_restore_lead. Client-scope guarded.',
+    input_schema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    exec: async (org_id, client_id, args) => softDeleteOrRestore('lead', org_id, client_id, String(args.id ?? ''), false),
+  },
+  {
+    name: 'crm_delete_deal',
+    description: 'Delete a deal by id. Soft delete — sets deleted_at, reversible with crm_restore_deal. Client-scope guarded.',
+    input_schema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    exec: async (org_id, client_id, args) => softDeleteOrRestore('deal', org_id, client_id, String(args.id ?? ''), false),
+  },
+  {
+    name: 'crm_delete_contact',
+    description: 'Delete a contact by id. Soft delete — sets deleted_at, reversible with crm_restore_contact. Client-scope guarded.',
+    input_schema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    exec: async (org_id, client_id, args) => softDeleteOrRestore('contact', org_id, client_id, String(args.id ?? ''), false),
+  },
+  {
+    name: 'crm_delete_account',
+    description: 'Delete an account by id. Soft delete — sets deleted_at, reversible with crm_restore_account. Client-scope guarded.',
+    input_schema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    exec: async (org_id, client_id, args) => softDeleteOrRestore('account', org_id, client_id, String(args.id ?? ''), false),
+  },
+  {
+    name: 'crm_restore_lead',
+    description: 'Restore (undelete) a previously soft-deleted lead by id — clears deleted_at. Client-scope guarded.',
+    input_schema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    exec: async (org_id, client_id, args) => softDeleteOrRestore('lead', org_id, client_id, String(args.id ?? ''), true),
+  },
+  {
+    name: 'crm_restore_deal',
+    description: 'Restore (undelete) a previously soft-deleted deal by id — clears deleted_at. Client-scope guarded.',
+    input_schema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    exec: async (org_id, client_id, args) => softDeleteOrRestore('deal', org_id, client_id, String(args.id ?? ''), true),
+  },
+  {
+    name: 'crm_restore_contact',
+    description: 'Restore (undelete) a previously soft-deleted contact by id — clears deleted_at. Client-scope guarded.',
+    input_schema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    exec: async (org_id, client_id, args) => softDeleteOrRestore('contact', org_id, client_id, String(args.id ?? ''), true),
+  },
+  {
+    name: 'crm_restore_account',
+    description: 'Restore (undelete) a previously soft-deleted account by id — clears deleted_at. Client-scope guarded.',
+    input_schema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    exec: async (org_id, client_id, args) => softDeleteOrRestore('account', org_id, client_id, String(args.id ?? ''), true),
+  },
+  // ── Wave 3: cross-object read — activities (NOT gated) ────────────────────
+  {
+    name: 'crm_search_activities',
+    description:
+      'Search CRM activities (calls / meetings / notes / tasks / etc.). Filter by owner (matches owner_id OR assigned_to — activities often carry the person in assigned_to with owner_id null), activity type, status, a date range on a chosen timestamp, and — because activities have NO city column — by the CITY OF THE LINKED LEAD (activity.lead_id → leads.city). Org + client scoped; honours the active global city scope when no explicit city is passed.',
+    input_schema: { type: 'object', properties: {
+      owner_id: { type: 'string', description: 'Match activities where owner_id OR assigned_to is this user.' },
+      type: { type: 'string', description: 'Activity type slug, e.g. call, meeting, note, task, whatsapp.' },
+      status: { type: 'string', description: 'Activity status, e.g. planned, completed, cancelled.' },
+      city: { type: 'string', description: 'City of the LINKED LEAD (activities carry no city column).' },
+      date_field: { type: 'string', enum: ['created_at','due_at','completed_at'], description: 'Which timestamp the date range applies to. Defaults to created_at.' },
+      date_from: { type: 'string', description: 'ISO date/datetime lower bound (inclusive).' },
+      date_to: { type: 'string', description: 'ISO date/datetime upper bound (inclusive).' },
+      limit: { type: 'number', default: 20 },
+    }},
+    exec: async (org_id, client_id, args, ctx) => {
+      const owner = isUuid(args.owner_id) ? String(args.owner_id) : '';
+      if (args.owner_id !== undefined && args.owner_id !== null && args.owner_id !== '' && !owner) {
+        return { data: { error: 'owner_id must be a valid id.' } };
+      }
+      let q = supabaseAdmin.from('crm_activities')
+        .select('id, type, subject, status, due_at, completed_at, created_at, owner_id, assigned_to, lead_id, contact_id, account_id, deal_id')
+        .eq('org_id', org_id);
+      q = scopeToClient(q, client_id);
+      // Owner must match owner_id OR assigned_to. owner is UUID-validated above,
+      // so it is safe to interpolate into the PostgREST .or() filter.
+      if (owner) q = q.or(`owner_id.eq.${owner},assigned_to.eq.${owner}`);
+      if (typeof args.type === 'string' && args.type.trim()) q = q.eq('type', args.type.trim());
+      if (typeof args.status === 'string' && args.status.trim()) q = q.eq('status', args.status.trim());
+      // City lives on the LINKED LEAD, not the activity — filtering .eq('city')
+      // on crm_activities silently returns nothing (no such column). Resolve the
+      // in-scope leads in that city first, then constrain to their activities.
+      // An explicit city arg wins; otherwise honour the active global city scope.
+      const city = (typeof args.city === 'string' && args.city.trim())
+        ? args.city.trim()
+        : (typeof ctx?.city === 'string' ? ctx.city.trim() : '');
+      if (city) {
+        let lq = supabaseAdmin.from('crm_leads').select('id').eq('org_id', org_id).is('deleted_at', null).eq('city', city);
+        lq = scopeToClient(lq, client_id);
+        const { data: leadRows } = await lq.range(0, 9999);
+        const leadIds = (leadRows ?? []).map((r) => r.id as string);
+        if (leadIds.length === 0) {
+          return { card: { type: 'activity_list', data: { activities: [] } }, data: { count: 0, activities: [] } };
+        }
+        q = q.in('lead_id', leadIds);
+      }
+      const dateField = (['created_at','due_at','completed_at'] as const).includes(args.date_field as never)
+        ? String(args.date_field)
+        : 'created_at';
+      const isoDate = (v: unknown): string | null => {
+        if (typeof v !== 'string') return null;
+        const s = v.trim();
+        if (!/^\d{4}-\d{2}-\d{2}([T ].*)?$/.test(s) || Number.isNaN(Date.parse(s))) return null;
+        return s;
+      };
+      const from = isoDate(args.date_from);
+      const to = isoDate(args.date_to);
+      if (from) q = q.gte(dateField, from);
+      if (to) q = q.lte(dateField, /^\d{4}-\d{2}-\d{2}$/.test(to) ? `${to}T23:59:59.999` : to);
+      const { data, error } = await q.order(dateField, { ascending: false }).limit(Math.min(Number(args.limit ?? 20), 100));
+      if (error) return { data: { error: error.message } };
+      return { card: { type: 'activity_list', data: { activities: data ?? [] } }, data: { count: (data ?? []).length, activities: data ?? [] } };
+    },
+  },
+  // ── Wave 3: admin / config (confirm-gated + ADMIN-only in-exec RBAC) ───────
+  {
+    name: 'crm_create_pipeline_stage',
+    description:
+      'Create a new stage in a deal pipeline (ADMIN ONLY). Pass a stage name and optionally pipeline_id (defaults to the org default pipeline), stage_type (open/won/lost), win probability (0–99), a position (defaults to the end), and a color. Requires an admin role.',
+    input_schema: { type: 'object', required: ['name'], properties: {
+      name: { type: 'string' },
+      pipeline_id: { type: 'string', description: 'Target pipeline. Defaults to the org default pipeline.' },
+      stage_type: { type: 'string', enum: ['open','won','lost'], description: 'Defaults to open.' },
+      probability: { type: 'number', description: 'Win probability 0–99. Defaults to 50.' },
+      position: { type: 'number', description: 'Order within the pipeline. Defaults to the end.' },
+      color: { type: 'string' },
+    }},
+    exec: async (org_id, client_id, args, ctx) => {
+      const denied = roleGate(ADMIN_ROLES, ctx, 'admin');
+      if (denied) return denied;
+      const name = String(args.name ?? '').trim();
+      if (!name) return { data: { error: 'A stage name is required.' } };
+      if (args.pipeline_id !== undefined && args.pipeline_id !== null && args.pipeline_id !== '' && !isUuid(String(args.pipeline_id))) {
+        return { data: { error: 'pipeline_id must be a valid id.' } };
+      }
+      // Resolve pipeline — explicit id (client-scope-verified) or the org default.
+      let pipeId = isUuid(args.pipeline_id) ? String(args.pipeline_id) : '';
+      if (pipeId) {
+        let pg = supabaseAdmin.from('crm_pipelines').select('id').eq('org_id', org_id).eq('id', pipeId);
+        pg = scopeToClient(pg, client_id);
+        const { data: p } = await pg.maybeSingle();
+        if (!p) return { data: { error: 'Pipeline not found in this scope.' } };
+      } else {
+        let pg = supabaseAdmin.from('crm_pipelines').select('id').eq('org_id', org_id).eq('is_default', true);
+        pg = scopeToClient(pg, client_id);
+        const { data: p } = await pg.limit(1).maybeSingle();
+        if (!p) return { data: { error: 'No default pipeline configured. Pass an explicit pipeline_id.' } };
+        pipeId = p.id as string;
+      }
+      const stageType = (['open','won','lost'] as const).includes(args.stage_type as never) ? String(args.stage_type) : 'open';
+      let probability = Number(args.probability);
+      if (!Number.isFinite(probability)) probability = 50;
+      probability = Math.min(Math.max(Math.round(probability), 0), 99);
+      let position = Number(args.position);
+      if (!Number.isFinite(position)) {
+        const { data: last } = await supabaseAdmin.from('crm_deal_stages').select('position')
+          .eq('org_id', org_id).eq('pipeline_id', pipeId).order('position', { ascending: false }).limit(1).maybeSingle();
+        position = (Number(last?.position) || 0) + 1;
+      }
+      position = Math.max(Math.round(position), 0);
+      const row: Record<string, unknown> = { org_id, pipeline_id: pipeId, name, stage_type: stageType, probability, position };
+      if (typeof args.color === 'string' && args.color.trim()) row.color = args.color.trim();
+      const { data, error } = await supabaseAdmin.from('crm_deal_stages').insert(row).select('*').single();
+      if (error) return { data: { error: error.message } };
+      return { card: { type: 'summary', data: { text: `Stage "${name}" added to the pipeline.` } }, data: { ...data, message: `Stage "${name}" created.` } };
+    },
+  },
+  {
+    name: 'crm_create_custom_field',
+    description:
+      'Define a new custom field on a CRM entity (ADMIN ONLY). Provide entity_type (lead/contact/account/deal/activity), a snake_case field_key, a human label, and a field_type (text, longtext, number, currency, boolean, date, datetime, select, multiselect, radio, url, email, phone). For select/multiselect/radio pass a non-empty options array. Requires an admin role.',
+    input_schema: { type: 'object', required: ['entity_type','field_key','label','field_type'], properties: {
+      entity_type: { type: 'string', enum: ['lead','contact','account','deal','activity'] },
+      field_key: { type: 'string', description: 'snake_case key, e.g. "warranty_expiry" — a lowercase letter first, then letters/digits/underscore.' },
+      label: { type: 'string' },
+      field_type: { type: 'string', enum: ['text','longtext','number','currency','boolean','date','datetime','select','multiselect','radio','url','email','phone'] },
+      options: { type: 'array', items: { type: 'string' }, description: 'Choices for select/multiselect/radio.' },
+      required: { type: 'boolean' },
+    }},
+    exec: async (org_id, client_id, args, ctx) => {
+      const denied = roleGate(ADMIN_ROLES, ctx, 'admin');
+      if (denied) return denied;
+      const entity = String(args.entity_type ?? '');
+      if (!['lead','contact','account','deal','activity'].includes(entity)) {
+        return { data: { error: 'entity_type must be one of lead, contact, account, deal, activity.' } };
+      }
+      const fieldKey = String(args.field_key ?? '').trim();
+      if (!/^[a-z][a-z0-9_]*$/.test(fieldKey) || fieldKey.length > 80) {
+        return { data: { error: 'field_key must be snake_case (a lowercase letter first, then letters/digits/underscore), max 80 chars.' } };
+      }
+      const label = String(args.label ?? '').trim();
+      if (!label) return { data: { error: 'A label is required.' } };
+      const TYPES = ['text','longtext','number','currency','boolean','date','datetime','select','multiselect','radio','url','email','phone'];
+      const fieldType = String(args.field_type ?? '');
+      if (!TYPES.includes(fieldType)) return { data: { error: `field_type must be one of: ${TYPES.join(', ')}.` } };
+      const needsOptions = ['select','multiselect','radio'].includes(fieldType);
+      const options = Array.isArray(args.options) ? args.options.map((o) => String(o)).filter(Boolean) : [];
+      if (needsOptions && options.length === 0) return { data: { error: `${fieldType} fields need a non-empty options array.` } };
+      // Reject a duplicate key on the same entity within scope.
+      let dup = supabaseAdmin.from('crm_custom_field_defs').select('id')
+        .eq('org_id', org_id).eq('entity_type', entity).eq('field_key', fieldKey);
+      dup = scopeToClient(dup, client_id);
+      const { data: existing } = await dup.maybeSingle();
+      if (existing) return { data: { error: `A "${fieldKey}" field already exists on ${entity}.` } };
+      const row: Record<string, unknown> = {
+        org_id, client_id: client_id ?? null,
+        entity_type: entity, field_key: fieldKey, label, field_type: fieldType,
+        options: needsOptions ? options : null,
+        required: Boolean(args.required) || false,
+        is_active: true,
+      };
+      const { data, error } = await supabaseAdmin.from('crm_custom_field_defs').insert(row).select('*').single();
+      if (error) return { data: { error: error.message } };
+      return { card: { type: 'summary', data: { text: `Custom field "${label}" (${fieldKey}) added to ${entity}.` } }, data: { ...data, message: `Custom field "${label}" created.` } };
     },
   },
 ];
