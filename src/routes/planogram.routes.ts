@@ -147,6 +147,9 @@ const upsertPlanogramSchema = z.object({
       sku_name: z.string(),
       brand: z.string().optional(),
       ref_image_url: z.string().url().optional(),
+      // v2 metrics: category feeds per-category rollups; expected_price feeds pricing deltas.
+      category: z.string().nullable().optional(),
+      expected_price: z.number().nullable().optional(),
     })).optional(),
   }).optional(),
   expected_skus: z.array(z.object({
@@ -159,6 +162,10 @@ const upsertPlanogramSchema = z.object({
     brand: z.string().optional(),
     // Front-facing pack shot URL → used as a vision reference for exact matching.
     ref_image_url: z.string().url().optional(),
+    // v2 metrics: category constrains the model's taxonomy + drives category
+    // rollups; expected_price is the baseline for shelf-tag pricing deltas.
+    category: z.string().nullable().optional(),
+    expected_price: z.number().nullable().optional(),
   })),
 });
 

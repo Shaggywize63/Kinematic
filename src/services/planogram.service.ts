@@ -3,12 +3,18 @@
  *
  * Core compliance + recommendation engine. Given a shelf recognition result
  * and the expected planogram, produces:
- *   • a 0..100 compliance score (presence + facing + position)
+ *   • a 0..100 compliance score (presence + facing + position + competitor)
+ *   • occupancy, shelf-share, per-category and per-zone rollups
+ *   • verbatim pricing rows (with expected-price deltas) and promotions
  *   • lists of missing / misplaced SKUs and facing deltas
  *   • prioritized "what to fix" actions
+ *   • a `methodology` object documenting how every headline number is computed
  *
  * The engine is deterministic so the same inputs always yield the same
- * scores, making analytics over time meaningful.
+ * scores, making analytics over time meaningful. The composite compliance
+ * score formula is intentionally UNCHANGED from v1 (presence/facing/position/
+ * competitor weighted 0.5/0.25/0.2/0.05) — occupancy and shelf-share are
+ * reported alongside it, not folded in.
  */
 
 import fs from 'fs';
@@ -21,6 +27,9 @@ import {
   ShelfRecognition,
   DetectedSKU,
   RecognizeArgs,
+  ShelfZone,
+  PriceSource,
+  PromoOfferType,
 } from './planogram-vision.service';
 
 export interface ExpectedSKU {
@@ -32,6 +41,9 @@ export interface ExpectedSKU {
   weight?: number;              // sales-weighted importance (default 1)
   competitor_ids?: string[];    // SKUs that may displace this one
   ref_image_url?: string;       // front-facing pack shot → vision reference
+  brand?: string | null;        // NEW — passed to the model as a matching hint
+  category?: string | null;     // NEW — seeds the category taxonomy + rollups
+  expected_price?: number | null; // NEW — baseline for pricing deltas
 }
 
 export interface PlanogramLayout {
@@ -41,15 +53,76 @@ export interface PlanogramLayout {
   // the planogram's `layout.competitors` jsonb and passed to the vision model
   // so competitor detection is matched against an explicit list rather than
   // inferred heuristically — this is what makes share-of-shelf reliable.
-  competitors: Array<{ sku_id: string; sku_name: string; brand?: string; ref_image_url?: string }>;
+  competitors: Array<{
+    sku_id: string;
+    sku_name: string;
+    brand?: string;
+    ref_image_url?: string;
+    category?: string | null;       // NEW
+    expected_price?: number | null; // NEW
+  }>;
 }
 
+export interface CategoryBreakdown {
+  category: string;
+  occupancy: number;              // % of total detected shelf area in this category
+  own_share: number;             // own facings / total facings in category (%)
+  competitor_share: number;      // competitor facings / total facings in category (%)
+  facings: number;
+  sku_count: number;             // distinct detected SKUs in the category
+  avg_own_price: number | null;
+  avg_competitor_price: number | null;
+}
+
+export interface ZoneBreakdown {
+  zone: ShelfZone;
+  own_facings: number;
+  competitor_facings: number;
+  own_share: number;             // own / (own + competitor) facings (%)
+  sku_ids: string[];             // distinct detected sku_ids in the zone
+}
+
+export interface PricingRow {
+  sku_id: string | null;
+  sku_name: string;
+  is_competitor: boolean;
+  price: number;
+  currency: string | null;
+  expected_price: number | null;
+  delta: number | null;          // price - expected_price (own SKUs with a baseline)
+  source: PriceSource | null;
+  confidence: number;
+}
+
+export interface CompliancePromo {
+  text: string;
+  offer_type: PromoOfferType;
+  confidence: number;
+  linked_sku_ids: string[];
+}
+
+export interface MethodologyEntry {
+  formula: string;
+  inputs: string[];
+  notes?: string;
+}
+
+export type Methodology = Record<string, MethodologyEntry>;
+
 export interface ComplianceResult {
-  score: number;               // 0..100
+  score: number;               // 0..100 (composite — UNCHANGED formula)
   presence_score: number;
   facing_score: number;
   position_score: number;
   competitor_share: number;
+  occupancy_score: number;         // NEW — overall filled shelf space %
+  shelf_share_own: number;         // NEW — own facings / total facings (%)
+  shelf_share_competitor: number;  // NEW — competitor facings / total facings (%)
+  category_breakdown: CategoryBreakdown[]; // NEW
+  zone_breakdown: ZoneBreakdown[];         // NEW
+  pricing: PricingRow[];                   // NEW
+  promotions: CompliancePromo[];           // NEW
+  methodology: Methodology;                // NEW
   missing_skus: Array<{ sku_id: string; sku_name: string; expected_facings: number }>;
   misplaced_skus: Array<{
     sku_id: string;
@@ -78,10 +151,14 @@ export interface ScoreShelfArgs {
   layout: PlanogramLayout;
 }
 
+const UNCATEGORIZED = 'Uncategorized';
+
 export class PlanogramService {
   /**
-   * Score a shelf capture against the expected planogram.
-   * Pure function — does not write to the DB.
+   * Score a shelf capture against the expected planogram. Deterministic.
+   * Note: this attaches the canonical `zone` (and fills `bbox_area`) onto each
+   * detection object in `recognition.detected_skus` so the persisted recognition
+   * carries backend-computed zones. It does not otherwise write to the DB.
    */
   static scoreShelf(args: ScoreShelfArgs): ComplianceResult {
     const { recognition, layout } = args;
@@ -92,9 +169,26 @@ export class PlanogramService {
       throw new AppError(400, 'Planogram has no expected SKUs.', 'PLANOGRAM_EMPTY');
     }
 
+    const expectedById = new Map<string, ExpectedSKU>();
+    for (const e of expected) expectedById.set(e.sku_id, e);
+
     const detectedById = new Map<string, DetectedSKU>();
     for (const d of detected) {
       if (d.sku_id && !d.is_competitor) detectedById.set(d.sku_id, d);
+    }
+
+    // ── Canonical zone (backend-computed) ──────────────────────────────
+    // Bottom third of shelves → low, middle → eye, top → top. Attach to each
+    // detection (overwriting any model hint) and fill bbox_area if absent.
+    const shelfCount = Math.max(
+      1,
+      recognition.shelf_count || (detected.reduce((m, d) => Math.max(m, d.shelf_index), 0) + 1),
+    );
+    for (const d of detected) {
+      d.zone = zoneFor(d.shelf_index, shelfCount);
+      if (d.bbox_area == null && Array.isArray(d.bbox) && d.bbox.length === 4) {
+        d.bbox_area = round4((d.bbox[2] || 0) * (d.bbox[3] || 0));
+      }
     }
 
     // ── Presence ───────────────────────────────────────────────
@@ -152,12 +246,67 @@ export class PlanogramService {
       ? (positionMatches / positionTotal) * 100
       : 0;
 
-    // ── Competitor share ──────────────────────────────────────────────
+    // ── Shelf share ───────────────────────────────────────────────────
     const totalFacings = detected.reduce((s, d) => s + (d.facings || 0), 0) || 1;
     const competitorFacings = detected
       .filter((d) => d.is_competitor)
       .reduce((s, d) => s + (d.facings || 0), 0);
+    const ownFacings = detected
+      .filter((d) => !d.is_competitor)
+      .reduce((s, d) => s + (d.facings || 0), 0);
     const competitor_share = (competitorFacings / totalFacings) * 100;
+    const shelf_share_own = (ownFacings / totalFacings) * 100;
+    const shelf_share_competitor = competitor_share;
+
+    // ── Occupancy ─────────────────────────────────────────────────────
+    const shelvesWithCapacity = (layout.shelves || []).filter(
+      (s) => Number.isFinite(s.capacity) && (s.capacity as number) > 0,
+    );
+    let occupancy_score: number;
+    let occupancyDenominator: string;
+    if (shelvesWithCapacity.length > 0) {
+      const totalCapacity = shelvesWithCapacity.reduce((s, sh) => s + (sh.capacity as number), 0);
+      occupancy_score = totalCapacity > 0 ? (totalFacings / totalCapacity) * 100 : 0;
+      occupancyDenominator = 'layout.shelves[].capacity (Σ detected facings / Σ capacity × 100)';
+    } else {
+      const filled = detected.reduce((s, d) => s + (d.bbox_area || 0), 0);
+      occupancy_score = (filled / shelfCount) * 100; // 1.0 normalized full-width unit per shelf
+      occupancyDenominator = 'normalized full width, 1.0 per shelf (Σ bbox_area / shelf_count × 100)';
+    }
+    occupancy_score = clamp(0, 100, occupancy_score);
+
+    // ── Category rollups ──────────────────────────────────────────────
+    const category_breakdown = this.buildCategoryBreakdown(detected, expected, expectedById);
+
+    // ── Zone rollups ──────────────────────────────────────────────────
+    const zone_breakdown = this.buildZoneBreakdown(detected);
+
+    // ── Pricing ───────────────────────────────────────────────────────
+    const pricing: PricingRow[] = detected
+      .filter((d) => d.price != null && Number.isFinite(d.price))
+      .map((d) => {
+        const exp = d.sku_id ? expectedById.get(d.sku_id) : undefined;
+        const expected_price = !d.is_competitor && exp?.expected_price != null ? exp.expected_price : null;
+        return {
+          sku_id: d.sku_id,
+          sku_name: d.sku_name,
+          is_competitor: d.is_competitor,
+          price: d.price as number,
+          currency: d.price_currency ?? null,
+          expected_price,
+          delta: expected_price != null ? round2((d.price as number) - expected_price) : null,
+          source: d.price_source ?? null,
+          confidence: d.confidence,
+        };
+      });
+
+    // ── Promotions (pass-through) ──────────────────────────────────────
+    const promotions: CompliancePromo[] = (recognition.promotions || []).map((p) => ({
+      text: p.text,
+      offer_type: p.offer_type,
+      confidence: p.confidence,
+      linked_sku_ids: p.linked_sku_ids || [],
+    }));
 
     // ── Missing ────────────────────────────────────────────────────
     const missing_skus = expected
@@ -168,7 +317,7 @@ export class PlanogramService {
         expected_facings: e.facings,
       }));
 
-    // ── Composite score ───────────────────────────────────────────────
+    // ── Composite score (UNCHANGED) ───────────────────────────────────
     // Weighted: presence dominates, facings + position equal, competitor
     // share lightly penalizes if it's eating shelf space.
     const competitorPenalty = Math.max(0, competitor_share - 25); // tolerate 25%
@@ -184,6 +333,14 @@ export class PlanogramService {
       facing_score: round1(facing_score),
       position_score: round1(position_score),
       competitor_share: round1(competitor_share),
+      occupancy_score: round1(occupancy_score),
+      shelf_share_own: round1(shelf_share_own),
+      shelf_share_competitor: round1(shelf_share_competitor),
+      category_breakdown,
+      zone_breakdown,
+      pricing,
+      promotions,
+      methodology: this.buildMethodology({ occupancyDenominator }),
       missing_skus,
       misplaced_skus,
       facing_deltas,
@@ -192,8 +349,150 @@ export class PlanogramService {
         misplaced_skus,
         facing_deltas,
         competitor_share,
+        promotions,
         expected,
       }),
+    };
+  }
+
+  /** Group detections + expected SKUs by category → per-category rollups. */
+  private static buildCategoryBreakdown(
+    detected: DetectedSKU[],
+    expected: ExpectedSKU[],
+    expectedById: Map<string, ExpectedSKU>,
+  ): CategoryBreakdown[] {
+    const catOf = (d: DetectedSKU): string =>
+      d.category || (d.sku_id ? expectedById.get(d.sku_id)?.category ?? null : null) || UNCATEGORIZED;
+
+    const totalArea = detected.reduce((s, d) => s + (d.bbox_area || 0), 0) || 1;
+
+    type Acc = {
+      facings: number;
+      area: number;
+      ownFacings: number;
+      competitorFacings: number;
+      skuIds: Set<string>;
+      ownPrices: number[];
+      competitorPrices: number[];
+    };
+    const map = new Map<string, Acc>();
+    const ensure = (cat: string): Acc => {
+      let a = map.get(cat);
+      if (!a) {
+        a = { facings: 0, area: 0, ownFacings: 0, competitorFacings: 0, skuIds: new Set(), ownPrices: [], competitorPrices: [] };
+        map.set(cat, a);
+      }
+      return a;
+    };
+
+    // Seed categories from expected SKUs so empty-on-shelf categories still surface.
+    for (const e of expected) ensure(e.category || UNCATEGORIZED);
+
+    for (const d of detected) {
+      const a = ensure(catOf(d));
+      const f = d.facings || 0;
+      a.facings += f;
+      a.area += d.bbox_area || 0;
+      a.skuIds.add(d.sku_id || d.sku_name);
+      if (d.is_competitor) {
+        a.competitorFacings += f;
+        if (d.price != null && Number.isFinite(d.price)) a.competitorPrices.push(d.price as number);
+      } else {
+        a.ownFacings += f;
+        if (d.price != null && Number.isFinite(d.price)) a.ownPrices.push(d.price as number);
+      }
+    }
+
+    return Array.from(map.entries())
+      .map(([category, a]) => {
+        const catTotal = a.ownFacings + a.competitorFacings;
+        return {
+          category,
+          occupancy: round1((a.area / totalArea) * 100),
+          own_share: catTotal ? round1((a.ownFacings / catTotal) * 100) : 0,
+          competitor_share: catTotal ? round1((a.competitorFacings / catTotal) * 100) : 0,
+          facings: a.facings,
+          sku_count: a.skuIds.size,
+          avg_own_price: a.ownPrices.length ? round2(avg(a.ownPrices)) : null,
+          avg_competitor_price: a.competitorPrices.length ? round2(avg(a.competitorPrices)) : null,
+        };
+      })
+      .sort((x, y) => y.facings - x.facings);
+  }
+
+  /** Per-zone (low / eye / top) own vs competitor facing rollups. */
+  private static buildZoneBreakdown(detected: DetectedSKU[]): ZoneBreakdown[] {
+    type Acc = { own: number; competitor: number; skuIds: Set<string> };
+    const map = new Map<ShelfZone, Acc>();
+    for (const d of detected) {
+      const z = (d.zone as ShelfZone) || 'eye';
+      let a = map.get(z);
+      if (!a) {
+        a = { own: 0, competitor: 0, skuIds: new Set() };
+        map.set(z, a);
+      }
+      const f = d.facings || 0;
+      if (d.is_competitor) a.competitor += f;
+      else a.own += f;
+      if (d.sku_id) a.skuIds.add(d.sku_id);
+    }
+    const order: ShelfZone[] = ['low', 'eye', 'top'];
+    return order
+      .filter((z) => map.has(z))
+      .map((zone) => {
+        const a = map.get(zone) as Acc;
+        const tot = a.own + a.competitor;
+        return {
+          zone,
+          own_facings: a.own,
+          competitor_facings: a.competitor,
+          own_share: tot ? round1((a.own / tot) * 100) : 0,
+          sku_ids: Array.from(a.skuIds),
+        };
+      });
+  }
+
+  /** Document each headline metric so every number is auditable. */
+  private static buildMethodology(opts: { occupancyDenominator: string }): Methodology {
+    return {
+      presence: {
+        formula: 'Σ weight(expected SKUs present) / Σ weight(all expected SKUs) × 100',
+        inputs: ['expected_skus.weight', 'detected_skus.sku_id'],
+        notes: 'weight defaults to 1; only own (non-competitor) detections count as present.',
+      },
+      facing: {
+        formula: '100 − (Σ |actual − expected| × weight / Σ expected × weight) × 100, floored at 0',
+        inputs: ['expected_skus.facings', 'expected_skus.weight', 'detected_skus.facings'],
+      },
+      position: {
+        formula: 'matched shelf_index / detected-and-expected SKUs × 100',
+        inputs: ['expected_skus.shelf_index', 'detected_skus.shelf_index'],
+      },
+      presence_facing_position_note: {
+        formula: 'n/a',
+        inputs: [],
+        notes: 'presence, facing and position are the three components of the composite score.',
+      },
+      occupancy: {
+        formula: 'Σ filled / Σ capacity × 100',
+        inputs: ['detected_skus.bbox_area', 'detected_skus.facings', 'layout.shelves[].capacity', 'shelf_count'],
+        notes: `denominator: ${opts.occupancyDenominator}. Clamped to 0..100.`,
+      },
+      shelf_share: {
+        formula: 'own or competitor facings / total detected facings × 100',
+        inputs: ['detected_skus.facings', 'detected_skus.is_competitor'],
+        notes: 'competitor_share is retained and equals shelf_share_competitor.',
+      },
+      zone: {
+        formula: 'zone assigned by shelf_index vs shelf_count: bottom third → low, middle → eye, top → top',
+        inputs: ['detected_skus.shelf_index', 'shelf_count'],
+        notes: 'zone is computed by the backend; the model hint is ignored. A single-shelf image is treated as eye.',
+      },
+      composite: {
+        formula: '0.5·presence + 0.25·facing + 0.2·position − 0.05·max(0, competitor_share − 25), clamped 0..100',
+        inputs: ['presence_score', 'facing_score', 'position_score', 'competitor_share'],
+        notes: 'Occupancy and shelf-share are reported alongside but NOT folded into the composite; competitor share is tolerated up to 25%.',
+      },
     };
   }
 
@@ -203,6 +502,7 @@ export class PlanogramService {
     misplaced_skus: ComplianceResult['misplaced_skus'];
     facing_deltas: ComplianceResult['facing_deltas'];
     competitor_share: number;
+    promotions: CompliancePromo[];
     expected: ExpectedSKU[];
   }): ComplianceResult['recommendations'] {
     const recs: ComplianceResult['recommendations'] = [];
@@ -249,6 +549,23 @@ export class PlanogramService {
           sku_id: d.sku_id,
           sku_name: d.sku_name,
           rationale: 'Over-facing reduces variety perception.',
+        });
+      }
+    }
+
+    // Promotions covering a missing / under-faced own SKU are an execution
+    // opportunity — the offer is live but the product is absent or thin.
+    const gapSkus = new Map<string, string>(); // sku_id → sku_name
+    for (const m of input.missing_skus) gapSkus.set(m.sku_id, m.sku_name);
+    for (const d of input.facing_deltas) if (d.delta < 0) gapSkus.set(d.sku_id, d.sku_name);
+    for (const p of input.promotions) {
+      const covered = (p.linked_sku_ids || []).filter((id) => gapSkus.has(id));
+      if (covered.length) {
+        const names = covered.map((id) => gapSkus.get(id)).filter(Boolean).join(', ');
+        recs.push({
+          priority: 'high',
+          action: `Promo "${p.text}" is live but ${names} is missing/under-faced — restock to capture the offer`,
+          rationale: 'An active promotion on an absent or thin SKU wastes promo spend and shopper demand.',
         });
       }
     }
@@ -490,9 +807,13 @@ export class PlanogramService {
     const recognition = await PlanogramVisionService.recognizeShelf({
       imageBase64: args.imageBase64,
       imageMediaType: args.imageMediaType,
+      // Pass brand + category so the model matches by packaging and constrains
+      // classification to the planogram's real taxonomy.
       expectedSkus: layout.expected_skus.map((s) => ({
         sku_id: s.sku_id,
         sku_name: s.sku_name,
+        brand: s.brand ?? undefined,
+        category: s.category ?? undefined,
       })),
       // Explicit competitor list → reliable is_competitor flags → accurate
       // share-of-shelf, instead of the model guessing which brands compete.
@@ -500,6 +821,7 @@ export class PlanogramService {
         sku_id: c.sku_id,
         sku_name: c.sku_name,
         brand: c.brand,
+        category: c.category ?? undefined,
       })),
       storeFormat,
       referenceImages,
@@ -540,6 +862,7 @@ export class PlanogramService {
       capture_id: cap.id,
       org_id: args.orgId,
       detected_skus: recognition.detected_skus,
+      promotions: recognition.promotions,
       shelf_map: { shelf_count: recognition.shelf_count },
       overall_confidence: recognition.overall_confidence,
       model_versions: { vision: recognition.model_version },
@@ -560,6 +883,14 @@ export class PlanogramService {
         facing_score: result.facing_score,
         position_score: result.position_score,
         competitor_share: result.competitor_share,
+        occupancy_score: result.occupancy_score,
+        shelf_share_own: result.shelf_share_own,
+        shelf_share_competitor: result.shelf_share_competitor,
+        category_breakdown: result.category_breakdown,
+        zone_breakdown: result.zone_breakdown,
+        pricing: result.pricing,
+        promotions: result.promotions,
+        methodology: result.methodology,
         missing_skus: result.missing_skus,
         misplaced_skus: result.misplaced_skus,
         facing_deltas: result.facing_deltas,
@@ -582,4 +913,24 @@ export class PlanogramService {
 
 function round1(v: number): number {
   return Math.round(v * 10) / 10;
+}
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+function round4(v: number): number {
+  return Math.round(v * 10000) / 10000;
+}
+function clamp(min: number, max: number, v: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+function avg(nums: number[]): number {
+  return nums.reduce((s, n) => s + n, 0) / nums.length;
+}
+function zoneFor(shelfIndex: number, shelfCount: number): ShelfZone {
+  const n = Math.max(1, shelfCount);
+  if (n === 1) return 'eye';
+  const third = n / 3;
+  if (shelfIndex < third) return 'low';
+  if (shelfIndex >= 2 * third) return 'top';
+  return 'eye';
 }
