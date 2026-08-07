@@ -16,6 +16,7 @@ import {
   pendingActionText,
   PENDING_TOOL_RESULT,
   doneText,
+  labelForTool,
 } from '../../services/crm/ai/kiniApproval.service';
 import { isAgenticV2Enabled } from '../../services/crm/ai/kiniFlags.service';
 import {
@@ -47,6 +48,48 @@ type AuthUser = any;
 function platformOf(req: AuthRequest): 'web' | 'ios' | 'android' {
   const raw = (req.headers['x-kinematic-platform'] as string | undefined ?? '').toLowerCase().trim();
   return raw === 'ios' || raw === 'android' ? raw : 'web';
+}
+
+// ── Streaming tool labels ─────────────────────────────────────────────────────
+// Friendly, present-progressive labels for the common read/lookup tools shown in
+// the streaming UI while a tool runs. Confirm-required (write) tools reuse the
+// approval-gate labels via labelForTool(); anything unmapped is prettified from
+// its snake_case name.
+const STREAM_TOOL_LABELS: Record<string, string> = {
+  crm_search_leads: 'Searching leads',
+  crm_search_deals: 'Searching deals',
+  crm_search_activities: 'Searching activities',
+  crm_get_lead: 'Looking up lead',
+  crm_get_deal: 'Looking up deal',
+  crm_top_leads_by_score: 'Ranking top leads',
+  crm_pipeline_summary: 'Summarizing pipeline',
+  crm_deals_closing: 'Finding deals closing soon',
+  crm_rep_leaderboard: 'Building rep leaderboard',
+  crm_conversion_funnel: 'Computing conversion funnel',
+  crm_summarize_account: 'Summarizing account',
+  crm_draft_email: 'Drafting email',
+  remember_fact: 'Saving to memory',
+  ff_visits_today: "Checking today's visits",
+  ff_attendance_today: "Checking today's attendance",
+  ff_live_locations: 'Fetching live locations',
+};
+
+/** Strip the module prefix and Title-Case a snake_case tool name. */
+function prettifyToolName(tool: string): string {
+  return tool
+    .replace(/^(crm|ff|kini|analytics|dist)_/, '')
+    .split('_')
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+/** Human label for a tool in a streaming `tool_call` event. */
+function labelFor(tool: string): string {
+  if (STREAM_TOOL_LABELS[tool]) return STREAM_TOOL_LABELS[tool];
+  const known = labelForTool(tool); // write / confirm-required tools carry labels
+  if (known && known !== tool) return known;
+  return prettifyToolName(tool);
 }
 
 async function gate(req: AuthRequest, res: Response): Promise<boolean> {
@@ -346,6 +389,313 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     const role = String((req.user as { role?: string } | undefined)?.role || '').toLowerCase();
     const detail = (e as { message?: string })?.message || 'unknown error';
     logger.error(`[kini.v2.chat] pre-flight error: ${detail}`);
+    return ok(res, {
+      text: role === 'super_admin' ? `KINI hit a server error: ${detail}` : 'I ran into a problem on my end — please try again.',
+      cards: [],
+      tool_calls: [],
+      thread_id: null,
+    });
+  }
+});
+
+// ── Chat (SSE streaming) ─────────────────────────────────────────────────────
+// Additive, non-breaking mirror of `chat` that streams the turn over
+// Server-Sent Events for a live typing UX. ALL gate/quota/scope/thread checks
+// run BEFORE any SSE byte is written, and on failure return the SAME JSON
+// status/shape as buffered `chat` so a client can fall back to POST /v2/chat.
+// Once streaming starts the event contract is:
+//   start → (tool_call | card | token)* → pending_action? → usage → done
+// with `error` replacing the tail on a mid-stream failure.
+export const chatStream = asyncHandler(async (req: AuthRequest, res: Response) => {
+ try {
+  // ---- Pre-flight (identical to `chat`): NOTHING is streamed yet, so any
+  // failure below returns the same JSON envelope the buffered path returns. ----
+  if (!(await gate(req, res))) return;
+  const user = req.user as AuthUser;
+  const { org_id, client_id, id: user_id, role, full_name, city } = user;
+
+  const {
+    messages,
+    context,
+    thread_id: clientThreadId,
+    system: extraSystem,
+  } = req.body as {
+    messages: Array<{ role: 'user' | 'assistant'; content: unknown }>;
+    context?: KiniContext;
+    thread_id?: string;
+    system?: string;
+  };
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return badRequest(res, 'messages is required');
+  }
+
+  const headerClient = (req.headers['x-client-id'] as string | undefined)?.trim();
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const effectiveClientId: string | null =
+    client_id || (headerClient && UUID_RE.test(headerClient) ? headerClient : null);
+  const isSuperAdmin = String(role ?? '').toLowerCase() === 'super_admin';
+  if (!effectiveClientId && !isSuperAdmin) {
+    return ok(res, {
+      text: "Select a client from the workspace switcher to use KINI — it stays scoped to that client's data.",
+      cards: [],
+      tool_calls: [],
+      thread_id: null,
+    });
+  }
+
+  const actor = { id: user_id, org_id, role, client_id: effectiveClientId };
+  const platform = platformOf(req);
+  const gateQuota = await kiniQuota.checkQuota(actor);
+  if (!gateQuota.allowed) {
+    const code = gateQuota.reason ?? 'USER_KINI_LIMIT_REACHED';
+    const msg = code === 'ORG_KINI_LIMIT_REACHED'
+      ? `Your organization has reached its monthly AI limit (${gateQuota.org_cap ?? gateQuota.cap} queries). Resets on the 1st.`
+      : `Monthly AI limit reached (${gateQuota.cap} queries). Resets on the 1st.`;
+    return res.status(429).json({
+      success: false,
+      error: { code, message: msg },
+      data: {
+        usage: {
+          used: gateQuota.used, cap: gateQuota.cap, remaining: 0,
+          month: gateQuota.month, exempt: gateQuota.exempt, limit_reached: true,
+          reason: code, org_used: gateQuota.org_used, org_cap: gateQuota.org_cap,
+        },
+      },
+    });
+  }
+
+  let thread: Awaited<ReturnType<typeof getThread>> = null;
+  const thread_id = clientThreadId ?? null;
+  if (thread_id) {
+    const r = await getThread(thread_id, user_id);
+    if (!r) return notFound(res, 'Thread not found');
+    thread = r;
+  }
+
+  const [memoryBlock] = await Promise.all([formatMemoryForPrompt(user_id)]);
+  const contextBlock = buildContextBlock(context, {
+    user_id,
+    org_id,
+    client_id: effectiveClientId,
+    role,
+    full_name,
+    city,
+  });
+
+  const systemPrompt = [
+    extraSystem || '',
+    "You are KINI, Kinematic's agentic platform copilot.",
+    'You have tools that span CRM, Field Force, Distribution, Analytics, and Admin. Pick the right tool for the question; do not explain how to do things manually.',
+    'You can CREATE and UPDATE records — leads, deals, contacts, accounts, tasks, and activities — and take Field Force actions. When the user asks you to add, create, log, update, or convert something ("add a lead for Rahul from Acme", "log a visit", "create a deal worth 2 lakh"), CALL the matching tool and actually do it. NEVER reply that you cannot create leads or take actions; if you have the details, act; if a required detail is missing, ask one short follow-up question, then act.',
+    'You can DRAFT messages for the user to review and send — an email, a WhatsApp/SMS message, or a call script. Drafting is just writing text: put a short, ready-to-send draft directly in your reply. Use the lookup tools only to find who the message is for; you do NOT need a tool to write a draft, and a lookup returning an error is never a reason to refuse — draft it anyway and note any assumption (e.g. the contact\'s name).',
+    'To actually SEND a WhatsApp (not just draft), call crm_send_whatsapp with the recipient (lead_id / contact_id, or a phone in "to") and the body. Only send when the user EXPLICITLY asks to send — otherwise show the draft and ask them to confirm first. After a successful send, confirm in one short line.',
+    'Default currency is INR (₹). Indian numbering: "2 lakh" = 200000, "1 crore" = 10000000.',
+    'When a tool returns a card, the UI renders it — confirm in 1-2 short sentences and do not repeat full record details in your text reply.',
+    contextBlock,
+    memoryBlock,
+    planningInstruction(),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const priorMessages = thread
+    ? thread.messages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .slice(-20)
+        .map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content || '',
+        }))
+    : [];
+  const fullMessages = [...priorMessages, ...messages] as Array<{
+    role: 'user' | 'assistant';
+    content: unknown;
+  }>;
+
+  const pending = createPendingCollector();
+
+  // ---- All checks passed. Begin the event stream. ----
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable proxy buffering (nginx)
+  res.flushHeaders?.();
+
+  // Write one SSE frame: `event: <name>\n` + `data: <json>\n\n`, flushing if the
+  // runtime supports it (e.g. behind compression middleware).
+  const sse = (event: string, dataObj: unknown): void => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(dataObj)}\n\n`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (res as any).flush?.();
+  };
+
+  sse('start', { thread_id });
+
+  const turnStart = Date.now();
+  try {
+    const result = await chatWithTools({
+      org_id,
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1500,
+      max_turns: 8,
+      system: systemPrompt,
+      tools: toAnthropicTools(),
+      messages: fullMessages,
+      // Translate the aiClient stream events into SSE frames.
+      onEvent: (ev) => {
+        if (ev.kind === 'token') {
+          sse('token', { text: ev.text });
+        } else if (ev.kind === 'tool_call') {
+          const payload: Record<string, unknown> = {
+            tool: ev.tool,
+            label: labelFor(ev.tool),
+            phase: ev.phase,
+          };
+          if (ev.phase === 'done') payload.ok = ev.ok;
+          sse('tool_call', payload);
+        } else if (ev.kind === 'card') {
+          sse('card', ev.card);
+        }
+      },
+      onToolCall: async (name, args) => {
+        // IDENTICAL approval gate + execution + logging as `chat`.
+        if (isConfirmRequired(name)) {
+          pending.record(name, (args ?? {}) as Record<string, unknown>);
+          return { data: PENDING_TOOL_RESULT };
+        }
+        const t0 = Date.now();
+        try {
+          const r = await executeTool(
+            org_id,
+            effectiveClientId,
+            name,
+            args as Record<string, unknown>,
+            { user_id, city: context?.city ?? null, role: role ?? null },
+          );
+          const out = r ?? { data: { error: `Unknown tool: ${name}` } };
+          let resultSize = 0;
+          try {
+            resultSize = JSON.stringify(out).length;
+          } catch {
+            /* unstringifiable result — leave size at 0 */
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const errMsg = (out as any)?.data?.error as string | undefined;
+          logToolCall({
+            org_id,
+            client_id: effectiveClientId,
+            user_id,
+            thread_id,
+            tool_name: name,
+            args,
+            result_size: resultSize,
+            success: !errMsg,
+            error_code: errMsg ? 'TOOL_ERROR' : undefined,
+            latency_ms: Date.now() - t0,
+          });
+          return out;
+        } catch (e) {
+          logToolCall({
+            org_id,
+            client_id: client_id ?? null,
+            user_id,
+            thread_id,
+            tool_name: name,
+            args,
+            success: false,
+            error_code: 'TOOL_EXCEPTION',
+            latency_ms: Date.now() - t0,
+          });
+          throw e;
+        }
+      },
+    });
+
+    const pendingAction = pending.get();
+    const text = pendingAction
+      ? pendingActionText(pendingAction)
+      : result.reply ||
+        (result.tool_calls.length > 0
+          ? 'Done — see the results above.'
+          : "Sorry, I couldn't generate a response for that. Could you rephrase?");
+
+    if (thread_id) {
+      const lastUserMsg = messages[messages.length - 1];
+      const userContent =
+        typeof lastUserMsg?.content === 'string'
+          ? lastUserMsg.content
+          : JSON.stringify(lastUserMsg?.content);
+      await appendMessages(thread_id, [
+        {
+          role: 'user',
+          content: userContent,
+          tool_calls: null,
+          cards: null,
+          tokens_in: null,
+          tokens_out: null,
+        },
+        {
+          role: 'assistant',
+          content: text,
+          tool_calls: result.tool_calls.map((t) => ({ name: t.name, args: t.args })),
+          cards: result.cards,
+          tokens_in: null,
+          tokens_out: null,
+        },
+      ]);
+      if (thread && !thread.thread.title && userContent) {
+        await setTitle(thread_id, user_id, userContent.slice(0, 80));
+      }
+    }
+
+    const tokenUsage = (result as { usage?: { input?: number; output?: number } }).usage;
+    void kiniQuota.recordQuery(actor, tokenUsage, platform);
+    const usage = await kiniQuota.getUsage(actor);
+
+    // Tail of the stream, in the order the client expects.
+    if (pendingAction) sse('pending_action', pendingAction);
+    sse('usage', usage);
+    sse('done', {
+      text,
+      cards: result.cards,
+      tool_calls: result.tool_calls.map((t) => ({ name: t.name, args: t.args })),
+      pending_action: pendingAction ?? null,
+      thread_id,
+      took_ms: Date.now() - turnStart,
+    });
+    return res.end();
+  } catch (e) {
+    // Error AFTER the stream opened. Headers are already sent, so we cannot
+    // switch to a JSON body — surface an SSE `error` frame and close.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ee = e as any;
+    if (ee?.code === 'CONFIG_ERROR') {
+      sse('error', { message: 'AI features require ANTHROPIC_API_KEY to be set on the server.' });
+      return res.end();
+    }
+    logger.error(`[kini.v2.chatStream] error: ${ee?.message || ee}`);
+    sse('error', { message: 'I hit an error processing that — try again?' });
+    return res.end();
+  }
+ } catch (e: unknown) {
+    // Pre-flight error (gate / quota / scope / memory / context) — thrown BEFORE
+    // any SSE byte. If nothing was streamed, fall back to the buffered JSON
+    // envelope the clients render; if headers somehow went out already, close
+    // the stream with an error frame instead.
+    const detail = (e as { message?: string })?.message || 'unknown error';
+    if (res.headersSent) {
+      logger.error(`[kini.v2.chatStream] post-header error: ${detail}`);
+      try {
+        res.write('event: error\n');
+        res.write(`data: ${JSON.stringify({ message: 'I ran into a problem on my end — please try again.' })}\n\n`);
+      } catch {
+        /* socket already gone */
+      }
+      return res.end();
+    }
+    const role = String((req.user as { role?: string } | undefined)?.role || '').toLowerCase();
+    logger.error(`[kini.v2.chatStream] pre-flight error: ${detail}`);
     return ok(res, {
       text: role === 'super_admin' ? `KINI hit a server error: ${detail}` : 'I ran into a problem on my end — please try again.',
       cards: [],
