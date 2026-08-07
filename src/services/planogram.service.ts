@@ -86,6 +86,7 @@ export interface PricingRow {
   sku_id: string | null;
   sku_name: string;
   is_competitor: boolean;
+  brand?: string | null;         // NEW — matched competitor (or own) brand for stable identity
   price: number;
   currency: string | null;
   expected_price: number | null;
@@ -180,6 +181,14 @@ export class PlanogramService {
     if (expected.length === 0) {
       throw new AppError(400, 'Planogram has no expected SKUs.', 'PLANOGRAM_EMPTY');
     }
+
+    // ── Lever 2 — competitor matching ──────────────────────────────────
+    // Bind each competitor detection to a tracked competitor in
+    // layout.competitors so competitors carry a STABLE sku_id/brand across
+    // captures. Mutates competitor detections only — presence/facing/position
+    // and share math key off is_competitor / own sku_ids, so those numbers are
+    // unchanged (detectedById below still excludes competitors).
+    this.matchCompetitors(detected, layout.competitors || []);
 
     const expectedById = new Map<string, ExpectedSKU>();
     for (const e of expected) expectedById.set(e.sku_id, e);
@@ -357,6 +366,7 @@ export class PlanogramService {
           sku_id: d.sku_id,
           sku_name: d.sku_name,
           is_competitor: d.is_competitor,
+          brand: d.brand ?? null,
           price: d.price as number,
           currency: d.price_currency ?? null,
           expected_price,
@@ -459,6 +469,75 @@ export class PlanogramService {
         expected,
       }),
     };
+  }
+
+  /**
+   * Lever 2 — deterministic competitor identity resolution.
+   *
+   * For each competitor detection, bind it to a tracked competitor from
+   * `layout.competitors` so competitors carry a STABLE sku_id/brand across
+   * captures (share-of-shelf trending needs a consistent identity, not a fresh
+   * name string each capture). Matching, in order:
+   *   (a) exact sku_id — the model was asked to echo the competitor's sku_id;
+   *   (b) normalized name/brand — case/whitespace-insensitive: an exact
+   *       normalized name match, OR a brand match plus a name-contains match.
+   * On a match the detection's sku_id/brand are set from the catalog entry.
+   *
+   * Mutates competitor detections in place ONLY. Own detections, presence,
+   * facing, position and share math are untouched (they key off is_competitor
+   * and own sku_ids).
+   */
+  private static matchCompetitors(
+    detected: DetectedSKU[],
+    competitors: PlanogramLayout['competitors'],
+  ): void {
+    if (!competitors || competitors.length === 0) return;
+    const byId = new Map<string, PlanogramLayout['competitors'][number]>();
+    for (const c of competitors) if (c.sku_id) byId.set(c.sku_id, c);
+    const norm = (s: string | null | undefined): string =>
+      (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+    for (const d of detected) {
+      if (!d.is_competitor) continue;
+
+      // (a) exact sku_id (the model may already echo the tracked competitor id).
+      let match = d.sku_id ? byId.get(d.sku_id) : undefined;
+
+      // (b) normalized name/brand fallback.
+      if (!match) {
+        const dn = norm(d.sku_name);
+        const db = norm(d.brand);
+        // Prefer an exact normalized-name match anywhere in the catalog.
+        match = competitors.find((c) => {
+          const cn = norm(c.sku_name);
+          return !!cn && !!dn && cn === dn;
+        });
+        // Else brand + bidirectional name-contains; on ties pick the MOST
+        // specific (longest) catalog name so same-brand variants don't collapse
+        // onto the shorter one (e.g. "Veeba Mayo" vs "Veeba Mayo Chipotle").
+        if (!match) {
+          let best: PlanogramLayout['competitors'][number] | undefined;
+          let bestLen = -1;
+          for (const c of competitors) {
+            const cn = norm(c.sku_name);
+            if (!cn) continue;
+            const cb = norm(c.brand);
+            const nameHit = !!dn && (dn.includes(cn) || cn.includes(dn));
+            const brandHit = !!cb && !!db && (cb === db || db.includes(cb) || cb.includes(db));
+            if (nameHit && brandHit && cn.length > bestLen) {
+              best = c;
+              bestLen = cn.length;
+            }
+          }
+          match = best;
+        }
+      }
+
+      if (match) {
+        d.sku_id = match.sku_id;
+        if (match.brand) d.brand = match.brand;
+      }
+    }
   }
 
   /** Group detections + expected SKUs by category → per-category rollups. */
@@ -1075,6 +1154,43 @@ export class PlanogramService {
     });
 
     const result = this.scoreShelf({ recognition, layout });
+
+    // ── Lever 3 — quality gate (flag only; never reject the capture) ──────
+    // Flag a capture for human review when it is likely unreliable, but always
+    // still persist it and its scores. Thresholds (documented here):
+    //   • QUALITY_MIN 0.4  — blur/glare/angle scores are 0..1 (1 = best); below
+    //     0.4 the image is degraded enough that recognition may be wrong. This
+    //     is the same 0.4 floor recognizeShelf already uses for blur/glare;
+    //     angle is added here.
+    //   • LOW_CONFIDENCE 0.6 — overall recognition confidence floor.
+    //   • HIGH_MISS_RATE 0.5 — >50% of expected SKUs still absent AFTER the
+    //     second-pass recall suggests a bad capture (or a truly empty shelf)
+    //     rather than a few genuine gaps.
+    // Only image-quality problems earn the "Re-shoot capture" action; miss-rate
+    // and low-confidence just raise needs_review (re-shooting won't fix an empty
+    // shelf or an inherently hard scene).
+    const QUALITY_MIN = 0.4;
+    const LOW_CONFIDENCE = 0.6;
+    const HIGH_MISS_RATE = 0.5;
+    const q = recognition.quality;
+    const lowQuality =
+      q.blur_score < QUALITY_MIN || q.glare_score < QUALITY_MIN || q.angle_score < QUALITY_MIN;
+    const expectedCount = (layout.expected_skus || []).length;
+    const missRate = expectedCount ? result.missing_skus.length / expectedCount : 0;
+    const highMiss = expectedCount > 0 && missRate > HIGH_MISS_RATE;
+    const lowConfidence = recognition.overall_confidence < LOW_CONFIDENCE;
+
+    if (lowQuality || highMiss || lowConfidence) {
+      recognition.needs_review = true;
+    }
+    if (lowQuality) {
+      result.recommendations.unshift({
+        priority: 'high',
+        action: 'Re-shoot capture',
+        rationale:
+          'Image quality low (blur/glare/angle) — recognition may be unreliable',
+      });
+    }
 
     // Store the shelf photo in this capture's own project so history can render
     // it; fall back to the client-provided URL if the in-project upload fails.
