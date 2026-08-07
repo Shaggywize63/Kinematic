@@ -194,6 +194,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
             effectiveClientId,
             name,
             args as Record<string, unknown>,
+            { user_id },
           );
           const out = r ?? { data: { error: `Unknown tool: ${name}` } };
           let resultSize = 0;

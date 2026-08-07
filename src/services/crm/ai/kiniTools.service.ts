@@ -7,14 +7,34 @@ import { sanitisePostgrestSearch } from '../../../utils';
 import * as autoResponse from './autoResponse.service';
 import * as summarize from './summarize.service';
 import * as leadsSvc from '../leads.service';
+import * as dealsSvc from '../deals.service';
+import * as leaderboardSvc from '../leaderboard.service';
+import * as kiniMemory from './kiniMemory.service';
 import { sendWhatsapp } from '../whatsapp.service';
+
+/**
+ * Per-call context threaded from the chat controller into a tool's exec.
+ * Optional so every existing tool (which never reads it) keeps its exact
+ * signature; only tools that act on behalf of the current USER — e.g.
+ * remember_fact writing per-user memory — read it.
+ */
+export interface KiniToolContext {
+  user_id?: string | null;
+}
 
 export interface KiniTool {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
-  exec: (org_id: string, client_id: string | null, args: Record<string, unknown>) => Promise<unknown>;
+  exec: (org_id: string, client_id: string | null, args: Record<string, unknown>, ctx?: KiniToolContext) => Promise<unknown>;
 }
+
+// Shared UUID guard. Mirrors the UUID_RE the v2 controller uses before it
+// trusts a client-supplied id — cheap way to turn a malformed id into a
+// clean tool error instead of a Postgres "invalid input syntax for type
+// uuid" that surfaces as an opaque failure.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v);
 
 export interface KiniToolResult {
   tool: string;
@@ -56,6 +76,39 @@ async function assertLeadInClientScope(org_id: string, client_id: string | null,
     throw new Error('Lead belongs to a different client; cannot mutate from this scope');
   }
 }
+
+// Same hard guard as assertLeadInClientScope, generalised to the other
+// mutable CRM entities. Reads the target row's client_id and refuses the
+// mutation when it belongs to a *different* client than the client-scoped
+// actor. A null client_id on the row (legacy / org-wide) is allowed, and an
+// actor with no client pinned (org-wide / super admin) skips the check —
+// the underlying service/query still enforces org_id.
+async function assertRowInClientScope(
+  table: 'crm_deals' | 'crm_contacts' | 'crm_accounts',
+  label: string,
+  org_id: string,
+  client_id: string | null,
+  id: string,
+): Promise<void> {
+  if (!client_id) return;
+  const { data, error } = await supabaseAdmin
+    .from(table)
+    .select('client_id')
+    .eq('id', id)
+    .eq('org_id', org_id)
+    .maybeSingle();
+  if (error || !data) throw new Error(`${label} not found`);
+  if (data.client_id && data.client_id !== client_id) {
+    throw new Error(`${label} belongs to a different client; cannot mutate from this scope`);
+  }
+}
+
+const assertDealInClientScope = (org_id: string, client_id: string | null, deal_id: string) =>
+  assertRowInClientScope('crm_deals', 'Deal', org_id, client_id, deal_id);
+const assertContactInClientScope = (org_id: string, client_id: string | null, contact_id: string) =>
+  assertRowInClientScope('crm_contacts', 'Contact', org_id, client_id, contact_id);
+const assertAccountInClientScope = (org_id: string, client_id: string | null, account_id: string) =>
+  assertRowInClientScope('crm_accounts', 'Account', org_id, client_id, account_id);
 
 export const tools: KiniTool[] = [
   {
@@ -610,6 +663,267 @@ export const tools: KiniTool[] = [
       return { card: { type: 'account_created', data }, data };
     },
   },
+  // ── Update tools (client-scope re-guarded, mirror crm_update_lead) ───────
+  {
+    name: 'crm_update_deal',
+    description:
+      'Update fields on an existing deal by id — any of stage_id, amount, status (open/won/lost), close_date, owner_id, name. To move a deal by stage NAME, use crm_move_deal_stage instead.',
+    input_schema: { type: 'object', required: ['id'], properties: {
+      id: { type: 'string' },
+      stage_id: { type: 'string' },
+      amount: { type: 'number', description: 'Deal value in INR.' },
+      status: { type: 'string', enum: ['open', 'won', 'lost'] },
+      close_date: { type: 'string', description: 'Expected close date, YYYY-MM-DD.' },
+      owner_id: { type: 'string' },
+      name: { type: 'string' },
+    }},
+    exec: async (org_id, client_id, args, ctx) => {
+      const id = String(args.id ?? '');
+      if (!isUuid(id)) return { data: { error: 'A valid deal id is required.' } };
+      if (args.stage_id !== undefined && !isUuid(String(args.stage_id))) return { data: { error: 'stage_id must be a valid id.' } };
+      if (args.owner_id !== undefined && args.owner_id !== null && !isUuid(String(args.owner_id))) return { data: { error: 'owner_id must be a valid id.' } };
+      // Client-scope re-check before mutating — identical guard to
+      // crm_update_lead. dealsSvc.updateDeal only enforces org_id; a
+      // prompt-injected instruction must not steer KINI into editing a
+      // sibling client's deal.
+      await assertDealInClientScope(org_id, client_id, id);
+      const patch: Record<string, unknown> = {};
+      if (args.stage_id !== undefined) patch.stage_id = String(args.stage_id);
+      if (args.amount !== undefined) patch.amount = Number(args.amount);
+      if (args.status !== undefined) patch.status = String(args.status);
+      // close_date maps to the deal's expected_close_date column.
+      if (args.close_date !== undefined) patch.expected_close_date = String(args.close_date);
+      if (args.owner_id !== undefined) patch.owner_id = args.owner_id ? String(args.owner_id) : null;
+      if (args.name !== undefined) patch.name = String(args.name);
+      if (Object.keys(patch).length === 0) {
+        return { data: { error: 'No fields to update. Pass at least one of stage_id, amount, status, close_date, owner_id, name.' } };
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const deal = await dealsSvc.updateDeal(org_id, id, patch as any, ctx?.user_id ?? undefined);
+      return { card: { type: 'deal_updated', data: deal }, data: deal };
+    },
+  },
+  {
+    name: 'crm_move_deal_stage',
+    description:
+      "Move a deal to a different pipeline stage. Pass deal_id plus either stage_id, or a stage_name that is resolved to a stage within the deal's own pipeline (e.g. \"Proposal\", \"Negotiation\").",
+    input_schema: { type: 'object', required: ['deal_id'], properties: {
+      deal_id: { type: 'string' },
+      stage_id: { type: 'string' },
+      stage_name: { type: 'string', description: "Stage name to resolve within the deal's pipeline." },
+    }},
+    exec: async (org_id, client_id, args, ctx) => {
+      const deal_id = String(args.deal_id ?? '');
+      if (!isUuid(deal_id)) return { data: { error: 'A valid deal_id is required.' } };
+      await assertDealInClientScope(org_id, client_id, deal_id);
+      let stage_id = isUuid(args.stage_id) ? args.stage_id : '';
+      if (!stage_id) {
+        const name = typeof args.stage_name === 'string' ? args.stage_name.trim() : '';
+        if (!name) return { data: { error: 'Provide stage_id or stage_name.' } };
+        // Resolve the stage by name within the deal's OWN pipeline so a
+        // same-named stage in a different pipeline can't be selected.
+        const { data: dealRow } = await supabaseAdmin.from('crm_deals').select('pipeline_id')
+          .eq('org_id', org_id).eq('id', deal_id).maybeSingle();
+        if (!dealRow?.pipeline_id) return { data: { error: 'Deal has no pipeline to resolve the stage against.' } };
+        const { data: stages } = await supabaseAdmin.from('crm_deal_stages').select('id, name')
+          .eq('org_id', org_id).eq('pipeline_id', dealRow.pipeline_id).order('position');
+        const lower = name.toLowerCase();
+        const match = (stages ?? []).find((s) => String(s.name).toLowerCase() === lower)
+          ?? (stages ?? []).find((s) => String(s.name).toLowerCase().includes(lower));
+        if (!match) return { data: { error: `No stage matching "${name}" in this deal's pipeline.` } };
+        stage_id = match.id as string;
+      }
+      const deal = await dealsSvc.moveStage(org_id, deal_id, stage_id, ctx?.user_id ?? undefined);
+      return { card: { type: 'deal_updated', data: deal }, data: deal };
+    },
+  },
+  {
+    name: 'crm_update_contact',
+    description:
+      'Update a contact by id — any of name (or first_name/last_name), email, phone, mobile, title, account_id.',
+    input_schema: { type: 'object', required: ['id'], properties: {
+      id: { type: 'string' },
+      name: { type: 'string', description: 'Full name — split into first/last when first_name/last_name are not given.' },
+      first_name: { type: 'string' },
+      last_name: { type: 'string' },
+      email: { type: 'string' },
+      phone: { type: 'string' },
+      mobile: { type: 'string' },
+      title: { type: 'string' },
+      account_id: { type: 'string' },
+    }},
+    exec: async (org_id, client_id, args) => {
+      const id = String(args.id ?? '');
+      if (!isUuid(id)) return { data: { error: 'A valid contact id is required.' } };
+      if (args.account_id !== undefined && args.account_id !== null && !isUuid(String(args.account_id))) {
+        return { data: { error: 'account_id must be a valid id.' } };
+      }
+      await assertContactInClientScope(org_id, client_id, id);
+      const patch: Record<string, unknown> = {};
+      if (typeof args.first_name === 'string') patch.first_name = args.first_name;
+      if (typeof args.last_name === 'string') patch.last_name = args.last_name;
+      // Convenience: split a single `name` into first/last when neither part
+      // was passed explicitly (contacts are stored split, like leads).
+      if (patch.first_name === undefined && patch.last_name === undefined && typeof args.name === 'string' && args.name.trim()) {
+        const parts = args.name.trim().split(/\s+/);
+        patch.first_name = parts.shift() ?? null;
+        patch.last_name = parts.length ? parts.join(' ') : null;
+      }
+      if (typeof args.email === 'string') patch.email = args.email;
+      if (typeof args.phone === 'string') patch.phone = args.phone;
+      if (typeof args.mobile === 'string') patch.mobile = args.mobile;
+      if (typeof args.title === 'string') patch.title = args.title;
+      if (args.account_id !== undefined) patch.account_id = args.account_id ? String(args.account_id) : null;
+      if (Object.keys(patch).length === 0) return { data: { error: 'No fields to update.' } };
+      patch.updated_at = new Date().toISOString();
+      const { data, error } = await supabaseAdmin.from('crm_contacts').update(patch)
+        .eq('org_id', org_id).eq('id', id).select('*').single();
+      if (error) return { data: { error: error.message } };
+      return { card: { type: 'contact_updated', data }, data };
+    },
+  },
+  {
+    name: 'crm_update_account',
+    description:
+      'Update an account (company) by id — any of name, industry, website, owner_id.',
+    input_schema: { type: 'object', required: ['id'], properties: {
+      id: { type: 'string' },
+      name: { type: 'string' },
+      industry: { type: 'string' },
+      website: { type: 'string' },
+      owner_id: { type: 'string' },
+    }},
+    exec: async (org_id, client_id, args) => {
+      const id = String(args.id ?? '');
+      if (!isUuid(id)) return { data: { error: 'A valid account id is required.' } };
+      if (args.owner_id !== undefined && args.owner_id !== null && !isUuid(String(args.owner_id))) {
+        return { data: { error: 'owner_id must be a valid id.' } };
+      }
+      await assertAccountInClientScope(org_id, client_id, id);
+      const patch: Record<string, unknown> = {};
+      if (typeof args.name === 'string' && args.name.trim()) patch.name = args.name.trim();
+      if (typeof args.industry === 'string') patch.industry = args.industry;
+      if (typeof args.website === 'string') patch.website = args.website;
+      if (args.owner_id !== undefined) patch.owner_id = args.owner_id ? String(args.owner_id) : null;
+      if (Object.keys(patch).length === 0) return { data: { error: 'No fields to update.' } };
+      patch.updated_at = new Date().toISOString();
+      const { data, error } = await supabaseAdmin.from('crm_accounts').update(patch)
+        .eq('org_id', org_id).eq('id', id).select('*').single();
+      if (error) return { data: { error: error.message } };
+      return { card: { type: 'account_updated', data }, data };
+    },
+  },
+  // ── Memory ───────────────────────────────────────────────────────────────
+  {
+    name: 'remember_fact',
+    description:
+      'Remember a durable fact about the CURRENT user for future conversations — a stable preference or working context (e.g. key "preferred_currency_format" value "lakhs", or key "territory" value "Pune"). Use for lasting facts the user asks you to remember, not transient chat detail. Both key and value are required.',
+    input_schema: { type: 'object', required: ['key', 'value'], properties: {
+      key: { type: 'string', description: 'Short, stable key, e.g. "territory".' },
+      value: { type: 'string', description: 'The value to remember.' },
+    }},
+    exec: async (org_id, _client_id, args, ctx) => {
+      const user_id = ctx?.user_id ?? null;
+      if (!user_id) return { data: { error: 'Cannot identify the current user, so nothing was saved.' } };
+      const key = String(args.key ?? '').trim();
+      const value = String(args.value ?? '').trim();
+      if (!key || !value) return { data: { error: 'Both key and value are required to remember something.' } };
+      const entry = await kiniMemory.setMemory(user_id, org_id, key, value, { source: 'kini' });
+      if (!entry) return { data: { error: 'Could not save that memory — try a shorter key/value.' } };
+      return { card: { type: 'summary', data: { text: `Got it — I'll remember ${entry.key}: ${entry.value}.` } }, data: entry };
+    },
+  },
+  // ── Analytics (read-only aggregates) ─────────────────────────────────────
+  {
+    name: 'crm_conversion_funnel',
+    description:
+      'Read-only conversion funnel over the last N days (default 30): lead counts by status, deal counts by open/won/lost, and derived lead-conversion + deal-win rates. Org + client scoped.',
+    input_schema: { type: 'object', properties: {
+      days: { type: 'number', default: 30, description: 'Look-back window on created_at, in days (default 30, max 365).' },
+    }},
+    exec: async (org_id, client_id, args) => {
+      const days = Math.min(Math.max(Number(args.days ?? 30) || 30, 1), 365);
+      const fromIso = new Date(Date.now() - days * 86400000).toISOString();
+
+      // Leads by status — one windowed read tallied in JS. range(0, 99999)
+      // lifts PostgREST's 1000-row cap, mirroring analytics.winRate.
+      let lq = supabaseAdmin.from('crm_leads').select('status')
+        .eq('org_id', org_id).is('deleted_at', null)
+        .gte('created_at', fromIso).range(0, 99999);
+      lq = scopeToClient(lq, client_id);
+      const { data: leadRows } = await lq;
+      const leadsByStatus: Record<string, number> = {};
+      for (const r of (leadRows ?? []) as Array<{ status?: string | null }>) {
+        const s = String(r.status ?? 'unknown');
+        leadsByStatus[s] = (leadsByStatus[s] ?? 0) + 1;
+      }
+      const totalLeads = (leadRows ?? []).length;
+      const convertedLeads = leadsByStatus['converted'] ?? 0;
+
+      // Deals by open/won/lost — prefer the joined stage_type, fall back to
+      // the deal.status column for legacy rows with no stage (mirrors
+      // leaderboard.service).
+      let dq = supabaseAdmin.from('crm_deals').select('status, crm_deal_stages(stage_type)')
+        .eq('org_id', org_id).is('deleted_at', null)
+        .gte('created_at', fromIso).range(0, 99999);
+      dq = scopeToClient(dq, client_id);
+      const { data: dealRows } = await dq;
+      let dealsOpen = 0, dealsWon = 0, dealsLost = 0;
+      for (const r of (dealRows ?? []) as Array<{ status?: string | null; crm_deal_stages?: { stage_type?: string | null } | null }>) {
+        const st = r.crm_deal_stages?.stage_type ?? r.status ?? 'open';
+        if (st === 'won') dealsWon += 1;
+        else if (st === 'lost') dealsLost += 1;
+        else dealsOpen += 1;
+      }
+      const totalDeals = dealsOpen + dealsWon + dealsLost;
+      const closedDeals = dealsWon + dealsLost;
+      const leadConversionRate = totalLeads > 0 ? convertedLeads / totalLeads : 0;
+      const dealWinRate = closedDeals > 0 ? dealsWon / closedDeals : 0;
+
+      const data = {
+        window_days: days,
+        leads: { total: totalLeads, by_status: leadsByStatus, converted: convertedLeads },
+        deals: { total: totalDeals, open: dealsOpen, won: dealsWon, lost: dealsLost },
+        rates: {
+          lead_conversion_rate: Math.round(leadConversionRate * 1000) / 1000,
+          deal_win_rate: Math.round(dealWinRate * 1000) / 1000,
+        },
+      };
+      const text = `Last ${days} days — ${totalLeads} leads (${convertedLeads} converted, ${(leadConversionRate * 100).toFixed(1)}%); deals ${dealsWon} won / ${dealsLost} lost / ${dealsOpen} open (win rate ${(dealWinRate * 100).toFixed(1)}%).`;
+      return { card: { type: 'summary', data: { text } }, data };
+    },
+  },
+  {
+    name: 'crm_rep_leaderboard',
+    description:
+      'Read-only sales leaderboard: top N owners ranked by deals WON (count + revenue) over a period — mtd / qtd / ytd, or a custom from/to. Org + client scoped.',
+    input_schema: { type: 'object', properties: {
+      limit: { type: 'number', default: 10, description: 'How many top reps to return (default 10, max 50).' },
+      period: { type: 'string', enum: ['mtd', 'qtd', 'ytd', 'custom'], description: "Time window. Defaults to 'mtd'." },
+      metric: { type: 'string', enum: ['count', 'revenue'], description: "Rank by won-deal count or won revenue. Defaults to 'count'." },
+      from: { type: 'string', description: "YYYY-MM-DD lower bound — required when period='custom'." },
+      to: { type: 'string', description: "YYYY-MM-DD upper bound — required when period='custom'." },
+    }},
+    exec: async (org_id, client_id, args) => {
+      const period = (['mtd', 'qtd', 'ytd', 'custom'] as const).includes(args.period as never)
+        ? (args.period as 'mtd' | 'qtd' | 'ytd' | 'custom')
+        : 'mtd';
+      const metric = args.metric === 'revenue' ? 'revenue' : 'count';
+      if (period === 'custom' && !(typeof args.from === 'string' && typeof args.to === 'string')) {
+        return { data: { error: "period='custom' requires both from and to (YYYY-MM-DD)." } };
+      }
+      const limit = Math.min(Math.max(Number(args.limit ?? 10) || 10, 1), 50);
+      const result = await leaderboardSvc.leaderboard(
+        org_id,
+        { metric, period, from: args.from as string | undefined, to: args.to as string | undefined },
+        // Hard client isolation to match scopeToClient used by every other
+        // KINI tool: strict-eq when a client is in scope, org-wide otherwise.
+        { client_id, strict: client_id != null },
+      );
+      const rows = result.rows.slice(0, limit);
+      return { card: { type: 'leaderboard', data: { ...result, rows } }, data: { ...result, rows } };
+    },
+  },
 ];
 
 /** Returns the Anthropic tool-use schema array. */
@@ -618,11 +932,11 @@ export function toAnthropicTools() {
 }
 
 /** Find and execute a tool by name. */
-export async function executeTool(org_id: string, client_id: string | null, name: string, args: Record<string, unknown>): Promise<KiniToolResult | null> {
+export async function executeTool(org_id: string, client_id: string | null, name: string, args: Record<string, unknown>, ctx?: KiniToolContext): Promise<KiniToolResult | null> {
   const tool = tools.find(t => t.name === name);
   if (!tool) return null;
   try {
-    const result = await tool.exec(org_id, client_id, args);
+    const result = await tool.exec(org_id, client_id, args, ctx);
     if (typeof result === 'object' && result !== null && 'card' in result) {
       const r = result as unknown as { data: unknown; card?: { type: string; data: unknown } };
       return { tool: name, data: r.data, card: r.card };
