@@ -64,6 +64,8 @@ export const CONFIRM_REQUIRED_TOOLS: readonly string[] = [
   'ff_assign_visit',
   'ff_approve_attendance',
   'ff_approve_leave',
+  // wave 4a — scheduling
+  'kini_schedule_reminder',
 ];
 
 const CONFIRM_SET = new Set<string>(CONFIRM_REQUIRED_TOOLS);
@@ -117,6 +119,8 @@ const TOOL_LABELS: Record<string, string> = {
   ff_assign_visit: 'Assign visit',
   ff_approve_attendance: 'Approve attendance',
   ff_approve_leave: 'Approve leave',
+  // wave 4a
+  kini_schedule_reminder: 'Schedule reminder',
 };
 
 export function labelForTool(tool: string): string {
@@ -238,6 +242,14 @@ export function summarizePendingAction(tool: string, rawArgs: Record<string, unk
       return `${str(a.decision) === 'rejected' ? 'Reject' : 'Approve'} attendance request ${str(a.request_id)}`;
     case 'ff_approve_leave':
       return `${str(a.decision) === 'rejected' ? 'Reject' : 'Approve'} leave request ${str(a.request_id)}`;
+    case 'kini_schedule_reminder': {
+      const msg = str(a.message);
+      const when = str(a.run_at);
+      const recur = str(a.recurrence);
+      const rec = recur && recur !== 'once' ? ` (repeats ${recur})` : '';
+      const base = when ? `Schedule a reminder for ${when}${rec}` : `Schedule a reminder${rec}`;
+      return msg ? `${base}: "${truncate(msg)}"` : base;
+    }
     default: {
       const changes = fieldList(a, []);
       return changes ? `${labelForTool(tool)} (${changes})` : labelForTool(tool);
@@ -309,6 +321,8 @@ export function doneText(tool: string, data: unknown): string {
     ff_assign_visit: 'Visit assigned.',
     ff_approve_attendance: 'Attendance request decided.',
     ff_approve_leave: 'Leave request decided.',
+    // wave 4a
+    kini_schedule_reminder: 'Reminder scheduled.',
   };
   return DONE[tool] ?? 'Done.';
 }

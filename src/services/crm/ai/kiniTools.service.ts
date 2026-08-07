@@ -1409,6 +1409,56 @@ export const tools: KiniTool[] = [
       return { card: { type: 'summary', data: { text: `Custom field "${label}" (${fieldKey}) added to ${entity}.` } }, data: { ...data, message: `Custom field "${label}" created.` } };
     },
   },
+  // ── Wave 4a: scheduling / reminders (mutation → confirm-gated) ─────────────
+  {
+    name: 'kini_schedule_reminder',
+    description:
+      'Schedule a reminder to be pushed to the CURRENT user at a future time. Use when the user says "remind me…", "follow up on…", "ping me every morning", etc. Provide the reminder text in message and an ISO 8601 run_at (compute from the current IST time — include the offset, e.g. 2026-08-08T09:00:00+05:30). recurrence is once (default), daily, or weekly; title is the optional push heading. Delivered as a push notification at the scheduled time.',
+    input_schema: { type: 'object', required: ['message', 'run_at'], properties: {
+      message: { type: 'string', description: 'The reminder text to deliver.' },
+      run_at: { type: 'string', description: 'ISO 8601 datetime for the first delivery, e.g. 2026-08-08T09:00:00+05:30.' },
+      recurrence: { type: 'string', enum: ['once', 'daily', 'weekly'], description: 'How often to repeat. Defaults to once.' },
+      title: { type: 'string', description: 'Optional push heading. Defaults to "Reminder".' },
+    }},
+    exec: async (org_id, client_id, args, ctx) => {
+      const user_id = ctx?.user_id ?? null;
+      if (!user_id || !isUuid(user_id)) {
+        return { data: { error: 'Cannot identify the current user, so nothing was scheduled.' } };
+      }
+      const message = String(args.message ?? '').trim();
+      if (!message) return { data: { error: 'A reminder message is required.' } };
+      const rawRunAt = String(args.run_at ?? '').trim();
+      const ts = Date.parse(rawRunAt);
+      if (!rawRunAt || Number.isNaN(ts)) {
+        return { data: { error: 'run_at must be a valid ISO 8601 datetime, e.g. 2026-08-08T09:00:00+05:30.' } };
+      }
+      const recurrence = (['once', 'daily', 'weekly'] as const).includes(args.recurrence as never)
+        ? String(args.recurrence)
+        : 'once';
+      const title = typeof args.title === 'string' && args.title.trim() ? args.title.trim().slice(0, 120) : null;
+      const runAtIso = new Date(ts).toISOString();
+      const row = {
+        org_id,
+        client_id: client_id ?? null,
+        user_id,
+        run_at: runAtIso,
+        recurrence,
+        message: message.slice(0, 1000),
+        title,
+        status: 'active',
+      };
+      const { data, error } = await supabaseAdmin
+        .from('kini_scheduled_tasks')
+        .insert(row)
+        .select('id, run_at, recurrence, title, message, status')
+        .single();
+      if (error) return { data: { error: error.message } };
+      const rec = recurrence === 'once' ? '' : ` (repeats ${recurrence})`;
+      const preview = message.length > 80 ? `${message.slice(0, 79)}…` : message;
+      const text = `Reminder scheduled for ${runAtIso}${rec}: "${preview}"`;
+      return { card: { type: 'summary', data: { text } }, data: { ...data, message: text } };
+    },
+  },
 ];
 
 /** Returns the Anthropic tool-use schema array. */
