@@ -42,6 +42,7 @@ export interface DetectedSKU {
   confidence: number;
   is_competitor: boolean;
   reasoning?: string | null;               // NEW — one-line why this identification was made
+  recovered?: boolean;                     // NEW — found only by the second-pass targeted recall (Lever 1)
 }
 
 export type PromoOfferType = 'price_off' | 'bundle' | 'bogo' | 'combo' | 'other';
@@ -119,7 +120,12 @@ tool exactly once. Do not answer in prose — only the tool call is read.
 
 For EACH product on the shelf:
 - Identify the SKU. If it matches an entry in the provided expected_skus list,
-  set sku_id to that id; if it matches competitor_skus, set is_competitor = true.
+  set sku_id to that id. If it matches an entry in competitor_skus (a KNOWN,
+  tracked competitor), set is_competitor = true AND set sku_id to that
+  competitor's sku_id, so the same competitor is identified consistently across
+  captures. Competitor reference pack-shots are provided too — use them to match.
+  If it is clearly a competitor product but not in competitor_skus, set
+  is_competitor = true with sku_id = null.
   If you cannot read the label confidently, set sku_id = null and lower confidence.
 - Assign a "brand" (the manufacturer/brand on the pack) and a "category". The
   category MUST be chosen from the provided category list (the real taxonomy for
@@ -151,6 +157,24 @@ match over a name guess, and use them to distinguish look-alike variants and
 competitor packs. A reference tagged "(competitor)" means is_competitor = true.
 
 Be conservative: when unsure, lower the confidence rather than guessing.`;
+
+// Lever 1 — second-pass targeted recall. A focused pass that only asks about a
+// short list of EXPECTED OWN products the first scan missed (each shown by its
+// reference pack-shot), so we recover recognition misses without re-scanning the
+// whole shelf and can cleanly separate "we missed it" from "out of stock".
+const RECALL_SYSTEM_PROMPT = `You are a retail shelf-recognition expert doing a SECOND, focused pass.
+A first automated scan of this shelf may have MISSED some specific products. You
+are shown the reference pack-shot of each such product (labelled with its
+sku_id), then the shelf photo. For EACH referenced product, decide whether it is
+actually present somewhere on this shelf. Call "report_recall" exactly once.
+
+Return a detection ONLY for products you can actually SEE on the shelf: set its
+sku_id to the matching reference's sku_id, and give its bbox ([x, y, w, h] in
+0..1 normalized image coordinates), facings (product fronts visible), shelf_index
+(0 = bottom shelf, increasing upward) and confidence. Do NOT invent products, do
+NOT report ones you cannot clearly see, and do NOT report anything outside the
+reference set. Be conservative: if you are not sure a referenced product is on
+the shelf, OMIT it — omission means it is genuinely out of stock.`;
 
 const PARSE_SYSTEM_PROMPT = `You are a retail planogram-parsing expert. You receive an image of a brand
 planogram document (a diagrammatic shelf layout the brand publishes) and must
@@ -231,6 +255,20 @@ const REPORT_SHELF_SCHEMA = {
     overall_confidence: { type: 'number', description: '0..1' },
   },
   required: ['shelf_count', 'detected_skus', 'overall_confidence'],
+} as const;
+
+/**
+ * Forced-tool input schema for the second-pass targeted recall (Lever 1).
+ * Same per-detection shape as report_shelf (so normalization is shared), but
+ * only detected_skus is required — the recall reports just the products it
+ * could actually find from the missing-SKU candidate list.
+ */
+const REPORT_RECALL_SCHEMA = {
+  type: 'object',
+  properties: {
+    detected_skus: REPORT_SHELF_SCHEMA.properties.detected_skus,
+  },
+  required: ['detected_skus'],
 } as const;
 
 /** Forced-tool input schema for brand-planogram parsing. */
@@ -344,31 +382,9 @@ export class PlanogramVisionService {
     });
 
     const detected_skus: DetectedSKU[] = (Array.isArray(parsed.detected_skus) ? parsed.detected_skus : [])
-      .map((s: any): DetectedSKU => {
-        const bbox = normalizeBbox(s.bbox);
-        const bbox_area = bbox
-          ? (s.bbox_area == null ? round4(bbox[2] * bbox[3]) : Number(s.bbox_area))
-          : null;
-        return {
-          sku_id: s.sku_id == null ? null : String(s.sku_id),
-          sku_name: String(s.sku_name || '').trim(),
-          brand: s.brand == null ? null : String(s.brand),
-          category: s.category == null ? null : String(s.category),
-          facings: Math.max(0, Math.round(Number(s.facings) || 0)),
-          shelf_index: Math.max(0, Math.round(Number(s.shelf_index) || 0)),
-          zone: normalizeZone(s.zone),
-          bbox: bbox || [0, 0, 0, 0],
-          bbox_area,
-          price: s.price == null || !Number.isFinite(Number(s.price)) ? null : Number(s.price),
-          price_currency: s.price_currency == null ? null : String(s.price_currency),
-          price_source: normalizePriceSource(s.price_source),
-          confidence: clamp01(s.confidence),
-          is_competitor: Boolean(s.is_competitor),
-          reasoning: s.reasoning == null ? null : String(s.reasoning),
-        };
-      })
+      .map((s: any): DetectedSKU => toDetectedSku(s))
       // Keep only detections with a valid bbox (tolerate slight over-1 values).
-      .filter((s: DetectedSKU) => Array.isArray(s.bbox) && s.bbox.length === 4 && s.bbox.every((v) => v >= 0 && v <= 1.5) && (s.bbox[2] > 0 || s.bbox[3] > 0));
+      .filter(hasValidBbox);
 
     const promotions: Promo[] = (Array.isArray(parsed.promotions) ? parsed.promotions : [])
       .map((p: any): Promo => ({
@@ -399,7 +415,130 @@ export class PlanogramVisionService {
       result.quality.blur_score < 0.4 ||
       result.quality.glare_score < 0.4;
 
+    // ── Lever 1: second-pass targeted recall ─────────────────────────────
+    // Recover EXPECTED OWN products that ARE on the shelf but pass-1 missed.
+    // Guarded end-to-end: recallMissingSkus only makes a vision call when ≥1
+    // expected own SKU with a reference pack-shot is absent from pass-1, and the
+    // whole thing is wrapped so a failed/slow/timed-out recall NEVER breaks the
+    // capture — on any error we keep the pass-1 results untouched.
+    try {
+      const recovered = await this.recallMissingSkus({
+        apiKey,
+        model,
+        imageBase64: args.imageBase64,
+        imageMediaType: args.imageMediaType,
+        pass1: result.detected_skus,
+        expectedSkus: args.expectedSkus || [],
+        referenceImages: args.referenceImages || [],
+      });
+      if (recovered.length) {
+        result.detected_skus = result.detected_skus.concat(recovered);
+        logger.info(`[PlanogramVision] recall recovered ${recovered.length} missed SKU(s)`);
+      }
+    } catch (e) {
+      logger.warn(`[PlanogramVision] recall pass failed (keeping pass-1 results): ${(e as Error)?.message}`);
+    }
+
     return result;
+  }
+
+  /** Hard deadline for the second-pass recall so a slow recall never pins the capture. */
+  private static readonly RECALL_TIMEOUT_MS = 30_000;
+
+  /**
+   * Lever 1 — second-pass targeted recall.
+   *
+   * Given the pass-1 detections and the reference pack-shots already loaded for
+   * this capture, ask the model — in ONE focused vision call — whether each
+   * EXPECTED OWN SKU that pass-1 missed (and that has a reference pack-shot) is
+   * actually on the shelf. This recovers recognition misses and cleanly
+   * separates "we missed it" (recovered) from "genuinely out of stock" (omitted).
+   *
+   * Returns ONLY the newly found detections, each tagged `recovered: true` and
+   * deduped against pass-1 by sku_id and bbox IoU. Best-effort: on any error the
+   * caller keeps pass-1. Returns [] (without a vision call) when there is nothing
+   * to recall, which is the primary guard.
+   */
+  private static async recallMissingSkus(opts: {
+    apiKey: string;
+    model: string;
+    imageBase64: string;
+    imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp';
+    pass1: DetectedSKU[];
+    expectedSkus: NonNullable<RecognizeArgs['expectedSkus']>;
+    referenceImages: NonNullable<RecognizeArgs['referenceImages']>;
+  }): Promise<DetectedSKU[]> {
+    // Own SKUs pass-1 already found (only own detections count as "present").
+    const pass1OwnIds = new Set<string>();
+    for (const d of opts.pass1) if (d.sku_id && !d.is_competitor) pass1OwnIds.add(d.sku_id);
+
+    // Own reference pack-shots keyed by sku_id (the only ones we can targetedly
+    // recall — a missing SKU with no reference has nothing to show the model).
+    const ownRefById = new Map<string, NonNullable<RecognizeArgs['referenceImages']>[number]>();
+    for (const r of opts.referenceImages) if (!r.is_competitor) ownRefById.set(r.sku_id, r);
+
+    // Candidates = expected own SKUs absent from pass-1 that HAVE a reference.
+    const missingIds = new Set<string>();
+    const candidateRefs: NonNullable<RecognizeArgs['referenceImages']> = [];
+    for (const e of opts.expectedSkus) {
+      if (pass1OwnIds.has(e.sku_id)) continue;
+      const ref = ownRefById.get(e.sku_id);
+      if (!ref) continue;
+      if (missingIds.has(e.sku_id)) continue;
+      missingIds.add(e.sku_id);
+      candidateRefs.push(ref);
+    }
+
+    // GUARD: nothing to recall → no vision call, pass-1 stands.
+    if (candidateRefs.length === 0) return [];
+
+    const content: Array<Record<string, unknown>> = [];
+    content.push({ type: 'text', text: 'A first scan may have missed these specific products. Their reference pack-shots follow, each labelled with its sku_id.' });
+    for (const r of candidateRefs) {
+      content.push({ type: 'text', text: `Reference - sku_id=${r.sku_id}: ${r.sku_name}` });
+      content.push({ type: 'image', source: { type: 'base64', media_type: r.imageMediaType, data: r.imageBase64 } });
+    }
+    content.push({ type: 'text', text: 'End of references. Now analyze this SHELF image:' });
+    content.push({ type: 'image', source: { type: 'base64', media_type: opts.imageMediaType, data: opts.imageBase64 } });
+    content.push({
+      type: 'text',
+      text: [
+        'For EACH referenced product, decide if it is present on this shelf; if yes',
+        'return its sku_id, bbox, facings, shelf_index and confidence. Only report',
+        'ones you can actually see — omit the rest (they are out of stock).',
+        'candidate_missing_skus = ' + JSON.stringify(candidateRefs.map((r) => ({ sku_id: r.sku_id, sku_name: r.sku_name }))),
+      ].join('\n'),
+    });
+
+    const parsed = await this.callVisionTool({
+      apiKey: opts.apiKey,
+      model: opts.model,
+      system: RECALL_SYSTEM_PROMPT,
+      content,
+      toolName: 'report_recall',
+      toolDescription: 'Report which of the specified previously-missed products are present on the shelf.',
+      inputSchema: REPORT_RECALL_SCHEMA,
+      errorCode: 'VISION_RECALL_ERROR',
+      timeoutMs: this.RECALL_TIMEOUT_MS,
+    });
+
+    const found: DetectedSKU[] = (Array.isArray(parsed.detected_skus) ? parsed.detected_skus : [])
+      .map((s: any): DetectedSKU => ({ ...toDetectedSku(s), is_competitor: false, recovered: true }))
+      .filter(hasValidBbox);
+
+    // Merge/dedup: accept only the specific missing SKUs we asked about, drop any
+    // that collide with pass-1 (or an earlier recovery) by sku_id, and drop any
+    // whose bbox strongly overlaps an existing detection (same physical facing).
+    const out: DetectedSKU[] = [];
+    const takenIds = new Set<string>();
+    for (const r of found) {
+      if (!r.sku_id || !missingIds.has(r.sku_id)) continue;
+      if (pass1OwnIds.has(r.sku_id) || takenIds.has(r.sku_id)) continue;
+      if (opts.pass1.some((d) => bboxIoU(d.bbox, r.bbox) > 0.5)) continue;
+      takenIds.add(r.sku_id);
+      out.push(r);
+    }
+    return out;
   }
 
   /**
@@ -482,8 +621,12 @@ export class PlanogramVisionService {
     toolDescription: string;
     inputSchema: unknown;
     errorCode: string;
+    // Optional hard deadline (ms). Used by the second-pass recall so a slow
+    // recall aborts instead of pinning the capture. Existing callers pass none
+    // → behavior is unchanged (plain fetch, no signal).
+    timeoutMs?: number;
   }): Promise<any> {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const init: RequestInit = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -506,7 +649,26 @@ export class PlanogramVisionService {
         tool_choice: { type: 'tool', name: opts.toolName },
         messages: [{ role: 'user', content: opts.content }],
       }),
-    });
+    };
+
+    let response: Response;
+    if (opts.timeoutMs && opts.timeoutMs > 0) {
+      // Same AbortController + hard-deadline pattern used across AIService.
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), opts.timeoutMs);
+      try {
+        response = await fetch('https://api.anthropic.com/v1/messages', { ...init, signal: ac.signal });
+      } catch (e: unknown) {
+        if ((e as { name?: string })?.name === 'AbortError') {
+          throw new AppError(504, 'Vision request timed out', opts.errorCode);
+        }
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
+    } else {
+      response = await fetch('https://api.anthropic.com/v1/messages', init);
+    }
 
     if (!response.ok) {
       const err: any = await response.json().catch(() => ({}));
@@ -556,4 +718,61 @@ function normalizeOfferType(v: any): PromoOfferType {
 
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+}
+
+/**
+ * Normalize one raw model detection into a DetectedSKU. Shared by the first
+ * pass and the second-pass recall so both produce identically-shaped rows.
+ */
+function toDetectedSku(s: any): DetectedSKU {
+  const bbox = normalizeBbox(s.bbox);
+  const bbox_area = bbox
+    ? (s.bbox_area == null ? round4(bbox[2] * bbox[3]) : Number(s.bbox_area))
+    : null;
+  return {
+    sku_id: s.sku_id == null ? null : String(s.sku_id),
+    sku_name: String(s.sku_name || '').trim(),
+    brand: s.brand == null ? null : String(s.brand),
+    category: s.category == null ? null : String(s.category),
+    facings: Math.max(0, Math.round(Number(s.facings) || 0)),
+    shelf_index: Math.max(0, Math.round(Number(s.shelf_index) || 0)),
+    zone: normalizeZone(s.zone),
+    bbox: bbox || [0, 0, 0, 0],
+    bbox_area,
+    price: s.price == null || !Number.isFinite(Number(s.price)) ? null : Number(s.price),
+    price_currency: s.price_currency == null ? null : String(s.price_currency),
+    price_source: normalizePriceSource(s.price_source),
+    confidence: clamp01(s.confidence),
+    is_competitor: Boolean(s.is_competitor),
+    reasoning: s.reasoning == null ? null : String(s.reasoning),
+  };
+}
+
+/** Keep only detections with a usable bbox (tolerate slight over-1 values). */
+function hasValidBbox(s: DetectedSKU): boolean {
+  return (
+    Array.isArray(s.bbox) &&
+    s.bbox.length === 4 &&
+    s.bbox.every((v) => v >= 0 && v <= 1.5) &&
+    (s.bbox[2] > 0 || s.bbox[3] > 0)
+  );
+}
+
+/** Intersection-over-union of two normalized [x, y, w, h] boxes (0 when disjoint). */
+function bboxIoU(
+  a: [number, number, number, number],
+  b: [number, number, number, number],
+): number {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 4 || b.length !== 4) return 0;
+  const ax2 = a[0] + a[2];
+  const ay2 = a[1] + a[3];
+  const bx2 = b[0] + b[2];
+  const by2 = b[1] + b[3];
+  const ix = Math.max(0, Math.min(ax2, bx2) - Math.max(a[0], b[0]));
+  const iy = Math.max(0, Math.min(ay2, by2) - Math.max(a[1], b[1]));
+  const inter = ix * iy;
+  const areaA = Math.max(0, a[2]) * Math.max(0, a[3]);
+  const areaB = Math.max(0, b[2]) * Math.max(0, b[3]);
+  const union = areaA + areaB - inter;
+  return union > 0 ? inter / union : 0;
 }
