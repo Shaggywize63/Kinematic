@@ -50,6 +50,10 @@ export interface ChatWithToolsOutput {
   reply: string;
   cards: Array<{ type: string; data: unknown }>;
   tool_calls: Array<{ name: string; args: unknown; result: unknown }>;
+  // Summed Anthropic token usage across every response in the loop (each
+  // tool-use turn plus the wrap-up call). Callers pass this into the quota
+  // recorder so kini_usage reflects real cost instead of 0. Always present.
+  usage: { input: number; output: number };
 }
 
 /**
@@ -94,6 +98,17 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
   const cards: Array<{ type: string; data: unknown }> = [];
   const tool_calls: Array<{ name: string; args: unknown; result: unknown }> = [];
 
+  // Accumulate token usage across EVERY Anthropic response in this loop — the
+  // per-turn tool-use calls AND the final wrap-up call. Previously usage was
+  // never captured, so recordQuery always incremented tokens by 0. Summing it
+  // here and returning it lets the call sites meter real cost.
+  const usage = { input: 0, output: 0 };
+  const addUsage = (u?: { input_tokens?: number; output_tokens?: number } | null): void => {
+    if (!u) return;
+    usage.input += Number(u.input_tokens ?? 0) || 0;
+    usage.output += Number(u.output_tokens ?? 0) || 0;
+  };
+
   for (let turn = 0; turn < max_turns; turn++) {
     // Use the AIService deadline+opaque-error wrapper so a slow
     // upstream can't pin a worker, and a 401 from Anthropic can't
@@ -121,18 +136,20 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
     }
     const data = await res.json() as {
       stop_reason: string;
+      usage?: { input_tokens?: number; output_tokens?: number };
       content: Array<
         | { type: 'text'; text: string }
         | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
       >;
     };
+    addUsage(data.usage);
 
     const toolUses = data.content.filter(c => c.type === 'tool_use') as Array<{ type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }>;
     const textBlocks = data.content.filter(c => c.type === 'text') as Array<{ type: 'text'; text: string }>;
 
     if (toolUses.length === 0) {
       const reply = textBlocks.map(t => t.text).join('\n').trim();
-      return { reply, cards, tool_calls };
+      return { reply, cards, tool_calls, usage };
     }
 
     // Append assistant turn
@@ -178,14 +195,16 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
     });
     if (finalRes.ok) {
       const finalData = (await finalRes.json()) as {
+        usage?: { input_tokens?: number; output_tokens?: number };
         content: Array<{ type: string; text?: string }>;
       };
+      addUsage(finalData.usage);
       const reply = (finalData.content || [])
         .filter((c) => c.type === 'text')
         .map((c) => (c as { text: string }).text)
         .join('\n')
         .trim();
-      return { reply, cards, tool_calls };
+      return { reply, cards, tool_calls, usage };
     }
     const body = await finalRes.json().catch(() => ({}));
     const detail = (body as { error?: { message?: string } })?.error?.message || '';
@@ -193,5 +212,5 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
   } catch (e) {
     console.warn('[chatWithTools.final] error:', (e as Error)?.message);
   }
-  return { reply: '', cards, tool_calls };
+  return { reply: '', cards, tool_calls, usage };
 }

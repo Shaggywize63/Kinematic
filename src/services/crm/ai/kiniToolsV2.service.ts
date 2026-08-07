@@ -7,6 +7,8 @@
 import {
   tools as crmTools,
   executeTool as executeCrmTool,
+  isToolAllowedForRole,
+  roleRefusal,
   type KiniTool,
   type KiniToolContext,
   type KiniToolResult,
@@ -37,6 +39,12 @@ export async function executeTool(
 ): Promise<KiniToolResult | null> {
   const v2Tool = ffTools.find((t) => t.name === name);
   if (v2Tool) {
+    // Per-tool RBAC gate (permissive by default). CRM tools are gated inside
+    // executeCrmTool; the v2-module (ff/…) tools are dispatched here, so apply
+    // the same gate before running them. Unknown tools fall through untouched.
+    if (!isToolAllowedForRole(ctx?.role, name)) {
+      return roleRefusal(ctx?.role, name);
+    }
     try {
       const result = await v2Tool.exec(org_id, client_id, args, ctx);
       if (typeof result === 'object' && result !== null && 'card' in result) {

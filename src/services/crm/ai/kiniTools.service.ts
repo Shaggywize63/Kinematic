@@ -17,9 +17,16 @@ import { sendWhatsapp } from '../whatsapp.service';
  * Optional so every existing tool (which never reads it) keeps its exact
  * signature; only tools that act on behalf of the current USER — e.g.
  * remember_fact writing per-user memory — read it.
+ *
+ * `city` mirrors the dashboard's global `?city=` scope: when set, CRM read
+ * tools over tables that carry a `city` column constrain to it (see
+ * `scopeToCity`). `role` drives the per-tool RBAC gate in `executeTool`
+ * (see `ROLE_TOOL_POLICY`). Both are optional and default to no restriction.
  */
 export interface KiniToolContext {
   user_id?: string | null;
+  city?: string | null;
+  role?: string | null;
 }
 
 export interface KiniTool {
@@ -52,6 +59,81 @@ export interface KiniToolResult {
 function scopeToClient<Q>(q: Q, client_id: string | null): Q {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return client_id ? ((q as any).eq('client_id', client_id) as Q) : q;
+}
+
+// City scope — mirrors the dashboard's global `?city=` filter. When the caller
+// has a city scope active (ctx.city set), constrain a read to that city with an
+// equality filter. ONLY apply this to queries over tables that actually carry a
+// `city` column (crm_leads / crm_accounts / crm_contacts). crm_deals and
+// crm_activities have NO city column, so their read tools must NOT call this —
+// they skip city scoping silently. Absent city = no filter (never a hard fail).
+//
+// Typed as `any` internally for the same TS2589 reason as scopeToClient.
+function scopeToCity<Q>(q: Q, ctx: KiniToolContext | undefined): Q {
+  const city = typeof ctx?.city === 'string' ? ctx.city.trim() : '';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return city ? ((q as any).eq('city', city) as Q) : q;
+}
+
+// ── Per-tool RBAC (MECHANISM — permissive by default) ──────────────────────
+//
+// A small allow-list keyed by (lowercased) operator role → the tool names that
+// role may invoke. The DEFAULT is fully permissive: a role that is absent from
+// the map, or mapped to ALL_TOOLS, may call every tool. Shipping this therefore
+// changes NO current behaviour — it only gives us a single place to TIGHTEN
+// later without editing every tool.
+//
+// The gate is enforced in executeTool (and in the v2 composite) BEFORE dispatch:
+// a disallowed (role, tool) pair returns a clear refusal payload instead of
+// running the tool.
+export const ALL_TOOLS = '*' as const;
+
+// Ready-made allow-list of the read-only tool names, provided so a role can be
+// made read-only in one line (see the commented example in ROLE_TOOL_POLICY).
+export const READ_ONLY_TOOLS: readonly string[] = [
+  'crm_search_leads',
+  'crm_top_leads_by_score',
+  'crm_get_lead',
+  'crm_search_deals',
+  'crm_deals_closing',
+  'crm_get_deal',
+  'crm_summarize_account',
+  'crm_pipeline_summary',
+  'crm_conversion_funnel',
+  'crm_rep_leaderboard',
+];
+
+// role (lowercased) → permitted tools ('*' = ALL_TOOLS = unrestricted).
+//
+// DEFAULT IS EMPTY = FULLY PERMISSIVE: no role is restricted, so behaviour is
+// unchanged. To tighten later, add an entry here — e.g. make a "junior" role
+// read-only (cannot create/update/convert/send), leaving everyone else
+// unrestricted:
+//
+//     junior_sales: READ_ONLY_TOOLS,
+//
+// (You can also list an explicit subset of tool names for finer control.)
+export const ROLE_TOOL_POLICY: Record<string, readonly string[] | typeof ALL_TOOLS> = {
+  // junior_sales: READ_ONLY_TOOLS,   // ← example: uncomment to tighten juniors
+};
+
+/**
+ * Returns true when `role` is permitted to invoke `toolName`. Permissive
+ * default: an empty/unknown role, or a role mapped to ALL_TOOLS, is allowed
+ * everything; only a role with an explicit allow-list is restricted.
+ */
+export function isToolAllowedForRole(role: string | null | undefined, toolName: string): boolean {
+  const key = String(role ?? '').toLowerCase().trim();
+  const policy = key ? ROLE_TOOL_POLICY[key] : undefined;
+  if (!policy || policy === ALL_TOOLS) return true;
+  return policy.includes(toolName);
+}
+
+/** Standard refusal payload for an RBAC-blocked tool. Shaped like every other
+ *  tool error so the model can explain it to the user and recover gracefully. */
+export function roleRefusal(role: string | null | undefined, toolName: string): KiniToolResult {
+  const label = String(role ?? '').trim() || 'your';
+  return { tool: toolName, data: { error: `Your role (${label}) can't perform ${toolName}.` } };
 }
 
 // Hard guard for AI-driven mutations. Reads the target lead and
@@ -122,10 +204,12 @@ export const tools: KiniTool[] = [
       created_to: { type: 'string', description: 'ISO date/datetime upper bound on created_at (inclusive)' },
       limit: { type: 'number', default: 10 },
     }},
-    exec: async (org_id, client_id, args) => {
+    exec: async (org_id, client_id, args, ctx) => {
       let q = supabaseAdmin.from('crm_leads').select('id, first_name, last_name, email, company, title, status, score, owner_id, created_at')
         .eq('org_id', org_id).is('deleted_at', null);
       q = scopeToClient(q, client_id);
+      // Honour the active city scope (crm_leads has a `city` column).
+      q = scopeToCity(q, ctx);
       if (args.status) q = q.eq('status', String(args.status));
       if (args.score_gte) q = q.gte('score', Number(args.score_gte));
       // Creation-date range — accept only well-formed ISO values so hostile /
@@ -178,11 +262,12 @@ export const tools: KiniTool[] = [
     name: 'crm_top_leads_by_score',
     description: 'Top N leads ranked by score.',
     input_schema: { type: 'object', properties: { limit: { type: 'number', default: 10 } } },
-    exec: async (org_id, client_id, args) => {
+    exec: async (org_id, client_id, args, ctx) => {
       let q = supabaseAdmin.from('crm_leads')
         .select('id, first_name, last_name, email, company, title, score, owner_id, status')
         .eq('org_id', org_id).is('deleted_at', null).neq('status', 'converted');
       q = scopeToClient(q, client_id);
+      q = scopeToCity(q, ctx); // crm_leads has a `city` column — honour city scope.
       const { data } = await q.order('score', { ascending: false }).limit(Math.min(Number(args.limit ?? 10), 50));
       return { card: { type: 'lead_list', data: { leads: data ?? [], title: 'Hottest leads' } }, data };
     },
@@ -841,7 +926,7 @@ export const tools: KiniTool[] = [
     input_schema: { type: 'object', properties: {
       days: { type: 'number', default: 30, description: 'Look-back window on created_at, in days (default 30, max 365).' },
     }},
-    exec: async (org_id, client_id, args) => {
+    exec: async (org_id, client_id, args, ctx) => {
       const days = Math.min(Math.max(Number(args.days ?? 30) || 30, 1), 365);
       const fromIso = new Date(Date.now() - days * 86400000).toISOString();
 
@@ -851,6 +936,11 @@ export const tools: KiniTool[] = [
         .eq('org_id', org_id).is('deleted_at', null)
         .gte('created_at', fromIso).range(0, 99999);
       lq = scopeToClient(lq, client_id);
+      // City scope applies to leads (crm_leads has `city`). The deals query
+      // below is left unscoped — crm_deals has no `city` column — so under an
+      // active city scope the funnel's lead counts are city-filtered while its
+      // deal counts stay org/client-wide.
+      lq = scopeToCity(lq, ctx);
       const { data: leadRows } = await lq;
       const leadsByStatus: Record<string, number> = {};
       for (const r of (leadRows ?? []) as Array<{ status?: string | null }>) {
@@ -935,6 +1025,12 @@ export function toAnthropicTools() {
 export async function executeTool(org_id: string, client_id: string | null, name: string, args: Record<string, unknown>, ctx?: KiniToolContext): Promise<KiniToolResult | null> {
   const tool = tools.find(t => t.name === name);
   if (!tool) return null;
+  // Per-tool RBAC gate (permissive by default — see ROLE_TOOL_POLICY). When a
+  // role policy restricts this tool for ctx.role, refuse BEFORE dispatch rather
+  // than execute. With the default empty policy this never fires.
+  if (!isToolAllowedForRole(ctx?.role, name)) {
+    return roleRefusal(ctx?.role, name);
+  }
   try {
     const result = await tool.exec(org_id, client_id, args, ctx);
     if (typeof result === 'object' && result !== null && 'card' in result) {

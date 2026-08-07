@@ -194,7 +194,10 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
             effectiveClientId,
             name,
             args as Record<string, unknown>,
-            { user_id },
+            // Thread the active city scope (from the client's KiniContext —
+            // mirrors the dashboard's global `?city=`) and the operator role
+            // so tools can city-scope reads and the RBAC gate can apply.
+            { user_id, city: context?.city ?? null, role: role ?? null },
           );
           const out = r ?? { data: { error: `Unknown tool: ${name}` } };
           let resultSize = 0;

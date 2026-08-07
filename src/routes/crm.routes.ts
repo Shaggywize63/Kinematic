@@ -5144,7 +5144,14 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
       system: systemPrompt,
       tools,
       messages: body.messages.map(m => ({ role: m.role, content: m.content as unknown })),
-      onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>, { user_id: userId(req) ?? null }),
+      // Thread the operator role (RBAC gate) and any active city scope. v1
+      // clients pass the city scope as the literal `?city=` query param — the
+      // same mechanism the dashboard uses for CRM GETs — so mirror it here.
+      onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>, {
+        user_id: userId(req) ?? null,
+        city: typeof req.query.city === 'string' ? req.query.city : null,
+        role: actor.role ?? null,
+      }),
       max_tokens: 1500,
     });
     const tokenUsage = (out as { usage?: { input?: number; output?: number } }).usage;
