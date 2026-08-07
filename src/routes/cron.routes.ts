@@ -18,6 +18,7 @@ import { rescoreLead } from '../services/crm/leads.service';
 import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
 import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { runDailyBriefings } from '../services/crm/ai/dailyBriefing.service';
+import { runScheduledTasks, runProactiveNudges } from '../services/crm/ai/kiniScheduler.service';
 import { runRetentionPurge } from '../services/crm/retention.service';
 import {
   pullEvents as pullGoogleEvents,
@@ -189,6 +190,55 @@ router.post('/dispatch-daily-briefings', requireEdgeSecret, async (_req, res) =>
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] dispatch-daily-briefings crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/kini-scheduled
+ *
+ * KINI Wave 4a — drains kini_scheduled_tasks whose run_at has passed (reminders
+ * the user scheduled from chat via kini_schedule_reminder). Each is delivered
+ * through the same notifications → FCM/APNs push path as the daily briefing;
+ * `once` tasks complete, daily/weekly advance to their next run. Idempotent and
+ * safe on empty. Schedule via pg_cron + the edge-function caller like the other
+ * jobs (every minute or few minutes). Body: { limit?: number } (default 100,
+ * cap 500).
+ */
+router.post('/kini-scheduled', requireEdgeSecret, async (req, res) => {
+  try {
+    const limit = Math.min(500, Math.max(1, Number((req.body ?? {}).limit) || 100));
+    const result = await runScheduledTasks(limit);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] kini-scheduled crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/kini-proactive
+ *
+ * KINI Wave 4a — proactive/event-driven nudges (intended daily). Per org (gated
+ * behind the KINI agentic-v2 org flag), scans a few high-signal conditions —
+ * cold deals (open, owned deals idle N+ days) and reps with no check-in today —
+ * and pushes a concise nudge via the same notifications → FCM/APNs path.
+ * Bounded (caps) and best-effort: one org's failure never fails the run.
+ * Schedule via pg_cron + the edge-function caller like the other jobs. Body:
+ * { org_id?: string, days?: number, limit?: number } — restrict to one org, the
+ * cold-deal idle window (default 14), and the per-signal per-org nudge cap.
+ */
+router.post('/kini-proactive', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { org_id?: string; days?: number; limit?: number };
+    const result = await runProactiveNudges({
+      org_id: typeof body.org_id === 'string' ? body.org_id : undefined,
+      cold_deal_days: Number(body.days) || undefined,
+      max_nudges_per_org: Number(body.limit) || undefined,
+    });
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] kini-proactive crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });
