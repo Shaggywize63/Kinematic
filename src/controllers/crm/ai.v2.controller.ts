@@ -9,6 +9,14 @@ import { AuthRequest } from '../../types';
 import { asyncHandler, ok, badRequest, notFound } from '../../utils';
 import { chatWithTools } from '../../services/crm/ai/aiClient';
 import { toAnthropicTools, executeTool } from '../../services/crm/ai/kiniToolsV2.service';
+import { isToolAllowedForRole } from '../../services/crm/ai/kiniTools.service';
+import {
+  isConfirmRequired,
+  createPendingCollector,
+  pendingActionText,
+  PENDING_TOOL_RESULT,
+  doneText,
+} from '../../services/crm/ai/kiniApproval.service';
 import { isAgenticV2Enabled } from '../../services/crm/ai/kiniFlags.service';
 import {
   buildContextBlock,
@@ -176,6 +184,13 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     content: unknown;
   }>;
 
+  // Human-in-the-loop approval gate. When the model calls a confirm-required
+  // tool (a CRM mutation or crm_send_whatsapp) we do NOT execute it — we record
+  // the first such call as a pending_action and hand the model a "not executed"
+  // tool_result so it wraps up by asking the user to confirm. The client then
+  // POSTs the echoed action to /kini/v2/confirm to actually run it.
+  const pending = createPendingCollector();
+
   const turnStart = Date.now();
   try {
     const result = await chatWithTools({
@@ -187,6 +202,12 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       tools: toAnthropicTools(),
       messages: fullMessages,
       onToolCall: async (name, args) => {
+        // Intercept confirm-required writes BEFORE execution. First one wins;
+        // any further write in this turn is likewise refused (never executed).
+        if (isConfirmRequired(name)) {
+          pending.record(name, (args ?? {}) as Record<string, unknown>);
+          return { data: PENDING_TOOL_RESULT };
+        }
         const t0 = Date.now();
         try {
           const r = await executeTool(
@@ -238,12 +259,16 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       },
     });
 
-    // Never return empty text — clients render that as a generic apology.
-    const text =
-      result.reply ||
-      (result.tool_calls.length > 0
-        ? 'Done — see the results above.'
-        : "Sorry, I couldn't generate a response for that. Could you rephrase?");
+    // If a write was queued for confirmation, the chat line is deterministic
+    // ("Ready to … — confirm to proceed.") regardless of the model's wrap-up,
+    // and we attach the pending_action below. Otherwise use the model reply.
+    const pendingAction = pending.get();
+    const text = pendingAction
+      ? pendingActionText(pendingAction)
+      : result.reply ||
+        (result.tool_calls.length > 0
+          ? 'Done — see the results above.'
+          : "Sorry, I couldn't generate a response for that. Could you rephrase?");
 
     // Persist the user's last turn + the assistant turn into the thread.
     if (thread_id) {
@@ -286,6 +311,9 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       text,
       cards: result.cards,
       tool_calls: result.tool_calls.map((t) => ({ name: t.name, args: t.args })),
+      // Only present when a write was queued for user confirmation. A client
+      // that ignores it simply won't execute the write (backward-compatible).
+      ...(pendingAction ? { pending_action: pendingAction } : {}),
       usage,
       thread_id,
       took_ms: Date.now() - turnStart,
@@ -324,6 +352,103 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       tool_calls: [],
       thread_id: null,
     });
+  }
+});
+
+// ── Confirm (human-in-the-loop approval gate) ────────────────────────────────
+// Executes a pending_action that /chat previously queued. NO Anthropic call —
+// the tool runs deterministically. Same tenant/client scoping + RBAC as chat.
+export const confirm = asyncHandler(async (req: AuthRequest, res: Response) => {
+ try {
+  if (!(await gate(req, res))) return;
+  const user = req.user as AuthUser;
+  const { org_id, client_id, id: user_id, role } = user;
+
+  // Rebuild the SAME scoping chat uses: JWT-pinned client_id, else a valid
+  // X-Client-Id picker header. A non-super_admin with no client in scope is
+  // blocked so a confirm can never execute against another tenant's data.
+  const headerClient = (req.headers['x-client-id'] as string | undefined)?.trim();
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const effectiveClientId: string | null =
+    client_id || (headerClient && UUID_RE.test(headerClient) ? headerClient : null);
+  const isSuperAdmin = String(role ?? '').toLowerCase() === 'super_admin';
+  if (!effectiveClientId && !isSuperAdmin) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'KINI_NO_CLIENT_SCOPE',
+        message: "Select a client from the workspace switcher before confirming — KINI stays scoped to that client's data.",
+      },
+    });
+  }
+
+  // Validate the echoed action.
+  const action = (req.body as { action?: { id?: unknown; tool?: unknown; args?: unknown } })?.action;
+  if (!action || typeof action !== 'object') {
+    return res.status(400).json({ success: false, error: { code: 'BAD_ACTION', message: 'action { id, tool, args } is required.' } });
+  }
+  const tool = typeof action.tool === 'string' ? action.tool : '';
+  const args = (action.args && typeof action.args === 'object' && !Array.isArray(action.args))
+    ? (action.args as Record<string, unknown>)
+    : {};
+  if (!tool) {
+    return res.status(400).json({ success: false, error: { code: 'BAD_ACTION', message: 'action.tool is required.' } });
+  }
+  // Only confirm-required tools may be executed here — a read or an unknown
+  // tool is rejected (they never produce a pending_action).
+  if (!isConfirmRequired(tool)) {
+    return res.status(400).json({ success: false, error: { code: 'NOT_CONFIRMABLE', message: `"${tool}" is not a confirmable action.` } });
+  }
+  // Re-validate RBAC for (role, tool) — the same gate chat applies before it
+  // would have executed the tool.
+  if (!isToolAllowedForRole(role ?? null, tool)) {
+    return res.status(403).json({ success: false, error: { code: 'ROLE_FORBIDDEN', message: `Your role (${String(role ?? '').trim() || 'unknown'}) can't perform ${tool}.` } });
+  }
+
+  // City scope only affects reads (all confirm-required tools are writes), but
+  // pass it through for ctx parity with chat if the client sent it.
+  const ctxCity =
+    typeof req.query.city === 'string' && req.query.city.trim()
+      ? req.query.city.trim()
+      : (req.body as { context?: { city?: unknown } })?.context?.city;
+  const ctx = { user_id, city: typeof ctxCity === 'string' ? ctxCity : null, role: role ?? null };
+
+  const platform = platformOf(req);
+  const t0 = Date.now();
+  const result = await executeTool(org_id, effectiveClientId, tool, args, ctx);
+  if (!result) {
+    return res.status(400).json({ success: false, error: { code: 'UNKNOWN_TOOL', message: `Tool "${tool}" is not registered.` } });
+  }
+  // The tool swallows scope/validation failures into { data: { error } } rather
+  // than throwing (so a chat turn can recover) — surface those as a 4xx here.
+  const toolErr = (result.data as { error?: unknown } | null | undefined)?.error;
+  if (typeof toolErr === 'string' && toolErr) {
+    logToolCall({
+      org_id, client_id: effectiveClientId, user_id, thread_id: null,
+      tool_name: tool, args, success: false, error_code: 'TOOL_ERROR', latency_ms: Date.now() - t0,
+    });
+    return res.status(400).json({ success: false, error: { code: 'ACTION_FAILED', message: toolErr } });
+  }
+
+  logToolCall({
+    org_id, client_id: effectiveClientId, user_id, thread_id: null,
+    tool_name: tool, args, result_size: 0, success: true, latency_ms: Date.now() - t0,
+  });
+
+  // Meter the confirmed action as one KINI action (no Anthropic call → 0
+  // tokens). Best-effort, non-blocking — mirrors how chat records a query.
+  const actor = { id: user_id, org_id, role, client_id: effectiveClientId };
+  void kiniQuota.recordQuery(actor, undefined, platform);
+
+  return ok(res, {
+    text: doneText(tool, result.data),
+    cards: result.card ? [result.card] : [],
+  });
+ } catch (e: unknown) {
+    if (res.headersSent) return;
+    const detail = (e as { message?: string })?.message || 'unknown error';
+    logger.error(`[kini.v2.confirm] error: ${detail}`);
+    return res.status(500).json({ success: false, error: { code: 'INTERNAL', message: 'Failed to run that action — please try again.' } });
   }
 });
 
