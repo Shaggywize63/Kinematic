@@ -11,6 +11,9 @@ const router: Router = Router();
 // Agentic chat
 router.post('/v2/chat', v2.chat);
 
+// Human-in-the-loop approval gate — execute a pending_action queued by /chat.
+router.post('/v2/confirm', v2.confirm);
+
 // Threads
 router.get('/v2/threads', v2.threadsList);
 router.post('/v2/threads', v2.threadCreate);

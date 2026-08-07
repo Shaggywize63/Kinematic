@@ -57,6 +57,12 @@ import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as targetsSvc from '../services/crm/targets.service';
 import * as homeSvc from '../services/crm/home.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
+import {
+  isConfirmRequired as kiniIsConfirmRequired,
+  createPendingCollector as kiniCreatePendingCollector,
+  pendingActionText as kiniPendingActionText,
+  PENDING_TOOL_RESULT as KINI_PENDING_TOOL_RESULT,
+} from '../services/crm/ai/kiniApproval.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
 import * as globalSearch from '../services/crm/globalSearch.service';
 import * as leadFormBuilder from '../services/crm/ai/leadFormBuilder.service';
@@ -5138,6 +5144,12 @@ Current entity: ${JSON.stringify(body.context?.entity ?? {})}.
 Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-filtered to this scope by the backend — do not try to bypass it or reference rows from other clients.${multiLangSuffix}`;
   const systemPrompt = `${body.system ?? ''}${crmSuffix}`;
 
+  // Human-in-the-loop approval gate (same contract as v2). A confirm-required
+  // write (CRM mutation / crm_send_whatsapp) is NOT executed here — we record
+  // the first one as a pending_action and hand the model a "not executed"
+  // tool_result so it asks the user to confirm. The client then POSTs the
+  // echoed action to /kini/v2/confirm to run it.
+  const pending = kiniCreatePendingCollector();
   try {
     const out = await chatWithTools({
       org_id: orgId(req),
@@ -5147,21 +5159,37 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
       // Thread the operator role (RBAC gate) and any active city scope. v1
       // clients pass the city scope as the literal `?city=` query param — the
       // same mechanism the dashboard uses for CRM GETs — so mirror it here.
-      onToolCall: async (name, args) => kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>, {
-        user_id: userId(req) ?? null,
-        city: typeof req.query.city === 'string' ? req.query.city : null,
-        role: actor.role ?? null,
-      }),
+      onToolCall: async (name, args) => {
+        if (kiniIsConfirmRequired(name)) {
+          pending.record(name, (args ?? {}) as Record<string, unknown>);
+          return { data: KINI_PENDING_TOOL_RESULT };
+        }
+        return kiniTools.executeTool(orgId(req), cid, name, args as Record<string, unknown>, {
+          user_id: userId(req) ?? null,
+          city: typeof req.query.city === 'string' ? req.query.city : null,
+          role: actor.role ?? null,
+        });
+      },
       max_tokens: 1500,
     });
     const tokenUsage = (out as { usage?: { input?: number; output?: number } }).usage;
     void kiniQuota.recordQuery(actor, tokenUsage, platform);
     const after = await kiniQuota.getUsage(actor);
-    // Guard against empty reply when the last turn was tool-use-only: prefer
-    // a card summary over a blank bubble, then a safe fallback as last resort.
-    const replyText = out.reply
-      || (out.tool_calls?.length ? 'Done — see the results above.' : "I couldn't generate a response for that. Could you rephrase?");
-    res.json({ success: true, data: { text: replyText, cards: out.cards, tool_calls: out.tool_calls, usage: after } });
+    // If a write was queued, the chat line is deterministic and we attach the
+    // pending_action. Otherwise guard against empty reply when the last turn
+    // was tool-use-only: prefer a card summary over a blank bubble.
+    const pendingAction = pending.get();
+    const replyText = pendingAction
+      ? kiniPendingActionText(pendingAction)
+      : (out.reply
+        || (out.tool_calls?.length ? 'Done — see the results above.' : "I couldn't generate a response for that. Could you rephrase?"));
+    res.json({ success: true, data: {
+      text: replyText,
+      cards: out.cards,
+      tool_calls: out.tool_calls,
+      ...(pendingAction ? { pending_action: pendingAction } : {}),
+      usage: after,
+    } });
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code;
     const msg = (e as { message?: string })?.message ?? '';
