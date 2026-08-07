@@ -108,6 +108,32 @@ router.get('/captures/:id', asyncHandler(async (req: AuthRequest, res: Response)
   res.json({ success: true, data: { capture: cap, recognition: rec, compliance: comp } });
 }));
 
+// ── Confirm a detection as a reference pack-shot (self-improving library) ──
+// A confirmed detection on a capture is cropped out of the capture photo and
+// stored as an extra reference pack-shot for that SKU (own or tracked
+// competitor), so it improves recognition on the next scan. Org-scoped like the
+// sibling capture routes.
+router.post('/captures/:id/confirm-detection', asyncHandler(async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    sku_id: z.string().min(1),
+    // [x, y, w, h] normalized 0..1 — validated as finite + in-range below so a
+    // bad box returns a clean 400 rather than cropping garbage.
+    bbox: z.array(z.number()).length(4),
+  });
+  const body = schema.parse(req.body);
+  const bbox = body.bbox as [number, number, number, number];
+  if (!bbox.every((n) => Number.isFinite(n) && n >= 0 && n <= 1)) {
+    throw new AppError(400, 'bbox must be 4 finite numbers in 0..1 ([x, y, w, h] normalized)', 'INVALID_BBOX');
+  }
+  const out = await PlanogramService.confirmDetectionAsReference({
+    orgId: req.user.org_id,
+    captureId: req.params.id,
+    skuId: body.sku_id,
+    bbox,
+  });
+  res.status(201).json({ success: true, data: out });
+}));
+
 // ── Analytics ──────────────────────────────────────────────────────────
 
 router.get('/analytics/trend', asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -140,6 +166,8 @@ const upsertPlanogramSchema = z.object({
   layout: z.object({
     shelves: z.array(z.object({ index: z.number(), capacity: z.number().optional() })),
     category_definition: z.string().optional(),
+    // Opt-in dense-bay shelf-tiling augment for this planogram (default off).
+    tiling: z.boolean().optional(),
     // Tracked competitor SKUs (with optional reference pack shots) live on the
     // planogram layout and are threaded into the vision call at capture time.
     competitors: z.array(z.object({
@@ -150,6 +178,9 @@ const upsertPlanogramSchema = z.object({
       // v2 metrics: category feeds per-category rollups; expected_price feeds pricing deltas.
       category: z.string().nullable().optional(),
       expected_price: z.number().nullable().optional(),
+      // Confirmed-crop reference pack-shots (grown by /confirm-detection); kept so
+      // the field round-trips through a save instead of being stripped.
+      additional_ref_urls: z.array(z.string().url()).optional(),
     })).optional(),
   }).optional(),
   expected_skus: z.array(z.object({
@@ -166,6 +197,9 @@ const upsertPlanogramSchema = z.object({
     // rollups; expected_price is the baseline for shelf-tag pricing deltas.
     category: z.string().nullable().optional(),
     expected_price: z.number().nullable().optional(),
+    // Confirmed-crop reference pack-shots (grown by /confirm-detection); kept so
+    // the field round-trips through a save instead of being stripped.
+    additional_ref_urls: z.array(z.string().url()).optional(),
   })),
 });
 

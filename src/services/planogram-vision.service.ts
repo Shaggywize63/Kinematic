@@ -43,6 +43,7 @@ export interface DetectedSKU {
   is_competitor: boolean;
   reasoning?: string | null;               // NEW — one-line why this identification was made
   recovered?: boolean;                     // NEW — found only by the second-pass targeted recall (Lever 1)
+  tiled?: boolean;                         // NEW — found only by the shelf-tiling augment pass (dense bays)
 }
 
 export type PromoOfferType = 'price_off' | 'bundle' | 'bogo' | 'combo' | 'other';
@@ -86,6 +87,13 @@ export interface RecognizeArgs {
     imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp';
     is_competitor?: boolean;
   }>;
+  /**
+   * When true, run the shelf-tiling augment pass (dense bays). Sourced from the
+   * planogram's `layout.tiling`. The tiling pass ALSO turns on when the
+   * `PLANOGRAM_TILING=1` env flag is set; either enables it. Default off, so
+   * omitting this leaves recognition behavior exactly as before.
+   */
+  tiling?: boolean;
   model?: string;
 }
 
@@ -340,15 +348,6 @@ export class PlanogramVisionService {
     for (const c of args.competitorSkus || []) if (c.category) categorySet.add(c.category);
     const categories = Array.from(categorySet);
 
-    const userText = [
-      'Identify every product on this shelf and call report_shelf exactly once.',
-      'expected_skus = ' + JSON.stringify(args.expectedSkus || []),
-      'competitor_skus = ' + JSON.stringify(args.competitorSkus || []),
-      'category list (choose category ONLY from these when a product fits) = ' +
-        JSON.stringify(categories),
-      'store_format = ' + (args.storeFormat || 'unknown'),
-    ].join('\n');
-
     // Prepend up to MAX_REFERENCE_IMAGES front-facing pack shots (each labelled
     // with its sku_id) so the model matches shelf products by packaging. Bounded
     // to keep token cost predictable.
@@ -358,27 +357,16 @@ export class PlanogramVisionService {
       logger.warn(`[PlanogramVision] ${args.referenceImages!.length} reference images supplied; using first ${MAX_REFERENCE_IMAGES}`);
     }
 
-    const content: Array<Record<string, unknown>> = [];
-    if (refs.length) {
-      content.push({ type: 'text', text: 'Reference pack images follow — each is the front of one SKU, labelled with its sku_id. Use them to identify that exact product (flavour / size / variant) and to tell competitor packs apart on the shelf image that comes after them.' });
-      for (const r of refs) {
-        content.push({ type: 'text', text: `Reference - sku_id=${r.sku_id}${r.is_competitor ? ' (competitor)' : ''}: ${r.sku_name}` });
-        content.push({ type: 'image', source: { type: 'base64', media_type: r.imageMediaType, data: r.imageBase64 } });
-      }
-      content.push({ type: 'text', text: 'End of references. Now analyze this SHELF image:' });
-    }
-    content.push({ type: 'image', source: { type: 'base64', media_type: args.imageMediaType, data: args.imageBase64 } });
-    content.push({ type: 'text', text: userText });
-
-    const parsed = await this.callVisionTool({
+    const parsed = await this.callShelfRecognition({
       apiKey,
       model,
-      system: SYSTEM_PROMPT,
-      content,
-      toolName: 'report_shelf',
-      toolDescription: 'Report every product, price and promotion detected on the shelf image.',
-      inputSchema: REPORT_SHELF_SCHEMA,
-      errorCode: 'VISION_ERROR',
+      imageBase64: args.imageBase64,
+      imageMediaType: args.imageMediaType,
+      refs,
+      expectedSkus: args.expectedSkus || [],
+      competitorSkus: args.competitorSkus || [],
+      categories,
+      storeFormat: args.storeFormat,
     });
 
     const detected_skus: DetectedSKU[] = (Array.isArray(parsed.detected_skus) ? parsed.detected_skus : [])
@@ -415,6 +403,37 @@ export class PlanogramVisionService {
       result.quality.blur_score < 0.4 ||
       result.quality.glare_score < 0.4;
 
+    // ── Shelf tiling (dense bays) — DEFAULT OFF, guarded, AUGMENTS pass-1 ──
+    // Crop the shelf into an overlapping grid and re-run the SAME structured
+    // recognition on each tile, so small / edge SKUs that pass-1 skimmed over on
+    // a densely-packed bay get picked up. Purely additive: tile finds are merged
+    // in (deduped by sku_id and bbox IoU) and tagged `tiled: true`; nothing that
+    // pass-1 already found is removed or double-counted. Gated behind the
+    // PLANOGRAM_TILING env flag OR the planogram's layout.tiling, and wrapped so
+    // any error/timeout leaves the pass-1 results exactly as they were.
+    if (process.env.PLANOGRAM_TILING === '1' || args.tiling === true) {
+      try {
+        const tiled = await this.tileAugment({
+          apiKey,
+          model,
+          imageBase64: args.imageBase64,
+          imageMediaType: args.imageMediaType,
+          pass1: result.detected_skus,
+          refs,
+          expectedSkus: args.expectedSkus || [],
+          competitorSkus: args.competitorSkus || [],
+          categories,
+          storeFormat: args.storeFormat,
+        });
+        if (tiled.length) {
+          result.detected_skus = result.detected_skus.concat(tiled);
+          logger.info(`[PlanogramVision] tiling recovered ${tiled.length} SKU(s) missed by pass-1`);
+        }
+      } catch (e) {
+        logger.warn(`[PlanogramVision] tiling pass failed (keeping pass-1 results): ${(e as Error)?.message}`);
+      }
+    }
+
     // ── Lever 1: second-pass targeted recall ─────────────────────────────
     // Recover EXPECTED OWN products that ARE on the shelf but pass-1 missed.
     // Guarded end-to-end: recallMissingSkus only makes a vision call when ≥1
@@ -444,6 +463,13 @@ export class PlanogramVisionService {
 
   /** Hard deadline for the second-pass recall so a slow recall never pins the capture. */
   private static readonly RECALL_TIMEOUT_MS = 30_000;
+
+  /** Per-tile vision deadline for the tiling augment pass. */
+  private static readonly TILE_TIMEOUT_MS = 25_000;
+  /** Overall wall-clock budget for the whole tiling pass (all tiles combined). */
+  private static readonly TILING_TOTAL_BUDGET_MS = 90_000;
+  /** Hard cap on tile vision calls — the grid never exceeds this either. */
+  private static readonly MAX_TILE_CALLS = 4;
 
   /**
    * Lever 1 — second-pass targeted recall.
@@ -539,6 +565,169 @@ export class PlanogramVisionService {
       out.push(r);
     }
     return out;
+  }
+
+  /**
+   * Build the report_shelf content payload and force the structured tool call.
+   * Shared by pass-1 and the tiling augment so a tile is analysed with the
+   * IDENTICAL prompt, reference pack-shots, expected/competitor/category hints
+   * and schema — only the image (a crop) and an optional per-call deadline
+   * differ. Returns the raw tool `input`; the caller normalizes it.
+   */
+  private static async callShelfRecognition(opts: {
+    apiKey: string;
+    model: string;
+    imageBase64: string;
+    imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp';
+    refs: NonNullable<RecognizeArgs['referenceImages']>;
+    expectedSkus: NonNullable<RecognizeArgs['expectedSkus']>;
+    competitorSkus: NonNullable<RecognizeArgs['competitorSkus']>;
+    categories: string[];
+    storeFormat?: string;
+    timeoutMs?: number;
+  }): Promise<any> {
+    const userText = [
+      'Identify every product on this shelf and call report_shelf exactly once.',
+      'expected_skus = ' + JSON.stringify(opts.expectedSkus),
+      'competitor_skus = ' + JSON.stringify(opts.competitorSkus),
+      'category list (choose category ONLY from these when a product fits) = ' +
+        JSON.stringify(opts.categories),
+      'store_format = ' + (opts.storeFormat || 'unknown'),
+    ].join('\n');
+
+    const content: Array<Record<string, unknown>> = [];
+    if (opts.refs.length) {
+      content.push({ type: 'text', text: 'Reference pack images follow — each is the front of one SKU, labelled with its sku_id. Use them to identify that exact product (flavour / size / variant) and to tell competitor packs apart on the shelf image that comes after them.' });
+      for (const r of opts.refs) {
+        content.push({ type: 'text', text: `Reference - sku_id=${r.sku_id}${r.is_competitor ? ' (competitor)' : ''}: ${r.sku_name}` });
+        content.push({ type: 'image', source: { type: 'base64', media_type: r.imageMediaType, data: r.imageBase64 } });
+      }
+      content.push({ type: 'text', text: 'End of references. Now analyze this SHELF image:' });
+    }
+    content.push({ type: 'image', source: { type: 'base64', media_type: opts.imageMediaType, data: opts.imageBase64 } });
+    content.push({ type: 'text', text: userText });
+
+    return this.callVisionTool({
+      apiKey: opts.apiKey,
+      model: opts.model,
+      system: SYSTEM_PROMPT,
+      content,
+      toolName: 'report_shelf',
+      toolDescription: 'Report every product, price and promotion detected on the shelf image.',
+      inputSchema: REPORT_SHELF_SCHEMA,
+      errorCode: 'VISION_ERROR',
+      timeoutMs: opts.timeoutMs,
+    });
+  }
+
+  /**
+   * Shelf tiling (dense bays) — augment pass.
+   *
+   * Crops the capture into an overlapping grid (≤ MAX_TILE_CALLS tiles chosen by
+   * aspect ratio) and runs the SAME structured recognition on each tile, then
+   * REMAPS every tile detection's normalized bbox back into full-image coords and
+   * MERGES the finds into pass-1 — deduping by sku_id and by bbox IoU > 0.5 so a
+   * SKU pass-1 already found is never removed or double-counted. Returns ONLY the
+   * newly-recovered detections, each tagged `tiled: true`.
+   *
+   * Best-effort and fully bounded: `sharp` is imported lazily (a missing binary
+   * just disables tiling), each tile is guarded independently, the whole pass has
+   * a wall-clock budget, and per-tile vision calls carry a hard deadline. Any
+   * failure returns whatever was recovered so far without disturbing pass-1.
+   */
+  private static async tileAugment(opts: {
+    apiKey: string;
+    model: string;
+    imageBase64: string;
+    imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp';
+    pass1: DetectedSKU[];
+    refs: NonNullable<RecognizeArgs['referenceImages']>;
+    expectedSkus: NonNullable<RecognizeArgs['expectedSkus']>;
+    competitorSkus: NonNullable<RecognizeArgs['competitorSkus']>;
+    categories: string[];
+    storeFormat?: string;
+  }): Promise<DetectedSKU[]> {
+    // Lazy import so a missing/broken native binary can only ever disable tiling,
+    // never crash recognition (which does not otherwise depend on sharp).
+    let sharp: (typeof import('sharp'))['default'];
+    try {
+      sharp = (await import('sharp')).default;
+    } catch (e) {
+      logger.warn(`[PlanogramVision] sharp unavailable — tiling skipped: ${(e as Error)?.message}`);
+      return [];
+    }
+
+    const srcBuf = Buffer.from(opts.imageBase64, 'base64');
+    const meta = await sharp(srcBuf).metadata();
+    const W = meta.width || 0;
+    const H = meta.height || 0;
+    if (!W || !H) {
+      logger.warn('[PlanogramVision] tiling skipped — could not read image dimensions');
+      return [];
+    }
+
+    // Wide bays → one row of two columns; squarer / taller bays → two rows. Both
+    // are ≤ MAX_TILE_CALLS tiles; slice is a belt-and-braces bound on the count.
+    const cols = 2;
+    const rows = W / H >= 1.3 ? 1 : 2;
+    const tiles = computeTiles(W, H, cols, rows).slice(0, this.MAX_TILE_CALLS);
+
+    // Dedup working set grows as we accept tile finds, so two tiles that both see
+    // the same edge product (in their overlap) can't both add it.
+    const takenIds = new Set<string>();
+    for (const d of opts.pass1) if (d.sku_id) takenIds.add(d.sku_id);
+    const existing: DetectedSKU[] = opts.pass1.slice();
+    const added: DetectedSKU[] = [];
+
+    const start = Date.now();
+    for (const tile of tiles) {
+      if (Date.now() - start > this.TILING_TOTAL_BUDGET_MS) {
+        logger.warn('[PlanogramVision] tiling budget exhausted — stopping early');
+        break;
+      }
+      try {
+        const tileBuf = await sharp(srcBuf)
+          .extract({ left: tile.x, top: tile.y, width: tile.w, height: tile.h })
+          .jpeg({ quality: 90 })
+          .toBuffer();
+
+        const parsed = await this.callShelfRecognition({
+          apiKey: opts.apiKey,
+          model: opts.model,
+          imageBase64: tileBuf.toString('base64'),
+          imageMediaType: 'image/jpeg',
+          refs: opts.refs,
+          expectedSkus: opts.expectedSkus,
+          competitorSkus: opts.competitorSkus,
+          categories: opts.categories,
+          storeFormat: opts.storeFormat,
+          timeoutMs: this.TILE_TIMEOUT_MS,
+        });
+
+        const tileDetections: DetectedSKU[] = (Array.isArray(parsed.detected_skus) ? parsed.detected_skus : [])
+          .map((s: any): DetectedSKU => toDetectedSku(s))
+          .filter(hasValidBbox);
+
+        for (const det of tileDetections) {
+          // Remap the tile-local bbox back to full-image normalized coords.
+          det.bbox = remapTileBbox(det.bbox, tile, W, H);
+          det.bbox_area = round4(det.bbox[2] * det.bbox[3]);
+          if (!hasValidBbox(det)) continue;
+          // Dedup: same sku_id already present, or same physical facing (IoU>0.5).
+          if (det.sku_id && takenIds.has(det.sku_id)) continue;
+          if (existing.some((e) => bboxIoU(e.bbox, det.bbox) > 0.5)) continue;
+          det.tiled = true;
+          if (det.sku_id) takenIds.add(det.sku_id);
+          existing.push(det);
+          added.push(det);
+        }
+      } catch (e) {
+        // One bad tile (crop or vision error/timeout) must not lose the others.
+        logger.warn(`[PlanogramVision] tile [${tile.x},${tile.y},${tile.w},${tile.h}] failed: ${(e as Error)?.message}`);
+      }
+    }
+
+    return added;
   }
 
   /**
@@ -756,6 +945,71 @@ function hasValidBbox(s: DetectedSKU): boolean {
     s.bbox.every((v) => v >= 0 && v <= 1.5) &&
     (s.bbox[2] > 0 || s.bbox[3] > 0)
   );
+}
+
+/** A pixel-space crop rectangle taken from the full capture image. */
+export interface Tile {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Split a W×H image into a `cols`×`rows` grid of OVERLAPPING pixel tiles.
+ * Each interior edge is expanded by `overlap` (fraction of the cell size) so a
+ * product straddling a cut line is fully visible in at least one tile; tiles are
+ * clamped to the image bounds. Pure + deterministic (unit-testable).
+ */
+export function computeTiles(
+  W: number,
+  H: number,
+  cols: number,
+  rows: number,
+  overlap = 0.12,
+): Tile[] {
+  const tiles: Tile[] = [];
+  if (!(W > 0) || !(H > 0) || cols < 1 || rows < 1) return tiles;
+  const cellW = W / cols;
+  const cellH = H / rows;
+  const ox = cellW * overlap;
+  const oy = cellH * overlap;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x0 = Math.max(0, Math.floor(c * cellW - ox));
+      const y0 = Math.max(0, Math.floor(r * cellH - oy));
+      const x1 = Math.min(W, Math.ceil((c + 1) * cellW + ox));
+      const y1 = Math.min(H, Math.ceil((r + 1) * cellH + oy));
+      const w = x1 - x0;
+      const h = y1 - y0;
+      if (w > 0 && h > 0) tiles.push({ x: x0, y: y0, w, h });
+    }
+  }
+  return tiles;
+}
+
+/**
+ * Remap a detection bbox expressed in a TILE's normalized 0..1 coords back to
+ * the FULL image's normalized 0..1 coords, clamped to [0,1]. Pure (unit-tested):
+ *   full_px = tile_offset + tile_norm × tile_size ; then ÷ image_size.
+ */
+export function remapTileBbox(
+  bbox: [number, number, number, number],
+  tile: Tile,
+  imageW: number,
+  imageH: number,
+): [number, number, number, number] {
+  const [tx, ty, tw, th] = bbox;
+  let fx = (tile.x + tx * tile.w) / imageW;
+  let fy = (tile.y + ty * tile.h) / imageH;
+  let fw = (tw * tile.w) / imageW;
+  let fh = (th * tile.h) / imageH;
+  // Clamp origin into the image, then clamp size so the box stays inside it.
+  fx = Math.max(0, Math.min(1, fx));
+  fy = Math.max(0, Math.min(1, fy));
+  fw = Math.max(0, Math.min(1 - fx, fw));
+  fh = Math.max(0, Math.min(1 - fy, fh));
+  return [round4(fx), round4(fy), round4(fw), round4(fh)];
 }
 
 /** Intersection-over-union of two normalized [x, y, w, h] boxes (0 when disjoint). */

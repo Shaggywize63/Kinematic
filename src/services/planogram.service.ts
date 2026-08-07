@@ -44,6 +44,11 @@ export interface ExpectedSKU {
   brand?: string | null;        // NEW — passed to the model as a matching hint
   category?: string | null;     // NEW — seeds the category taxonomy + rollups
   expected_price?: number | null; // NEW — baseline for pricing deltas
+  // NEW — extra reference pack-shots grown by the confirm-crop-as-reference
+  // flow (a field rep confirms a detection → its crop is stored here). Loaded
+  // alongside ref_image_url so confirmed crops feed future recognition. jsonb;
+  // no migration (lives inside the expected_skus jsonb column).
+  additional_ref_urls?: string[];
 }
 
 export interface PlanogramLayout {
@@ -60,7 +65,11 @@ export interface PlanogramLayout {
     ref_image_url?: string;
     category?: string | null;       // NEW
     expected_price?: number | null; // NEW
+    additional_ref_urls?: string[]; // NEW — confirmed-crop reference pack-shots
   }>;
+  // NEW — opt-in per-planogram switch for the dense-bay shelf-tiling augment
+  // pass (also globally enableable via PLANOGRAM_TILING=1). Default off.
+  tiling?: boolean;
 }
 
 export interface CategoryBreakdown {
@@ -923,6 +932,7 @@ export class PlanogramService {
       shelves: data.layout?.shelves || [],
       expected_skus: data.expected_skus || [],
       competitors: Array.isArray(data.layout?.competitors) ? data.layout.competitors : [],
+      tiling: data.layout?.tiling === true,
     };
   }
 
@@ -959,11 +969,25 @@ export class PlanogramService {
     layout: PlanogramLayout,
   ): Promise<RecognizeArgs['referenceImages']> {
     const entries: Array<{ sku_id: string; sku_name: string; url: string; is_competitor: boolean }> = [];
+    // Primary pack-shots first (own then competitor) so every SKU's canonical
+    // reference is kept before the bound crowds any of them out …
     for (const e of layout.expected_skus || []) {
       if (e.ref_image_url) entries.push({ sku_id: e.sku_id, sku_name: e.sku_name, url: e.ref_image_url, is_competitor: false });
     }
     for (const c of layout.competitors || []) {
       if (c.ref_image_url) entries.push({ sku_id: c.sku_id, sku_name: c.sku_name, url: c.ref_image_url, is_competitor: true });
+    }
+    // … then confirmed-crop extras (own then competitor), so the self-improving
+    // library of confirmed detections also feeds recognition.
+    for (const e of layout.expected_skus || []) {
+      for (const u of e.additional_ref_urls || []) {
+        if (u) entries.push({ sku_id: e.sku_id, sku_name: e.sku_name, url: u, is_competitor: false });
+      }
+    }
+    for (const c of layout.competitors || []) {
+      for (const u of c.additional_ref_urls || []) {
+        if (u) entries.push({ sku_id: c.sku_id, sku_name: c.sku_name, url: u, is_competitor: true });
+      }
     }
     const bounded = entries.slice(0, this.MAX_REFERENCE_IMAGES);
 
@@ -1017,6 +1041,14 @@ export class PlanogramService {
 
   /** Public bucket (per project) that holds field-rep shelf capture photos. */
   private static readonly CAPTURE_BUCKET = process.env.BUCKET_PLANOGRAM_CAPTURES || 'planogram-captures';
+
+  /**
+   * Public bucket that holds reference pack-shots — the SAME bucket the
+   * dashboard uploads brand pack-shots to via POST /api/v1/upload/planogram_ref
+   * (see upload.controller BUCKET_MAP.planogram_ref). Confirmed-detection crops
+   * are uploaded here so they load identically to hand-uploaded references.
+   */
+  private static readonly REFERENCE_BUCKET = process.env.BUCKET_PLANOGRAM_REFS || 'planogram-refs';
 
   /** Ensure a bucket exists and is public (self-provision on first use). */
   private static async ensurePublicBucket(bucket: string): Promise<void> {
@@ -1075,6 +1107,167 @@ export class PlanogramService {
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length === 0 || buf.length > 4_000_000) return null; // skip empty / oversized refs
     return { base64: buf.toString('base64'), mediaType: this.mediaTypeFor(res.headers.get('content-type') || '') };
+  }
+
+  /**
+   * Fetch an image URL into a raw Buffer (local bundled asset OR remote), with a
+   * generous size cap suitable for full-resolution capture photos. Unlike
+   * fetchImageAsBase64 (tuned for small pack-shots) this tolerates larger shelf
+   * captures so the confirm-crop flow can read the original photo. Returns null
+   * on any failure so the caller can respond cleanly.
+   */
+  private static async fetchImageBuffer(
+    url: string,
+    maxBytes = 20_000_000,
+  ): Promise<Buffer | null> {
+    const local = this.readLocalReferenceImage(url);
+    if (local) return Buffer.from(local.base64, 'base64');
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length === 0 || buf.length > maxBytes) return null;
+      return buf;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Crop a normalized [x, y, w, h] (0..1) region out of an image buffer with
+   * `sharp`, clamping the box to the real pixel bounds. Returns a JPEG buffer, or
+   * null if the region degenerates. `sharp` is imported lazily so a missing
+   * native binary surfaces as a clean error rather than a process-level crash.
+   */
+  private static async cropNormalizedRegion(
+    src: Buffer,
+    bbox: [number, number, number, number],
+  ): Promise<Buffer | null> {
+    let sharp: (typeof import('sharp'))['default'];
+    try {
+      sharp = (await import('sharp')).default;
+    } catch (e) {
+      throw new AppError(500, 'Image processing unavailable (sharp not installed)', 'SHARP_UNAVAILABLE');
+    }
+    const meta = await sharp(src).metadata();
+    const W = meta.width || 0;
+    const H = meta.height || 0;
+    if (!W || !H) return null;
+    const [x, y, w, h] = bbox;
+    // normalized → pixels, clamped so extract() never reads outside the image.
+    const left = Math.round(clamp(0, W - 1, x * W));
+    const top = Math.round(clamp(0, H - 1, y * H));
+    const width = Math.round(clamp(0, W - left, w * W));
+    const height = Math.round(clamp(0, H - top, h * H));
+    if (width < 1 || height < 1) return null; // degenerate box → 422 CROP_FAILED
+    return sharp(src).extract({ left, top, width, height }).jpeg({ quality: 90 }).toBuffer();
+  }
+
+  /**
+   * Upload a cropped reference JPEG into the reference pack-shot bucket (public)
+   * and return its fetchable URL. Same bucket + public-URL mechanism the
+   * dashboard's pack-shot upload uses, so recognition loads it with a plain GET.
+   */
+  private static async uploadReferenceCrop(orgId: string, buffer: Buffer): Promise<string | null> {
+    try {
+      await this.ensurePublicBucket(this.REFERENCE_BUCKET);
+      const key = `${orgId}/confirmed/${randomUUID()}.jpg`;
+      const { error } = await supabaseAdmin.storage
+        .from(this.REFERENCE_BUCKET)
+        .upload(key, buffer, { contentType: 'image/jpeg', upsert: false });
+      if (error) return null;
+      const { data } = supabaseAdmin.storage.from(this.REFERENCE_BUCKET).getPublicUrl(key);
+      return data?.publicUrl || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Confirm-crop-as-reference (self-improving library).
+   *
+   * A confirmed detection on a capture becomes a NEW reference pack-shot for that
+   * SKU: load the capture photo, crop the given normalized bbox, upload the crop
+   * to the reference bucket, append its URL to the SKU's `additional_ref_urls`
+   * inside the planogram's `expected_skus` (own) or `layout.competitors`
+   * (competitor) jsonb, and persist. The crop then feeds every future capture via
+   * loadReferenceImages. Org-scoped like the other planogram routes.
+   */
+  static async confirmDetectionAsReference(args: {
+    orgId: string;
+    captureId: string;
+    skuId: string;
+    bbox: [number, number, number, number];
+  }): Promise<{ ref_image_url: string }> {
+    // 1. Capture (org-scoped) → its planogram + stored photo.
+    const { data: cap, error: capErr } = await supabaseAdmin
+      .from('planogram_captures')
+      .select('id, org_id, planogram_id, image_url')
+      .eq('id', args.captureId)
+      .eq('org_id', args.orgId)
+      .single();
+    if (capErr || !cap) throw new AppError(404, 'Capture not found', 'NOT_FOUND');
+    if (!cap.planogram_id) throw new AppError(400, 'Capture is not linked to a planogram', 'NO_PLANOGRAM');
+    if (!cap.image_url) throw new AppError(422, 'Capture has no stored image to crop', 'IMAGE_UNAVAILABLE');
+
+    // 2. Planogram row (org-scoped) — need the jsonb we will mutate + persist.
+    const { data: pg, error: pgErr } = await supabaseAdmin
+      .from('planograms')
+      .select('id, layout, expected_skus')
+      .eq('id', cap.planogram_id)
+      .eq('org_id', args.orgId)
+      .single();
+    if (pgErr || !pg) throw new AppError(404, 'Planogram not found', 'NOT_FOUND');
+
+    const expected_skus: ExpectedSKU[] = Array.isArray(pg.expected_skus) ? pg.expected_skus : [];
+    const layout: any = pg.layout && typeof pg.layout === 'object' ? pg.layout : {};
+    const competitors: PlanogramLayout['competitors'] = Array.isArray(layout.competitors)
+      ? layout.competitors
+      : [];
+
+    // 3. Validate the sku_id belongs to this planogram (own or tracked competitor).
+    const ownIdx = expected_skus.findIndex((s) => s.sku_id === args.skuId);
+    const compIdx = ownIdx >= 0 ? -1 : competitors.findIndex((c) => c.sku_id === args.skuId);
+    if (ownIdx < 0 && compIdx < 0) {
+      throw new AppError(404, `sku_id "${args.skuId}" is not on this planogram`, 'SKU_NOT_FOUND');
+    }
+
+    // 4. Load the capture photo and crop the confirmed region.
+    const src = await this.fetchImageBuffer(cap.image_url);
+    if (!src) throw new AppError(422, 'Could not load the capture image to crop', 'IMAGE_UNAVAILABLE');
+    const crop = await this.cropNormalizedRegion(src, args.bbox);
+    if (!crop) throw new AppError(422, 'Crop region is empty after clamping to the image', 'CROP_FAILED');
+
+    // 5. Upload the crop to the reference bucket (public, fetchable URL).
+    const ref_image_url = await this.uploadReferenceCrop(args.orgId, crop);
+    if (!ref_image_url) throw new AppError(500, 'Failed to store the cropped reference', 'UPLOAD_FAILED');
+
+    // 6. Append to the SKU's additional_ref_urls and persist the mutated jsonb.
+    if (ownIdx >= 0) {
+      const cur = Array.isArray(expected_skus[ownIdx].additional_ref_urls)
+        ? (expected_skus[ownIdx].additional_ref_urls as string[])
+        : [];
+      expected_skus[ownIdx] = { ...expected_skus[ownIdx], additional_ref_urls: [...cur, ref_image_url] };
+      const { error: upErr } = await supabaseAdmin
+        .from('planograms')
+        .update({ expected_skus, updated_at: new Date().toISOString() })
+        .eq('id', pg.id)
+        .eq('org_id', args.orgId);
+      if (upErr) throw new AppError(500, upErr.message, 'DB_ERROR');
+    } else {
+      const cur = Array.isArray(competitors[compIdx].additional_ref_urls)
+        ? (competitors[compIdx].additional_ref_urls as string[])
+        : [];
+      competitors[compIdx] = { ...competitors[compIdx], additional_ref_urls: [...cur, ref_image_url] };
+      const { error: upErr } = await supabaseAdmin
+        .from('planograms')
+        .update({ layout: { ...layout, competitors }, updated_at: new Date().toISOString() })
+        .eq('id', pg.id)
+        .eq('org_id', args.orgId);
+      if (upErr) throw new AppError(500, upErr.message, 'DB_ERROR');
+    }
+
+    return { ref_image_url };
   }
 
   /**
@@ -1151,6 +1344,10 @@ export class PlanogramService {
       })),
       storeFormat,
       referenceImages,
+      // Dense-bay shelf-tiling augment: on when this planogram opts in via
+      // layout.tiling (the PLANOGRAM_TILING=1 env flag also forces it on inside
+      // recognizeShelf). Default off → single-pass behavior is unchanged.
+      tiling: layout.tiling === true,
     });
 
     const result = this.scoreShelf({ recognition, layout });
