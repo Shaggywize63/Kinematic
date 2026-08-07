@@ -105,7 +105,19 @@ export interface MethodologyEntry {
   formula: string;
   inputs: string[];
   notes?: string;
+  // ── Auditability (all OPTIONAL so older stored methodology that only carries
+  //    {formula, inputs, notes} still validates and renders) ────────────────
+  weight?: number;   // composite contribution weight: presence 0.5, facing 0.25,
+                     // position 0.2, competitor −0.05; omit for occupancy/shelf_share/zone
+  result?: number;   // the computed metric value (0..100), rounded 1dp
+  calc?: string;     // the ACTUAL arithmetic with real numbers, e.g.
+                     // "present weight 20 / total weight 32 × 100 = 62.5"
+  columns?: { key: string; label: string }[];               // header for the per-item audit table
+  rows?: Array<Record<string, string | number | boolean | null>>; // per-SKU audit rows
 }
+
+/** One row of a methodology audit table. */
+type MethodologyRow = Record<string, string | number | boolean | null>;
 
 export type Methodology = Record<string, MethodologyEntry>;
 
@@ -193,15 +205,21 @@ export class PlanogramService {
 
     // ── Presence ───────────────────────────────────────────────
     const totalWeight = expected.reduce((s, e) => s + (e.weight ?? 1), 0);
-    const presentWeight = expected
-      .filter((e) => detectedById.has(e.sku_id))
-      .reduce((s, e) => s + (e.weight ?? 1), 0);
+    let presentWeight = 0;
+    const presenceRows: MethodologyRow[] = [];
+    for (const e of expected) {
+      const w = e.weight ?? 1;
+      const present = detectedById.has(e.sku_id);
+      if (present) presentWeight += w;
+      presenceRows.push({ sku_name: e.sku_name, weight: w, present });
+    }
     const presence_score = totalWeight ? (presentWeight / totalWeight) * 100 : 0;
 
     // ── Facings ─────────────────────────────────────────────────────
     let facingPenalty = 0;
     let facingMax = 0;
     const facing_deltas: ComplianceResult['facing_deltas'] = [];
+    const facingRows: MethodologyRow[] = [];
     for (const e of expected) {
       const d = detectedById.get(e.sku_id);
       const actual = d?.facings ?? 0;
@@ -209,6 +227,14 @@ export class PlanogramService {
       const w = e.weight ?? 1;
       facingMax += e.facings * w;
       facingPenalty += Math.abs(delta) * w;
+      facingRows.push({
+        sku_name: e.sku_name,
+        expected: e.facings,
+        detected: actual,
+        delta,
+        weight: w,
+        penalty: round2(Math.abs(delta) * w),
+      });
       if (delta !== 0) {
         facing_deltas.push({
           sku_id: e.sku_id,
@@ -225,13 +251,21 @@ export class PlanogramService {
 
     // ── Position ──────────────────────────────────────────────────────
     const misplaced_skus: ComplianceResult['misplaced_skus'] = [];
+    const positionRows: MethodologyRow[] = [];
     let positionMatches = 0;
     let positionTotal = 0;
     for (const e of expected) {
       const d = detectedById.get(e.sku_id);
       if (!d) continue;
       positionTotal += 1;
-      if (d.shelf_index === e.shelf_index) {
+      const match = d.shelf_index === e.shelf_index;
+      positionRows.push({
+        sku_name: e.sku_name,
+        expected_shelf: e.shelf_index,
+        actual_shelf: d.shelf_index,
+        match,
+      });
+      if (match) {
         positionMatches += 1;
       } else {
         misplaced_skus.push({
@@ -264,10 +298,15 @@ export class PlanogramService {
     );
     let occupancy_score: number;
     let occupancyDenominator: string;
+    let occupancyCalc: string;
     if (shelvesWithCapacity.length > 0) {
       const totalCapacity = shelvesWithCapacity.reduce((s, sh) => s + (sh.capacity as number), 0);
       occupancy_score = totalCapacity > 0 ? (totalFacings / totalCapacity) * 100 : 0;
       occupancyDenominator = 'layout.shelves[].capacity (Σ detected facings / Σ capacity × 100)';
+      occupancyCalc =
+        totalCapacity > 0
+          ? `${round1(totalFacings)} facings / ${round1(totalCapacity)} capacity × 100 = ${round1(clamp(0, 100, occupancy_score))}`
+          : 'no shelf capacity defined → 0';
     } else {
       // bbox_area = w*h with w,h normalized to the WHOLE image, so `filled` is
       // already the fraction of total image area covered by product (≈1.0 when
@@ -276,6 +315,7 @@ export class PlanogramService {
       const filled = detected.reduce((s, d) => s + (d.bbox_area || 0), 0);
       occupancy_score = filled * 100; // Σ bbox_area over the full image
       occupancyDenominator = 'total image area (Σ bbox_area × 100)';
+      occupancyCalc = `Σ bbox_area ${round4(filled)} × 100 = ${round1(clamp(0, 100, occupancy_score))}`;
     }
     occupancy_score = clamp(0, 100, occupancy_score);
 
@@ -330,9 +370,10 @@ export class PlanogramService {
       0.25 * facing_score +
       0.2 * position_score -
       0.05 * competitorPenalty;
+    const finalScore = Math.max(0, Math.min(100, Math.round(score * 10) / 10));
 
     return {
-      score: Math.max(0, Math.min(100, Math.round(score * 10) / 10)),
+      score: finalScore,
       presence_score: round1(presence_score),
       facing_score: round1(facing_score),
       position_score: round1(position_score),
@@ -344,7 +385,44 @@ export class PlanogramService {
       zone_breakdown,
       pricing,
       promotions,
-      methodology: this.buildMethodology({ occupancyDenominator }),
+      methodology: this.buildMethodology({
+        occupancyDenominator,
+        occupancyCalc,
+        occupancyScore: occupancy_score,
+        presence: {
+          presentWeight,
+          totalWeight,
+          score: presence_score,
+          rows: presenceRows,
+        },
+        facing: {
+          penalty: facingPenalty,
+          max: facingMax,
+          score: facing_score,
+          rows: facingRows,
+        },
+        position: {
+          matches: positionMatches,
+          total: positionTotal,
+          score: position_score,
+          rows: positionRows,
+        },
+        composite: {
+          presence: presence_score,
+          facing: facing_score,
+          position: position_score,
+          competitorShare: competitor_share,
+          competitorPenalty,
+          score: finalScore,
+        },
+        shelfShare: {
+          own: ownFacings,
+          competitor: competitorFacings,
+          total: totalFacings,
+          ownShare: shelf_share_own,
+          competitorShare: shelf_share_competitor,
+        },
+      }),
       missing_skus,
       misplaced_skus,
       facing_deltas,
@@ -456,21 +534,89 @@ export class PlanogramService {
       });
   }
 
-  /** Document each headline metric so every number is auditable. */
-  private static buildMethodology(opts: { occupancyDenominator: string }): Methodology {
+  /**
+   * Document each headline metric so every number is auditable. Data-driven:
+   * every entry carries the composite weight (where it applies), the computed
+   * `result`, the ACTUAL arithmetic (`calc`) with this capture's real numbers,
+   * and a per-SKU `columns`/`rows` audit table — so an admin can reconstruct
+   * presence / facings / position / composite by hand. All the auditability
+   * fields are optional, so historical rows stored with only {formula, inputs,
+   * notes} still validate and render.
+   */
+  private static buildMethodology(m: {
+    occupancyDenominator: string;
+    occupancyCalc: string;
+    occupancyScore: number;
+    presence: { presentWeight: number; totalWeight: number; score: number; rows: MethodologyRow[] };
+    facing: { penalty: number; max: number; score: number; rows: MethodologyRow[] };
+    position: { matches: number; total: number; score: number; rows: MethodologyRow[] };
+    composite: {
+      presence: number;
+      facing: number;
+      position: number;
+      competitorShare: number;
+      competitorPenalty: number;
+      score: number;
+    };
+    shelfShare: {
+      own: number;
+      competitor: number;
+      total: number;
+      ownShare: number;
+      competitorShare: number;
+    };
+  }): Methodology {
+    const c = m.composite;
     return {
       presence: {
         formula: 'Σ weight(expected SKUs present) / Σ weight(all expected SKUs) × 100',
         inputs: ['expected_skus.weight', 'detected_skus.sku_id'],
         notes: 'weight defaults to 1; only own (non-competitor) detections count as present.',
+        weight: 0.5,
+        result: round1(m.presence.score),
+        calc: `present weight ${round1(m.presence.presentWeight)} / total weight ${round1(
+          m.presence.totalWeight,
+        )} × 100 = ${round1(m.presence.score)}`,
+        columns: [
+          { key: 'sku_name', label: 'SKU' },
+          { key: 'weight', label: 'Weight' },
+          { key: 'present', label: 'Present' },
+        ],
+        rows: m.presence.rows,
       },
       facing: {
         formula: '100 − (Σ |actual − expected| × weight / Σ expected × weight) × 100, floored at 0',
         inputs: ['expected_skus.facings', 'expected_skus.weight', 'detected_skus.facings'],
+        weight: 0.25,
+        result: round1(m.facing.score),
+        calc: `100 − (Σ|Δ|×w ${round1(m.facing.penalty)} / Σ expected×w ${round1(
+          m.facing.max,
+        )} × 100) = ${round1(m.facing.score)}`,
+        columns: [
+          { key: 'sku_name', label: 'SKU' },
+          { key: 'expected', label: 'Expected' },
+          { key: 'detected', label: 'Detected' },
+          { key: 'delta', label: 'Δ' },
+          { key: 'weight', label: 'Weight' },
+          { key: 'penalty', label: 'Penalty' },
+        ],
+        rows: m.facing.rows,
       },
       position: {
         formula: 'matched shelf_index / detected-and-expected SKUs × 100',
         inputs: ['expected_skus.shelf_index', 'detected_skus.shelf_index'],
+        weight: 0.2,
+        result: round1(m.position.score),
+        calc: `on expected shelf ${m.position.matches} / detected SKUs ${m.position.total} × 100 = ${round1(
+          m.position.score,
+        )}`,
+        columns: [
+          { key: 'sku_name', label: 'SKU' },
+          { key: 'expected_shelf', label: 'Expected shelf' },
+          { key: 'actual_shelf', label: 'Actual shelf' },
+          { key: 'match', label: 'On shelf' },
+        ],
+        rows: m.position.rows,
       },
       presence_facing_position_note: {
         formula: 'n/a',
@@ -480,12 +626,18 @@ export class PlanogramService {
       occupancy: {
         formula: 'Σ filled / Σ capacity × 100',
         inputs: ['detected_skus.bbox_area', 'detected_skus.facings', 'layout.shelves[].capacity', 'shelf_count'],
-        notes: `denominator: ${opts.occupancyDenominator}. Clamped to 0..100.`,
+        notes: `denominator: ${m.occupancyDenominator}. Clamped to 0..100.`,
+        result: round1(m.occupancyScore),
+        calc: m.occupancyCalc,
       },
       shelf_share: {
         formula: 'own or competitor facings / total detected facings × 100',
         inputs: ['detected_skus.facings', 'detected_skus.is_competitor'],
         notes: 'competitor_share is retained and equals shelf_share_competitor.',
+        result: round1(m.shelfShare.ownShare),
+        calc: `own ${round1(m.shelfShare.own)} / total ${round1(m.shelfShare.total)} × 100 = ${round1(
+          m.shelfShare.ownShare,
+        )}% (competitor ${round1(m.shelfShare.competitorShare)}%)`,
       },
       zone: {
         formula: 'zone assigned by shelf_index vs shelf_count: bottom third → low, middle → eye, top → top',
@@ -495,7 +647,29 @@ export class PlanogramService {
       composite: {
         formula: '0.5·presence + 0.25·facing + 0.2·position − 0.05·max(0, competitor_share − 25), clamped 0..100',
         inputs: ['presence_score', 'facing_score', 'position_score', 'competitor_share'],
-        notes: 'Occupancy and shelf-share are reported alongside but NOT folded into the composite; competitor share is tolerated up to 25%.',
+        notes:
+          'Occupancy and shelf-share are reported alongside but NOT folded into the composite; competitor share is tolerated up to 25% before it penalizes.',
+        result: round1(c.score),
+        calc: `0.5×${round1(c.presence)} + 0.25×${round1(c.facing)} + 0.2×${round1(
+          c.position,
+        )} − 0.05×${round1(c.competitorPenalty)} = ${round1(c.score)}`,
+        columns: [
+          { key: 'component', label: 'Component' },
+          { key: 'value', label: 'Score' },
+          { key: 'weight', label: 'Weight' },
+          { key: 'contribution', label: 'Contribution' },
+        ],
+        rows: [
+          { component: 'Presence', value: round1(c.presence), weight: 0.5, contribution: round1(0.5 * c.presence) },
+          { component: 'Facings', value: round1(c.facing), weight: 0.25, contribution: round1(0.25 * c.facing) },
+          { component: 'Position', value: round1(c.position), weight: 0.2, contribution: round1(0.2 * c.position) },
+          {
+            component: 'Competitor penalty',
+            value: round1(c.competitorShare),
+            weight: -0.05,
+            contribution: round1(-0.05 * c.competitorPenalty),
+          },
+        ],
       },
     };
   }
