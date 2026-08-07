@@ -11,6 +11,11 @@ const router: Router = Router();
 // Agentic chat
 router.post('/v2/chat', v2.chat);
 
+// Agentic chat — SSE streaming variant (same checks/behavior as /v2/chat, but
+// streams tokens/tool_calls/cards as Server-Sent Events). Clients that don't
+// get an event-stream response fall back to POST /v2/chat.
+router.post('/v2/chat/stream', v2.chatStream);
+
 // Human-in-the-loop approval gate — execute a pending_action queued by /chat.
 router.post('/v2/confirm', v2.confirm);
 
