@@ -507,15 +507,30 @@ export class PlanogramService {
       if (!match) {
         const dn = norm(d.sku_name);
         const db = norm(d.brand);
+        // Prefer an exact normalized-name match anywhere in the catalog.
         match = competitors.find((c) => {
           const cn = norm(c.sku_name);
-          if (!cn) return false;
-          if (dn && cn === dn) return true; // exact normalized name
-          const cb = norm(c.brand);
-          const nameHit = !!dn && (dn.includes(cn) || cn.includes(dn));
-          const brandHit = !!cb && !!db && (cb === db || db.includes(cb) || cb.includes(db));
-          return nameHit && brandHit;
+          return !!cn && !!dn && cn === dn;
         });
+        // Else brand + bidirectional name-contains; on ties pick the MOST
+        // specific (longest) catalog name so same-brand variants don't collapse
+        // onto the shorter one (e.g. "Veeba Mayo" vs "Veeba Mayo Chipotle").
+        if (!match) {
+          let best: PlanogramLayout['competitors'][number] | undefined;
+          let bestLen = -1;
+          for (const c of competitors) {
+            const cn = norm(c.sku_name);
+            if (!cn) continue;
+            const cb = norm(c.brand);
+            const nameHit = !!dn && (dn.includes(cn) || cn.includes(dn));
+            const brandHit = !!cb && !!db && (cb === db || db.includes(cb) || cb.includes(db));
+            if (nameHit && brandHit && cn.length > bestLen) {
+              best = c;
+              bestLen = cn.length;
+            }
+          }
+          match = best;
+        }
       }
 
       if (match) {
