@@ -80,20 +80,45 @@ router.post('/captures', asyncHandler(async (req: AuthRequest, res: Response) =>
   res.status(201).json({ success: true, data: out });
 }));
 
-router.get('/captures', asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabaseAdmin
-    .from('planogram_captures')
-    .select(`
-      *,
-      fe:users!fe_id(name),
-      store:stores!store_id(name),
-      planogram:planograms!planogram_id(name),
-      compliance:planogram_compliance!capture_id(score)
-    `)
-    .eq('org_id', req.user.org_id)
-    .order('captured_at', { ascending: false });
+// Captures list for the redesigned module (Captures tab + Review queue). Org-
+// scoped; returns the pinned dashboard shape { total, captures:[...] }. The
+// Review queue is just this with needs_review=true.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const parseBoolParam = (v: unknown): boolean | undefined => {
+  if (v === undefined) return undefined;
+  const s = String(v).toLowerCase();
+  if (s === 'true' || s === '1' || s === 'yes') return true;
+  if (s === 'false' || s === '0' || s === 'no') return false;
+  return undefined;
+};
+const parseNumParam = (v: unknown): number | undefined => {
+  if (v === undefined || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+};
 
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+router.get('/captures', asyncHandler(async (req: AuthRequest, res: Response) => {
+  const q = req.query;
+  const data = await PlanogramAnalyticsService.listCaptures(req.user.org_id, {
+    city: typeof q.city === 'string' && q.city.trim() ? q.city.trim() : undefined,
+    storeId: typeof q.store_id === 'string' && UUID_RE.test(q.store_id) ? q.store_id : undefined,
+    needsReview: parseBoolParam(q.needs_review),
+    minScore: parseNumParam(q.min_score),
+    maxScore: parseNumParam(q.max_score),
+    limit: parseNumParam(q.limit),
+    offset: parseNumParam(q.offset),
+  });
+  res.json({ success: true, data });
+}));
+
+// Overview aggregate for the redesigned module's landing view. Org-scoped,
+// last `period_days` (default 30), optional city filter.
+router.get('/overview', asyncHandler(async (req: AuthRequest, res: Response) => {
+  const q = req.query;
+  const data = await PlanogramAnalyticsService.overview(req.user.org_id, {
+    periodDays: parseNumParam(q.period_days),
+    city: typeof q.city === 'string' && q.city.trim() ? q.city.trim() : undefined,
+  });
   res.json({ success: true, data });
 }));
 
@@ -132,6 +157,52 @@ router.post('/captures/:id/confirm-detection', asyncHandler(async (req: AuthRequ
     bbox,
   });
   res.status(201).json({ success: true, data: out });
+}));
+
+// ── Detection feedback (accept / "this detection is wrong" learning loop) ──
+// A per-detection thumbs-down from the Captures / Review queue UI. Validates the
+// capture belongs to the caller's org (404 otherwise) and that `reason` is in
+// the allowed set (zod → 400 otherwise), then records a planogram_feedback row.
+// Org-scoped; client_id + created_by stamped from the caller like the capture
+// pipeline. Shares the planogram_feedback table with the corrections loop.
+const DETECTION_FEEDBACK_REASONS = ['wrong_product', 'not_a_product', 'wrong_facings', 'wrong_price', 'other'] as const;
+
+router.post('/captures/:id/detection-feedback', asyncHandler(async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    sku_id: z.string().min(1).nullable().optional(),
+    bbox: z.array(z.number()).nullable().optional(),
+    reason: z.enum(DETECTION_FEEDBACK_REASONS),
+    correct_sku_id: z.string().min(1).nullable().optional(),
+    note: z.string().nullable().optional(),
+  });
+  const body = schema.parse(req.body);
+
+  // Capture must exist AND belong to the caller's org (else 404 — no leak).
+  const { data: cap, error: capErr } = await supabaseAdmin
+    .from('planogram_captures')
+    .select('id')
+    .eq('id', req.params.id)
+    .eq('org_id', req.user.org_id)
+    .single();
+  if (capErr || !cap) throw new AppError(404, 'Capture not found', 'NOT_FOUND');
+
+  const { data, error } = await supabaseAdmin
+    .from('planogram_feedback')
+    .insert({
+      org_id: req.user.org_id,
+      client_id: req.user.client_id ?? null,
+      capture_id: req.params.id,
+      sku_id: body.sku_id ?? null,
+      bbox: body.bbox ?? null,
+      reason: body.reason,
+      correct_sku_id: body.correct_sku_id ?? null,
+      note: body.note ?? null,
+      created_by: req.user.id,
+    })
+    .select('id')
+    .single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  res.status(201).json({ success: true, data: { id: data.id } });
 }));
 
 // ── Analytics ──────────────────────────────────────────────────────────
