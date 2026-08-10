@@ -139,10 +139,18 @@ For EACH product on the shelf:
   category MUST be chosen from the provided category list (the real taxonomy for
   this shelf) whenever the product fits one — do not invent free-form categories.
   Use null only when no listed category applies.
-- Read any PRICE shown on a shelf tag / label, on the pack, or in promo signage,
-  VERBATIM: capture the numeric value in "price", the currency code or symbol in
-  "price_currency", and set "price_source" to shelf_tag | on_pack | promo. If no
-  price is legible, leave price null.
+- PRICE — read it for EVERY product you can. Prices live on the shelf-edge
+  tag/label strip directly BELOW or beside the product, on the pack itself (MRP),
+  or inside promo signage. Look hard at the shelf-edge strip — that is where most
+  prices are. Put the SELLING price a shopper actually pays in "price" as a plain
+  number (drop the currency symbol, thousands separators and any trailing "/-"),
+  the currency as seen in "price_currency" (e.g. "INR" or "₹"), and set
+  "price_source" to shelf_tag | on_pack | promo. Indian tags often read "MRP ₹99",
+  "Rs. 99/-", "₹99", or a struck-through MRP beside a lower offer price — when both
+  an MRP and a lower offer/selling price are shown, put the LOWER price the shopper
+  pays in "price" (and record the deal in promotions). Read partially occluded or
+  angled tags whenever the digits are legible; only leave price null when no price
+  can be read at all.
 - Count "facings": one facing = one product front visible on the shelf.
 - Report "shelf_index": 0 for the BOTTOM shelf, increasing upward.
 - Report "bbox" as [x, y, w, h] in 0..1 normalized image coordinates, and
@@ -152,11 +160,16 @@ For EACH product on the shelf:
 - Give a one-line "reasoning" for the identification (what packaging/label cue
   you used).
 
-Also detect visible PROMOTION / OFFER signage (price-off flags, bundles, BOGO,
-combo deals, wobblers) into the top-level "promotions" list: capture the offer
-text verbatim, classify offer_type (price_off | bundle | bogo | combo | other),
-give a bbox when locatable, and list linked_sku_ids for any SKUs the offer
-clearly covers.
+PROMOTIONS — sweep the WHOLE shelf for every visible offer and record each in the
+top-level "promotions" list. Look for shelf-edge price-off tags, "MRP ₹X now ₹Y"
+/ "Save ₹Z", percentage-off flashes ("20% OFF"), "Buy 1 Get 1" / BOGO, combo &
+multi-buy packs ("Pack of 3", "₹X for 2"), festival / seasonal offers, and any
+wobblers, danglers, shelf-talkers, buntings or stickers. Capture the offer text
+VERBATIM in "text", classify offer_type (price_off | bundle | bogo | combo |
+other), give a bbox when locatable, set confidence, and list linked_sku_ids for
+every detected SKU the offer clearly covers (match by the product nearest the
+signage). Report an offer even when you cannot tie it to a specific SKU (leave
+linked_sku_ids empty). Do not invent offers — only report signage you can see.
 
 Reference pack images: you may be shown reference pack images BEFORE the shelf
 image, each labelled "Reference - sku_id=...". Match shelf products to those
@@ -183,6 +196,35 @@ sku_id to the matching reference's sku_id, and give its bbox ([x, y, w, h] in
 NOT report ones you cannot clearly see, and do NOT report anything outside the
 reference set. Be conservative: if you are not sure a referenced product is on
 the shelf, OMIT it — omission means it is genuinely out of stock.`;
+
+// Focused pricing + promotion recovery pass. A single shelf photo forces the
+// model to split attention across identity, facings, position, price AND promo;
+// this pass re-reads the SAME shelf for ONLY prices and offers, keyed back to the
+// already-detected SKUs, so shelf-tag prices and promo signage that pass-1
+// skimmed get captured.
+const PRICING_SYSTEM_PROMPT = `You are a retail shelf-recognition expert doing a FOCUSED pass that reads ONLY
+prices and promotions from a shelf photo. The products on the shelf were already
+identified and are given to you as detected_skus (each with a sku_id). Call
+"report_pricing" exactly once. Do not answer in prose — only the tool call is read.
+
+PRICES: read the shelf-edge tag/label strip below or beside each product (and the
+pack MRP when that is all that is visible). For every product whose price you can
+read, return a price_reading with its sku_id (from detected_skus), the SELLING
+price the shopper pays as a plain number (drop currency symbols, thousands
+separators and any trailing "/-"), the currency as seen ("INR" / "₹"), and
+price_source = shelf_tag | on_pack | promo. Indian tags often read "MRP ₹99",
+"Rs. 99/-", "₹99", or a struck-through MRP beside a lower offer price — when both
+are shown, return the LOWER price the shopper actually pays. Only skip a product
+when no price is legible.
+
+PROMOTIONS: sweep the whole shelf for every visible offer — price-off tags,
+"MRP ₹X now ₹Y" / "Save ₹Z", "% OFF" flashes, "Buy 1 Get 1" / BOGO, combo &
+multi-buy packs, festival / seasonal offers, wobblers, danglers, shelf-talkers,
+buntings, stickers. Capture each offer's text verbatim, classify offer_type
+(price_off | bundle | bogo | combo | other), give a bbox when locatable, set
+confidence, and link it to the nearest detected sku_ids it covers. Report an offer
+even if you cannot tie it to a SKU. Do not invent anything — only report prices
+and signage you can actually see.`;
 
 const PARSE_SYSTEM_PROMPT = `You are a retail planogram-parsing expert. You receive an image of a brand
 planogram document (a diagrammatic shelf layout the brand publishes) and must
@@ -236,9 +278,9 @@ const REPORT_SHELF_SCHEMA = {
           zone: { type: ['string', 'null'], enum: ['low', 'eye', 'top', null] },
           bbox: BBOX_SCHEMA,
           bbox_area: { type: ['number', 'null'], description: 'w * h of the bbox' },
-          price: { type: ['number', 'null'] },
-          price_currency: { type: ['string', 'null'] },
-          price_source: { type: ['string', 'null'], enum: ['shelf_tag', 'on_pack', 'promo', null] },
+          price: { type: ['number', 'null'], description: 'Selling price the shopper pays, as a plain number — no currency symbol, thousands separators or "/-". Read from the shelf-edge tag, pack MRP, or promo. null only when no price is legible.' },
+          price_currency: { type: ['string', 'null'], description: 'Currency exactly as seen, e.g. "INR" or "₹".' },
+          price_source: { type: ['string', 'null'], enum: ['shelf_tag', 'on_pack', 'promo', null], description: 'Where the price was read: shelf_tag (shelf-edge label), on_pack (MRP printed on the pack), or promo (offer signage).' },
           confidence: { type: 'number', description: '0..1' },
           is_competitor: { type: 'boolean' },
           reasoning: { type: ['string', 'null'] },
@@ -248,14 +290,15 @@ const REPORT_SHELF_SCHEMA = {
     },
     promotions: {
       type: 'array',
+      description: 'Every visible offer / promotion on the shelf (price-off tags, "now ₹Y", % off, BOGO, combos, festival offers, wobblers, danglers, shelf-talkers, stickers).',
       items: {
         type: 'object',
         properties: {
-          text: { type: 'string' },
+          text: { type: 'string', description: 'Offer text, verbatim (e.g. "Buy 1 Get 1 Free", "MRP ₹99 now ₹79", "20% OFF").' },
           offer_type: { type: 'string', enum: ['price_off', 'bundle', 'bogo', 'combo', 'other'] },
           bbox: { anyOf: [BBOX_SCHEMA, { type: 'null' }] },
           confidence: { type: 'number', description: '0..1' },
-          linked_sku_ids: { type: 'array', items: { type: 'string' } },
+          linked_sku_ids: { type: 'array', items: { type: 'string' }, description: 'sku_ids of detected products this offer covers (nearest to the signage); empty if it applies to none in particular.' },
         },
         required: ['text', 'offer_type', 'confidence'],
       },
@@ -277,6 +320,33 @@ const REPORT_RECALL_SCHEMA = {
     detected_skus: REPORT_SHELF_SCHEMA.properties.detected_skus,
   },
   required: ['detected_skus'],
+} as const;
+
+/** One price reading from the focused pricing pass, keyed to a detected sku_id. */
+const PRICE_READING_SCHEMA = {
+  type: 'object',
+  properties: {
+    sku_id: { type: 'string', description: 'sku_id from the provided detected_skus this price belongs to' },
+    price: { type: ['number', 'null'], description: 'Selling price the shopper pays, plain number — no symbol / separators / "/-"' },
+    price_currency: { type: ['string', 'null'], description: 'Currency as seen, e.g. "INR" or "₹"' },
+    price_source: { type: ['string', 'null'], enum: ['shelf_tag', 'on_pack', 'promo', null] },
+    confidence: { type: 'number', description: '0..1' },
+  },
+  required: ['sku_id', 'price'],
+} as const;
+
+/**
+ * Forced-tool input schema for the focused pricing + promotion recovery pass.
+ * Reuses the report_shelf promotions shape so promo normalization is shared;
+ * price_readings are keyed back to already-detected sku_ids.
+ */
+const REPORT_PRICING_SCHEMA = {
+  type: 'object',
+  properties: {
+    price_readings: { type: 'array', items: PRICE_READING_SCHEMA },
+    promotions: REPORT_SHELF_SCHEMA.properties.promotions,
+  },
+  required: ['price_readings'],
 } as const;
 
 /** Forced-tool input schema for brand-planogram parsing. */
@@ -458,11 +528,147 @@ export class PlanogramVisionService {
       logger.warn(`[PlanogramVision] recall pass failed (keeping pass-1 results): ${(e as Error)?.message}`);
     }
 
+    // ── Focused pricing + promotion recovery pass ────────────────────────────
+    // A single shelf photo makes the model split attention across identity,
+    // facings, position, price AND promo. This pass re-reads the SAME shelf for
+    // ONLY prices and offers, keyed back to the already-detected SKUs, to fill
+    // price gaps pass-1 left null and catch promo signage it skimmed. Additive:
+    // it only FILLS null prices (never overrides a pass-1 price) and appends
+    // deduped promotions — so nothing downstream (DB / API / UI) changes shape.
+    // Guarded (skips when there is nothing to gain), hard-timeout-bounded, and
+    // wrapped so any failure leaves the detection set exactly as it was. Kill
+    // switch: PLANOGRAM_PRICE_PASS=0.
+    if (process.env.PLANOGRAM_PRICE_PASS !== '0') {
+      try {
+        const { priced, addedPromos } = await this.recoverPricingAndPromos({
+          apiKey,
+          model,
+          imageBase64: args.imageBase64,
+          imageMediaType: args.imageMediaType,
+          detected: result.detected_skus,
+          promotions: result.promotions,
+        });
+        if (addedPromos.length) result.promotions = result.promotions.concat(addedPromos);
+        if (priced || addedPromos.length) {
+          logger.info(`[PlanogramVision] pricing pass filled ${priced} price(s), added ${addedPromos.length} promo(s)`);
+        }
+      } catch (e) {
+        logger.warn(`[PlanogramVision] pricing pass failed (keeping prior results): ${(e as Error)?.message}`);
+      }
+    }
+
     return result;
   }
 
   /** Hard deadline for the second-pass recall so a slow recall never pins the capture. */
   private static readonly RECALL_TIMEOUT_MS = 30_000;
+  /** Hard deadline for the focused pricing + promotion recovery pass. */
+  private static readonly PRICING_TIMEOUT_MS = 30_000;
+
+  /**
+   * Focused pricing + promotion recovery pass.
+   *
+   * Re-reads the SAME shelf image asking ONLY for shelf-tag prices (keyed back to
+   * the already-detected sku_ids) and promotion signage. Prices FILL gaps only —
+   * a detection that pass-1 already priced is never overwritten — and promotions
+   * are appended after dedup (by normalized text AND bbox IoU). Returns how many
+   * prices were filled and the new promotions to append.
+   *
+   * Best-effort: the caller wraps this in try/catch so any failure keeps prior
+   * results. GUARD: returns without a vision call when there is nothing to gain
+   * (every identified product already has a price AND at least one promotion was
+   * already found).
+   */
+  private static async recoverPricingAndPromos(opts: {
+    apiKey: string;
+    model: string;
+    imageBase64: string;
+    imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp';
+    detected: DetectedSKU[];
+    promotions: Promo[];
+  }): Promise<{ priced: number; addedPromos: Promo[] }> {
+    // Only products with a sku_id can have a price keyed back to them.
+    const byId = new Map<string, DetectedSKU>();
+    for (const d of opts.detected) if (d.sku_id) byId.set(d.sku_id, d);
+
+    const needPrice = [...byId.values()].filter((d) => d.price == null);
+
+    // GUARD: nothing to gain — every identified product already has a price AND
+    // we already found ≥1 promotion. (Missing prices OR zero promotions → the
+    // focused sweep can still help, so we proceed.)
+    if (needPrice.length === 0 && opts.promotions.length > 0) return { priced: 0, addedPromos: [] };
+
+    const skuList = [...byId.values()].map((d) => ({
+      sku_id: d.sku_id,
+      sku_name: d.sku_name,
+      shelf_index: d.shelf_index,
+    }));
+
+    const content: Array<Record<string, unknown>> = [
+      { type: 'image', source: { type: 'base64', media_type: opts.imageMediaType, data: opts.imageBase64 } },
+      {
+        type: 'text',
+        text: [
+          'Focus ONLY on shelf-edge PRICE tags and PROMOTION / OFFER signage on this shelf.',
+          'These products were already identified on the shelf — key each price reading',
+          'back to the matching sku_id:',
+          'detected_skus = ' + JSON.stringify(skuList),
+          'Return price_readings for every product whose price you can read, and list',
+          'every visible promotion. Call report_pricing exactly once.',
+        ].join('\n'),
+      },
+    ];
+
+    const parsed = await this.callVisionTool({
+      apiKey: opts.apiKey,
+      model: opts.model,
+      system: PRICING_SYSTEM_PROMPT,
+      content,
+      toolName: 'report_pricing',
+      toolDescription: 'Report shelf-tag prices (keyed to the given sku_ids) and all visible promotions.',
+      inputSchema: REPORT_PRICING_SCHEMA,
+      errorCode: 'VISION_PRICING_ERROR',
+      timeoutMs: this.PRICING_TIMEOUT_MS,
+    });
+
+    // Apply price readings — FILL gaps only, never override a pass-1 price.
+    let priced = 0;
+    const readings = Array.isArray(parsed.price_readings) ? parsed.price_readings : [];
+    for (const r of readings) {
+      const id = r?.sku_id == null ? '' : String(r.sku_id);
+      const d = byId.get(id);
+      if (!d || d.price != null) continue;
+      const price = r?.price == null || !Number.isFinite(Number(r.price)) ? null : Number(r.price);
+      if (price == null) continue;
+      d.price = price;
+      d.price_currency = r?.price_currency == null ? d.price_currency : String(r.price_currency);
+      d.price_source = normalizePriceSource(r?.price_source) ?? d.price_source ?? 'shelf_tag';
+      priced++;
+    }
+
+    // Merge promotions — dedup vs existing by normalized text AND bbox IoU.
+    const addedPromos: Promo[] = [];
+    const seenText = new Set(opts.promotions.map((p) => p.text.trim().toLowerCase()));
+    const rawPromos = Array.isArray(parsed.promotions) ? parsed.promotions : [];
+    for (const p of rawPromos) {
+      const text = String(p?.text || '').trim();
+      if (!text) continue;
+      const key = text.toLowerCase();
+      if (seenText.has(key)) continue;
+      const bbox = normalizeBbox(p?.bbox);
+      if (bbox && opts.promotions.some((e) => e.bbox && bboxIoU(e.bbox, bbox) > 0.5)) continue;
+      seenText.add(key);
+      addedPromos.push({
+        text,
+        offer_type: normalizeOfferType(p?.offer_type),
+        bbox,
+        confidence: clamp01(p?.confidence),
+        linked_sku_ids: Array.isArray(p?.linked_sku_ids) ? p.linked_sku_ids.map((x: any) => String(x)) : [],
+      });
+    }
+
+    return { priced, addedPromos };
+  }
 
   /** Per-tile vision deadline for the tiling augment pass. */
   private static readonly TILE_TIMEOUT_MS = 25_000;
