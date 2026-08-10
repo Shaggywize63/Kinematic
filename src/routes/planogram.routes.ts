@@ -159,6 +159,22 @@ router.post('/captures/:id/confirm-detection', asyncHandler(async (req: AuthRequ
   res.status(201).json({ success: true, data: out });
 }));
 
+// ── Re-analyze an existing capture (on-demand, re-runs the AI) ─────────────
+// The dashboard "Re-analyze" button. Re-runs the FULL pipeline (recognition →
+// score → quality gate) on the capture's STORED photo + its planogram layout,
+// then UPSERTs the recognition + compliance rows so an OLDER capture gains the
+// full v2 analysis (occupancy, shelf-share, zones, categories, pricing,
+// promotions, methodology, …). Org-scoped: a capture outside the caller's org
+// 404s; a capture with no stored image 422s; a vision failure 502s and leaves
+// the existing rows untouched. Returns the same shape as GET /captures/:id.
+router.post('/captures/:id/reprocess', asyncHandler(async (req: AuthRequest, res: Response) => {
+  const out = await PlanogramService.reprocessCapture({
+    orgId: req.user.org_id,
+    captureId: req.params.id,
+  });
+  res.json({ success: true, data: out });
+}));
+
 // ── Detection feedback (accept / "this detection is wrong" learning loop) ──
 // A per-detection thumbs-down from the Captures / Review queue UI. Validates the
 // capture belongs to the caller's org (404 otherwise) and that `reason` is in
