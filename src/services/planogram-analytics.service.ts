@@ -80,6 +80,64 @@ export interface PlanogramOverviewResult {
 }
 
 /**
+ * Cross-store trend analytics for the redesigned module's Insights view.
+ * Every series is derived from the same compliance-history window so the page
+ * reads as one coherent picture. Degrades gracefully on sparse data — a series
+ * is simply empty when the underlying v2 fields aren't populated yet.
+ */
+export interface PlanogramInsightsResult {
+  period_days: number;
+  captures_count: number;                 // scored captures in the window
+  stores_count: number;
+  /** Org-wide daily average compliance score. */
+  compliance_trend: Array<{ date: string; avg_score: number; captures: number }>;
+  /** Window-average own-vs-competitor shelf share per category. */
+  category_share: Array<{
+    category: string;
+    own_share: number;
+    competitor_share: number;
+    facings: number;
+    captures: number;
+    avg_own_price: number | null;
+    avg_competitor_price: number | null;
+  }>;
+  /** Own-vs-competitor average shelf price, per day (price movement). */
+  price_movement: Array<{
+    date: string;
+    own_avg_price: number | null;
+    competitor_avg_price: number | null;
+    own_n: number;
+    competitor_n: number;
+  }>;
+  /** Per-store compliance rollup, ranked best→worst. */
+  store_compliance: Array<{
+    store_id: string;
+    store_name: string | null;
+    region: string | null;
+    captures: number;
+    avg_score: number;
+    own_shelf_share: number | null;
+    competitor_share: number | null;
+  }>;
+  /** Per-region (city) compliance rollup, ranked best→worst. */
+  region_compliance: Array<{
+    region: string;
+    stores: number;
+    captures: number;
+    avg_score: number;
+    own_shelf_share: number | null;
+  }>;
+  /** Promotion presence — how often shelves carry live offers, and which. */
+  promo: {
+    captures_total: number;
+    captures_with_promo: number;
+    pct: number;
+    trend: Array<{ date: string; total: number; with_promo: number; pct: number }>;
+    top_offers: Array<{ text: string; offer_type: string; count: number }>;
+  };
+}
+
+/**
  * Internal enrichment row: the public CaptureListItem plus the extra signals the
  * Overview "needs attention" reason string is derived from. The extra fields are
  * stripped before a capture is returned to a caller (see toCaptureListItem).
@@ -267,6 +325,218 @@ export class PlanogramAnalyticsService {
     }
     out.sort((a, b) => b.risk - a.risk);
     return out;
+  }
+
+  /**
+   * Cross-store trend analytics for the Insights view. One pass over the
+   * compliance-history window (default 90 days) yields: the org compliance
+   * trend, per-category own-vs-competitor shelf share, own-vs-competitor price
+   * movement, store + region compliance rollups, and promotion presence. All
+   * derived from the same window so the page is internally consistent; each
+   * series degrades to empty when its v2 fields aren't populated yet.
+   */
+  static async insights(orgId: string, opts: { periodDays?: number } = {}): Promise<PlanogramInsightsResult> {
+    const periodDays = Math.min(365, Math.max(1, opts.periodDays ?? 90));
+    const sinceISO = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data, error } = await supabaseAdmin
+      .from('planogram_compliance')
+      .select('store_id, score, shelf_share_own, competitor_share, category_breakdown, pricing, promotions, created_at')
+      .eq('org_id', orgId)
+      .gte('created_at', sinceISO)
+      .order('created_at', { ascending: true })
+      .limit(5000);
+    if (error) throw error;
+    const rows = (data || []) as Array<{
+      store_id: string | null;
+      score: number | null;
+      shelf_share_own: number | null;
+      competitor_share: number | null;
+      category_breakdown: unknown;
+      pricing: unknown;
+      promotions: unknown;
+      created_at: string;
+    }>;
+
+    // Resolve store name + city (region) in a batch (store → city_id → cities.name).
+    const storeIds = [...new Set(rows.map((r) => r.store_id).filter(Boolean) as string[])];
+    const storeById = new Map<string, { name: string | null; city_id: string | null }>();
+    if (storeIds.length) {
+      const { data: sd } = await supabaseAdmin.from('stores').select('id, name, city_id').in('id', storeIds);
+      for (const s of (sd || []) as any[]) storeById.set(s.id as string, { name: (s.name as string) ?? null, city_id: (s.city_id as string) ?? null });
+    }
+    const cityIds = [...new Set([...storeById.values()].map((s) => s.city_id).filter(Boolean) as string[])];
+    const cityNameById = new Map<string, string>();
+    if (cityIds.length) {
+      const { data: cd } = await supabaseAdmin.from('cities').select('id, name').in('id', cityIds);
+      for (const c of (cd || []) as any[]) cityNameById.set(c.id as string, (c.name as string) ?? '');
+    }
+    const regionOf = (storeId: string | null): string | null => {
+      if (!storeId) return null;
+      const cid = storeById.get(storeId)?.city_id ?? null;
+      return cid ? cityNameById.get(cid) ?? null : null;
+    };
+
+    const scored = rows.filter((r) => r.score != null);
+    const captures_count = scored.length;
+    const stores_count = new Set(rows.map((r) => r.store_id).filter(Boolean) as string[]).size;
+
+    // 1. Compliance trend — daily average score.
+    const dayAgg = new Map<string, { sum: number; count: number }>();
+    for (const r of scored) {
+      const day = (r.created_at || '').slice(0, 10);
+      if (!day) continue;
+      const b = dayAgg.get(day) || { sum: 0, count: 0 };
+      b.sum += r.score as number;
+      b.count += 1;
+      dayAgg.set(day, b);
+    }
+    const compliance_trend = [...dayAgg.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, b]) => ({ date, avg_score: round1(b.sum / b.count), captures: b.count }));
+
+    // 2. Category share — window average of own/competitor share per category.
+    const catAgg = new Map<string, { own: number; comp: number; facings: number; n: number; ownP: number; ownPn: number; compP: number; compPn: number }>();
+    for (const r of rows) {
+      const cb = Array.isArray(r.category_breakdown) ? (r.category_breakdown as any[]) : [];
+      for (const c of cb) {
+        const name = typeof c?.category === 'string' && c.category.trim() ? c.category.trim() : null;
+        if (!name) continue;
+        const a = catAgg.get(name) || { own: 0, comp: 0, facings: 0, n: 0, ownP: 0, ownPn: 0, compP: 0, compPn: 0 };
+        a.own += num(c.own_share);
+        a.comp += num(c.competitor_share);
+        a.facings += num(c.facings);
+        a.n += 1;
+        if (c?.avg_own_price != null && Number.isFinite(Number(c.avg_own_price))) { a.ownP += Number(c.avg_own_price); a.ownPn += 1; }
+        if (c?.avg_competitor_price != null && Number.isFinite(Number(c.avg_competitor_price))) { a.compP += Number(c.avg_competitor_price); a.compPn += 1; }
+        catAgg.set(name, a);
+      }
+    }
+    const category_share = [...catAgg.entries()]
+      .map(([category, a]) => ({
+        category,
+        own_share: round1(a.own / a.n),
+        competitor_share: round1(a.comp / a.n),
+        facings: Math.round(a.facings),
+        captures: a.n,
+        avg_own_price: a.ownPn ? round1(a.ownP / a.ownPn) : null,
+        avg_competitor_price: a.compPn ? round1(a.compP / a.compPn) : null,
+      }))
+      .sort((x, y) => y.facings - x.facings);
+
+    // 3. Price movement — daily own vs competitor average shelf price.
+    const priceByDay = new Map<string, { own: number; ownN: number; comp: number; compN: number }>();
+    for (const r of rows) {
+      const day = (r.created_at || '').slice(0, 10);
+      if (!day) continue;
+      const pr = Array.isArray(r.pricing) ? (r.pricing as any[]) : [];
+      for (const p of pr) {
+        const price = p?.price;
+        if (price == null || !Number.isFinite(Number(price))) continue;
+        const b = priceByDay.get(day) || { own: 0, ownN: 0, comp: 0, compN: 0 };
+        if (p?.is_competitor === true) { b.comp += Number(price); b.compN += 1; }
+        else { b.own += Number(price); b.ownN += 1; }
+        priceByDay.set(day, b);
+      }
+    }
+    const price_movement = [...priceByDay.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, b]) => ({
+        date,
+        own_avg_price: b.ownN ? round1(b.own / b.ownN) : null,
+        competitor_avg_price: b.compN ? round1(b.comp / b.compN) : null,
+        own_n: b.ownN,
+        competitor_n: b.compN,
+      }));
+
+    // 4. Store compliance (ranked) + region rollup (by city).
+    const storeAgg = new Map<string, { score: number; n: number; own: number; ownN: number; comp: number; compN: number }>();
+    for (const r of scored) {
+      if (!r.store_id) continue;
+      const a = storeAgg.get(r.store_id) || { score: 0, n: 0, own: 0, ownN: 0, comp: 0, compN: 0 };
+      a.score += r.score as number;
+      a.n += 1;
+      if (r.shelf_share_own != null) { a.own += r.shelf_share_own; a.ownN += 1; }
+      if (r.competitor_share != null) { a.comp += r.competitor_share; a.compN += 1; }
+      storeAgg.set(r.store_id, a);
+    }
+    const store_compliance = [...storeAgg.entries()]
+      .map(([store_id, a]) => ({
+        store_id,
+        store_name: storeById.get(store_id)?.name ?? null,
+        region: regionOf(store_id),
+        captures: a.n,
+        avg_score: round1(a.score / a.n),
+        own_shelf_share: a.ownN ? round1(a.own / a.ownN) : null,
+        competitor_share: a.compN ? round1(a.comp / a.compN) : null,
+      }))
+      .sort((x, y) => y.avg_score - x.avg_score);
+
+    const regionAgg = new Map<string, { score: number; n: number; own: number; ownN: number; stores: Set<string> }>();
+    for (const r of scored) {
+      const region = regionOf(r.store_id) || 'Unassigned';
+      const a = regionAgg.get(region) || { score: 0, n: 0, own: 0, ownN: 0, stores: new Set<string>() };
+      a.score += r.score as number;
+      a.n += 1;
+      if (r.shelf_share_own != null) { a.own += r.shelf_share_own; a.ownN += 1; }
+      if (r.store_id) a.stores.add(r.store_id);
+      regionAgg.set(region, a);
+    }
+    const region_compliance = [...regionAgg.entries()]
+      .map(([region, a]) => ({
+        region,
+        stores: a.stores.size,
+        captures: a.n,
+        avg_score: round1(a.score / a.n),
+        own_shelf_share: a.ownN ? round1(a.own / a.ownN) : null,
+      }))
+      .sort((x, y) => y.avg_score - x.avg_score);
+
+    // 5. Promotion presence — share of captures carrying a live offer + top offers.
+    const promoDay = new Map<string, { total: number; withPromo: number }>();
+    const offerAgg = new Map<string, { text: string; offer_type: string; count: number }>();
+    let capturesWithPromo = 0;
+    for (const r of rows) {
+      const day = (r.created_at || '').slice(0, 10);
+      const promos = Array.isArray(r.promotions) ? (r.promotions as any[]) : [];
+      const has = promos.length > 0;
+      if (has) capturesWithPromo += 1;
+      if (day) {
+        const b = promoDay.get(day) || { total: 0, withPromo: 0 };
+        b.total += 1;
+        if (has) b.withPromo += 1;
+        promoDay.set(day, b);
+      }
+      for (const p of promos) {
+        const text = typeof p?.text === 'string' ? p.text.trim() : '';
+        if (!text) continue;
+        const key = text.toLowerCase();
+        const a = offerAgg.get(key) || { text, offer_type: typeof p?.offer_type === 'string' ? p.offer_type : 'other', count: 0 };
+        a.count += 1;
+        offerAgg.set(key, a);
+      }
+    }
+    const promo = {
+      captures_total: rows.length,
+      captures_with_promo: capturesWithPromo,
+      pct: rows.length ? round1((capturesWithPromo / rows.length) * 100) : 0,
+      trend: [...promoDay.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([date, b]) => ({ date, total: b.total, with_promo: b.withPromo, pct: b.total ? round1((b.withPromo / b.total) * 100) : 0 })),
+      top_offers: [...offerAgg.values()].sort((a, b) => b.count - a.count).slice(0, 8),
+    };
+
+    return {
+      period_days: periodDays,
+      captures_count,
+      stores_count,
+      compliance_trend,
+      category_share,
+      price_movement,
+      store_compliance,
+      region_compliance,
+      promo,
+    };
   }
 
   // ── Redesigned module: captures list + overview ──────────────────────────
@@ -561,6 +831,11 @@ function attentionReason(c: EnrichedCapture): string {
 
 function round1(v: number): number {
   return Math.round(v * 10) / 10;
+}
+/** Finite-or-zero coercion for aggregating possibly-null jsonb numeric fields. */
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
 }
 function clamp(min: number, max: number, v: number) {
   return Math.max(min, Math.min(max, v));
