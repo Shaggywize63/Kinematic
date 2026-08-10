@@ -24,6 +24,8 @@ import {
   pullEvents as pullGoogleEvents,
   isConfigured as googleConfigured,
 } from '../services/integrations/googleCalendar.service';
+import { PlanogramService } from '../services/planogram.service';
+import { runWithProject, isKnownProject, fallbackProjectKey } from '../lib/projects';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -309,6 +311,45 @@ router.post('/sync-google-calendars', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: { users, imported, updated, cancelled } });
   } catch (err: any) {
     logger.error(`[cron] sync-google-calendars crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/rescore-planogram-compliance
+ *
+ * Cheap, DETERMINISTIC backfill (NO vision / NO AI) that upgrades OLDER shelf
+ * captures to the v2 compliance metrics. For captures whose compliance is stale
+ * / pre-v2 (`occupancy_score IS NULL OR methodology = '{}'::jsonb`) but which
+ * already HAVE a planogram_recognition row, it re-runs the pure `scoreShelf`
+ * from the EXISTING stored detections + the planogram layout and updates the
+ * compliance row in place — deriving occupancy, shelf-share, zone/category
+ * rollups, pricing/promotions and the full methodology with zero model cost.
+ *
+ * (Per-capture re-analysis that RE-RUNS vision is the separate, org-scoped
+ * POST /api/v1/planograms/captures/:id/reprocess — use that when the detections
+ * themselves need refreshing; this job is the cheap bulk path.)
+ *
+ * Body: { limit?: number (default 50, cap 500), project?: string }. `project`
+ * routes the sweep to a specific Supabase project (honoring the same multi-
+ * project routing as the rest of the app via runWithProject); omitted it runs
+ * against the fallback (default/Tata in production) like the other cron jobs.
+ * Idempotent: a re-scored row is no longer stale, so re-running only picks up
+ * rows not yet upgraded. Returns { processed, remaining }.
+ */
+router.post('/rescore-planogram-compliance', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { limit?: number; project?: string };
+    const limit = Math.min(500, Math.max(1, Number(body.limit) || 50));
+    const requested = typeof body.project === 'string' ? body.project.trim().toLowerCase() : '';
+    const project = requested && isKnownProject(requested) ? requested : fallbackProjectKey();
+
+    const result = await runWithProject(project, () =>
+      PlanogramService.rescoreStaleCompliance({ limit }),
+    );
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] rescore-planogram-compliance crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });

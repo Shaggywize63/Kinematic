@@ -21,6 +21,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { supabaseAdmin } from '../lib/supabase';
+import { logger } from '../lib/logger';
 import { AppError } from '../utils';
 import {
   PlanogramVisionService,
@@ -1270,6 +1271,429 @@ export class PlanogramService {
     return { ref_image_url };
   }
 
+  // ── Shared analysis / persistence helpers ────────────────────────────────
+  //
+  // Extracted so both the live capture pipeline (processCapture) and the
+  // on-demand re-analysis (reprocessCapture) build the SAME recognition /
+  // compliance rows and apply the SAME quality gate — a green typecheck on one
+  // path shouldn't let the other drift.
+
+  /**
+   * Lever 3 — quality gate (flag only; never reject the capture). Flags a
+   * capture for human review when it is likely unreliable, but always leaves it
+   * (and its scores) persisted. Thresholds:
+   *   • QUALITY_MIN 0.4  — blur/glare/angle are 0..1 (1 = best); below 0.4 the
+   *     image is degraded enough that recognition may be wrong (the same 0.4
+   *     floor recognizeShelf uses for blur/glare; angle is added here).
+   *   • LOW_CONFIDENCE 0.6 — overall recognition confidence floor.
+   *   • HIGH_MISS_RATE 0.5 — >50% of expected SKUs still absent AFTER the
+   *     second-pass recall suggests a bad capture (or a truly empty shelf)
+   *     rather than a few genuine gaps.
+   * Only image-quality problems earn the "Re-shoot capture" action; miss-rate
+   * and low-confidence just raise needs_review (re-shooting won't fix an empty
+   * shelf or an inherently hard scene). Mutates `recognition.needs_review` and
+   * may prepend a recommendation to `result`.
+   */
+  private static applyQualityGate(
+    recognition: ShelfRecognition,
+    result: ComplianceResult,
+    layout: PlanogramLayout,
+  ): void {
+    const QUALITY_MIN = 0.4;
+    const LOW_CONFIDENCE = 0.6;
+    const HIGH_MISS_RATE = 0.5;
+    const q = recognition.quality;
+    const lowQuality =
+      q.blur_score < QUALITY_MIN || q.glare_score < QUALITY_MIN || q.angle_score < QUALITY_MIN;
+    const expectedCount = (layout.expected_skus || []).length;
+    const missRate = expectedCount ? result.missing_skus.length / expectedCount : 0;
+    const highMiss = expectedCount > 0 && missRate > HIGH_MISS_RATE;
+    const lowConfidence = recognition.overall_confidence < LOW_CONFIDENCE;
+
+    if (lowQuality || highMiss || lowConfidence) {
+      recognition.needs_review = true;
+    }
+    if (lowQuality) {
+      result.recommendations.unshift({
+        priority: 'high',
+        action: 'Re-shoot capture',
+        rationale: 'Image quality low (blur/glare/angle) — recognition may be unreliable',
+      });
+    }
+  }
+
+  /** Build the `planogram_recognition` row payload for a capture (insert or update). */
+  private static recognitionRow(captureId: string, orgId: string, recognition: ShelfRecognition) {
+    return {
+      capture_id: captureId,
+      org_id: orgId,
+      detected_skus: recognition.detected_skus,
+      promotions: recognition.promotions,
+      shelf_map: { shelf_count: recognition.shelf_count },
+      overall_confidence: recognition.overall_confidence,
+      model_versions: { vision: recognition.model_version },
+      needs_review: recognition.needs_review,
+    };
+  }
+
+  /**
+   * The scored metric columns of a `planogram_compliance` row (everything the
+   * engine computes) — WITHOUT the identity columns (org/client/capture/
+   * planogram/store/fe) which never change on a re-score. Used both for the
+   * initial insert (spread alongside the identity columns) and for in-place
+   * updates by reprocess / the bulk re-score.
+   */
+  private static complianceScoreFields(result: ComplianceResult) {
+    return {
+      score: result.score,
+      presence_score: result.presence_score,
+      facing_score: result.facing_score,
+      position_score: result.position_score,
+      competitor_share: result.competitor_share,
+      occupancy_score: result.occupancy_score,
+      shelf_share_own: result.shelf_share_own,
+      shelf_share_competitor: result.shelf_share_competitor,
+      category_breakdown: result.category_breakdown,
+      zone_breakdown: result.zone_breakdown,
+      pricing: result.pricing,
+      promotions: result.promotions,
+      methodology: result.methodology,
+      missing_skus: result.missing_skus,
+      misplaced_skus: result.misplaced_skus,
+      facing_deltas: result.facing_deltas,
+      recommendations: result.recommendations,
+    };
+  }
+
+  /**
+   * UPSERT the recognition row for a capture: update in place if one already
+   * exists (the reprocess case), else insert. Manual select-then-write (rather
+   * than PostgREST `.upsert`) so it never depends on a DB unique constraint on
+   * capture_id that we can't verify here.
+   */
+  private static async upsertRecognition(
+    captureId: string,
+    orgId: string,
+    recognition: ShelfRecognition,
+  ): Promise<void> {
+    const row = this.recognitionRow(captureId, orgId, recognition);
+    const { data: existing } = await supabaseAdmin
+      .from('planogram_recognition')
+      .select('id')
+      .eq('capture_id', captureId)
+      .maybeSingle();
+    if (existing?.id) {
+      const { error } = await supabaseAdmin
+        .from('planogram_recognition')
+        .update(row)
+        .eq('id', existing.id);
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    } else {
+      const { error } = await supabaseAdmin.from('planogram_recognition').insert(row);
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    }
+  }
+
+  /**
+   * UPSERT the compliance row for a capture: update the metric columns in place
+   * if a row exists (the reprocess case), else insert a full row. Same manual
+   * select-then-write approach as upsertRecognition.
+   */
+  private static async upsertCompliance(args: {
+    orgId: string;
+    clientId?: string | null;
+    captureId: string;
+    planogramId: string;
+    storeId?: string | null;
+    feId: string;
+    result: ComplianceResult;
+  }): Promise<void> {
+    const fields = this.complianceScoreFields(args.result);
+    const { data: existing } = await supabaseAdmin
+      .from('planogram_compliance')
+      .select('id')
+      .eq('capture_id', args.captureId)
+      .eq('org_id', args.orgId)
+      .maybeSingle();
+    if (existing?.id) {
+      const { error } = await supabaseAdmin
+        .from('planogram_compliance')
+        .update(fields)
+        .eq('id', existing.id);
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    } else {
+      const { error } = await supabaseAdmin.from('planogram_compliance').insert({
+        org_id: args.orgId,
+        client_id: args.clientId ?? null,
+        capture_id: args.captureId,
+        planogram_id: args.planogramId,
+        store_id: args.storeId ?? null,
+        fe_id: args.feId,
+        ...fields,
+      });
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    }
+  }
+
+  /**
+   * Fetch a STORED capture photo (local bundled asset OR remote) as base64 + a
+   * supported media type for a re-analysis vision call. Uses the larger cap
+   * suitable for full-resolution shelf photos (fetchImageAsBase64's 4MB cap is
+   * tuned for small pack-shots and would reject most captures). Media type is
+   * taken from the response content-type, falling back to the URL extension.
+   * Returns null on any failure so the caller can respond cleanly (422).
+   */
+  private static async fetchCaptureImageForVision(
+    url: string,
+  ): Promise<{ base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/webp' } | null> {
+    const local = this.readLocalReferenceImage(url);
+    if (local) return local;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length === 0 || buf.length > 20_000_000) return null;
+      const ct = res.headers.get('content-type') || '';
+      return { base64: buf.toString('base64'), mediaType: this.mediaTypeFor(ct || url) };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * On-demand RE-ANALYSIS of a single existing capture (the dashboard's
+   * "Re-analyze" button). Re-runs the FULL pipeline — recognition (vision) →
+   * score → quality gate — on the capture's STORED photo + its planogram layout,
+   * then UPSERTs the recognition + compliance rows (update in place if present,
+   * else insert). Org-scoped: a capture outside `orgId` 404s.
+   *
+   * The vision call is wrapped so a failure returns 502 and leaves the existing
+   * recognition / compliance rows UNTOUCHED (nothing is written until scoring
+   * succeeds). Returns the same shape as GET /captures/:id.
+   */
+  static async reprocessCapture(args: {
+    orgId: string;
+    captureId: string;
+  }): Promise<{ capture: any; recognition: any; compliance: any }> {
+    // 1. Load the capture (org-scoped). Same joins as GET /captures/:id so the
+    //    returned `capture` matches that endpoint's shape.
+    const { data: cap, error } = await supabaseAdmin
+      .from('planogram_captures')
+      .select('*, fe:users!fe_id(name), store:stores!store_id(name), planogram:planograms!planogram_id(name)')
+      .eq('id', args.captureId)
+      .eq('org_id', args.orgId)
+      .single();
+    if (error || !cap) throw new AppError(404, 'Capture not found', 'NOT_FOUND');
+    if (!cap.image_url) {
+      throw new AppError(422, 'Capture has no stored image to re-analyze', 'IMAGE_UNAVAILABLE');
+    }
+
+    // 2. Resolve the planogram (prefer the capture's own; else the store's active).
+    let planogramId: string | null = cap.planogram_id ?? null;
+    if (!planogramId && cap.store_id) {
+      planogramId = await this.resolvePlanogramForStore(args.orgId, cap.store_id);
+    }
+    if (!planogramId) {
+      throw new AppError(400, 'Capture is not linked to a planogram', 'NO_PLANOGRAM');
+    }
+    const layout = await this.loadPlanogramLayout(planogramId);
+
+    // 3. Load the stored photo for the vision call (larger cap for real captures).
+    const img = await this.fetchCaptureImageForVision(cap.image_url);
+    if (!img) {
+      throw new AppError(422, 'Could not load the stored capture image', 'IMAGE_UNAVAILABLE');
+    }
+
+    // 4. Store format (calibrates dense MT vs sparse GT), same as processCapture.
+    let storeFormat: string | undefined;
+    if (cap.store_id) {
+      const { data: st } = await supabaseAdmin
+        .from('stores')
+        .select('store_type')
+        .eq('id', cap.store_id)
+        .maybeSingle();
+      storeFormat = (st as { store_type?: string } | null)?.store_type || undefined;
+    }
+
+    // 5. Re-run vision — GUARDED. On failure return 502 and write NOTHING, so
+    //    the existing recognition / compliance rows are never corrupted.
+    const referenceImages = await this.loadReferenceImages(layout);
+    let recognition: ShelfRecognition;
+    try {
+      recognition = await PlanogramVisionService.recognizeShelf({
+        imageBase64: img.base64,
+        imageMediaType: img.mediaType,
+        expectedSkus: layout.expected_skus.map((s) => ({
+          sku_id: s.sku_id,
+          sku_name: s.sku_name,
+          brand: s.brand ?? undefined,
+          category: s.category ?? undefined,
+        })),
+        competitorSkus: (layout.competitors || []).map((c) => ({
+          sku_id: c.sku_id,
+          sku_name: c.sku_name,
+          brand: c.brand,
+          category: c.category ?? undefined,
+        })),
+        storeFormat,
+        referenceImages,
+        tiling: layout.tiling === true,
+      });
+    } catch (e: any) {
+      logger.warn(`[planogram] reprocess vision failed for capture ${args.captureId}: ${e?.message || e}`);
+      throw new AppError(
+        502,
+        'Vision re-analysis failed; the existing analysis was left unchanged',
+        'VISION_FAILED',
+      );
+    }
+
+    // 6. Score + quality gate (deterministic).
+    const result = this.scoreShelf({ recognition, layout });
+    this.applyQualityGate(recognition, result, layout);
+
+    // 7. UPSERT recognition + compliance for this capture.
+    await this.upsertRecognition(args.captureId, args.orgId, recognition);
+    await this.upsertCompliance({
+      orgId: args.orgId,
+      clientId: cap.client_id ?? null,
+      captureId: args.captureId,
+      planogramId,
+      storeId: cap.store_id ?? null,
+      feId: cap.fe_id,
+      result,
+    });
+
+    // 8. Return the freshly-written rows in the GET /captures/:id shape.
+    const { data: rec } = await supabaseAdmin
+      .from('planogram_recognition')
+      .select('*')
+      .eq('capture_id', args.captureId)
+      .single();
+    const { data: comp } = await supabaseAdmin
+      .from('planogram_compliance')
+      .select('*')
+      .eq('capture_id', args.captureId)
+      .single();
+    return { capture: cap, recognition: rec, compliance: comp };
+  }
+
+  /**
+   * Bulk deterministic re-score (cheap backfill, NO vision). Upgrades captures
+   * whose compliance is stale / pre-v2 to the v2 metrics they can derive from
+   * the detections ALREADY stored on their recognition row — occupancy,
+   * shelf-share, zone/category rollups, pricing/promotions and the full
+   * methodology — by re-running the pure `scoreShelf` from the existing
+   * `recognition.detected_skus` + planogram layout. No AI, no image fetch.
+   *
+   * "Stale / pre-v2" predicate: `occupancy_score IS NULL OR methodology =
+   * '{}'::jsonb`. Both columns were added by the SAME v2 migration
+   * (planogram_v2_metrics.sql) with occupancy nullable and methodology
+   * defaulting to '{}', so every pre-v2 compliance row matches. Only rows that
+   * HAVE a recognition row are recomputable; the rest are skipped (they stay
+   * stale and remain in `remaining`). Idempotent — a re-scored row is no longer
+   * stale, so re-running only ever picks up rows not yet upgraded.
+   *
+   * Processes up to `limit` per call and returns `{ processed, remaining }`.
+   */
+  static async rescoreStaleCompliance(args: { limit: number }): Promise<{
+    processed: number;
+    remaining: number;
+  }> {
+    const limit = Math.min(500, Math.max(1, Number(args.limit) || 50));
+    // Pre-v2 compliance is reliably identified by occupancy_score IS NULL — the
+    // column was added in the v2 migration, so every pre-v2 row is null. We do
+    // NOT also test methodology.eq.{}: it's redundant, and the unquoted {} is
+    // fragile to parse inside a PostgREST filter. We also require a non-null
+    // planogram_id so the sweep only ever selects recomputable rows (a row with
+    // no layout can never be scored and must not wedge the resumable page).
+    const STALE_OR = 'occupancy_score.is.null';
+
+    // Total stale rows (for `remaining`). head:true → count only, no bodies.
+    const { count: totalStale } = await supabaseAdmin
+      .from('planogram_compliance')
+      .select('id', { count: 'exact', head: true })
+      .or(STALE_OR)
+      .not('planogram_id', 'is', null);
+
+    // A page of stale rows. Ordered by id for a stable, resumable sweep.
+    const { data: staleRows, error } = await supabaseAdmin
+      .from('planogram_compliance')
+      .select('id, capture_id, planogram_id')
+      .or(STALE_OR)
+      .not('planogram_id', 'is', null)
+      .order('id', { ascending: true })
+      .limit(limit);
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+    const rows = (staleRows || []) as Array<{
+      id: string;
+      capture_id: string;
+      planogram_id: string | null;
+    }>;
+    if (rows.length === 0) return { processed: 0, remaining: totalStale ?? 0 };
+
+    // The stored detections for these captures — only rows WITH a recognition
+    // row are recomputable (no vision here). Fetched in one round-trip.
+    const captureIds = rows.map((r) => r.capture_id).filter(Boolean);
+    const recByCapture = new Map<string, any>();
+    if (captureIds.length) {
+      const { data: recs } = await supabaseAdmin
+        .from('planogram_recognition')
+        .select('capture_id, detected_skus, promotions, shelf_map, overall_confidence, needs_review, model_versions')
+        .in('capture_id', captureIds);
+      for (const r of (recs || []) as any[]) recByCapture.set(r.capture_id as string, r);
+    }
+
+    // Cache layouts so N captures on one planogram load it once.
+    const layoutCache = new Map<string, PlanogramLayout>();
+    const loadLayout = async (pid: string): Promise<PlanogramLayout> => {
+      let l = layoutCache.get(pid);
+      if (!l) {
+        l = await this.loadPlanogramLayout(pid);
+        layoutCache.set(pid, l);
+      }
+      return l;
+    };
+
+    let processed = 0;
+    for (const row of rows) {
+      try {
+        if (!row.planogram_id) continue; // can't score without a layout
+        const rec = recByCapture.get(row.capture_id);
+        if (!rec) continue; // no stored detections → nothing to recompute from
+        const layout = await loadLayout(row.planogram_id);
+
+        // Rebuild the minimal ShelfRecognition scoreShelf needs (it reads only
+        // detected_skus / shelf_count / promotions; quality/confidence are unused
+        // by the pure scorer, so neutral values are fine).
+        const recognition: ShelfRecognition = {
+          detected_skus: Array.isArray(rec.detected_skus) ? rec.detected_skus : [],
+          promotions: Array.isArray(rec.promotions) ? rec.promotions : [],
+          shelf_count: Number(rec.shelf_map?.shelf_count) || 0,
+          overall_confidence: Number(rec.overall_confidence) || 0,
+          needs_review: rec.needs_review === true,
+          quality: { angle_score: 1, blur_score: 1, glare_score: 1 },
+          model_version: (rec.model_versions?.vision as string) || '',
+        };
+
+        const result = this.scoreShelf({ recognition, layout });
+
+        const { error: upErr } = await supabaseAdmin
+          .from('planogram_compliance')
+          .update(this.complianceScoreFields(result))
+          .eq('id', row.id);
+        if (upErr) throw new Error(upErr.message);
+        processed += 1;
+      } catch (e: any) {
+        logger.warn(`[planogram] rescore failed for capture ${row.capture_id}: ${e?.message || e}`);
+      }
+    }
+
+    const remaining = Math.max(0, (totalStale ?? processed) - processed);
+    return { processed, remaining };
+  }
+
   /**
    * End-to-end pipeline: capture image → vision → compliance → persist.
    * Returns the persisted compliance row id along with the result payload.
@@ -1353,41 +1777,7 @@ export class PlanogramService {
     const result = this.scoreShelf({ recognition, layout });
 
     // ── Lever 3 — quality gate (flag only; never reject the capture) ──────
-    // Flag a capture for human review when it is likely unreliable, but always
-    // still persist it and its scores. Thresholds (documented here):
-    //   • QUALITY_MIN 0.4  — blur/glare/angle scores are 0..1 (1 = best); below
-    //     0.4 the image is degraded enough that recognition may be wrong. This
-    //     is the same 0.4 floor recognizeShelf already uses for blur/glare;
-    //     angle is added here.
-    //   • LOW_CONFIDENCE 0.6 — overall recognition confidence floor.
-    //   • HIGH_MISS_RATE 0.5 — >50% of expected SKUs still absent AFTER the
-    //     second-pass recall suggests a bad capture (or a truly empty shelf)
-    //     rather than a few genuine gaps.
-    // Only image-quality problems earn the "Re-shoot capture" action; miss-rate
-    // and low-confidence just raise needs_review (re-shooting won't fix an empty
-    // shelf or an inherently hard scene).
-    const QUALITY_MIN = 0.4;
-    const LOW_CONFIDENCE = 0.6;
-    const HIGH_MISS_RATE = 0.5;
-    const q = recognition.quality;
-    const lowQuality =
-      q.blur_score < QUALITY_MIN || q.glare_score < QUALITY_MIN || q.angle_score < QUALITY_MIN;
-    const expectedCount = (layout.expected_skus || []).length;
-    const missRate = expectedCount ? result.missing_skus.length / expectedCount : 0;
-    const highMiss = expectedCount > 0 && missRate > HIGH_MISS_RATE;
-    const lowConfidence = recognition.overall_confidence < LOW_CONFIDENCE;
-
-    if (lowQuality || highMiss || lowConfidence) {
-      recognition.needs_review = true;
-    }
-    if (lowQuality) {
-      result.recommendations.unshift({
-        priority: 'high',
-        action: 'Re-shoot capture',
-        rationale:
-          'Image quality low (blur/glare/angle) — recognition may be unreliable',
-      });
-    }
+    this.applyQualityGate(recognition, result, layout);
 
     // Store the shelf photo in this capture's own project so history can render
     // it; fall back to the client-provided URL if the in-project upload fails.
@@ -1418,16 +1808,9 @@ export class PlanogramService {
       throw new AppError(500, 'Failed to persist capture', 'DB_ERROR');
     }
 
-    await supabaseAdmin.from('planogram_recognition').insert({
-      capture_id: cap.id,
-      org_id: args.orgId,
-      detected_skus: recognition.detected_skus,
-      promotions: recognition.promotions,
-      shelf_map: { shelf_count: recognition.shelf_count },
-      overall_confidence: recognition.overall_confidence,
-      model_versions: { vision: recognition.model_version },
-      needs_review: recognition.needs_review,
-    });
+    await supabaseAdmin
+      .from('planogram_recognition')
+      .insert(this.recognitionRow(cap.id, args.orgId, recognition));
 
     const { data: comp, error: compErr } = await supabaseAdmin
       .from('planogram_compliance')
@@ -1438,23 +1821,7 @@ export class PlanogramService {
         planogram_id: planogramId,
         store_id: args.storeId ?? null,
         fe_id: args.feId,
-        score: result.score,
-        presence_score: result.presence_score,
-        facing_score: result.facing_score,
-        position_score: result.position_score,
-        competitor_share: result.competitor_share,
-        occupancy_score: result.occupancy_score,
-        shelf_share_own: result.shelf_share_own,
-        shelf_share_competitor: result.shelf_share_competitor,
-        category_breakdown: result.category_breakdown,
-        zone_breakdown: result.zone_breakdown,
-        pricing: result.pricing,
-        promotions: result.promotions,
-        methodology: result.methodology,
-        missing_skus: result.missing_skus,
-        misplaced_skus: result.misplaced_skus,
-        facing_deltas: result.facing_deltas,
-        recommendations: result.recommendations,
+        ...this.complianceScoreFields(result),
       })
       .select('id')
       .single();
