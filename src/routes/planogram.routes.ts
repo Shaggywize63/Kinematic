@@ -241,6 +241,12 @@ router.get('/analytics/sku-visibility', asyncHandler(async (req: AuthRequest, re
 router.get('/analytics/risk-forecast', asyncHandler(async (req: AuthRequest, res: Response) => {
   res.json({ success: true, data: await PlanogramAnalyticsService.riskForecast(req.user.org_id) });
 }));
+// Cross-store trend analytics for the redesigned module's Insights view.
+// Org-scoped; last `days` (default 90, max 365).
+router.get('/analytics/insights', asyncHandler(async (req: AuthRequest, res: Response) => {
+  const days = Math.min(365, Math.max(1, Number(req.query.days) || 90));
+  res.json({ success: true, data: await PlanogramAnalyticsService.insights(req.user.org_id, { periodDays: days }) });
+}));
 
 // ── Planogram CRUD ─────────────────────────────────────────────────────
 
