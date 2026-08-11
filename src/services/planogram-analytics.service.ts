@@ -32,6 +32,10 @@ export interface CaptureListItem {
   id: string;
   store_id: string | null;
   store_name: string | null;
+  // Free-trial / storeless captures have no server store; the field rep's
+  // manually-entered outlet name rides along on the capture
+  // (device_meta.outlet_label) so the history can still name the outlet.
+  outlet_label: string | null;
   city: string | null;
   category: string | null;
   captured_at: string;
@@ -552,7 +556,11 @@ export class PlanogramAnalyticsService {
     let rows = enriched;
     if (filters.city) {
       const target = filters.city.trim().toLowerCase();
-      rows = rows.filter((r) => (r.city ?? '').toLowerCase() === target);
+      // Storeless captures (free-trial outlets have no server store → no city)
+      // are kept regardless of the city scope, so the dashboard's auto-appended
+      // ?city= never hides trial audits from the history. Store-based captures
+      // still narrow to the selected city.
+      rows = rows.filter((r) => r.store_id == null || (r.city ?? '').toLowerCase() === target);
     }
     if (filters.needsReview !== undefined) {
       rows = rows.filter((r) => r.needs_review === filters.needsReview);
@@ -585,7 +593,9 @@ export class PlanogramAnalyticsService {
     let enriched = await this.enrichedCaptures(orgId, { sinceISO });
     if (opts.city) {
       const target = opts.city.trim().toLowerCase();
-      enriched = enriched.filter((r) => (r.city ?? '').toLowerCase() === target);
+      // Keep storeless (free-trial) captures regardless of city scope — see
+      // listCaptures — so the overview KPIs aren't emptied for trial tenants.
+      enriched = enriched.filter((r) => r.store_id == null || (r.city ?? '').toLowerCase() === target);
     }
     // Only captures that were actually scored feed the headline aggregates.
     const scored = enriched.filter((r) => r.score != null);
@@ -663,7 +673,7 @@ export class PlanogramAnalyticsService {
   ): Promise<EnrichedCapture[]> {
     let capQ = supabaseAdmin
       .from('planogram_captures')
-      .select('id, store_id, planogram_id, fe_id, captured_at, blur_score, glare_score, angle_score')
+      .select('id, store_id, planogram_id, fe_id, captured_at, blur_score, glare_score, angle_score, device_meta')
       .eq('org_id', orgId)
       .order('captured_at', { ascending: false })
       .limit(5000);
@@ -680,6 +690,7 @@ export class PlanogramAnalyticsService {
       blur_score: number | null;
       glare_score: number | null;
       angle_score: number | null;
+      device_meta: { outlet_label?: string | null } | null;
     }>;
     if (captures.length === 0) return [];
 
@@ -766,6 +777,7 @@ export class PlanogramAnalyticsService {
         id: c.id,
         store_id: c.store_id ?? null,
         store_name: store?.name ?? null,
+        outlet_label: (c.device_meta?.outlet_label ?? null) || null,
         city: cityId ? cityNameById.get(cityId) ?? null : null,
         category: c.planogram_id ? categoryById.get(c.planogram_id) ?? null : null,
         captured_at: c.captured_at,
@@ -792,6 +804,7 @@ function toCaptureListItem(c: EnrichedCapture): CaptureListItem {
     id: c.id,
     store_id: c.store_id,
     store_name: c.store_name,
+    outlet_label: c.outlet_label,
     city: c.city,
     category: c.category,
     captured_at: c.captured_at,
