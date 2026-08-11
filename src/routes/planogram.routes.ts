@@ -17,6 +17,22 @@ import { PlanogramVisionService } from '../services/planogram-vision.service';
 const router = Router();
 router.use(requireAuth);
 
+// The AI vision routes below run a SYNCHRONOUS 60-120s pipeline (Anthropic
+// shelf recognition + recall + the price/promo pass). The server sets a global
+// 30s idle-socket timeout in src/server.ts (Slowloris protection) — but while
+// the pipeline computes, no bytes flow on the socket, so Node would destroy the
+// connection at 30s. The edge proxy then returns a 502 to the client even
+// though processCapture keeps running, finishes, and persists the capture. Give
+// just these long routes a generous per-request socket timeout so the response
+// actually reaches the client; every other endpoint keeps the 30s guard. Kept
+// at/above the mobile clients' capture call timeout so the server never cuts
+// first.
+const VISION_ROUTE_TIMEOUT_MS = 240_000;
+function extendVisionTimeout(req: AuthRequest, res: Response): void {
+  req.setTimeout(VISION_ROUTE_TIMEOUT_MS);
+  res.setTimeout(VISION_ROUTE_TIMEOUT_MS);
+}
+
 // ── Planogram CRUD ─────────────────────────────────────────────────────
 
 // ── AI parse: convert a brand planogram image into structured layout ───
@@ -27,6 +43,7 @@ const parseSchema = z.object({
 });
 
 router.post('/parse', asyncHandler(async (req: AuthRequest, res: Response) => {
+  extendVisionTimeout(req, res);
   const body = parseSchema.parse(req.body);
   const parsed = await PlanogramVisionService.parsePlanogramFromImage({
     imageBase64: body.image_base64,
@@ -64,6 +81,7 @@ const captureSchema = z.object({
 });
 
 router.post('/captures', asyncHandler(async (req: AuthRequest, res: Response) => {
+  extendVisionTimeout(req, res);
   const body = captureSchema.parse(req.body);
   const out = await PlanogramService.processCapture({
     orgId: req.user.org_id,
@@ -168,6 +186,7 @@ router.post('/captures/:id/confirm-detection', asyncHandler(async (req: AuthRequ
 // 404s; a capture with no stored image 422s; a vision failure 502s and leaves
 // the existing rows untouched. Returns the same shape as GET /captures/:id.
 router.post('/captures/:id/reprocess', asyncHandler(async (req: AuthRequest, res: Response) => {
+  extendVisionTimeout(req, res);
   const out = await PlanogramService.reprocessCapture({
     orgId: req.user.org_id,
     captureId: req.params.id,
