@@ -21,15 +21,17 @@ import { supabase, supabaseAdmin } from '../../lib/supabase';
 import { sendEmail } from '../crm/emails.service';
 import { logger } from '../../lib/logger';
 
-// Visible sender for every password-reset email. Defaults to the
-// already-Resend-verified `mail.kinematicapp.com` subdomain (SPF + DKIM
-// + DMARC live). Override with PASSWORD_RESET_FROM_EMAIL once the
-// apex `kinematicapp.com` is also verified in Resend
-// (https://resend.com/domains) — flipping the sender is then a
-// no-deploy env change. Previously hard-coded to `noreply@kinematicapp.com`
-// (the apex, not the verified subdomain), which Resend was 403-rejecting
-// with "domain is not verified" so no reset email ever left the queue.
-const FROM_EMAIL = process.env.PASSWORD_RESET_FROM_EMAIL || 'noreply@mail.kinematicapp.com';
+// Visible sender for every password-reset email. Defaults to
+// `noreply@kinematic.app` — the domain Resend has verified and that every
+// other outbound CRM email already ships from reliably (1000+ delivered,
+// zero failures). We had briefly pointed this at the `mail.kinematicapp.com`
+// subdomain, but its Resend verification lapsed, so every reset email started
+// 403-ing ("domain is not verified") and no reset link ever left the queue —
+// which silently broke self-service password reset. Override with
+// PASSWORD_RESET_FROM_EMAIL if/when a `*.kinematicapp.com` sender is verified
+// in Resend (https://resend.com/domains); switching back is then a no-deploy
+// env change.
+const FROM_EMAIL = process.env.PASSWORD_RESET_FROM_EMAIL || 'noreply@kinematic.app';
 
 /**
  * Where the reset link points the user. The token + email both ride
