@@ -956,6 +956,25 @@ export class PlanogramService {
     return row.planogram_id;
   }
 
+  /**
+   * Org-level fallback planogram: the most recently updated ACTIVE planogram for
+   * the org. Used for captures that carry no store and no explicit planogram_id
+   * (e.g. the MoiSoi free trial, where reps use on-device outlets with no server
+   * store to assign a planogram to) so the audit still has a layout to score
+   * against. Org-scoped, so it never crosses tenants. Returns null if the org has
+   * no active planogram.
+   */
+  static async resolveDefaultPlanogramForOrg(orgId: string): Promise<string | null> {
+    const { data } = await supabaseAdmin
+      .from('planograms')
+      .select('id')
+      .eq('org_id', orgId)
+      .eq('is_active', true)
+      .order('updated_at', { ascending: false })
+      .limit(1);
+    return data?.[0]?.id ?? null;
+  }
+
   /** Max reference pack shots to fetch per capture (keeps token cost bounded). */
   private static readonly MAX_REFERENCE_IMAGES = 32;
 
@@ -1718,6 +1737,13 @@ export class PlanogramService {
     let planogramId = args.planogramId;
     if (!planogramId && args.storeId) {
       planogramId = await this.resolvePlanogramForStore(args.orgId, args.storeId);
+    }
+    // Fallback for storeless / unassigned captures (e.g. the MoiSoi free trial,
+    // where reps use on-device outlets with no server store): use the org's
+    // active planogram so the audit still has a layout. Org-scoped, so tenants
+    // that always pass a store/planogram (Tata, …) are unaffected.
+    if (!planogramId) {
+      planogramId = await this.resolveDefaultPlanogramForOrg(args.orgId);
     }
     if (!planogramId) {
       throw new AppError(
