@@ -484,6 +484,30 @@ export async function resolveProjectForIntegrationAsync(integrationId?: string |
 }
 
 /**
+ * Resolve which Supabase project a user id lives in by finding the project whose
+ * `users` table holds that id. Used by the Google OAuth callback — an
+ * unauthenticated Google redirect that carries NO `X-Kinematic-Project` header,
+ * so without this it would always fall back to the default project and write the
+ * rep's token into the WRONG tenant (the "connected but immediately shows
+ * disconnected / no Import button" bug for non-default-project users). The state
+ * JWT already pins the project at authorize time; this is the belt-and-braces
+ * fallback for links minted before that pin existed. Unknown ids fall back to
+ * the default project.
+ */
+export async function resolveProjectForUserIdAsync(userId?: string | null): Promise<string> {
+  const id = (userId || '').trim();
+  if (!id) return fallbackProjectKey();
+  for (const key of projectSearchOrder()) {
+    try {
+      const { data } = await adminClientFor(key)
+        .from('users').select('id').eq('id', id).limit(1).maybeSingle();
+      if (data) return key;
+    } catch { /* project unreachable — skip it */ }
+  }
+  return fallbackProjectKey();
+}
+
+/**
  * Synchronous, config-only resolver (env pins + fallback, NO DB lookup and NO
  * hardcoded domain). Retained for non-login code paths that can't await; the
  * login project-for-email endpoint uses the async, data-driven resolver above.
