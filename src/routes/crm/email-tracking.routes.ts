@@ -19,27 +19,32 @@ router.get('/open/:token', async (req: Request, res: Response) => {
 
 router.get('/click/:token', async (req: Request, res: Response) => {
   await emailsSvc.recordClick(req.params.token).catch(() => {});
-  // Open-redirect guard. Before: `res.redirect(302, req.query.u)` —
-  // anyone could craft a phishing link
-  //   `${api}/.../track/click/<token>?u=https://attacker.com`
-  // that 302s the recipient off-platform. Now we only follow URLs whose
-  // hostname is in CRM_TRACKING_REDIRECT_HOSTS (comma-separated env list,
-  // defaults to DASHBOARD_URL) — anything else falls back to '/'.
+  // Open-redirect guard. Before: `res.redirect(302, req.query.u)` — anyone could
+  // craft a phishing link `${api}/.../track/click/<token>?u=https://attacker.com`
+  // that 302s the recipient off-platform. A host allowlist fixed that but ALSO
+  // broke every legitimate external CTA in a marketing email (calendar links,
+  // landing pages, …). Now the primary check is a per-link SIGNATURE (`s`): a
+  // valid signature proves WE embedded the link, so any http(s) URL is safe to
+  // follow; an attacker can't forge it. Unsigned/legacy links keep the stricter
+  // same-host / allowlist behaviour, and anything else still falls back to '/'.
   const raw = String(req.query.u ?? '/');
+  const sig = String(req.query.s ?? '');
   let target = '/';
   try {
     if (raw.startsWith('/')) {
       target = raw; // relative paths are always same-origin
     } else {
       const u = new URL(raw);
-      // Same-host is always allowed — can't be an open-redirect by
-      // definition (we're redirecting from the API back to itself, e.g.
-      // the sender-verification email's link → /verified-senders/verify/:token).
+      const httpOk = u.protocol === 'https:' || u.protocol === 'http:';
+      // Signed by us → follow it, wherever it points (never non-http schemes).
+      const signedOk = httpOk && !!sig && emailsSvc.signRedirect(req.params.token, raw) === sig;
+      // Same-host is always allowed — can't be an open-redirect by definition
+      // (e.g. the sender-verification email's link back to /verified-senders/…).
       const sameHost = req.hostname && u.hostname === req.hostname;
       const allow = (process.env.CRM_TRACKING_REDIRECT_HOSTS || process.env.DASHBOARD_URL || '')
         .split(',').map((s) => s.trim()).filter(Boolean)
         .map((h) => { try { return new URL(h).hostname; } catch { return h.replace(/^https?:\/\//, '').replace(/\/.*$/, ''); } });
-      if (sameHost || allow.includes(u.hostname) || allow.some((h) => u.hostname.endsWith('.' + h))) {
+      if (signedOk || sameHost || allow.includes(u.hostname) || allow.some((h) => u.hostname.endsWith('.' + h))) {
         target = u.toString();
       }
     }
