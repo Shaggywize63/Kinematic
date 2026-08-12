@@ -31,6 +31,11 @@ const SCOPES = [
   // their next (re)connect. NOTE: this is a Google "sensitive" scope — the OAuth
   // app must be verified (or the user added as a test user) to use it in prod.
   'https://www.googleapis.com/auth/contacts.readonly',
+  // "Other contacts" — addresses Google auto-collected from the user's mail
+  // (i.e. everyone they've emailed). Most real address books live here rather
+  // than in manually-saved contacts, so without this the import comes back
+  // empty for users who never hit "save contact". Also a sensitive scope.
+  'https://www.googleapis.com/auth/contacts.other.readonly',
   'https://www.googleapis.com/auth/userinfo.email',
 ].join(' ');
 
