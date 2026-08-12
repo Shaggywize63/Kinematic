@@ -210,6 +210,24 @@ export async function getStatus(userId: string): Promise<{ connected: boolean; e
   return { connected: true, email: row.google_email };
 }
 
+/** Non-refreshing status read: does a connection row exist, and which scopes did
+ *  it grant? Used by status endpoints that only need connectivity + scope info
+ *  and must NOT report "disconnected" merely because the short-lived access token
+ *  happens to need a refresh right now (the token is only actually needed at
+ *  sync/push time). Keeps the "Connected as …" state stable across polls. */
+export async function getStoredAccess(userId: string): Promise<{ email: string; scopes: string } | null> {
+  const { data } = await supabaseAdmin
+    .from('user_google_integrations')
+    .select('google_email, scopes')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (!data) return null;
+  return {
+    email: String((data as { google_email?: string }).google_email ?? ''),
+    scopes: String((data as { scopes?: string }).scopes ?? ''),
+  };
+}
+
 /** A valid (auto-refreshed) access token + granted scopes for a connected
  *  user, or null if they haven't connected Google. Used by the Google
  *  Contacts sync so it can reuse this module's token plumbing rather than

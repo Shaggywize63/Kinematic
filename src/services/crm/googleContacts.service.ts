@@ -12,7 +12,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
-import { getAccess } from '../integrations/googleCalendar.service';
+import { getAccess, getStoredAccess } from '../integrations/googleCalendar.service';
 import { findOrCreateLead, type NormalizedLead } from './integrations/dedup.orchestrator';
 
 const PEOPLE_CONNECTIONS = 'https://people.googleapis.com/v1/people/me/connections';
@@ -29,7 +29,9 @@ const hasContactsScope = (scopes: string) => /(?:^|\s|\/)contacts(?:\.readonly)?
 export async function getConnectionStatus(userId?: string | null) {
   if (!userId) return { connected: false, has_contacts_scope: false };
   try {
-    const acc = await getAccess(userId);
+    // Read the stored row directly (no token refresh) — a status poll must not
+    // flip to "disconnected" just because the access token needs refreshing.
+    const acc = await getStoredAccess(userId);
     if (!acc) return { connected: false, has_contacts_scope: false };
     return { connected: true, email: acc.email, has_contacts_scope: hasContactsScope(acc.scopes || '') };
   } catch (e) {

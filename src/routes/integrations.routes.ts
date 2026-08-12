@@ -27,6 +27,7 @@ import {
 } from '../services/integrations/googleCalendar.service';
 import { AppError } from '../utils';
 import { demoIntegrationsMiddleware } from '../utils/demoCrm';
+import { currentProjectKey } from '../lib/projects';
 
 const router = Router();
 
@@ -61,10 +62,14 @@ router.get('/google/authorize', wrap(async (req, res) => {
   const ret = typeof req.query.return === 'string' && req.query.return.startsWith('/dashboard/')
     ? req.query.return
     : undefined;
-  // Sign user + org into the state so the callback can map the code
-  // back to the right rep (no cookies survive Google's redirect).
+  // Sign user + org + PROJECT into the state so the callback can map the code
+  // back to the right rep AND write the token into the right Supabase project.
+  // The callback is an unauthenticated Google redirect with no project header,
+  // so without pinning the project here it would default to Tata and strand a
+  // non-default-tenant user's token in the wrong project. `pk` is captured from
+  // this (authenticated) request's resolved project.
   const state = jwt.sign(
-    { uid: u.id, oid: u.org_id, kind: 'google_oauth', ...(ret ? { ret } : {}) },
+    { uid: u.id, oid: u.org_id, pk: currentProjectKey(), kind: 'google_oauth', ...(ret ? { ret } : {}) },
     stateSecret(),
     { expiresIn: '10m' },
   );

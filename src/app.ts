@@ -332,6 +332,7 @@ app.get(`${V1}/integrations/google/callback`, async (req, res, next) => {
   try {
     const { default: jwt } = await import('jsonwebtoken');
     const { completeOAuth, isConfigured } = await import('./services/integrations/googleCalendar.service');
+    const { runWithProject, isKnownProject, resolveProjectForUserIdAsync } = await import('./lib/projects');
     const dashUrl = process.env.DASHBOARD_URL || 'http://localhost:3000';
     // Where to land after consent. Default: the Activities calendar view (where
     // the calendar banner lives). A `ret` path in the state (in-app /dashboard/
@@ -346,7 +347,7 @@ app.get(`${V1}/integrations/google/callback`, async (req, res, next) => {
     const state = String(req.query.state || '');
     const err   = String(req.query.error || '');
     const secret = process.env.GOOGLE_OAUTH_STATE_SECRET || process.env.SUPABASE_JWT_SECRET || 'dev-only-secret-replace-me';
-    let payload: { uid: string; oid: string; kind: string; ret?: string } | null = null;
+    let payload: { uid: string; oid: string; pk?: string; kind: string; ret?: string } | null = null;
     if (state) { try { payload = jwt.verify(state, secret) as typeof payload; } catch { payload = null; } }
     const ret = payload && typeof payload.ret === 'string' && payload.ret.startsWith('/dashboard/') ? payload.ret : null;
     const back = ret ? `${dashUrl}${ret}` : defaultBack;
@@ -355,7 +356,14 @@ app.get(`${V1}/integrations/google/callback`, async (req, res, next) => {
     if (!payload || payload.kind !== 'google_oauth' || !payload.uid || !payload.oid) {
       return res.redirect(withParam(back, 'error', 'invalid_state'));
     }
-    const { email } = await completeOAuth(payload.uid, payload.oid, code);
+    // This callback carries no X-Kinematic-Project header (it's a raw Google
+    // redirect), so we MUST set the project context explicitly before the write.
+    // Prefer the project pinned into the state at authorize time; fall back to
+    // resolving it from the user id for links minted before that pin existed.
+    const projectKey = payload.pk && isKnownProject(payload.pk)
+      ? payload.pk
+      : await resolveProjectForUserIdAsync(payload.uid);
+    const { email } = await runWithProject(projectKey, () => completeOAuth(payload!.uid, payload!.oid, code));
     return res.redirect(withParam(back, 'connected', email));
   } catch (e) { next(e); }
 });
