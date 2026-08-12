@@ -143,9 +143,21 @@ export async function dispatchAlert(alertId: string): Promise<void> {
   bodyHtml = renderVars(bodyHtml, vars);
 
   let sent = 0, failed = 0;
+  // Send from the alert's CHOSEN verified sender. Previously this call omitted
+  // from_email, so every alert fell back to the env default (CRM_FROM_EMAIL =
+  // noreply@mail.kinematicapp.com) — an unverified Resend domain that 403s on
+  // every send, so nothing reached the inbox. Honour the picked sender (its
+  // domain must be verified in Resend); include the display name when present.
+  const fromAddr = a.from_email
+    ? (a.from_name ? `${a.from_name} <${a.from_email}>` : (a.from_email as string))
+    : undefined;
   for (const to of (a.to_emails as string[])) {
     try {
-      await sendEmail({
+      // sendEmail swallows provider (Resend) errors and RETURNS a status —
+      // it does NOT throw on a 403/bounce. The old code ignored the result and
+      // counted every recipient as "sent", so the dashboard showed "sent" even
+      // when Resend rejected all of them. Count by the real returned status.
+      const res = await sendEmail({
         org_id: a.org_id,
         user_id: a.created_by ?? undefined,
         to,
@@ -154,8 +166,10 @@ export async function dispatchAlert(alertId: string): Promise<void> {
         subject,
         body_html: bodyHtml,
         template_id: a.template_id ?? null,
+        from_email: fromAddr,
       });
-      sent++;
+      if ((res as { status?: string })?.status === 'sent') sent++;
+      else failed++; // provider failure or suppression (blocked) — not delivered
     } catch (err) {
       failed++;
       // Best-effort: don't abort the whole alert if one address bounces.
