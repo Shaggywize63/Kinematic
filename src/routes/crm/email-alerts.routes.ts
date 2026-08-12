@@ -4,7 +4,7 @@
  */
 import { Router, Request, Response, NextFunction } from 'express';
 import {
-  createAlert, listAlerts, getAlert, cancelAlert, dispatchAlert,
+  createAlert, listAlerts, getAlert, cancelAlert, dispatchAlert, listRecipients,
 } from '../../services/crm/emailAlerts.service';
 import type { AuthRequest } from '../../types';
 
@@ -15,6 +15,14 @@ const wrap = (fn: (req: Request, res: Response, next: NextFunction) => Promise<u
 router.get('/', wrap(async (req, res) => {
   const u = (req as AuthRequest).user!;
   const rows = await listAlerts(u.org_id, Number(req.query.limit) || 100);
+  res.json({ success: true, data: rows });
+}));
+
+// Saved-recipient book for the org — powers the compose form's "saved
+// recipients" picker. MUST stay above the `/:id` route or it gets captured.
+router.get('/recipients', wrap(async (req, res) => {
+  const u = (req as AuthRequest).user!;
+  const rows = await listRecipients(u.org_id, Number(req.query.limit) || 500);
   res.json({ success: true, data: rows });
 }));
 

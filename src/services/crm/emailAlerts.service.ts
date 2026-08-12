@@ -185,6 +185,43 @@ export async function dispatchAlert(alertId: string): Promise<void> {
     recipients_failed: failed,
     error: failed > 0 ? `${failed} address(es) failed; check email logs for details` : null,
   }).eq('id', alertId);
+
+  // Auto-populate the org's saved-recipient book from everyone this alert was
+  // addressed to (To + CC + BCC). Feeds the "saved recipients" picker in the
+  // compose form so the next alert can add them back with one click. Strictly
+  // best-effort: a project missing the table/RPC must never break a send.
+  try {
+    const everyone = [
+      ...(a.to_emails as string[] | null ?? []),
+      ...(a.cc_emails as string[] | null ?? []),
+      ...(a.bcc_emails as string[] | null ?? []),
+    ];
+    if (everyone.length > 0) {
+      await supabaseAdmin.rpc('crm_record_email_recipients', {
+        p_org_id: a.org_id,
+        p_client_id: a.client_id ?? null,
+        p_emails: everyone,
+      });
+    }
+  } catch (err) {
+    void err; // never let recipient bookkeeping fail a dispatched alert
+  }
+}
+
+/**
+ * The org's saved-recipient book — every address a past alert was sent to,
+ * newest activity first. Powers the compose form's "saved recipients" picker
+ * so reps can re-add people without retyping. Auto-grows via dispatchAlert.
+ */
+export async function listRecipients(org_id: string, limit = 500) {
+  const { data, error } = await supabaseAdmin
+    .from('crm_email_recipients')
+    .select('email, name, times_sent, last_sent_at')
+    .eq('org_id', org_id)
+    .order('last_sent_at', { ascending: false, nullsFirst: false })
+    .limit(Math.min(limit, 2000));
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return data ?? [];
 }
 
 /**
