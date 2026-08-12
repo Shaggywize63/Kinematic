@@ -332,6 +332,31 @@ export async function cancelCampaign(scope: Scope, id: string) {
 
 // ── Paced sending ────────────────────────────────────────────────────────────
 
+/**
+ * Resolve the effective From address for a campaign send. If the campaign has
+ * its own from_email, honour it. Otherwise fall back to the org's DEFAULT
+ * VERIFIED sender — NOT the env CRM_FROM_EMAIL, which may point at an unverified
+ * domain (e.g. mail.kinematicapp.com) that Resend 403s on every recipient. The
+ * campaign wizard has no From picker today, so without this every send failed.
+ */
+async function resolveCampaignFrom(orgId: string, campaignFrom?: string | null): Promise<string | undefined> {
+  if (campaignFrom) return campaignFrom;
+  const { data } = await supabaseAdmin
+    .from('crm_verified_senders')
+    .select('email, display_name, is_default')
+    .eq('org_id', orgId)
+    .not('verified_at', 'is', null)
+    .order('is_default', { ascending: false, nullsFirst: false })
+    .order('verified_at', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+  if (!data) return undefined; // no verified sender — let sendEmail apply its env default
+  const email = (data as { email?: string }).email;
+  if (!email) return undefined;
+  const name = (data as { display_name?: string | null }).display_name;
+  return name ? `${name} <${email}>` : email;
+}
+
 /** Send one batch (up to throttle_per_min) for a campaign. CAS-claims rows so
  *  concurrent runners never double-send. Returns how many were sent this tick. */
 export async function processCampaignBatch(orgId: string, id: string): Promise<{ sent: number; failed: number; skipped: number; done: boolean }> {
@@ -339,6 +364,8 @@ export async function processCampaignBatch(orgId: string, id: string): Promise<{
   if (!campaign || (campaign as any).status !== 'sending') return { sent: 0, failed: 0, skipped: 0, done: true };
   const c = campaign as any;
   const batchSize = clampThrottle(c.throttle_per_min);
+  // Pick the verified From once per batch (avoids the unverified env fallback).
+  const effectiveFrom = await resolveCampaignFrom(orgId, c.from_email);
 
   const { data: queued } = await supabaseAdmin.from(RECIPIENTS)
     .select('id').eq('campaign_id', id).eq('status', 'queued')
@@ -374,7 +401,7 @@ export async function processCampaignBatch(orgId: string, id: string): Promise<{
           body_text: text,
           template_id: c.template_id ?? null,
           lead_id: rec.lead_id ?? null,
-          from_email: c.from_email ?? undefined,
+          from_email: effectiveFrom,
           campaign_id: id,
         }) as { id: string; suppressed?: string | null; status?: string; error?: string | null };
 
