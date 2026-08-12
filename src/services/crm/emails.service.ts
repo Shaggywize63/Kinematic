@@ -321,13 +321,36 @@ export async function renderTemplate(html: string, vars: Record<string, string |
   return html.replace(/\{\{\s*([a-z_][a-z0-9_]*)\s*\}\}/gi, (_, k) => String(vars[k] ?? ''));
 }
 
+/**
+ * Per-link signature for the click redirector. The click handler follows any
+ * http(s) URL that carries a matching `s` — proving WE embedded the link — so
+ * marketing emails can link off-platform (calendar links, landing pages, …)
+ * WITHOUT reopening the open-redirect hole: an attacker can't forge `s` without
+ * this secret, so a crafted `?u=https://phishing` still falls back to '/'.
+ */
+function trackingSecret(): string {
+  return process.env.CRM_TRACKING_SECRET
+    || process.env.SUPABASE_JWT_SECRET
+    || process.env.GOOGLE_OAUTH_STATE_SECRET
+    || 'kinematic-tracking-dev-secret';
+}
+export function signRedirect(token: string, url: string): string {
+  return crypto.createHmac('sha256', trackingSecret()).update(`${token}\n${url}`).digest('hex').slice(0, 24);
+}
+
 function wrapTracking(html: string, token: string): string {
   const base = process.env.CRM_TRACKING_BASE_URL || '';
   if (!base) return html;
+  const root = base.replace(/\/$/, '');
   // Append open pixel
-  const pixel = `<img src="${base}/api/v1/crm/emails/track/open/${token}" width="1" height="1" style="display:none" alt="" />`;
-  // Rewrite links
-  const rewritten = html.replace(/href=("|')([^"']+)("|')/g, (m, q1, url, q2) =>
-    `href=${q1}${base}/api/v1/crm/emails/track/click/${token}?u=${encodeURIComponent(url)}${q2}`);
+  const pixel = `<img src="${root}/api/v1/crm/emails/track/open/${token}" width="1" height="1" style="display:none" alt="" />`;
+  // Rewrite only http(s) links through the click tracker; leave mailto:, tel:,
+  // #anchors and {{merge_vars}} untouched (wrapping a mailto: broke it before).
+  // Each gets a signature so the handler can safely 302 to the original URL.
+  const rewritten = html.replace(/href=("|')([^"']+)("|')/g, (m, q1, url, q2) => {
+    if (!/^https?:\/\//i.test(url)) return m;
+    const sig = signRedirect(token, url);
+    return `href=${q1}${root}/api/v1/crm/emails/track/click/${token}?u=${encodeURIComponent(url)}&s=${sig}${q2}`;
+  });
   return rewritten + pixel;
 }
