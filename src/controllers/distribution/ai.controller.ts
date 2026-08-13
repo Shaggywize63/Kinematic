@@ -14,7 +14,8 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
-import { asyncHandler, ok, badRequest, isDemo } from '../../utils';
+import { asyncHandler, ok, created, badRequest, notFound, isDemo } from '../../utils';
+import { audit } from '../../utils/audit';
 import { complete as aiComplete } from '../../services/crm/ai/aiClient';
 
 const num = (v: unknown) => Number(v || 0);
@@ -99,17 +100,19 @@ async function nameMaps(org_id: string, distIds: string[], skuIds: string[]) {
 }
 
 // ── Replenishment agent ─────────────────────────────────────────────────────
-export const replenishment = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { org_id } = req.user!;
-  if (isDemo(req.user)) return ok(res, demoReplenishment());
+type ReplItem = { sku_id: string; name: string; last30: number; prior30: number; trendPct: number; suggested_qty: number };
+type ReplSuggestion = { distributor_id: string; distributor_name: string; items: ReplItem[]; total_units: number };
 
+// Shared by the replenishment GET and the approve endpoint so a draft persists
+// the SAME authoritative numbers the suggestion shows — no client-supplied qty.
+async function buildReplenishment(org_id: string): Promise<ReplSuggestion[]> {
   const agg = await computeVelocity(org_id);
   const distIds = new Set<string>(); const skuIds = new Set<string>();
   for (const k of agg.keys()) { const [d, s] = k.split('|'); distIds.add(d); skuIds.add(s); }
   const { dist, sku } = await nameMaps(org_id, Array.from(distIds), Array.from(skuIds));
 
   // Group projected next-30d demand per distributor, keep the meaningful movers.
-  const byDist = new Map<string, Array<{ sku_id: string; name: string; last30: number; prior30: number; trendPct: number; suggested_qty: number }>>();
+  const byDist = new Map<string, ReplItem[]>();
   for (const [k, v] of agg.entries()) {
     const [d, s] = k.split('|');
     if (v.q30 <= 0) continue;
@@ -121,12 +124,19 @@ export const replenishment = asyncHandler(async (req: AuthRequest, res: Response
     byDist.set(d, arr);
   }
 
-  const suggestions = Array.from(byDist.entries()).map(([d, items]) => ({
+  return Array.from(byDist.entries()).map(([d, items]) => ({
     distributor_id: d,
     distributor_name: dist.get(d) || 'Distributor',
     items: items.sort((a, b) => b.last30 - a.last30).slice(0, 6),
     total_units: items.reduce((s, i) => s + i.suggested_qty, 0),
   })).sort((a, b) => b.total_units - a.total_units).slice(0, 10);
+}
+
+export const replenishment = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  if (isDemo(req.user)) return ok(res, demoReplenishment());
+
+  const suggestions = await buildReplenishment(org_id);
 
   let rationale = '';
   if (suggestions.length && String(req.query.ai ?? '1') !== '0') {
@@ -143,6 +153,96 @@ export const replenishment = asyncHandler(async (req: AuthRequest, res: Response
   }
 
   return ok(res, { suggestions, rationale: (rationale || '').trim(), generated_at: new Date().toISOString() });
+});
+
+// ── Approve a replenishment suggestion → persist a draft order ───────────────
+// A draft order is a reviewable REPLENISHMENT PLAN for one distributor
+// (SKU + projected qty), deliberately price-free. It is NOT a placed order:
+// it never enters the outlet-centric orders/pricing/GST/scheme flow, so the
+// live `orders` ledger the velocity engine reads stays clean. The sales head
+// reviews/dismisses it, and places the real order in the Orders screen.
+export const approveReplenishment = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  const distributorId = String(req.body?.distributor_id || '').trim();
+  if (!distributorId) return badRequest(res, 'distributor_id is required.');
+  if (isDemo(req.user)) return created(res, demoDraft(distributorId), 'Draft order created (Demo)');
+
+  // Recompute server-side (anti-tamper, mirrors orders.create): the client only
+  // names a distributor; the server authors the authoritative line quantities.
+  const suggestions = await buildReplenishment(org_id);
+  const s = suggestions.find((x) => x.distributor_id === distributorId);
+  if (!s) return badRequest(res, 'No current replenishment suggestion for that distributor.');
+
+  let rationale = '';
+  try {
+    rationale = await aiComplete({
+      org_id, model: MODEL,
+      system: 'You are KINI, a replenishment agent. In ONE plain-English sentence, justify this draft reorder for the ' +
+        'distributor from the projected next-30-day quantities. No markdown, no preamble, reference concrete numbers.',
+      messages: [{ role: 'user', content: JSON.stringify(s) }],
+      max_tokens: 120,
+    });
+  } catch { rationale = ''; }
+
+  const payload: any = {
+    org_id,
+    distributor_id: s.distributor_id,
+    distributor_name: s.distributor_name,
+    source: 'replenishment_agent',
+    status: 'open',
+    total_units: s.total_units,
+    items: s.items,
+    rationale: (rationale || '').trim() || null,
+    created_by: req.user!.id ?? null,
+    updated_at: new Date().toISOString(),
+  };
+
+  // Refresh an existing open draft for this distributor instead of piling up
+  // duplicates when the head re-approves.
+  const { data: existing } = await supabaseAdmin.from('distribution_draft_orders')
+    .select('id').eq('org_id', org_id).eq('distributor_id', s.distributor_id)
+    .eq('source', 'replenishment_agent').eq('status', 'open').maybeSingle();
+
+  let row: any;
+  if (existing?.id) {
+    const { data, error } = await supabaseAdmin.from('distribution_draft_orders')
+      .update(payload).eq('id', existing.id).eq('org_id', org_id).select().single();
+    if (error) return badRequest(res, error.message);
+    row = data;
+  } else {
+    const { data, error } = await supabaseAdmin.from('distribution_draft_orders')
+      .insert(payload).select().single();
+    if (error) return badRequest(res, error.message);
+    row = data;
+  }
+  await audit(req, 'distribution.draft_order.create', 'distribution_draft_orders', row.id, existing || null, row);
+  return created(res, row, 'Draft order created');
+});
+
+// ── Draft orders (list + dismiss) ────────────────────────────────────────────
+export const listDraftOrders = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  if (isDemo(req.user)) return ok(res, { drafts: [demoDraft('d1')] });
+  const status = String(req.query.status || 'open');
+  const { data, error } = await supabaseAdmin.from('distribution_draft_orders')
+    .select('*').eq('org_id', org_id).eq('status', status)
+    .order('created_at', { ascending: false }).limit(50);
+  if (error) return badRequest(res, error.message);
+  return ok(res, { drafts: data || [] });
+});
+
+export const dismissDraftOrder = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  if (isDemo(req.user)) return ok(res, { id: req.params.id, status: 'dismissed' });
+  const { data: before } = await supabaseAdmin.from('distribution_draft_orders')
+    .select('*').eq('id', req.params.id).eq('org_id', org_id).maybeSingle();
+  if (!before) return notFound(res, 'Draft order not found');
+  const { data, error } = await supabaseAdmin.from('distribution_draft_orders')
+    .update({ status: 'dismissed', updated_at: new Date().toISOString() })
+    .eq('id', req.params.id).eq('org_id', org_id).select().single();
+  if (error) return badRequest(res, error.message);
+  await audit(req, 'distribution.draft_order.dismiss', 'distribution_draft_orders', data.id, before, data);
+  return ok(res, data, 'Draft order dismissed');
 });
 
 // ── Conversational control tower ─────────────────────────────────────────────
@@ -343,6 +443,19 @@ function demoAnomalies() {
     count: 3, total_impact: 4200,
     rationale: 'Nova Atta 5kg is being billed 16% under list to Metro (₹1,600 leakage on this order) — check for an unauthorised discount or a stale price list.',
     generated_at: new Date().toISOString(),
+  };
+}
+
+function demoDraft(distributor_id: string) {
+  return {
+    id: 'demo-draft-0001', org_id: 'demo', distributor_id, distributor_name: 'Metro Distributors',
+    source: 'replenishment_agent', status: 'open', total_units: 590,
+    items: [
+      { sku_id: 's1', name: 'Nova Atta 5kg', last30: 340, prior30: 279, trendPct: 22, suggested_qty: 414 },
+      { sku_id: 's2', name: 'Nova Poha 1kg', last30: 190, prior30: 205, trendPct: -7, suggested_qty: 176 },
+    ],
+    rationale: 'Metro is trending +22% on Nova Atta — 414 units covers the next cycle; Poha eased 7%, trimmed to 176.',
+    created_at: new Date().toISOString(),
   };
 }
 
