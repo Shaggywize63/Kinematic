@@ -25,6 +25,7 @@ import {
   isConfigured as googleConfigured,
 } from '../services/integrations/googleCalendar.service';
 import { PlanogramService } from '../services/planogram.service';
+import { runAutoReplenishment, runAutoReplenishmentAllProjects } from '../services/distribution/replenishment.service';
 import { runWithProject, isKnownProject, fallbackProjectKey } from '../lib/projects';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
@@ -350,6 +351,42 @@ router.post('/rescore-planogram-compliance', requireEdgeSecret, async (req, res)
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] rescore-planogram-compliance crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/auto-replenishment
+ *
+ * Auto-mode replenishment agent. For every org whose replenishment agent
+ * autonomy is 'auto', drafts the next distributor order from 30-day sell-out
+ * velocity (idempotent — refreshes the OPEN draft per distributor, never
+ * duplicates). A no-op for any org still on 'suggest'/'approve', so production
+ * behaviour is unchanged until an admin opts in.
+ *
+ * Also runs as a once-a-day in-process tick (see server.ts) so it works without
+ * pg_cron; exposing it here lets pg_cron / a manual call drive it too.
+ *
+ * Body: { all_projects?: boolean, project?: string, org_id?: string }.
+ *   - all_projects: fan out across every known tenant (what the daily tick does).
+ *   - project: route to one Supabase project (defaults to the prod fallback).
+ *   - org_id: restrict to a single org within that project.
+ */
+router.post('/auto-replenishment', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string; org_id?: string };
+    if (body.all_projects) {
+      const result = await runAutoReplenishmentAllProjects();
+      return res.json({ success: true, data: result });
+    }
+    const requested = typeof body.project === 'string' ? body.project.trim().toLowerCase() : '';
+    const project = requested && isKnownProject(requested) ? requested : fallbackProjectKey();
+    const result = await runWithProject(project, () =>
+      runAutoReplenishment({ org_id: typeof body.org_id === 'string' ? body.org_id : undefined }),
+    );
+    res.json({ success: true, data: { project, ...result } });
+  } catch (err: any) {
+    logger.error(`[cron] auto-replenishment crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });
