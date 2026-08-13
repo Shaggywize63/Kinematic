@@ -14,12 +14,14 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
-import { asyncHandler, ok, created, badRequest, notFound, isDemo } from '../../utils';
+import { asyncHandler, ok, created, badRequest, notFound, conflict, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
 import { complete as aiComplete } from '../../services/crm/ai/aiClient';
 import {
   computeVelocity, nameMaps, buildReplenishment, upsertDraftOrder,
 } from '../../services/distribution/replenishment.service';
+import { listOutletsForDistributor, placeDraftOrder } from '../../services/distribution/orderPlacement.service';
+import { PricerError } from '../../services/order-pricer';
 
 const num = (v: unknown) => Number(v || 0);
 const DAY = 86_400_000;
@@ -151,6 +153,55 @@ export const dismissDraftOrder = asyncHandler(async (req: AuthRequest, res: Resp
   if (error) return badRequest(res, error.message);
   await audit(req, 'distribution.draft_order.dismiss', 'distribution_draft_orders', data.id, before, data);
   return ok(res, data, 'Draft order dismissed');
+});
+
+// ── Place a draft in Orders ──────────────────────────────────────────────────
+// Candidate outlets (served by the draft's distributor) for the placement picker.
+export const listDraftOutlets = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  if (isDemo(req.user)) return ok(res, { outlets: [{ id: 'o1', name: 'Sharma Kirana' }, { id: 'o2', name: 'New Mart' }] });
+  const { data: draft } = await supabaseAdmin.from('distribution_draft_orders')
+    .select('distributor_id, status').eq('id', req.params.id).eq('org_id', org_id).maybeSingle();
+  if (!draft) return notFound(res, 'Draft order not found');
+  if (!draft.distributor_id) return ok(res, { outlets: [] });
+  const outlets = await listOutletsForDistributor(org_id, draft.distributor_id);
+  return ok(res, { outlets });
+});
+
+// Turn the draft into a REAL order for one chosen outlet, priced through the
+// full GST/scheme engine (status 'placed'); the draft flips to 'converted' and
+// links the new order. The draft's SKUs + suggested quantities seed the order —
+// review/cancel it in Orders afterward.
+export const placeDraftOrderHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  const outletId = String(req.body?.outlet_id || '').trim();
+  if (!outletId) return badRequest(res, 'outlet_id is required.');
+  if (isDemo(req.user)) return created(res, { order: { id: 'demo-order', order_no: 'ORD-DEMO', grand_total: 0 }, draft_id: req.params.id }, 'Order placed (Demo)');
+
+  const { data: draft } = await supabaseAdmin.from('distribution_draft_orders')
+    .select('*').eq('id', req.params.id).eq('org_id', org_id).maybeSingle();
+  if (!draft) return notFound(res, 'Draft order not found');
+  if (draft.status !== 'open') return conflict(res, `Draft is already ${draft.status}`);
+  if (!draft.distributor_id) return badRequest(res, 'Draft has no distributor to resolve pricing.');
+
+  // Only allow outlets actually served by this distributor.
+  const outlets = await listOutletsForDistributor(org_id, draft.distributor_id);
+  if (!outlets.some((o) => o.id === outletId)) return badRequest(res, 'Outlet is not served by this distributor.');
+
+  let order: any;
+  try {
+    order = await placeDraftOrder({ id: req.user!.id, org_id, client_id: req.user!.client_id }, draft, outletId);
+  } catch (e: any) {
+    if (e instanceof PricerError) return conflict(res, `${e.code}: ${e.message}`);
+    return badRequest(res, e?.message || 'Could not place the order.');
+  }
+
+  const { data: updated } = await supabaseAdmin.from('distribution_draft_orders')
+    .update({ status: 'converted', converted_order_id: order.id, updated_at: new Date().toISOString() })
+    .eq('id', draft.id).eq('org_id', org_id).select().single();
+  await audit(req, 'distribution.draft_order.place', 'orders', order.id,
+    { draft_id: draft.id }, { order_id: order.id, order_no: order.order_no, grand_total: order.grand_total });
+  return created(res, { order, draft: updated || null }, 'Order placed');
 });
 
 // ── Conversational control tower ─────────────────────────────────────────────
