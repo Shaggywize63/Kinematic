@@ -110,7 +110,10 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // ── Preview / Create (used by both salesman + dashboard) ────────────────────
-async function buildPriceContext(user: any, outletId: string, distributorId?: string) {
+// Exported so the distribution AI "Place in Orders" path can reuse the exact
+// same outlet → distributor → customer_class/place_of_supply resolution the
+// salesman order-create uses (no divergent pricing context).
+export async function buildPriceContext(user: any, outletId: string, distributorId?: string) {
   const { data: outlet } = await supabaseAdmin.from('stores')
     .select('id, name, lat, lng, city_id')
     .eq('id', outletId).eq('org_id', user.org_id).maybeSingle();
