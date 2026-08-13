@@ -78,6 +78,7 @@ import warehouseRoutes    from './routes/warehouse.routes';
 // Distribution module
 import distControlTowerRoutes  from './routes/distribution/control-tower.routes';
 import distStagesRoutes        from './routes/distribution/stages.routes';
+import distAiRoutes            from './routes/distribution/ai.routes';
 import distBrandsRoutes        from './routes/distribution/brands.routes';
 import distDistributorsRoutes  from './routes/distribution/distributors.routes';
 import distPriceListsRoutes    from './routes/distribution/price-lists.routes';
@@ -542,6 +543,7 @@ app.use(`${V1}/admin/email-campaign-entitlement`, requireAuth, emailCampaignEnti
 // ── Distribution module ────────────────────────────────
 app.use(`${V1}/distribution/control-tower`,  requireAuth, requireModule('distribution'),              distControlTowerRoutes);
 app.use(`${V1}/distribution/stages`,         requireAuth, requireModule('distribution'),              distStagesRoutes);
+app.use(`${V1}/distribution/ai`,             requireAuth, requireModule('distribution'),              distAiRoutes);
 app.use(`${V1}/distribution/brands`,         requireAuth, requireModule('distribution_brands'),       distBrandsRoutes);
 app.use(`${V1}/distribution/distributors`,   requireAuth, requireModule('distribution_distributors'), distDistributorsRoutes);
 app.use(`${V1}/distribution/price-lists`,    requireAuth, requireModule('distribution_pricing'),      distPriceListsRoutes);
