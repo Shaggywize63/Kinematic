@@ -7,6 +7,7 @@ import { runDueReportDigests } from './services/crm/reportSchedules.service';
 import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
 import { processDueBroadcastsAllProjects } from './services/crm/broadcast.service';
 import { processDueEmailCampaignsAllProjects } from './services/crm/emailCampaign.service';
+import { runAutoReplenishmentAllProjects } from './services/distribution/replenishment.service';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -112,6 +113,25 @@ if (String(process.env.CRM_EMAIL_CAMPAIGN_SCHEDULER_ENABLED ?? 'true').toLowerCa
       .catch((e) => logger.warn(`[email-campaign] scheduler run failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[email-campaign] pacing scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Auto-mode replenishment agent. Hourly tick that fires once a day at the
+// configured UTC hour: for every org whose replenishment agent autonomy is
+// 'auto', draft the next distributor order from 30-day sell-out velocity, across
+// all known projects. Idempotent — upsertDraftOrder refreshes the OPEN draft per
+// distributor, so multiple ticks in the hour never duplicate; a no-op for every
+// org still on 'suggest'/'approve', so nothing changes until an admin opts in.
+// Toggle with DIST_AUTO_REPLENISHMENT_ENABLED=false; set the hour with
+// DIST_AUTO_REPLENISHMENT_HOUR_UTC (0-23, default 2 ≈ 07:30 IST).
+if (String(process.env.DIST_AUTO_REPLENISHMENT_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const hour = Math.min(23, Math.max(0, Number(process.env.DIST_AUTO_REPLENISHMENT_HOUR_UTC ?? 2)));
+  setInterval(() => {
+    if (new Date().getUTCHours() !== hour) return;
+    runAutoReplenishmentAllProjects()
+      .then((r) => { if (r.drafts) logger.info(`[auto-replenishment] drafted ${r.drafts} order(s) for ${r.orgs} org(s) across ${r.projects} project(s)`); })
+      .catch((e) => logger.warn(`[auto-replenishment] run failed: ${e?.message ?? e}`));
+  }, 3600 * 1000).unref();
+  logger.info(`[auto-replenishment] scheduler enabled (fires at ${hour}:00 UTC)`);
 }
 
 // Graceful shutdown
