@@ -207,6 +207,145 @@ export const ask = asyncHandler(async (req: AuthRequest, res: Response) => {
   return ok(res, { answer: (answer || '').trim(), snapshot, generated_at: new Date().toISOString() });
 });
 
+// ── Coverage agent ──────────────────────────────────────────────────────────
+export const coverage = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  if (isDemo(req.user)) return ok(res, demoCoverage());
+
+  const now = Date.now();
+  const since30 = new Date(now - 30 * DAY).toISOString();
+  const since90 = new Date(now - 90 * DAY).toISOString();
+  const dormantCut = new Date(now - 21 * DAY).toISOString();
+
+  const { data: storesRaw } = await supabaseAdmin
+    .from('stores').select('id, name, store_type').eq('org_id', org_id).eq('is_active', true).limit(5000);
+  const stores = (storesRaw as any[]) || [];
+  const { data: ordersRaw } = await supabaseAdmin
+    .from('orders').select('outlet_id, placed_at').eq('org_id', org_id).neq('status', 'cancelled').gte('placed_at', since90).limit(5000);
+  const lastByOutlet = new Map<string, string>();
+  for (const o of (ordersRaw as any[]) || []) { if (!o.outlet_id) continue; const p = lastByOutlet.get(o.outlet_id); if (!p || o.placed_at > p) lastByOutlet.set(o.outlet_id, o.placed_at); }
+
+  const dormant: Array<{ outlet_id: string; name: string; last_order: string; days: number }> = [];
+  const never: Array<{ outlet_id: string; name: string }> = [];
+  let covered30 = 0;
+  for (const s of stores) {
+    const last = lastByOutlet.get(s.id);
+    if (!last) { never.push({ outlet_id: s.id, name: s.name || 'Outlet' }); continue; }
+    if (last >= since30) covered30++;
+    if (last < dormantCut) dormant.push({ outlet_id: s.id, name: s.name || 'Outlet', last_order: last, days: Math.floor((now - Date.parse(last)) / DAY) });
+  }
+  dormant.sort((a, b) => a.days - b.days).reverse();
+  const total = stores.length;
+  const coverage_pct = total ? Math.round((covered30 / total) * 100) : 0;
+
+  let rationale = '';
+  if (String(req.query.ai ?? '1') !== '0' && (dormant.length || never.length)) {
+    try {
+      rationale = await aiComplete({
+        org_id, model: MODEL,
+        system: 'You are KINI, a coverage agent for a distribution business. Given outlet coverage stats plus dormant and ' +
+          'never-ordered outlets, write ONE crisp sentence telling the sales head where to focus beats to recover revenue. ' +
+          'Plain business English, no markdown, reference concrete numbers.',
+        messages: [{ role: 'user', content: JSON.stringify({ total, covered30, coverage_pct, dormant: dormant.slice(0, 10), never_count: never.length }) }],
+        max_tokens: 140,
+      });
+    } catch { rationale = ''; }
+  }
+
+  return ok(res, {
+    total_outlets: total, covered_30d: covered30, coverage_pct,
+    dormant: dormant.slice(0, 25), dormant_count: dormant.length,
+    never_ordered: never.slice(0, 25), never_count: never.length,
+    rationale: (rationale || '').trim(), generated_at: new Date().toISOString(),
+  });
+});
+
+// ── Anomaly agent (pricing leakage) ─────────────────────────────────────────
+export const anomalies = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { org_id } = req.user!;
+  if (isDemo(req.user)) return ok(res, demoAnomalies());
+
+  const since60 = new Date(Date.now() - 60 * DAY).toISOString();
+  const { data: ordersRaw } = await supabaseAdmin
+    .from('orders').select('id, distributor_id, placed_at').eq('org_id', org_id).neq('status', 'cancelled').gte('placed_at', since60).limit(5000);
+  const orders = (ordersRaw as any[]) || [];
+  const distById = new Map<string, string>();
+  for (const o of orders) if (o.distributor_id) distById.set(o.id, o.distributor_id);
+  const ids = orders.map((o) => o.id);
+  if (!ids.length) return ok(res, { anomalies: [], count: 0, total_impact: 0, rationale: '', generated_at: new Date().toISOString() });
+
+  const { data: itemsRaw } = await supabaseAdmin.from('order_items').select('order_id, sku_id, unit_price, qty').in('order_id', ids).limit(20000);
+  const items = (itemsRaw as any[]) || [];
+  const skuIds = Array.from(new Set(items.map((i) => i.sku_id).filter(Boolean)));
+
+  // Expected price per SKU: the modal base_price from price lists (fallback MRP).
+  const baseBySku = new Map<string, number>();
+  if (skuIds.length) {
+    const { data: pli } = await supabaseAdmin.from('price_list_items').select('sku_id, base_price').in('sku_id', skuIds);
+    for (const r of (pli as any[]) || []) { const b = num(r.base_price); if (b > 0 && !baseBySku.has(r.sku_id)) baseBySku.set(r.sku_id, b); }
+    const missing = skuIds.filter((s) => !baseBySku.has(s));
+    if (missing.length) {
+      const { data: pde } = await supabaseAdmin.from('product_distribution_ext').select('sku_id, mrp').in('sku_id', missing);
+      for (const r of (pde as any[]) || []) { const m = num(r.mrp); if (m > 0) baseBySku.set(r.sku_id, m); }
+    }
+  }
+  const distIds = Array.from(new Set(Array.from(distById.values())));
+  const { dist, sku } = await nameMaps(org_id, distIds, skuIds);
+
+  const flagged: Array<{ sku: string; distributor: string; unit_price: number; expected: number; dev_pct: number; qty: number; impact: number }> = [];
+  for (const it of items) {
+    const base = baseBySku.get(it.sku_id);
+    if (!base || !it.unit_price) continue;
+    const dev = (num(it.unit_price) - base) / base;
+    if (Math.abs(dev) >= 0.15) {
+      const impact = Math.round((base - num(it.unit_price)) * num(it.qty)); // +ve = under-charged (leakage)
+      flagged.push({
+        sku: sku.get(it.sku_id) || 'SKU',
+        distributor: dist.get(distById.get(it.order_id) || '') || '—',
+        unit_price: num(it.unit_price), expected: base,
+        dev_pct: Math.round(dev * 100), qty: num(it.qty), impact,
+      });
+    }
+  }
+  flagged.sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact));
+  const total_impact = flagged.reduce((s, f) => s + Math.max(0, f.impact), 0);
+
+  let rationale = '';
+  if (String(req.query.ai ?? '1') !== '0' && flagged.length) {
+    try {
+      rationale = await aiComplete({
+        org_id, model: MODEL,
+        system: 'You are KINI, a revenue-assurance agent for a distribution business. Given order lines priced off the ' +
+          'expected price list, write ONE crisp sentence flagging the biggest pricing leakage and what to check. Plain ' +
+          'business English, no markdown, reference concrete numbers (₹ where relevant).',
+        messages: [{ role: 'user', content: JSON.stringify({ count: flagged.length, total_impact, top: flagged.slice(0, 6) }) }],
+        max_tokens: 140,
+      });
+    } catch { rationale = ''; }
+  }
+
+  return ok(res, { anomalies: flagged.slice(0, 20), count: flagged.length, total_impact, rationale: (rationale || '').trim(), generated_at: new Date().toISOString() });
+});
+
+function demoCoverage() {
+  return {
+    total_outlets: 28, covered_30d: 17, coverage_pct: 61,
+    dormant: [{ outlet_id: 'o1', name: 'Sharma Kirana', last_order: new Date(Date.now() - 24 * DAY).toISOString(), days: 24 }],
+    dormant_count: 5, never_ordered: [{ outlet_id: 'o9', name: 'New Mart' }], never_count: 3,
+    rationale: 'Coverage is 61% — 5 outlets on Beat 12 have gone dormant (24+ days) and 3 mapped outlets have never ordered; prioritise them this week to recover ~₹38k/mo.',
+    generated_at: new Date().toISOString(),
+  };
+}
+
+function demoAnomalies() {
+  return {
+    anomalies: [{ sku: 'Nova Atta 5kg', distributor: 'Metro Distributors', unit_price: 210, expected: 250, dev_pct: -16, qty: 40, impact: 1600 }],
+    count: 3, total_impact: 4200,
+    rationale: 'Nova Atta 5kg is being billed 16% under list to Metro (₹1,600 leakage on this order) — check for an unauthorised discount or a stale price list.',
+    generated_at: new Date().toISOString(),
+  };
+}
+
 function demoReplenishment() {
   return {
     suggestions: [

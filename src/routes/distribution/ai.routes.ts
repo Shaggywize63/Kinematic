@@ -8,5 +8,7 @@ const router = Router();
 router.get('/agents', ctrl.getAgents);
 router.post('/agents', requireAdminOrAbove, ctrl.saveAgent);
 router.get('/replenishment', ctrl.replenishment);
+router.get('/coverage', ctrl.coverage);
+router.get('/anomalies', ctrl.anomalies);
 router.post('/ask', ctrl.ask);
 export default router;
