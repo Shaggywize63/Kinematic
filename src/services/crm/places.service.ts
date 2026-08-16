@@ -21,6 +21,20 @@ export interface PlaceDetail {
   longitude?: number;
 }
 
+// A GPS fix is only usable as a location bias when it's a plausible
+// on-shore India coordinate. Without this guard, a missing/denied fix
+// (which arrives as 0,0 — the Gulf of Guinea) or a garbage value still
+// built a bias circle, and Google would anchor predictions to that bogus
+// point — so autocomplete returned the same nearby set regardless of what
+// the rep typed ("Google location shows same results"). India's
+// mainland+islands bounding box, with an explicit null-island reject.
+function isPlausibleIndiaFix(lat: number, lng: number): boolean {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  // (0,0) and anything hugging it means "no fix", not a real location.
+  if (Math.abs(lat) < 0.5 && Math.abs(lng) < 0.5) return false;
+  return lat >= 6 && lat <= 37.5 && lng >= 68 && lng <= 97.5;
+}
+
 /** Autocomplete predictions for a partial address (India-restricted). */
 export async function autocomplete(
   input: string,
@@ -32,8 +46,10 @@ export async function autocomplete(
   // Google to prefer results near that point so the rep sees nearby
   // outlets first (Tata's "I'm here" usage pattern). Radius defaults to
   // 30 km; capped at 50 km so the bias doesn't degrade into "global".
+  // Only bias on a real India fix — a bogus/zero coordinate would pin
+  // every query to the same spot and mask the typed text.
   const body: Record<string, unknown> = { input: q, includedRegionCodes: ['in'] };
-  if (bias && Number.isFinite(bias.lat) && Number.isFinite(bias.lng)) {
+  if (bias && isPlausibleIndiaFix(bias.lat, bias.lng)) {
     body.locationBias = {
       circle: {
         center: { latitude: bias.lat, longitude: bias.lng },
