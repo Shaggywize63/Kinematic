@@ -339,10 +339,28 @@ export async function listLeadsWithCount(
   if (filters.score_gte) q = q.gte('score', Number(filters.score_gte));
   if (filters.utm_source)   q = q.eq('utm_source',   String(filters.utm_source));
   if (filters.utm_campaign) q = q.eq('utm_campaign', String(filters.utm_campaign));
-  if (filters.state)    q = q.eq('state',    String(filters.state));
-  if (filters.city)     q = q.eq('city',     String(filters.city));
-  if (filters.district) q = q.eq('district', String(filters.district));
-  if (filters.block)    q = q.eq('block',    String(filters.block));
+  // Geo narrowing (the app's global State/City location scope). For a
+  // frontline own-only rep this must NEVER hide their OWN leads. Some tenants
+  // (e.g. BMW Ventures) don't capture geo on lead-create, so every lead is
+  // null city/state/district — a bare `.eq()` would then AND the list down to
+  // zero even though the rep owns every row (the reported "can't see my leads"
+  // bug). For own-only callers, match the value OR a null cell so ungeotagged
+  // own-leads stay visible; everyone else (admins, managers, territory ASOs)
+  // keeps strict geo narrowing, so other tenants' behaviour is unchanged.
+  const applyGeo = (col: 'state' | 'city' | 'district' | 'block', raw: unknown) => {
+    if (raw === undefined || raw === null || raw === '') return;
+    const val = String(raw);
+    if (options.ownOnly) {
+      const quoted = `"${val.replace(/[\\"]/g, (m) => '\\' + m)}"`;
+      q = q.or(`${col}.eq.${quoted},${col}.is.null`);
+    } else {
+      q = q.eq(col, val);
+    }
+  };
+  applyGeo('state', filters.state);
+  applyGeo('city', filters.city);
+  applyGeo('district', filters.district);
+  applyGeo('block', filters.block);
   if (filters.score_grade) q = q.eq('score_grade', String(filters.score_grade));
   // Converted-lead default: converted leads remain visible in the Leads
   // list with their `status='converted'` badge so reps can still track
