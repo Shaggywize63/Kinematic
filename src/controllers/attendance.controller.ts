@@ -15,12 +15,20 @@ const checkinSchema = z.object({
   activity_id: z.string().uuid().optional(),
   zone_id: z.string().uuid().optional(),
   battery_percentage: z.number().optional(),
+  // Face-recognition attendance (module 'face_attendance'): the on-device 1:1
+  // match result. Optional — absent for clients without the module.
+  face_score: z.number().min(0).max(1).optional(),
+  face_verified: z.boolean().optional(),
+  face_model_id: z.string().max(128).optional(),
 });
 
 const checkoutSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   selfie_url: z.string().url().optional(),
+  face_score: z.number().min(0).max(1).optional(),
+  face_verified: z.boolean().optional(),
+  face_model_id: z.string().max(128).optional(),
 });
 
 // POST /api/v1/attendance/checkin
@@ -28,7 +36,8 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return created(res, { id: 'demo-att-id', status: 'checked_in', checkin_at: new Date().toISOString() }, 'Checked in successfully (Demo)');
   
-  const { latitude, longitude, selfie_url, activity_id, zone_id, battery_percentage } = req.body;
+  const { latitude, longitude, selfie_url, activity_id, zone_id, battery_percentage,
+          face_score, face_verified, face_model_id } = req.body;
   const { date: passedDate } = req.query as Record<string, string>;
   const today = isoDate(new Date());
 
@@ -98,6 +107,10 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
       checkin_lng: longitude,
       checkin_selfie_url: selfie_url,
       checkin_distance_m: distanceMetres,
+      // Face-match result (only sent when the client has face_attendance on).
+      ...(face_verified !== undefined && { checkin_face_verified: face_verified }),
+      ...(face_score !== undefined && { checkin_face_score: face_score }),
+      ...(face_model_id !== undefined && { face_model_id }),
     }, { onConflict: 'user_id,date', ignoreDuplicates: false })
     .select('*, breaks(*)')
     .single();
@@ -138,7 +151,7 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, { id: 'demo-att-id', status: 'checked_out', checkout_at: new Date().toISOString() }, 'Checked out successfully (Demo)');
 
-  const { latitude, longitude, selfie_url } = req.body;
+  const { latitude, longitude, selfie_url, face_score, face_verified, face_model_id } = req.body;
   const { date: passedDate } = req.query as Record<string, string>;
   const today = isoDate(new Date());
   const attendanceDate = parseAppDate(passedDate || today);
@@ -194,7 +207,10 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
       checkout_lng: longitude,
       checkout_selfie_url: selfie_url,
       working_minutes: Math.max(0, workingMinutes),
-      total_hours: Number((Math.max(0, workingMinutes) / 60).toFixed(2))
+      total_hours: Number((Math.max(0, workingMinutes) / 60).toFixed(2)),
+      ...(face_verified !== undefined && { checkout_face_verified: face_verified }),
+      ...(face_score !== undefined && { checkout_face_score: face_score }),
+      ...(face_model_id !== undefined && { face_model_id }),
     })
     .eq('id', record.id)
     .select('*, breaks(*)')
