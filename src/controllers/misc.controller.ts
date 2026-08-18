@@ -1002,7 +1002,8 @@ const LIVE_TRACKING_DISABLED_CLIENT_IDS = new Set<string>([
 ]);
 
 export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
-  const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version } = req.body;
+  const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version,
+          is_mock, location_accuracy_m } = req.body;
   const user = req.user!;
 
   // Defence-in-depth kill switch — even if a stale build keeps pinging,
@@ -1026,7 +1027,7 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   // 1. Run User Update and Attendance fetch concurrently
   const today = now.split('T')[0];
   
-  const [userUpdate, attResult] = await Promise.all([
+  const [userUpdate, attResult, prevPingResult] = await Promise.all([
     supabaseAdmin
       .from('users')
       .update({
@@ -1045,13 +1046,41 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
       .select('id')
       .eq('user_id', user.id)
       .eq('date', today)
+      .maybeSingle(),
+
+    // Previous fix — for the server-side teleport / impossible-speed check.
+    supabaseAdmin
+      .from('work_activity')
+      .select('lat, lng, captured_at')
+      .eq('user_id', user.id)
+      .order('captured_at', { ascending: false })
+      .limit(1)
       .maybeSingle()
   ]);
 
   if (userUpdate.error) throw new AppError(500, userUpdate.error.message, 'DB_ERROR');
   const att = attResult.data;
 
-  // 2. Insert into work_activity for history tracking
+  // Location-integrity: flag a ping that "moves" faster than any ground travel
+  // (>100 m/s ≈ 360 km/h over >500 m) vs the previous fix — a classic GPS
+  // jump / spoof. Combined with the client-reported mock flag + accuracy, this
+  // gives the dashboard a per-ping trust signal. Additive; never blocks the ping.
+  let isSuspect: boolean | null = null;
+  let suspectReason: string | null = null;
+  const prev = prevPingResult.data as { lat: number | null; lng: number | null; captured_at: string | null } | null;
+  if (prev?.lat != null && prev?.lng != null && prev?.captured_at) {
+    const R = 6371000, toRad = (d: number) => (d * Math.PI) / 180;
+    const dLat = toRad(latitude - prev.lat), dLng = toRad(longitude - prev.lng);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(prev.lat)) * Math.cos(toRad(latitude)) * Math.sin(dLng / 2) ** 2;
+    const meters = 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+    const secs = (new Date(now).getTime() - new Date(prev.captured_at).getTime()) / 1000;
+    if (secs > 1 && meters / secs > 100 && meters > 500) {
+      isSuspect = true;
+      suspectReason = `teleport ${Math.round(meters)}m in ${Math.round(secs)}s (~${Math.round((meters / secs) * 3.6)} km/h)`;
+    }
+  }
+
+  // 2. Insert into work_activity for history tracking (+ integrity signals)
   await supabaseAdmin.from('work_activity').insert({
     org_id: user.org_id,
     client_id: user.client_id,
@@ -1064,7 +1093,10 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     device_model: device_model || null,
     device_brand: device_brand || null,
     os_version: os_version || null,
-    captured_at: now
+    captured_at: now,
+    ...(is_mock !== undefined && { is_mock: !!is_mock }),
+    ...(location_accuracy_m !== undefined && { accuracy_m: location_accuracy_m }),
+    ...(isSuspect !== null && { is_suspect: isSuspect, suspect_reason: suspectReason })
   });
 
   sendSuccess(res, null, 'Status updated');

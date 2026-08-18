@@ -20,6 +20,9 @@ const checkinSchema = z.object({
   face_score: z.number().min(0).max(1).optional(),
   face_verified: z.boolean().optional(),
   face_model_id: z.string().max(128).optional(),
+  // Location integrity (module-independent): client mock-GPS flag + accuracy.
+  is_mock: z.boolean().optional(),
+  location_accuracy_m: z.number().optional(),
 });
 
 const checkoutSchema = z.object({
@@ -29,6 +32,8 @@ const checkoutSchema = z.object({
   face_score: z.number().min(0).max(1).optional(),
   face_verified: z.boolean().optional(),
   face_model_id: z.string().max(128).optional(),
+  is_mock: z.boolean().optional(),
+  location_accuracy_m: z.number().optional(),
 });
 
 // POST /api/v1/attendance/checkin
@@ -37,7 +42,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   if (isDemo(user)) return created(res, { id: 'demo-att-id', status: 'checked_in', checkin_at: new Date().toISOString() }, 'Checked in successfully (Demo)');
   
   const { latitude, longitude, selfie_url, activity_id, zone_id, battery_percentage,
-          face_score, face_verified, face_model_id } = req.body;
+          face_score, face_verified, face_model_id, is_mock, location_accuracy_m } = req.body;
   const { date: passedDate } = req.query as Record<string, string>;
   const today = isoDate(new Date());
 
@@ -111,6 +116,9 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
       ...(face_verified !== undefined && { checkin_face_verified: face_verified }),
       ...(face_score !== undefined && { checkin_face_score: face_score }),
       ...(face_model_id !== undefined && { face_model_id }),
+      // Location-integrity signals (client-reported mock GPS + fix accuracy).
+      ...(is_mock !== undefined && { checkin_is_mock: is_mock }),
+      ...(location_accuracy_m !== undefined && { checkin_accuracy_m: location_accuracy_m }),
     }, { onConflict: 'user_id,date', ignoreDuplicates: false })
     .select('*, breaks(*)')
     .single();
@@ -151,7 +159,8 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, { id: 'demo-att-id', status: 'checked_out', checkout_at: new Date().toISOString() }, 'Checked out successfully (Demo)');
 
-  const { latitude, longitude, selfie_url, face_score, face_verified, face_model_id } = req.body;
+  const { latitude, longitude, selfie_url, face_score, face_verified, face_model_id,
+          is_mock, location_accuracy_m } = req.body;
   const { date: passedDate } = req.query as Record<string, string>;
   const today = isoDate(new Date());
   const attendanceDate = parseAppDate(passedDate || today);
@@ -211,6 +220,9 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
       ...(face_verified !== undefined && { checkout_face_verified: face_verified }),
       ...(face_score !== undefined && { checkout_face_score: face_score }),
       ...(face_model_id !== undefined && { face_model_id }),
+      // Location-integrity signals (client-reported mock GPS + fix accuracy).
+      ...(is_mock !== undefined && { checkout_is_mock: is_mock }),
+      ...(location_accuracy_m !== undefined && { checkout_accuracy_m: location_accuracy_m }),
     })
     .eq('id', record.id)
     .select('*, breaks(*)')
