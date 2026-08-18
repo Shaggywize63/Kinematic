@@ -506,6 +506,25 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
 
   const attMap = new Map((att || []).map((a) => [a.user_id, a]));
 
+  // Location-integrity: the most recent heartbeat's mock/teleport signals per
+  // rep (populated by the GPS-spoof hardening). Pull the last 24h of pings for
+  // this exec set ordered newest-first and keep the first (latest) per user, so
+  // the live map can flag a spoofed / impossible-jump fix.
+  const execIds = (execs || []).map((f: any) => f.id);
+  const integrityByUser = new Map<string, any>();
+  if (execIds.length) {
+    const { data: pings } = await supabaseAdmin
+      .from('work_activity')
+      .select('user_id, is_mock, is_suspect, suspect_reason, accuracy_m, captured_at')
+      .in('user_id', execIds)
+      .gte('captured_at', new Date(Date.now() - 86400000).toISOString())
+      .order('captured_at', { ascending: false })
+      .limit(5000);
+    for (const p of (pings || []) as any[]) {
+      if (!integrityByUser.has(p.user_id)) integrityByUser.set(p.user_id, p);
+    }
+  }
+
   const locations = (execs || []).map((fe: any) => {
     const rec  = attMap.get(fe.id) as any;
     const zone = fe.zones as unknown as { name: string; city: string; meeting_lat: number; meeting_lng: number } | null;
@@ -539,16 +558,23 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
       total_hours: enrichWithHours(rec)?.total_hours || null,
       is_regularised: rec?.is_regularised || false,
       last_location_updated_at: fe.last_location_updated_at || null,
+      // GPS-integrity signals from the latest heartbeat (null when the app
+      // build doesn't send them / no ping in 24h).
+      is_mock: integrityByUser.get(fe.id)?.is_mock ?? null,
+      is_suspect: integrityByUser.get(fe.id)?.is_suspect ?? null,
+      suspect_reason: integrityByUser.get(fe.id)?.suspect_reason ?? null,
+      location_accuracy_m: integrityByUser.get(fe.id)?.accuracy_m ?? null,
     };
   });
 
   const active  = locations.filter((l) => l.status === 'active' || l.status === 'on_break').length;
   const out     = locations.filter((l) => l.status === 'checked_out').length;
   const absent  = locations.filter((l) => l.status === 'absent').length;
+  const flagged = locations.filter((l) => l.is_mock === true || l.is_suspect === true).length;
 
   return ok(res, {
     date: today,
-    summary: { total: locations.length, active, checked_out: out, absent },
+    summary: { total: locations.length, active, checked_out: out, absent, flagged },
     locations,
   });
 });
