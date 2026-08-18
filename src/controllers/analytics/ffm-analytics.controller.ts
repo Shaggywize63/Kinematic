@@ -355,11 +355,45 @@ export const idleHeatmap = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, []);
 });
 
-/** GET /off-route — visits outside the planned beat (geo exceptions). */
+/** GET /off-route — visits the FE checked into far from the planned outlet
+ *  (a real geo-deviation: check-in distance exceeded the outlet's geofence). */
 export const offRoute = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, []);
-  return ok(res, []);
+  const fes = await getFEs(user.org_id);
+  const feName = new Map(fes.map((f) => [f.id, f.name]));
+
+  // A visit is "off-route" when the rep checked in further from the planned
+  // outlet than its geofence allowed. checkin_distance_m + geofence_radius_m
+  // are both persisted at check-in, so this is exact — no recompute needed.
+  const { data: outlets } = await supabaseAdmin
+    .from('route_plan_outlets')
+    .select('checkin_at, checkin_distance_m, geofence_radius_m, stores(name), route_plans!inner(user_id, org_id, territory_label, plan_date)')
+    .eq('route_plans.org_id', user.org_id)
+    .gte('route_plans.plan_date', dayAgo(14))
+    .not('checkin_at', 'is', null)
+    .not('checkin_distance_m', 'is', null);
+
+  const rows = ((outlets || []) as any[])
+    .map((o) => {
+      const rp = Array.isArray(o.route_plans) ? o.route_plans[0] : o.route_plans;
+      const store = Array.isArray(o.stores) ? o.stores[0] : o.stores;
+      const geofence = Number(o.geofence_radius_m) || 100;
+      const dist = Number(o.checkin_distance_m) || 0;
+      return {
+        outlet_name: store?.name || 'Outlet',
+        fe_name: feName.get(rp?.user_id) || 'FE',
+        planned_beat: rp?.territory_label || '—',
+        distance_km: Math.round((dist / 1000) * 100) / 100,
+        visited_at: o.checkin_at,
+        _off: dist > geofence,
+      };
+    })
+    .filter((r) => r._off)
+    .sort((a, b) => b.distance_km - a.distance_km)
+    .map(({ _off, ...r }) => r);
+
+  return ok(res, rows);
 });
 
 // ── Discipline ─────────────────────────────────────────────────────────────
@@ -465,5 +499,87 @@ export const securityViolations = asyncHandler<AuthRequest>(async (req, res) => 
   const rows = fes.map((fe) => ({
     fe_id: fe.id, fe_name: fe.name, mock_location: 0, vpn_detected: 0, violation_count: 0,
   }));
+  return ok(res, rows);
+});
+
+// ── Beat productivity (module: beat_productivity) ──────────────────────────
+
+/** GET /tlsd — Total Lines Sold per Day across the force (last 30d), plus the
+ *  order count so the dashboard can show lines-per-order (drop size). A "line"
+ *  is one order_items row (a distinct SKU billed on an order). */
+export const tlsd = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, []);
+  const { data: orders } = await supabaseAdmin
+    .from('orders')
+    .select('id, placed_at')
+    .eq('org_id', user.org_id)
+    .gte('placed_at', `${dayAgo(30)}T00:00:00Z`)
+    .not('status', 'eq', 'cancelled');
+
+  const orderList = (orders || []) as any[];
+  if (!orderList.length) return ok(res, []);
+  const dayByOrder = new Map<string, string>();
+  for (const o of orderList) if (o.placed_at) dayByOrder.set(o.id, isoDate(toIST(new Date(o.placed_at))));
+
+  // Count lines per order (chunk the IN() so a big force doesn't blow the URL).
+  const ids = Array.from(dayByOrder.keys());
+  const linesByOrder = new Map<string, number>();
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const { data: items } = await supabaseAdmin
+      .from('order_items').select('order_id').in('order_id', chunk);
+    for (const it of (items || []) as any[]) linesByOrder.set(it.order_id, (linesByOrder.get(it.order_id) || 0) + 1);
+  }
+
+  const agg = new Map<string, { lines: number; orders: number }>();
+  for (const [orderId, day] of dayByOrder) {
+    const cur = agg.get(day) || { lines: 0, orders: 0 };
+    cur.lines += linesByOrder.get(orderId) || 0;
+    cur.orders += 1;
+    agg.set(day, cur);
+  }
+  const rows = Array.from(agg.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([day, a]) => ({
+      day, lines: a.lines, orders: a.orders,
+      lines_per_order: a.orders ? Math.round((a.lines / a.orders) * 10) / 10 : 0,
+    }));
+  return ok(res, rows);
+});
+
+/** GET /unique-outlets — per FE (MTD): distinct outlets actually visited and
+ *  how many of those were productive (an order was booked there). */
+export const uniqueOutlets = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, []);
+  const fes = await getFEs(user.org_id);
+  const { data: plans } = await supabaseAdmin
+    .from('route_plans')
+    .select('user_id, route_plan_outlets(store_id, status, order_amount)')
+    .eq('org_id', user.org_id)
+    .gte('plan_date', monthStart());
+
+  const unique = new Map<string, Set<string>>();
+  const productive = new Map<string, Set<string>>();
+  for (const p of (plans || []) as any[]) {
+    const u = unique.get(p.user_id) || new Set<string>();
+    const pr = productive.get(p.user_id) || new Set<string>();
+    for (const o of p.route_plan_outlets || []) {
+      if (!o.store_id || !VISITED.has(o.status)) continue;
+      u.add(o.store_id);
+      if ((o.order_amount || 0) > 0) pr.add(o.store_id);
+    }
+    unique.set(p.user_id, u);
+    productive.set(p.user_id, pr);
+  }
+  const rows = fes
+    .map((fe) => {
+      const uq = unique.get(fe.id)?.size || 0;
+      const pd = productive.get(fe.id)?.size || 0;
+      return { fe_id: fe.id, fe_name: fe.name, unique_outlets: uq, productive_outlets: pd, productive_outlet_pct: pct(pd, uq) };
+    })
+    .filter((r) => r.unique_outlets > 0)
+    .sort((a, b) => b.productive_outlets - a.productive_outlets);
   return ok(res, rows);
 });

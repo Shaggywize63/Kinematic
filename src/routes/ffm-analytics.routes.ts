@@ -14,6 +14,9 @@ const router = Router();
 // Gate on the analytics entitlement — same module the sibling /analytics/*
 // routes use (the FFM section only shows for tenants that carry it).
 const gate = requireModule('analytics');
+// Phase-B beat-productivity metrics (TLSD + unique/productive outlets) are a
+// separately-toggleable module, off by default until enabled at onboarding.
+const productivityGate = requireModule('beat_productivity');
 
 router.get('/beat-adherence',        gate, ffm.beatAdherence);
 router.get('/outlet-coverage',       gate, ffm.outletCoverage);
@@ -31,5 +34,9 @@ router.get('/stuck-fes',             gate, ffm.stuckFes);
 router.get('/security-violations',   gate, ffm.securityViolations);
 router.get('/form-completion',       gate, ffm.formCompletion);
 router.get('/top-performers',        gate, ffm.topPerformers);
+
+// Beat productivity (module: beat_productivity)
+router.get('/tlsd',                  productivityGate, ffm.tlsd);
+router.get('/unique-outlets',        productivityGate, ffm.uniqueOutlets);
 
 export default router;

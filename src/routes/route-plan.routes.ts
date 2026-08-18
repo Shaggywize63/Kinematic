@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth, requireSupervisorOrAbove, requireRole } from '../middleware/auth';
+import { requireModule } from '../middleware/rbac';
 import {
   getRoutePlans,
   getRoutePlanSummary,
@@ -13,6 +14,7 @@ import {
   getImports,
   getOutletFrequency,
   optimizeRoutePlan,
+  optimizeAndApplyMyPlan,
 } from '../controllers/route-plan.controller';
 
 const router = Router();
@@ -34,6 +36,7 @@ router.delete('/:id',            requireRole('admin', 'super_admin', 'main_admin
 router.get('/me',                getMyRoutePlan);
 router.get('/my-plan',           getMyRoutePlan); // Mobile compatibility
 router.post('/optimize/me',      optimizeRoutePlan);
+router.post('/optimize/apply',   requireModule('route_optimization'), optimizeAndApplyMyPlan);
 router.patch('/outlets/:outletId', updateOutletVisit);
 
 export default router;

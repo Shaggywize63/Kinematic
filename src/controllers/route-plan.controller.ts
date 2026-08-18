@@ -294,6 +294,54 @@ export const optimizeRoutePlan = asyncHandler(async (req, res) => {
   return ok(res, result);
 });
 
+/**
+ * POST /route-plan/optimize/apply — optimize the caller's OWN plan(s) for a date
+ * and PERSIST the new visit order. Unlike /optimize (which just computes on the
+ * outlets in the request body), this fetches the rep's stored plan, reorders
+ * route_plan_outlets.visit_order by the nearest-neighbour + 2-opt result, and
+ * stamps route_plans.optimized + total_distance_km. Gated by the
+ * route_optimization module. Returns per-plan km saved.
+ */
+export const optimizeAndApplyMyPlan = asyncHandler(async (req, res) => {
+  const uid = userId(req);
+  const istDate = parseAppDate((req.body?.date as string) || dbToday());
+  const start = req.body?.start && typeof req.body.start.lat === 'number' && typeof req.body.start.lng === 'number'
+    ? { lat: Number(req.body.start.lat), lng: Number(req.body.start.lng) } : undefined;
+
+  const { data: plans, error } = await supabase
+    .from('route_plans')
+    .select('id, vehicle_type, route_plan_outlets(id, store_id, visit_order, stores(lat, lng))')
+    .eq('user_id', uid)
+    .eq('plan_date', istDate);
+  if (error) return badRequest(res, error.message);
+  if (!plans?.length) return badRequest(res, 'No route plan for this date');
+
+  const results: any[] = [];
+  for (const plan of plans as any[]) {
+    const outlets: OutletPoint[] = (plan.route_plan_outlets || [])
+      .map((o: any) => {
+        const s = Array.isArray(o.stores) ? o.stores[0] : o.stores;
+        return s && typeof s.lat === 'number' && typeof s.lng === 'number'
+          ? { id: String(o.id), lat: Number(s.lat), lng: Number(s.lng) } : null;
+      })
+      .filter(Boolean) as OutletPoint[];
+    if (outlets.length < 2) { results.push({ plan_id: plan.id, skipped: 'fewer than 2 geocoded outlets' }); continue; }
+
+    const result = await optimizeRoute(orgId(req), plan.vehicle_type || DEFAULT_VEHICLE_TYPE, start, outlets);
+    // Persist the new visit_order (1-based, in optimized sequence).
+    await Promise.all(result.ordered.map((outletId, i) =>
+      supabase.from('route_plan_outlets').update({ visit_order: i + 1 }).eq('id', outletId),
+    ));
+    await supabase.from('route_plans')
+      .update({ optimized: true, total_distance_km: result.optimized_km })
+      .eq('id', plan.id);
+    results.push({ plan_id: plan.id, ...result });
+  }
+
+  const savedKm = round2(results.reduce((s, r) => s + (r.saved_km || 0), 0));
+  return ok(res, { date: istDate, plans: results, total_saved_km: savedKm });
+});
+
 export const updateOutletVisit = asyncHandler(async (req, res) => {
   const { outletId } = req.params;
   const { status, checkin_lat, checkin_lng, photo_url, visit_notes, checkin_at, checkout_at } = req.body;
