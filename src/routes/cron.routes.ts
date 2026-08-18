@@ -26,7 +26,8 @@ import {
 } from '../services/integrations/googleCalendar.service';
 import { PlanogramService } from '../services/planogram.service';
 import { runAutoReplenishment, runAutoReplenishmentAllProjects } from '../services/distribution/replenishment.service';
-import { runWithProject, isKnownProject, fallbackProjectKey } from '../lib/projects';
+import { runWithProject, isKnownProject, fallbackProjectKey, knownProjectKeys } from '../lib/projects';
+import { runCarryForward } from '../services/leave.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -387,6 +388,46 @@ router.post('/auto-replenishment', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: { project, ...result } });
   } catch (err: any) {
     logger.error(`[cron] auto-replenishment crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/leave-carry-forward
+ *
+ * Year-end leave carry-forward. Rolls each active rep's leftover balance into
+ * the next year, capped per leave type at `max_carry_forward`, as the opening
+ * balance. Schedule this once at the year boundary (e.g. 00:30 on Jan 1).
+ *
+ * Body: { year?: number, all_projects?: boolean, project?: string }.
+ *   - year: the target year to carry INTO (defaults to the current UTC year, so
+ *     a Jan-1 run rolls last year's leftovers into this year).
+ *   - all_projects: fan out across every known tenant project.
+ *   - project: route to one Supabase project (defaults to the prod fallback).
+ *
+ * Idempotent — the (org,user,type,year) unique key means a re-run overwrites
+ * the same opening rather than stacking. Types with max_carry_forward = 0 are
+ * skipped, so their balances reset.
+ */
+router.post('/leave-carry-forward', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { year?: number; all_projects?: boolean; project?: string };
+    const toYear = Number.isInteger(body.year) ? Number(body.year) : new Date().getUTCFullYear();
+
+    if (body.all_projects) {
+      const out: Record<string, unknown> = {};
+      for (const key of knownProjectKeys()) {
+        out[key] = await runWithProject(key, () => runCarryForward(toYear));
+      }
+      return res.json({ success: true, data: { year: toYear, projects: out } });
+    }
+
+    const requested = typeof body.project === 'string' ? body.project.trim().toLowerCase() : '';
+    const project = requested && isKnownProject(requested) ? requested : fallbackProjectKey();
+    const result = await runWithProject(project, () => runCarryForward(toYear));
+    res.json({ success: true, data: { project, year: toYear, ...result } });
+  } catch (err: any) {
+    logger.error(`[cron] leave-carry-forward crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });

@@ -606,14 +606,15 @@ export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => 
     const rec = attMap.get(fe.id) as any;
     const zone = fe.zones as unknown as { name: string } | null;
     const feBreaks = rec ? (brkMap.get(rec.id) || []) : [];
-    let display_status: 'present' | 'absent' | 'regularised' | 'checked_out' | 'on_break' = 'absent';
-    
+    let display_status: 'present' | 'absent' | 'regularised' | 'checked_out' | 'on_break' | 'on_leave' = 'absent';
+
     let total_hours = rec?.total_hours || 0;
     if (rec) {
-      if (rec.is_regularised)      display_status = 'regularised';
-      else if (rec.checkout_at)    display_status = 'checked_out';
+      if (rec.status === 'on_leave') display_status = 'on_leave';
+      else if (rec.is_regularised)   display_status = 'regularised';
+      else if (rec.checkout_at)      display_status = 'checked_out';
       else if (rec.status === 'on_break') display_status = 'on_break';
-      else                        display_status = 'present';
+      else                          display_status = 'present';
 
       enrichWithHours(rec);
       total_hours = rec.total_hours || 0;
@@ -636,6 +637,7 @@ export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => 
     checked_out: rows.filter((r) => r.display_status === 'checked_out').length,
     absent:      rows.filter((r) => r.display_status === 'absent').length,
     regularised: rows.filter((r) => r.display_status === 'regularised').length,
+    on_leave:    rows.filter((r) => r.display_status === 'on_leave').length,
   };
 
   return ok(res, { date: today, summary, executives: rows });
@@ -772,6 +774,7 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
     checked_out: att.filter(a => a.checkout_at).length,
     absent: totalExecs - att.length,
     regularised: att.filter(a => a.is_regularised).length,
+    on_leave: att.filter(a => a.status === 'on_leave').length,
   };
 
   const dayMap: Record<string, number> = {};

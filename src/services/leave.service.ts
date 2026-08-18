@@ -79,6 +79,77 @@ export function countLeaveDays(from: string, to: string, halfStart: boolean, hal
   return Math.max(0, n);
 }
 
+/** Working days (Mon–Sat minus org holidays) in [from,to] inclusive, as YYYY-MM-DD. */
+async function workingDays(org_id: string, from: string, to: string): Promise<string[]> {
+  const hol = await holidaySet(org_id, from, to);
+  const a = parseDate(from), b = parseDate(to);
+  const out: string[] = [];
+  for (const d = new Date(a); d <= b; d.setUTCDate(d.getUTCDate() + 1)) {
+    if (WEEKEND_DOWS.includes(d.getUTCDay())) continue;
+    const key = ymd(d);
+    if (hol.has(key)) continue;
+    out.push(key);
+  }
+  return out;
+}
+
+/**
+ * Reflect an APPROVED leave onto the attendance sheet so those days read
+ * "on leave" instead of "absent". Placeholder rows carry `leave_request_id`
+ * and are only ever written for days the rep has NOT already checked in — a
+ * real check-in always wins and is never overwritten. Half-day boundaries are
+ * marked `half_day` (the rep still works the other half). Best-effort: a
+ * failure here never blocks the approval itself.
+ */
+async function markAttendanceOnLeave(req: any): Promise<void> {
+  try {
+    const days = await workingDays(req.org_id, req.from_date, req.to_date);
+    if (!days.length) return;
+    const { data: existing } = await supabaseAdmin
+      .from('attendance').select('date, checkin_at')
+      .eq('user_id', req.user_id).in('date', days);
+    const hasCheckin = new Set(
+      (existing ?? []).filter((r: any) => r.checkin_at).map((r: any) => String(r.date).slice(0, 10))
+    );
+    const halfDays = new Set<string>();
+    if (req.half_day_start) halfDays.add(String(req.from_date).slice(0, 10));
+    if (req.half_day_end) halfDays.add(String(req.to_date).slice(0, 10));
+
+    const rows = days
+      .filter((d) => !hasCheckin.has(d))
+      .map((d) => ({
+        org_id: req.org_id, client_id: req.client_id ?? null, user_id: req.user_id,
+        date: d,
+        status: halfDays.has(d) ? 'half_day' : 'on_leave',
+        leave_request_id: req.id,
+        notes: 'Auto: approved leave',
+        updated_at: new Date().toISOString(),
+      }));
+    if (!rows.length) return;
+    const { error } = await supabaseAdmin
+      .from('attendance').upsert(rows, { onConflict: 'user_id,date', ignoreDuplicates: false });
+    if (error) logger.warn(`[leave] attendance auto-mark failed for request ${req.id}: ${error.message}`);
+  } catch (e: any) {
+    logger.warn(`[leave] attendance auto-mark threw for request ${req?.id}: ${e?.message || e}`);
+  }
+}
+
+/**
+ * Reverse the auto-mark when an approved leave is cancelled: delete ONLY the
+ * placeholder rows we created (tagged with this request) that never became a
+ * real check-in. A day where the rep actually checked in keeps its real row.
+ */
+async function clearAttendanceForLeave(request_id: string): Promise<void> {
+  try {
+    await supabaseAdmin.from('attendance')
+      .delete()
+      .eq('leave_request_id', request_id)
+      .is('checkin_at', null);
+  } catch (e: any) {
+    logger.warn(`[leave] attendance auto-clear threw for request ${request_id}: ${e?.message || e}`);
+  }
+}
+
 // ── leave types (admin) ───────────────────────────────────────────────────
 export async function listTypes(org_id: string, client_id: string | null) {
   const { data, error } = await supabaseAdmin
@@ -210,6 +281,8 @@ export async function cancelLeave(actor: Actor, id: string) {
   if ((req as any).user_id !== actor.id) throw new AppError(403, 'Not your request', 'FORBIDDEN');
   if (!['pending', 'approved'].includes((req as any).status)) throw new AppError(400, 'Only pending/approved leave can be cancelled', 'BAD_STATE');
   await supabaseAdmin.from('leave_requests').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', id);
+  // Remove any attendance placeholders we created for an approved leave.
+  if ((req as any).status === 'approved') await clearAttendanceForLeave(id);
   await notify(actor.org_id, (req as any).approver_id, 'Leave cancelled', `A leave request was cancelled by the applicant.`, { type: 'leave_cancelled', request_id: id });
   return { ok: true };
 }
@@ -237,6 +310,11 @@ export async function decide(actor: Actor, id: string, decision: 'approved' | 'r
     status: decision, decided_by: actor.id, decided_at: new Date().toISOString(), decision_note: note ?? null, updated_at: new Date().toISOString(),
   }).eq('id', id);
   if (error) throw new AppError(500, error.message, 'DB');
+
+  // Stitch into attendance: an approved leave marks those days "on leave" so
+  // the attendance sheet stops reading them as absent.
+  if (decision === 'approved') await markAttendanceOnLeave(req);
+
   await notify(actor.org_id, (req as any).user_id, `Leave ${decision}`,
     `Your leave request (${(req as any).from_date}) was ${decision}${note ? ': ' + note : '.'}`,
     { type: 'leave_decision', request_id: id, decision });
@@ -253,4 +331,53 @@ export async function teamCalendar(actor: Actor, from: string, to: string) {
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB');
   return stampNames(data ?? [], { users: true, types: true });
+}
+
+// ── year-end carry-forward (cron) ─────────────────────────────────────────
+/**
+ * Roll leftover balances into the next year. For the transition INTO `toYear`
+ * (from toYear-1): for every active user in every org that has leave types,
+ * compute the prior-year leftover per type, cap it at the type's
+ * `max_carry_forward`, and write it as `leave_balances.opening` for `toYear`.
+ *
+ * Idempotent — the unique key (org_id,user_id,leave_type_id,year) means a
+ * re-run overwrites the same opening rather than duplicating it. Types with
+ * `max_carry_forward = 0` (e.g. sick leave that shouldn't accumulate) are
+ * skipped entirely, so their opening stays 0 and the balance resets.
+ */
+export async function runCarryForward(toYear: number): Promise<{ orgs: number; users: number; rows: number }> {
+  const fromYear = toYear - 1;
+  const { data: typeOrgs } = await supabaseAdmin
+    .from('leave_types').select('org_id').eq('is_active', true);
+  const orgIds = Array.from(new Set((typeOrgs ?? []).map((t: any) => t.org_id)));
+
+  let users = 0, rows = 0;
+  for (const org_id of orgIds) {
+    const carryTypes = (await listTypes(org_id, null)).filter((t: any) => Number(t.max_carry_forward) > 0);
+    if (!carryTypes.length) continue;
+
+    const { data: us } = await supabaseAdmin
+      .from('users').select('id, client_id').eq('org_id', org_id).eq('is_active', true);
+    for (const u of us ?? []) {
+      users++;
+      const prev = await balances(org_id, (u as any).id, (u as any).client_id ?? null, fromYear);
+      const upserts = carryTypes.map((t: any) => {
+        const b = prev.find((x) => x.leave_type_id === t.id);
+        const leftover = b ? Math.max(0, b.available) : 0;
+        return {
+          org_id, user_id: (u as any).id, leave_type_id: t.id, year: toYear,
+          opening: Math.min(leftover, Number(t.max_carry_forward)),
+          updated_at: new Date().toISOString(),
+        };
+      }).filter((r) => r.opening > 0);
+      if (!upserts.length) continue;
+      const { error } = await supabaseAdmin
+        .from('leave_balances')
+        .upsert(upserts, { onConflict: 'org_id,user_id,leave_type_id,year', ignoreDuplicates: false });
+      if (error) logger.warn(`[leave] carry-forward upsert failed org=${org_id} user=${(u as any).id}: ${error.message}`);
+      else rows += upserts.length;
+    }
+  }
+  logger.info(`[leave] carry-forward → ${toYear}: ${orgIds.length} org(s), ${users} user(s), ${rows} balance row(s)`);
+  return { orgs: orgIds.length, users, rows };
 }
