@@ -28,6 +28,7 @@ import { PlanogramService } from '../services/planogram.service';
 import { runAutoReplenishment, runAutoReplenishmentAllProjects } from '../services/distribution/replenishment.service';
 import { runWithProject, isKnownProject, fallbackProjectKey, knownProjectKeys } from '../lib/projects';
 import { runCarryForward } from '../services/leave.service';
+import { runRouteDeviationScan } from '../services/routeDeviation.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -428,6 +429,40 @@ router.post('/leave-carry-forward', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: { project, year: toYear, ...result } });
   } catch (err: any) {
     logger.error(`[cron] leave-carry-forward crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/route-deviation-scan
+ *
+ * Alerts supervisors about off-route visits (check-in beyond the outlet
+ * geofence) for clients granted the route_deviation module. Idempotent —
+ * deviation_alerted_at dedupes, so re-runs never double-notify. A no-op when no
+ * client carries the module.
+ *
+ * Body: { lookback_hours?: number (default 24, cap 240), all_projects?: boolean,
+ *         project?: string }. Schedule hourly / a few times a day.
+ */
+router.post('/route-deviation-scan', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { lookback_hours?: number; all_projects?: boolean; project?: string };
+    const lookbackHours = Number.isFinite(body.lookback_hours) ? Number(body.lookback_hours) : 24;
+
+    if (body.all_projects) {
+      const out: Record<string, unknown> = {};
+      for (const key of knownProjectKeys()) {
+        out[key] = await runWithProject(key, () => runRouteDeviationScan({ lookbackHours }));
+      }
+      return res.json({ success: true, data: { projects: out } });
+    }
+
+    const requested = typeof body.project === 'string' ? body.project.trim().toLowerCase() : '';
+    const project = requested && isKnownProject(requested) ? requested : fallbackProjectKey();
+    const result = await runWithProject(project, () => runRouteDeviationScan({ lookbackHours }));
+    res.json({ success: true, data: { project, ...result } });
+  } catch (err: any) {
+    logger.error(`[cron] route-deviation-scan crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });
