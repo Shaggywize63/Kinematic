@@ -313,6 +313,16 @@ const upsertPlanogramSchema = z.object({
     // the field round-trips through a save instead of being stripped.
     additional_ref_urls: z.array(z.string().url()).optional(),
   })),
+  // Retail execution: expected POSM / merchandising assets this planogram
+  // prescribes. The POSM-compliance check (expected-vs-found) scores against
+  // this list; empty/omitted → POSM compliance is N/A for the planogram.
+  expected_posm: z.array(z.object({
+    id: z.string().optional(),
+    type: z.enum(['poster', 'dangler', 'wobbler', 'shelf_strip', 'standee', 'gondola_end', 'cooler', 'branded_rack', 'tent_card', 'bunting', 'banner', 'other']),
+    name: z.string().min(1),
+    brand: z.string().nullable().optional(),
+    required: z.boolean().optional(),
+  })).optional(),
 });
 
 router.get('/', asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -341,6 +351,7 @@ router.post('/', asyncHandler(async (req: AuthRequest, res: Response) => {
     source_url: body.source_url ?? null,
     layout: body.layout ?? { shelves: [] },
     expected_skus: body.expected_skus,
+    expected_posm: body.expected_posm ?? [],
     created_by: req.user.id,
   }).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');

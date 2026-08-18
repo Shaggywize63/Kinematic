@@ -25,6 +25,24 @@ import { logger } from '../lib/logger';
 export type PriceSource = 'shelf_tag' | 'on_pack' | 'promo';
 /** Canonical shelf zone (backend recomputes this from shelf_index; the model may hint). */
 export type ShelfZone = 'low' | 'eye' | 'top';
+/** On-shelf availability read for a product (stock-count-from-image). */
+export type StockStatus = 'in_stock' | 'low' | 'out';
+/** Point-of-sale-material / merchandising asset type. */
+export type PosmType =
+  | 'poster'
+  | 'dangler'
+  | 'wobbler'
+  | 'shelf_strip'
+  | 'standee'
+  | 'gondola_end'
+  | 'cooler'
+  | 'branded_rack'
+  | 'tent_card'
+  | 'bunting'
+  | 'banner'
+  | 'other';
+/** Physical condition of a detected POSM asset. */
+export type PosmCondition = 'good' | 'damaged' | 'obscured';
 
 export interface DetectedSKU {
   sku_id: string | null;
@@ -39,6 +57,8 @@ export interface DetectedSKU {
   price?: number | null;                   // NEW — numeric price read from tag / pack / promo
   price_currency?: string | null;          // NEW — currency code/symbol as seen (e.g. "INR", "₹")
   price_source?: PriceSource | null;       // NEW — where the price was read
+  units_estimate?: number | null;          // NEW — estimated physical units on shelf (stock count)
+  stock_status?: StockStatus | null;       // NEW — in_stock | low | out (availability read)
   confidence: number;
   is_competitor: boolean;
   reasoning?: string | null;               // NEW — one-line why this identification was made
@@ -56,9 +76,20 @@ export interface Promo {
   linked_sku_ids: string[];
 }
 
+/** A point-of-sale material / merchandising asset detected in the shelf photo. */
+export interface PosmDetection {
+  type: PosmType;
+  name: string;                             // short description of the asset
+  brand: string | null;                     // brand on the asset, if legible
+  bbox: [number, number, number, number] | null;
+  condition: PosmCondition;
+  confidence: number;
+}
+
 export interface ShelfRecognition {
   detected_skus: DetectedSKU[];
   promotions: Promo[];                      // NEW — visible offer / promotion signage
+  posm: PosmDetection[];                    // NEW — POSM / merchandising assets (distinct from offers)
   shelf_count: number;
   overall_confidence: number;
   needs_review: boolean;
@@ -152,6 +183,12 @@ For EACH product on the shelf:
   angled tags whenever the digits are legible; only leave price null when no price
   can be read at all.
 - Count "facings": one facing = one product front visible on the shelf.
+- STOCK — estimate "units_estimate": the number of physical units of this product
+  currently on the shelf (count the visible fronts across its facings, plus units
+  clearly stacked behind/beside them). Set "stock_status" to "out" when a labelled
+  slot for the product is visibly empty, "low" when only 1–2 units remain or the
+  facing is nearly bare, otherwise "in_stock". Estimate conservatively; use null
+  only when you genuinely cannot tell.
 - Report "shelf_index": 0 for the BOTTOM shelf, increasing upward.
 - Report "bbox" as [x, y, w, h] in 0..1 normalized image coordinates, and
   "bbox_area" = w * h.
@@ -170,6 +207,17 @@ other), give a bbox when locatable, set confidence, and list linked_sku_ids for
 every detected SKU the offer clearly covers (match by the product nearest the
 signage). Report an offer even when you cannot tie it to a specific SKU (leave
 linked_sku_ids empty). Do not invent offers — only report signage you can see.
+
+POSM / MERCHANDISING — sweep the WHOLE image for point-of-sale materials and
+branded merchandising assets and record each in the top-level "posm" list:
+posters, danglers, wobblers, shelf strips / shelf-talkers, standees, gondola-end
+displays, branded coolers / chillers, branded racks or display units, tent cards,
+buntings and banners. For each asset give its "type" (from that list), a short
+"name"/description, the "brand" if legible, a "bbox" when locatable, a "condition"
+(good | damaged | obscured), and a confidence. POSM is the physical branding /
+display asset itself — this is DIFFERENT from "promotions", which is offer/price
+signage; a single wobbler carrying an offer may appear in both lists. Report only
+assets you can actually see.
 
 Reference pack images: you may be shown reference pack images BEFORE the shelf
 image, each labelled "Reference - sku_id=...". Match shelf products to those
@@ -281,6 +329,8 @@ const REPORT_SHELF_SCHEMA = {
           price: { type: ['number', 'null'], description: 'Selling price the shopper pays, as a plain number — no currency symbol, thousands separators or "/-". Read from the shelf-edge tag, pack MRP, or promo. null only when no price is legible.' },
           price_currency: { type: ['string', 'null'], description: 'Currency exactly as seen, e.g. "INR" or "₹".' },
           price_source: { type: ['string', 'null'], enum: ['shelf_tag', 'on_pack', 'promo', null], description: 'Where the price was read: shelf_tag (shelf-edge label), on_pack (MRP printed on the pack), or promo (offer signage).' },
+          units_estimate: { type: ['number', 'null'], description: 'Estimated physical units of this product on the shelf (count visible fronts across facings, plus units clearly stacked behind). null only when not determinable.' },
+          stock_status: { type: ['string', 'null'], enum: ['in_stock', 'low', 'out', null], description: 'in_stock | low (only 1–2 units / nearly bare facing) | out (labelled slot visibly empty).' },
           confidence: { type: 'number', description: '0..1' },
           is_competitor: { type: 'boolean' },
           reasoning: { type: ['string', 'null'] },
@@ -301,6 +351,22 @@ const REPORT_SHELF_SCHEMA = {
           linked_sku_ids: { type: 'array', items: { type: 'string' }, description: 'sku_ids of detected products this offer covers (nearest to the signage); empty if it applies to none in particular.' },
         },
         required: ['text', 'offer_type', 'confidence'],
+      },
+    },
+    posm: {
+      type: 'array',
+      description: 'Point-of-sale materials / branded merchandising assets visible (posters, danglers, wobblers, shelf strips, standees, gondola-end displays, branded coolers, racks, tent cards, buntings, banners). Distinct from promotions (offer/price signage).',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['poster', 'dangler', 'wobbler', 'shelf_strip', 'standee', 'gondola_end', 'cooler', 'branded_rack', 'tent_card', 'bunting', 'banner', 'other'] },
+          name: { type: 'string', description: 'Short description of the asset (e.g. "End-cap standee", "Fridge brand sticker").' },
+          brand: { type: ['string', 'null'], description: 'Brand on the asset, if legible.' },
+          bbox: { anyOf: [BBOX_SCHEMA, { type: 'null' }] },
+          condition: { type: 'string', enum: ['good', 'damaged', 'obscured'], description: 'good | damaged (torn/faded/broken) | obscured (blocked/partly hidden).' },
+          confidence: { type: 'number', description: '0..1' },
+        },
+        required: ['type', 'name', 'confidence'],
       },
     },
     overall_confidence: { type: 'number', description: '0..1' },
@@ -454,9 +520,21 @@ export class PlanogramVisionService {
       }))
       .filter((p: Promo) => p.text.length > 0);
 
+    const posm: PosmDetection[] = (Array.isArray(parsed.posm) ? parsed.posm : [])
+      .map((p: any): PosmDetection => ({
+        type: normalizePosmType(p.type),
+        name: String(p.name || '').trim(),
+        brand: p.brand == null ? null : String(p.brand).trim(),
+        bbox: normalizeBbox(p.bbox),
+        condition: normalizePosmCondition(p.condition),
+        confidence: clamp01(p.confidence),
+      }))
+      .filter((p: PosmDetection) => p.name.length > 0);
+
     const result: ShelfRecognition = {
       detected_skus,
       promotions,
+      posm,
       shelf_count: Math.max(0, Math.round(Number(parsed.shelf_count) || 0)),
       overall_confidence: clamp01(parsed.overall_confidence),
       quality: {
@@ -1111,6 +1189,20 @@ function normalizeOfferType(v: any): PromoOfferType {
   return v === 'price_off' || v === 'bundle' || v === 'bogo' || v === 'combo' ? v : 'other';
 }
 
+const POSM_TYPES: PosmType[] = [
+  'poster', 'dangler', 'wobbler', 'shelf_strip', 'standee', 'gondola_end',
+  'cooler', 'branded_rack', 'tent_card', 'bunting', 'banner', 'other',
+];
+function normalizePosmType(v: any): PosmType {
+  return POSM_TYPES.includes(v) ? v : 'other';
+}
+function normalizePosmCondition(v: any): PosmCondition {
+  return v === 'good' || v === 'damaged' || v === 'obscured' ? v : 'good';
+}
+function normalizeStockStatus(v: any): StockStatus | null {
+  return v === 'in_stock' || v === 'low' || v === 'out' ? v : null;
+}
+
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
 }
@@ -1137,6 +1229,11 @@ function toDetectedSku(s: any): DetectedSKU {
     price: s.price == null || !Number.isFinite(Number(s.price)) ? null : Number(s.price),
     price_currency: s.price_currency == null ? null : String(s.price_currency),
     price_source: normalizePriceSource(s.price_source),
+    units_estimate:
+      s.units_estimate == null || !Number.isFinite(Number(s.units_estimate))
+        ? null
+        : Math.max(0, Math.round(Number(s.units_estimate))),
+    stock_status: normalizeStockStatus(s.stock_status),
     confidence: clamp01(s.confidence),
     is_competitor: Boolean(s.is_competitor),
     reasoning: s.reasoning == null ? null : String(s.reasoning),

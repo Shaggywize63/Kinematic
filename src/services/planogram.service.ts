@@ -31,6 +31,9 @@ import {
   ShelfZone,
   PriceSource,
   PromoOfferType,
+  PosmDetection,
+  PosmType,
+  PosmCondition,
 } from './planogram-vision.service';
 
 export interface ExpectedSKU {
@@ -71,6 +74,19 @@ export interface PlanogramLayout {
   // NEW — opt-in per-planogram switch for the dense-bay shelf-tiling augment
   // pass (also globally enableable via PLANOGRAM_TILING=1). Default off.
   tiling?: boolean;
+  // NEW — expected POSM / merchandising assets this planogram prescribes, used
+  // by the POSM-compliance check (expected-vs-found). Stored on the planogram's
+  // own `expected_posm` jsonb column. Empty/omitted → POSM compliance is N/A.
+  expected_posm?: ExpectedPosm[];
+}
+
+/** One prescribed POSM / merchandising asset on a planogram. */
+export interface ExpectedPosm {
+  id?: string;
+  type: PosmType;
+  name: string;
+  brand?: string | null;
+  required?: boolean;   // default true — counts toward the POSM score
 }
 
 export interface CategoryBreakdown {
@@ -112,6 +128,29 @@ export interface CompliancePromo {
   linked_sku_ids: string[];
 }
 
+/** Stock-count-from-image rollup for one capture. */
+export interface StockSummary {
+  total_units: number;            // own + competitor estimated units on shelf
+  own_units: number;
+  competitor_units: number;
+  availability_rate: number;      // % of expected own SKUs present on shelf (0..100)
+  oos_count: number;              // expected own SKUs not found (out of stock)
+  low_count: number;              // detected own SKUs flagged low / near-empty
+  out_of_stock_skus: Array<{ sku_id: string; sku_name: string }>;
+  low_stock_skus: Array<{ sku_id: string; sku_name: string; units_estimate: number | null }>;
+}
+
+/** POSM / merchandising compliance (expected-vs-found) for one capture. */
+export interface PosmCompliance {
+  expected_count: number;
+  required_count: number;
+  found_count: number;
+  score: number | null;           // % of required POSM found in acceptable condition; null when nothing expected
+  missing: Array<{ type: PosmType; name: string }>;
+  damaged: Array<{ type: PosmType; name: string }>;
+  found: Array<{ type: PosmType; name: string; brand: string | null; condition: PosmCondition; confidence: number }>;
+}
+
 export interface MethodologyEntry {
   formula: string;
   inputs: string[];
@@ -145,6 +184,12 @@ export interface ComplianceResult {
   zone_breakdown: ZoneBreakdown[];         // NEW
   pricing: PricingRow[];                   // NEW
   promotions: CompliancePromo[];           // NEW
+  stock_summary: StockSummary;             // NEW — stock-count-from-image rollup
+  posm: PosmCompliance;                    // NEW — POSM / merchandising compliance
+  posm_score: number | null;               // NEW — scalar POSM score (mirror of posm.score)
+  availability_rate: number;               // NEW — scalar (mirror of stock_summary.availability_rate)
+  oos_count: number;                        // NEW — scalar (mirror of stock_summary.oos_count)
+  low_stock_count: number;                  // NEW — scalar (mirror of stock_summary.low_count)
   methodology: Methodology;                // NEW
   missing_skus: Array<{ sku_id: string; sku_name: string; expected_facings: number }>;
   misplaced_skus: Array<{
@@ -414,6 +459,50 @@ export class PlanogramService {
       0.05 * competitorPenalty;
     const finalScore = Math.max(0, Math.min(100, Math.round(score * 10) / 10));
 
+    // ── Stock count (from image) ───────────────────────────────────────
+    // Estimated on-shelf units per SKU (model's units_estimate, falling back to
+    // facings when it gave none). Availability = share of expected own SKUs
+    // actually on the shelf; OOS = expected own SKUs not found (the recall pass
+    // treats an omission as genuinely out of stock).
+    const ownDetected = detected.filter((d) => !d.is_competitor);
+    const compDetected = detected.filter((d) => d.is_competitor);
+    const unitsOf = (d: DetectedSKU): number =>
+      typeof d.units_estimate === 'number' && d.units_estimate >= 0
+        ? d.units_estimate
+        : Math.max(0, d.facings || 0);
+    const own_units = ownDetected.reduce((s, d) => s + unitsOf(d), 0);
+    const competitor_units = compDetected.reduce((s, d) => s + unitsOf(d), 0);
+    const out_of_stock_skus = expected
+      .filter((e) => !detectedById.has(e.sku_id))
+      .map((e) => ({ sku_id: e.sku_id, sku_name: e.sku_name }));
+    const low_stock_skus = ownDetected
+      .filter(
+        (d) =>
+          !!d.sku_id &&
+          (d.stock_status === 'low' ||
+            (typeof d.units_estimate === 'number' && d.units_estimate > 0 && d.units_estimate <= 2)),
+      )
+      .map((d) => ({
+        sku_id: d.sku_id as string,
+        sku_name: d.sku_name,
+        units_estimate: d.units_estimate ?? null,
+      }));
+    const presentCount = expected.filter((e) => detectedById.has(e.sku_id)).length;
+    const availability_rate = expected.length ? round1((presentCount / expected.length) * 100) : 0;
+    const stock_summary: StockSummary = {
+      total_units: own_units + competitor_units,
+      own_units,
+      competitor_units,
+      availability_rate,
+      oos_count: out_of_stock_skus.length,
+      low_count: low_stock_skus.length,
+      out_of_stock_skus,
+      low_stock_skus,
+    };
+
+    // ── POSM / merchandising compliance (expected-vs-found) ────────────
+    const posm = this.scorePosm(layout.expected_posm || [], recognition.posm || []);
+
     return {
       score: finalScore,
       presence_score: round1(presence_score),
@@ -427,6 +516,12 @@ export class PlanogramService {
       zone_breakdown,
       pricing,
       promotions,
+      stock_summary,
+      posm,
+      posm_score: posm.score,
+      availability_rate,
+      oos_count: stock_summary.oos_count,
+      low_stock_count: stock_summary.low_count,
       methodology: this.buildMethodology({
         occupancyDenominator,
         occupancyCalc,
@@ -478,6 +573,50 @@ export class PlanogramService {
         promotions,
         expected,
       }),
+    };
+  }
+
+  /**
+   * POSM / merchandising compliance — compares the planogram's expected POSM
+   * assets against those detected in the shelf photo. An expected asset counts
+   * as "found" when a detected POSM shares its type (and brand, when the expected
+   * entry names one). Score = required assets found in acceptable condition /
+   * required (a damaged find counts as half). null when the planogram prescribes
+   * no POSM (nothing to check).
+   */
+  private static scorePosm(expected: ExpectedPosm[], found: PosmDetection[]): PosmCompliance {
+    const norm = (s: unknown) => String(s || '').toLowerCase().trim();
+    const required = expected.filter((e) => e.required !== false);
+    const findFor = (e: ExpectedPosm): PosmDetection | undefined =>
+      found.find((f) => norm(f.type) === norm(e.type) && (!e.brand || norm(f.brand) === norm(e.brand)));
+    const missing = required.filter((e) => !findFor(e)).map((e) => ({ type: e.type, name: e.name }));
+    const damaged = found
+      .filter((f) => f.condition === 'damaged')
+      .map((f) => ({ type: f.type, name: f.name }));
+    let score: number | null = null;
+    if (required.length > 0) {
+      let good = 0;
+      for (const e of required) {
+        const hit = findFor(e);
+        if (!hit) continue;
+        good += hit.condition === 'damaged' ? 0.5 : 1;
+      }
+      score = round1(Math.max(0, Math.min(100, (good / required.length) * 100)));
+    }
+    return {
+      expected_count: expected.length,
+      required_count: required.length,
+      found_count: found.length,
+      score,
+      missing,
+      damaged,
+      found: found.map((f) => ({
+        type: f.type,
+        name: f.name,
+        brand: f.brand ?? null,
+        condition: f.condition,
+        confidence: f.confidence,
+      })),
     };
   }
 
@@ -923,7 +1062,7 @@ export class PlanogramService {
   static async loadPlanogramLayout(planogramId: string): Promise<PlanogramLayout> {
     const { data, error } = await supabaseAdmin
       .from('planograms')
-      .select('id, layout, expected_skus')
+      .select('id, layout, expected_skus, expected_posm')
       .eq('id', planogramId)
       .single();
     if (error || !data) {
@@ -934,6 +1073,7 @@ export class PlanogramService {
       expected_skus: data.expected_skus || [],
       competitors: Array.isArray(data.layout?.competitors) ? data.layout.competitors : [],
       tiling: data.layout?.tiling === true,
+      expected_posm: Array.isArray(data.expected_posm) ? data.expected_posm : [],
     };
   }
 
@@ -1348,6 +1488,7 @@ export class PlanogramService {
       org_id: orgId,
       detected_skus: recognition.detected_skus,
       promotions: recognition.promotions,
+      posm: recognition.posm,
       shelf_map: { shelf_count: recognition.shelf_count },
       overall_confidence: recognition.overall_confidence,
       model_versions: { vision: recognition.model_version },
@@ -1376,6 +1517,12 @@ export class PlanogramService {
       zone_breakdown: result.zone_breakdown,
       pricing: result.pricing,
       promotions: result.promotions,
+      stock_summary: result.stock_summary,
+      posm: result.posm,
+      posm_score: result.posm_score,
+      availability_rate: result.availability_rate,
+      oos_count: result.oos_count,
+      low_stock_count: result.low_stock_count,
       methodology: result.methodology,
       missing_skus: result.missing_skus,
       misplaced_skus: result.misplaced_skus,
@@ -1689,6 +1836,7 @@ export class PlanogramService {
         const recognition: ShelfRecognition = {
           detected_skus: Array.isArray(rec.detected_skus) ? rec.detected_skus : [],
           promotions: Array.isArray(rec.promotions) ? rec.promotions : [],
+          posm: Array.isArray(rec.posm) ? rec.posm : [],
           shelf_count: Number(rec.shelf_map?.shelf_count) || 0,
           overall_confidence: Number(rec.overall_confidence) || 0,
           needs_review: rec.needs_review === true,
