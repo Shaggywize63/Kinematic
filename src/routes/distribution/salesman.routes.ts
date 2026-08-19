@@ -12,6 +12,7 @@ const router = Router();
 router.get('/route/today', salesman.routeToday);
 router.post('/visits/:visitId/checkin', salesman.visitCheckin);
 router.get('/outlets/:id/cart-suggest', salesman.cartSuggest);
+router.get('/outlets/:id/catalogue', orders.catalogue);
 
 router.post('/orders/preview', orders.preview);
 router.post('/orders', idempotency, orders.create);
