@@ -17,8 +17,24 @@ import { logger } from '../../lib/logger';
 const num = (v: unknown) => Number(v || 0);
 const DAY = 86_400_000;
 
-export type ReplItem = { sku_id: string; name: string; last30: number; prior30: number; trendPct: number; suggested_qty: number };
+export type ReplItem = { sku_id: string; name: string; last30: number; prior30: number; trendPct: number; projected_demand: number; on_hand: number; suggested_qty: number };
 export type ReplSuggestion = { distributor_id: string; distributor_name: string; items: ReplItem[]; total_units: number };
+
+// Current distributor on-hand (available = qty − reserved) per distributor|sku.
+// Wave C: replenishment nets projected demand against stock the distributor
+// already holds, so we stop re-ordering what's already on the shelf. Empty for
+// tenants without a stocked distribution_distributor_stock table → on_hand 0 →
+// the numbers collapse to the pre-Wave-C velocity-only behaviour (no regression).
+export async function fetchOnHand(org_id: string): Promise<Map<string, number>> {
+  const m = new Map<string, number>();
+  const { data } = await supabaseAdmin.from('distribution_distributor_stock')
+    .select('distributor_id, sku_id, qty, reserved').eq('org_id', org_id).limit(20000);
+  for (const r of (data as any[]) || []) {
+    if (!r.distributor_id || !r.sku_id) continue;
+    m.set(`${r.distributor_id}|${r.sku_id}`, Math.max(0, num(r.qty) - num(r.reserved)));
+  }
+  return m;
+}
 
 // ── Velocity engine (shared by replenishment + ask) ─────────────────────────
 export async function computeVelocity(org_id: string) {
@@ -71,6 +87,7 @@ export async function buildReplenishment(org_id: string): Promise<ReplSuggestion
   const distIds = new Set<string>(); const skuIds = new Set<string>();
   for (const k of agg.keys()) { const [d, s] = k.split('|'); distIds.add(d); skuIds.add(s); }
   const { dist, sku } = await nameMaps(org_id, Array.from(distIds), Array.from(skuIds));
+  const onHand = await fetchOnHand(org_id);
 
   // Group projected next-30d demand per distributor, keep the meaningful movers.
   const byDist = new Map<string, ReplItem[]>();
@@ -79,9 +96,13 @@ export async function buildReplenishment(org_id: string): Promise<ReplSuggestion
     if (v.q30 <= 0) continue;
     const ratio = v.qPrior > 0 ? v.q30 / v.qPrior : 1;
     const trendPct = v.qPrior > 0 ? Math.round((ratio - 1) * 100) : 100;
-    const suggested_qty = Math.max(1, Math.round(v.q30 * Math.min(1.5, Math.max(0.8, ratio)))); // projected next-30d, damped
+    const projected_demand = Math.max(1, Math.round(v.q30 * Math.min(1.5, Math.max(0.8, ratio)))); // projected next-30d, damped
+    const on_hand = onHand.get(k) || 0;
+    // Net the projected demand against stock the distributor already holds.
+    const suggested_qty = Math.max(0, projected_demand - on_hand);
+    if (suggested_qty <= 0) continue; // already sufficiently stocked — nothing to reorder
     const arr = byDist.get(d) || [];
-    arr.push({ sku_id: s, name: sku.get(s) || 'SKU', last30: v.q30, prior30: v.qPrior, trendPct, suggested_qty });
+    arr.push({ sku_id: s, name: sku.get(s) || 'SKU', last30: v.q30, prior30: v.qPrior, trendPct, projected_demand, on_hand, suggested_qty });
     byDist.set(d, arr);
   }
 
@@ -90,7 +111,7 @@ export async function buildReplenishment(org_id: string): Promise<ReplSuggestion
     distributor_name: dist.get(d) || 'Distributor',
     items: items.sort((a, b) => b.last30 - a.last30).slice(0, 6),
     total_units: items.reduce((s, i) => s + i.suggested_qty, 0),
-  })).sort((a, b) => b.total_units - a.total_units).slice(0, 10);
+  })).filter((s) => s.items.length > 0).sort((a, b) => b.total_units - a.total_units).slice(0, 10);
 }
 
 // Idempotent draft persistence: refreshes the existing OPEN draft for this
