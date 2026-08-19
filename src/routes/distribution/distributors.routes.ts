@@ -5,6 +5,7 @@ import { idempotency } from '../../middleware/idempotency';
 
 const router = Router();
 router.get('/', ctrl.list);
+router.get('/ageing', ctrl.ageingPortfolio);
 router.get('/:id', ctrl.get);
 router.get('/:id/billing-summary', ctrl.billingSummary);
 router.post('/', requireAdminOrAbove, idempotency, ctrl.create);
