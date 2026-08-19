@@ -43,6 +43,27 @@ export const get = asyncHandler(async (req: AuthRequest, res: Response) => {
   ok(res, data);
 });
 
+// ── Salesman-facing: the GST invoice for one of the rep's orders ─────────────
+// The mobile order detail only prints a thermal (ESC/POS) bill; this returns the
+// formal e-invoice document (invoice_no, IRN, seller/buyer GSTIN, HSN-wise line
+// items, tax breakdown) so the app can render a proper GST invoice view. Keyed
+// by ORDER id (the app has the order, not the invoice id); org-scoped. 404 until
+// the order is invoiced.
+export const invoiceForOrder = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, { ...getDemoInvoice(), invoice_items: [] });
+  const { data: invoice, error } = await supabaseAdmin.from('invoices')
+    .select('*, invoice_items(*), distributor:distributor_id(name, gstin, address, state_code, place_of_supply), outlet:outlet_id(name, address)')
+    .eq('order_id', req.params.id).eq('org_id', user.org_id)
+    .order('issued_at', { ascending: false }).limit(1).maybeSingle();
+  if (error) return badRequest(res, error.message);
+  if (!invoice) return notFound(res, 'No invoice for this order yet');
+  // Buyer GSTIN lives on outlet_distribution_ext (not embeddable via FK here).
+  const { data: buyerExt } = await supabaseAdmin.from('outlet_distribution_ext')
+    .select('gstin, state_code').eq('outlet_id', (invoice as any).outlet_id).maybeSingle();
+  ok(res, { ...invoice, buyer_gstin: buyerExt?.gstin ?? null, buyer_state_code: buyerExt?.state_code ?? null });
+});
+
 // ── Issue invoice from approved order ───────────────────────────────────────
 export const issue = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;

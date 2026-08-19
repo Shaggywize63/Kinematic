@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import * as salesman from '../../controllers/distribution/salesman.controller';
 import * as orders from '../../controllers/distribution/orders.controller';
+import * as invoices from '../../controllers/distribution/invoices.controller';
 import * as uploads from '../../controllers/distribution/uploads.controller';
 import * as payments from '../../controllers/distribution/payments.controller';
 import * as returns from '../../controllers/distribution/returns.controller';
@@ -18,6 +19,7 @@ router.post('/orders/preview', orders.preview);
 router.post('/orders', idempotency, orders.create);
 router.get('/orders', salesman.myOrders);
 router.get('/orders/:id', orders.get);
+router.get('/orders/:id/invoice', invoices.invoiceForOrder);
 router.post('/orders/:id/cancel', idempotency, orders.cancel);
 
 router.post('/payments', idempotency, payments.create);
