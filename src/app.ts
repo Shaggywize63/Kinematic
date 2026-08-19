@@ -92,6 +92,7 @@ import distDeliveriesRoutes    from './routes/distribution/deliveries.routes';
 import distPaymentsRoutes      from './routes/distribution/payments.routes';
 import distLedgerRoutes        from './routes/distribution/ledger.routes';
 import distSchemesRoutes       from './routes/distribution/schemes.routes';
+import distPromotionsRoutes    from './routes/distribution/promotions.routes';
 import distReturnsRoutes       from './routes/distribution/returns.routes';
 import distSecondaryRoutes     from './routes/distribution/secondary-sales.routes';
 // Last-mile distribution: tertiary sales (retailer → consumer) + consumer
@@ -555,6 +556,7 @@ app.use(`${V1}/distribution/deliveries`,     requireAuth,                       
 app.use(`${V1}/distribution/payments`,       requireAuth, requireModule('distribution_payments'),     distPaymentsRoutes);
 app.use(`${V1}/distribution/ledger`,         requireAuth, requireModule('distribution_ledger'),       distLedgerRoutes);
 app.use(`${V1}/distribution/schemes`,        requireAuth, requireModule('distribution_schemes'),      distSchemesRoutes);
+app.use(`${V1}/distribution/promotions`,     requireAuth, requireModule('distribution_promotions'),   distPromotionsRoutes);
 app.use(`${V1}/distribution/returns`,        requireAuth, requireModule('distribution_returns'),      distReturnsRoutes);
 app.use(`${V1}/distribution/secondary-sales`,requireAuth, requireModule('distribution_consumer'),     distSecondaryRoutes);
 // Tertiary sales + consumer registrations gate on the same SKU as
