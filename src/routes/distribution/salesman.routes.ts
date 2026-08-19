@@ -6,11 +6,19 @@ import * as uploads from '../../controllers/distribution/uploads.controller';
 import * as payments from '../../controllers/distribution/payments.controller';
 import * as returns from '../../controllers/distribution/returns.controller';
 import * as secondary from '../../controllers/distribution/secondary-sales.controller';
+import * as van from '../../controllers/distribution/van.controller';
 import { idempotency } from '../../middleware/idempotency';
 
 const router = Router();
 
 router.get('/route/today', salesman.routeToday);
+
+// Van sales stock: the rep's open load for today, load-in, and end-of-day
+// reconcile (load-out). Rides the same distribution-package gate as the rest
+// of the salesman surface.
+router.get('/van-load/today', van.today);
+router.post('/van-load', idempotency, van.create);
+router.post('/van-load/:id/reconcile', idempotency, van.reconcile);
 router.post('/visits/:visitId/checkin', salesman.visitCheckin);
 router.get('/outlets/:id/cart-suggest', salesman.cartSuggest);
 router.get('/outlets/:id/catalogue', orders.catalogue);
