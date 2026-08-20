@@ -414,14 +414,46 @@ export async function mileageSuggestion(actor: Actor, fromISO: string, toISO: st
 }
 
 // ── approver ────────────────────────────────────────────────────────────────
-export async function pendingForApprover(actor: Actor, limit = 200) {
+export async function pendingForApprover(actor: Actor, city?: string, limit = 200) {
   let q = supabaseAdmin.from('expense_claims').select('*')
     .eq('org_id', actor.org_id).eq('status', 'submitted')
     .order('submitted_at', { ascending: false }).limit(limit);
   if (!isAdmin(actor.role)) q = q.eq('approver_id', actor.id);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB');
-  return stampNames(data ?? []);
+  let rows = (data as any[]) || [];
+  // Optional city scope: filter by the claimant's city (users.city).
+  if (city) {
+    const ids = Array.from(new Set(rows.map((r) => r.user_id).filter(Boolean)));
+    if (ids.length) {
+      const { data: us } = await supabaseAdmin.from('users').select('id, city').in('id', ids);
+      const cityOf = new Map((us ?? []).map((u: any) => [u.id, (u.city || '').toLowerCase()]));
+      const want = city.toLowerCase();
+      rows = rows.filter((r) => cityOf.get(r.user_id) === want);
+    }
+  }
+  return stampNames(rows);
+}
+
+/** Approved claims across the org still awaiting reimbursement (admin/finance). */
+export async function awaitingReimbursement(actor: Actor, city?: string, limit = 200) {
+  if (!isAdmin(actor.role)) throw new AppError(403, 'Only an admin can view reimbursements', 'FORBIDDEN');
+  const { data, error } = await supabaseAdmin.from('expense_claims').select('*')
+    .eq('org_id', actor.org_id).eq('status', 'approved')
+    .order('reviewed_at', { ascending: true }).limit(limit);
+  if (error) throw new AppError(500, error.message, 'DB');
+  let rows = (data as any[]) || [];
+  // Optional city scope: filter by the claimant's city (users.city).
+  if (city) {
+    const ids = Array.from(new Set(rows.map((r) => r.user_id).filter(Boolean)));
+    if (ids.length) {
+      const { data: us } = await supabaseAdmin.from('users').select('id, city').in('id', ids);
+      const cityOf = new Map((us ?? []).map((u: any) => [u.id, (u.city || '').toLowerCase()]));
+      const want = city.toLowerCase();
+      rows = rows.filter((r) => cityOf.get(r.user_id) === want);
+    }
+  }
+  return stampNames(rows);
 }
 
 /**

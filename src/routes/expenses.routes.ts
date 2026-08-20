@@ -89,7 +89,12 @@ router.post('/scan-receipt', asyncHandler<AuthRequest>(async (req, res) => {
 
 // ── approver queue (declare before /claims/:id) ─────────────────────────────
 router.get('/claims/pending', requireSupervisorOrAbove, asyncHandler<AuthRequest>(async (req, res) => {
-  res.json({ success: true, data: await expenses.pendingForApprover(actor(req)) });
+  const city = req.query.city ? String(req.query.city) : undefined;
+  res.json({ success: true, data: await expenses.pendingForApprover(actor(req), city) });
+}));
+router.get('/claims/awaiting-reimbursement', requireAdminOrAbove, asyncHandler<AuthRequest>(async (req, res) => {
+  const city = req.query.city ? String(req.query.city) : undefined;
+  res.json({ success: true, data: await expenses.awaitingReimbursement(actor(req), city) });
 }));
 
 // ── claims (rep) ────────────────────────────────────────────────────────────
