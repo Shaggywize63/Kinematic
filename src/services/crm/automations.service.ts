@@ -110,6 +110,18 @@ export async function fireForTrigger(
   trigger_type: TriggerType,
   context: AutomationContext,
 ): Promise<{ fired: number; matched: number }> {
+  // Also drive the Phase-2 flow engine (ordered / delay / branch cadences and
+  // sequenced drips) for the same trigger. Fired here, once, so every existing
+  // and future trigger point activates flows without editing each call site.
+  // Independent of whether any Phase-1 automation matches below — an org may
+  // have a flow but no loose automation on this trigger. Lazy import breaks the
+  // static cycle (flows.service imports this module). Fire-and-forget: a flow
+  // failure never affects Phase-1 automations or the caller. No-op when there
+  // are no active flows, or on a project without the flow tables (e.g. Tata).
+  void import('./flows.service')
+    .then((m) => m.fireFlowsForTrigger(trigger_type, context))
+    .catch((err) => console.error(`[flow] fire failed for trigger ${trigger_type}:`, err instanceof Error ? err.message : err));
+
   let q = supabaseAdmin.from('crm_automations').select('*')
     .eq('org_id', context.org_id)
     .eq('trigger_type', trigger_type)
