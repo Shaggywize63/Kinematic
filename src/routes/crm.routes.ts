@@ -23,6 +23,7 @@ import * as automationsSvc from '../services/crm/automations.service';
 import * as flowsSvc from '../services/crm/flows.service';
 import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
+import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
@@ -1972,6 +1973,51 @@ stagesRouter.post('/reorder', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 router.use('/stages', stagesRouter);
+
+// ---------- CUSTOM OBJECTS (user-defined entity types) --------------
+// Object-type definitions live in crm_custom_objects; their fields reuse
+// crm_custom_field_defs (entity_type = object.key); records live in
+// crm_custom_records with values validated through the same custom-field path.
+const customObjects = express.Router();
+
+customObjects.get('/', wrap(async (req, res) =>
+  res.json(await customObjectsSvc.listObjects(orgId(req), clientId(req)))));
+customObjects.post('/', wrap(async (req, res) =>
+  res.status(201).json(await customObjectsSvc.createObject(orgId(req), clientId(req), req.body ?? {}, userId(req)))));
+customObjects.get('/:key', wrap(async (req, res) =>
+  res.json(await customObjectsSvc.getObject(orgId(req), clientId(req), req.params.key))));
+customObjects.patch('/:id', wrap(async (req, res) =>
+  res.json(await customObjectsSvc.updateObject(orgId(req), req.params.id, req.body ?? {}))));
+customObjects.delete('/:id', wrap(async (req, res) => {
+  await customObjectsSvc.deleteObject(orgId(req), req.params.id); res.status(204).end();
+}));
+
+// Records for an object type (addressed by the object's key).
+customObjects.get('/:key/records', wrap(async (req, res) => {
+  const obj = await customObjectsSvc.getObject(orgId(req), clientId(req), req.params.key);
+  const { limit, page, q, owner_id } = req.query;
+  res.json(await customObjectsSvc.listRecords(orgId(req), clientId(req), obj, {
+    limit: limit ? parseInt(String(limit), 10) : undefined,
+    page: page ? parseInt(String(page), 10) : undefined,
+    q: q ? String(q) : undefined,
+    owner_id: owner_id ? String(owner_id) : undefined,
+  }));
+}));
+customObjects.post('/:key/records', wrap(async (req, res) => {
+  const obj = await customObjectsSvc.getObject(orgId(req), clientId(req), req.params.key);
+  res.status(201).json(await customObjectsSvc.createRecord(orgId(req), clientId(req), obj, req.body ?? {}, userId(req)));
+}));
+customObjects.get('/:key/records/:id', wrap(async (req, res) =>
+  res.json(await customObjectsSvc.getRecord(orgId(req), req.params.id))));
+customObjects.patch('/:key/records/:id', wrap(async (req, res) => {
+  const obj = await customObjectsSvc.getObject(orgId(req), clientId(req), req.params.key);
+  res.json(await customObjectsSvc.updateRecord(orgId(req), clientId(req), obj, req.params.id, req.body ?? {}));
+}));
+customObjects.delete('/:key/records/:id', wrap(async (req, res) => {
+  await customObjectsSvc.deleteRecord(orgId(req), req.params.id); res.status(204).end();
+}));
+
+router.use('/custom-objects', rbac.requireModuleAccess('crm_leads'), customObjects);
 
 // ---------- ACTIVITIES + NOTES + TASKS ------------------------------
 const activities = express.Router();

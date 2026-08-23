@@ -102,7 +102,10 @@ function coerceMultiselect(v: unknown, key: string): string[] {
 export async function validateAndStampCustomFields(
   orgId: string,
   clientId: string | null,
-  entity: 'lead' | 'deal' | 'contact' | 'account' | 'activity',
+  // Built-in entities OR a custom object's `key` (crm_custom_objects.key is
+  // stored as entity_type on its field defs, so custom-object records reuse
+  // this same validation/coercion/formula/lookup path).
+  entity: 'lead' | 'deal' | 'contact' | 'account' | 'activity' | (string & {}),
   incoming: Record<string, unknown> | null | undefined,
   // `enforceRequired` is opt-in and passed ONLY by the interactive create
   // paths (the dashboard / mobile lead form). Inbound webhooks, CSV imports
