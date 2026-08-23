@@ -373,6 +373,27 @@ export async function listLeadsWithCount(
   if (filters.is_converted !== undefined) {
     q = q.eq('is_converted', String(filters.is_converted) === 'true');
   }
+  // ── Additive filters (used by AI Smart Filters; all backwards-compatible —
+  // only applied when the param is present, so existing callers are unchanged).
+  if (filters.is_b2c !== undefined) q = q.eq('is_b2c', String(filters.is_b2c) === 'true');
+  if (filters.industry) q = q.eq('industry', String(filters.industry));
+  if (filters.score_lte !== undefined && filters.score_lte !== '') q = q.lte('score', Number(filters.score_lte));
+  if (filters.status_in) {
+    const vals = String(filters.status_in).split(',').map((s) => s.trim()).filter(Boolean);
+    if (vals.length) q = q.in('status', vals);
+  }
+  if (filters.created_within_days) {
+    const n = Number(filters.created_within_days);
+    if (n > 0) q = q.gte('created_at', new Date(Date.now() - n * 86_400_000).toISOString());
+  }
+  if (filters.not_contacted_days) {
+    const n = Number(filters.not_contacted_days);
+    if (n > 0) q = q.or(`last_contacted_at.is.null,last_contacted_at.lt.${new Date(Date.now() - n * 86_400_000).toISOString()}`);
+  }
+  if (filters.no_activity_days) {
+    const n = Number(filters.no_activity_days);
+    if (n > 0) q = q.or(`last_activity_at.is.null,last_activity_at.lt.${new Date(Date.now() - n * 86_400_000).toISOString()}`);
+  }
   if (filters.q) {
     const s = sanitisePostgrestSearch(filters.q);
     if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`);

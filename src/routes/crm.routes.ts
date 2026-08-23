@@ -49,6 +49,7 @@ import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as updateSuggestSvc from '../services/crm/ai/updateSuggest.service';
 import * as dailyBriefingSvc from '../services/crm/ai/dailyBriefing.service';
 import * as cardScanSvc from '../services/crm/ai/cardScan.service';
+import * as smartFilterSvc from '../services/crm/ai/smartFilter.service';
 import * as convIntel from '../services/crm/ai/conversationIntel.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as webChatCtrl from '../controllers/crm/webChat.controller';
@@ -3949,6 +3950,20 @@ function assertKiniBuilderAccess(req: Request) {
     throw new AppError(403, 'The KINI form builder is not enabled for your account.', 'FORBIDDEN');
   }
 }
+
+// AI Smart Filters — plain-English → validated lead-list filter params. Returns
+// the params (ready for GET /crm/leads) + a human explanation; the FE applies
+// them to the existing, fully tenant-scoped leads list. `mine` is resolved to
+// the caller's own owner_id here (the FE never needs to know its user id).
+router.post('/ai/smart-filter', rbac.requireModuleAccess('crm_leads'), wrap(async (req, res) => {
+  const query = String(req.body?.query ?? '').trim();
+  if (query.length > 500) throw new AppError(400, 'query is too long (max 500 chars)', 'VALIDATION');
+  const result = await smartFilterSvc.interpretSmartFilter(query);
+  const params: Record<string, string> = { ...result.params };
+  const me = (req as AuthRequest).user;
+  if (result.mine && me?.id) params.owner_id = me.id;
+  res.json({ success: true, data: { params, explanation: result.explanation } });
+}));
 
 router.post('/ai/lead-form/questions', rbac.requireModuleAccess('crm_settings'), wrap(async (req, res) => {
   assertKiniBuilderAccess(req);
