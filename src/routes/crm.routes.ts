@@ -66,6 +66,7 @@ import {
   PENDING_TOOL_RESULT as KINI_PENDING_TOOL_RESULT,
 } from '../services/crm/ai/kiniApproval.service';
 import { chatWithTools } from '../services/crm/ai/aiClient';
+import { AIService } from '../services/ai.service';
 import * as globalSearch from '../services/crm/globalSearch.service';
 import * as leadFormBuilder from '../services/crm/ai/leadFormBuilder.service';
 import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, stampDirectoryNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
@@ -4009,6 +4010,19 @@ router.post('/ai/smart-filter', rbac.requireModuleAccess('crm_leads'), wrap(asyn
   const me = (req as AuthRequest).user;
   if (result.mine && me?.id) params.owner_id = me.id;
   res.json({ success: true, data: { params, explanation: result.explanation } });
+}));
+
+// AI self-test — surfaces the EXACT cause of an "AI request failed" without
+// server-log access: which credential path is configured, the model ids this
+// org's Anthropic key can actually serve (`GET /v1/models`), and the precise
+// status / error-type a minimal Messages call returns. Everything is
+// secret-free (the key value is never returned; sk- fragments are redacted).
+// Admin-gated because it makes a real (tiny) AI call. Optional ?model= to test
+// a specific id.
+router.get('/ai/diagnose', requireRole('super_admin', 'admin', 'main_admin'), wrap(async (req, res) => {
+  const model = req.query.model ? String(req.query.model).slice(0, 80) : undefined;
+  const data = await AIService.diagnose(model);
+  res.json({ success: true, data });
 }));
 
 router.post('/ai/lead-form/questions', rbac.requireModuleAccess('crm_settings'), wrap(async (req, res) => {
