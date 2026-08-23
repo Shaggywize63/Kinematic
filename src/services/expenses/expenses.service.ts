@@ -317,7 +317,7 @@ async function buildSummary(claim: any, items: any[], flags: Flag[]): Promise<st
       flags: flags.map((f) => `${f.severity}:${f.code} ${f.detail}`),
     };
     const text = await AIService.callKiniAI({
-      model: process.env.EXPENSE_SUMMARY_MODEL || 'claude-haiku-4-5-20251001',
+      model: process.env.EXPENSE_SUMMARY_MODEL || 'claude-sonnet-5',
       max_tokens: 120,
       system: 'You brief a manager approving a field-sales expense claim. Given the claim facts as JSON, write ONE plain-text sentence (max 40 words) an approver can read at a glance: the total, what it is for, and the single most important thing to check if anything is flagged. No preamble, no markdown, no bullet points.',
       messages: [{ role: 'user', content: JSON.stringify(facts) }],

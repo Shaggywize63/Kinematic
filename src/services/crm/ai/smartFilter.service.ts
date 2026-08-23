@@ -98,15 +98,14 @@ export async function interpretSmartFilter(query: string): Promise<SmartFilterRe
   const q = query.trim();
   if (!q) return { params: {}, explanation: 'Type a request to filter leads.', mine: false };
 
-  // Self-healing model selection. `callKiniAI` maps a 404 "model not found"
-  // to the opaque "AI request failed" — which is what users saw. That happens
-  // when the configured model id is unknown to the API: e.g. CRM_NBA_MODEL is
-  // unset and the bare 'claude-haiku-4-5' alias is rejected, or CRM_NBA_MODEL
-  // holds a stale/aliased value. Rather than depend on any single env value
-  // being correct in prod, try the configured model first and, on failure,
-  // fall back ONCE to a pinned, known-valid id before giving up. This makes the
-  // feature resilient to a misconfigured model var instead of hard-failing.
-  const PINNED_MODEL = 'claude-haiku-4-5-20251001';
+  // Self-healing model selection. `callKiniAI` maps a rejected upstream model to
+  // the opaque "AI request failed". Root cause in prod: the org's functional API
+  // key is NOT provisioned for Claude Haiku 4.5, so every Haiku fallback 404s —
+  // while the SAME key works for claude-sonnet-5 (the vision/planogram features
+  // prove it). So the pinned fallback is sonnet-5, which the key demonstrably
+  // has. Try the configured model first (set CRM_NBA_MODEL to a Haiku id once
+  // its access is provisioned, to cut cost), then fall back once to sonnet-5.
+  const PINNED_MODEL = 'claude-sonnet-5';
   const runModel = (model: string) =>
     aiComplete({
       model,

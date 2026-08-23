@@ -81,9 +81,9 @@ async function aiExtract(from: string, subject: string, text: string): Promise<E
   const content = `From: ${from}\nSubject: ${subject}\n\n${text}`.slice(0, 4000);
   try {
     const raw = await aiComplete({
-      // Valid pinned Haiku id — the bare 'claude-haiku-4-5' alias is rejected
-      // by the API, which is what broke Smart Filter. Use the dated id here.
-      model: process.env.CRM_EMAIL_PARSE_MODEL || 'claude-haiku-4-5-20251001',
+      // The prod functional key isn't provisioned for Claude Haiku 4.5 (it
+      // 404s), but works for claude-sonnet-5 — so that's the fallback.
+      model: process.env.CRM_EMAIL_PARSE_MODEL || 'claude-sonnet-5',
       max_tokens: 400,
       system: EXTRACT_SYSTEM,
       messages: [{ role: 'user', content }],
