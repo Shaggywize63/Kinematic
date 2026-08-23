@@ -9,7 +9,7 @@
  * (no new query path, no scoping to re-implement). Degrades to an empty filter
  * (all leads) if the model is unavailable or returns junk.
  */
-import { AIService } from '../../ai.service';
+import { complete as aiComplete } from './aiClient';
 import { logger } from '../../../lib/logger';
 
 export interface SmartFilterResult {
@@ -98,12 +98,16 @@ export async function interpretSmartFilter(query: string): Promise<SmartFilterRe
   const q = query.trim();
   if (!q) return { params: {}, explanation: 'Type a request to filter leads.', mine: false };
 
-  // Model source mirrors the other CRM-AI features (nba/summarize/etc.) so we
-  // inherit the same prod-configured, valid model. Using a brand-new env var
-  // that isn't set in prod would fall back to a bare alias the API may reject —
-  // which previously made every request fail into the "all leads" fallback.
-  const text = await AIService.callKiniAI({
-    model: process.env.SMART_FILTER_MODEL || process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
+  // Use the EXACT model expression + call wrapper the proven-working CRM-AI
+  // features use (summarize/nba/update-suggest all do `aiComplete({ model:
+  // process.env.CRM_NBA_MODEL || 'claude-haiku-4-5', ... })`). We deliberately
+  // do NOT read a smart-filter-specific `SMART_FILTER_MODEL` override: that was
+  // the ONE thing that diverged this call from the known-good path, and a stale
+  // or invalid value left on that env var in prod makes Anthropic 404 the model
+  // ("AI request failed"). Matching the working expression byte-for-byte means
+  // if summarize/nba work, this works too.
+  const text = await aiComplete({
+    model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
     max_tokens: 500,
     system: SYSTEM,
     messages: [{ role: 'user', content: q.slice(0, 500) }],
