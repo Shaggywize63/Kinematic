@@ -56,7 +56,11 @@ const str = (v: unknown): string =>
 const bool = (v: unknown): boolean => v === true || v === 'true';
 
 function validate(p: any): SmartFilterResult {
-  const inP = (p && typeof p.params === 'object' && p.params) || {};
+  // Accept the filter keys either nested under `params` (as instructed) OR flat
+  // at the top level (some models drop the wrapper). validate only reads known
+  // whitelisted keys, so treating the whole object as the params bag is safe —
+  // `explanation`/`mine` simply aren't in the whitelist and are ignored here.
+  const inP = (p && typeof p.params === 'object' && p.params) || (p && typeof p === 'object' ? p : {});
   const out: Record<string, string> = {};
 
   if (str(inP.q)) out.q = str(inP.q).slice(0, 120);
@@ -91,22 +95,33 @@ function validate(p: any): SmartFilterResult {
 }
 
 export async function interpretSmartFilter(query: string): Promise<SmartFilterResult> {
-  const empty: SmartFilterResult = { params: {}, explanation: 'Showing all leads.', mine: false };
   const q = query.trim();
-  if (!q) return empty;
+  if (!q) return { params: {}, explanation: 'Type a request to filter leads.', mine: false };
+
+  // Model source mirrors the other CRM-AI features (nba/summarize/etc.) so we
+  // inherit the same prod-configured, valid model. Using a brand-new env var
+  // that isn't set in prod would fall back to a bare alias the API may reject —
+  // which previously made every request fail into the "all leads" fallback.
+  const text = await AIService.callKiniAI({
+    model: process.env.SMART_FILTER_MODEL || process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
+    max_tokens: 500,
+    system: SYSTEM,
+    messages: [{ role: 'user', content: q.slice(0, 500) }],
+  });
+  // NOTE: a callKiniAI failure (bad key/model, upstream error) is deliberately
+  // NOT swallowed here — it propagates so the UI shows a real error instead of a
+  // misleading "showing all leads". Only a parse miss (model returned no usable
+  // JSON) degrades to an empty filter.
   try {
-    const text = await AIService.callKiniAI({
-      model: process.env.SMART_FILTER_MODEL || 'claude-haiku-4-5',
-      max_tokens: 400,
-      system: SYSTEM,
-      messages: [{ role: 'user', content: q.slice(0, 500) }],
-    });
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
-    if (start < 0 || end <= start) return empty;
+    if (start < 0 || end <= start) {
+      logger.warn('[smart-filter] model returned no JSON object');
+      return { params: {}, explanation: 'Could not detect specific filters — showing all leads.', mine: false };
+    }
     return validate(JSON.parse(text.slice(start, end + 1)));
   } catch (e: any) {
-    logger.warn(`[smart-filter] interpret failed: ${e?.message || e}`);
-    return empty;
+    logger.warn(`[smart-filter] parse failed: ${e?.message || e}`);
+    return { params: {}, explanation: 'Could not detect specific filters — showing all leads.', mine: false };
   }
 }
