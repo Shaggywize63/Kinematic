@@ -32,6 +32,7 @@ import { metaLeadAdsProvider } from '../../services/crm/integrations/providers/m
 import { googleAdsProvider } from '../../services/crm/integrations/providers/googleAds';
 import { zohoProvider } from '../../services/crm/integrations/providers/zoho';
 import { salesforceProvider } from '../../services/crm/integrations/providers/salesforce';
+import { emailInboundProvider } from '../../services/crm/integrations/providers/emailInbound';
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
 import { logger } from '../../lib/logger';
 
@@ -42,13 +43,14 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   google_ads:      'Google Ads',
   zoho:            'Zoho CRM',
   salesforce:      'Salesforce',
+  email_inbound:   'Inbound Email',
 };
 
 // All v1 providers are push-mode: an external system POSTs leads to our
 // webhook URL with `?key=<webhook_secret>`. OAuth / pull-mode (Zoho's
 // native API polling, Salesforce's REST sync) can come later as a
 // power-user upgrade — the webhook path covers 90% of real-world setups.
-const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads', 'zoho', 'salesforce'];
+const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads', 'zoho', 'salesforce', 'email_inbound'];
 
 function getProvider(id: ProviderId) {
   if (id === 'web_form')        return webFormProvider;
@@ -57,6 +59,7 @@ function getProvider(id: ProviderId) {
   if (id === 'google_ads')      return googleAdsProvider;
   if (id === 'zoho')            return zohoProvider;
   if (id === 'salesforce')      return salesforceProvider;
+  if (id === 'email_inbound')   return emailInboundProvider;
   return null;
 }
 
@@ -181,7 +184,7 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   const reqBase = `${req.protocol}://${req.get('host')}`;
   const base = envBase || reqBase;
   const webhook_url = webhook_secret
-    ? `${base}/api/v1/integrations/webhook/${provider.replace('_', '-')}/${integration.id}?key=${webhook_secret}`
+    ? `${base}/api/v1/integrations/webhook/${provider.replace(/_/g, '-')}/${integration.id}?key=${webhook_secret}`
     : null;
 
   return created(res, {
@@ -300,7 +303,7 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
   // Google / Zapier retry which would amplify any bug.
   const integration_id = req.params.id;
   const providerSlug = req.params.provider; // 'web-form' from URL
-  const providerId = providerSlug.replace('-', '_') as ProviderId;
+  const providerId = providerSlug.replace(/-/g, '_') as ProviderId;
 
   // 1. Load integration.
   const { data: integration } = await supabaseAdmin.from('crm_lead_source_integrations')
@@ -387,7 +390,7 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
 
 export const verifyChallenge = asyncHandler<Request>(async (req, res) => {
   const providerSlug = req.params.provider;
-  const providerId = providerSlug.replace('-', '_') as ProviderId;
+  const providerId = providerSlug.replace(/-/g, '_') as ProviderId;
   if (providerId !== 'meta_lead_ads') {
     res.status(405).json({ ok: false, error: 'GET not supported for this provider' });
     return;

@@ -166,7 +166,7 @@ app.get('/f/:id', cors({ origin: '*' }), withIntegrationProject, async function 
       res.status(404).type('text/html').send('<h2 style="font-family:sans-serif">Form not found</h2>');
       return;
     }
-    const providerSlug = String(integration.provider).replace('_', '-');
+    const providerSlug = String(integration.provider).replace(/_/g, '-');
     const webhookBase = `${req.protocol}://${req.get('host')}`;
     const webhookUrl = `${webhookBase}/api/v1/integrations/webhook/${providerSlug}/${integration.id}?key=${encodeURIComponent(key)}`;
     const embedUrl   = `${webhookBase}/embed.js`;
