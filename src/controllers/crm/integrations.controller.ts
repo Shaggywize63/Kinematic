@@ -33,6 +33,7 @@ import { googleAdsProvider } from '../../services/crm/integrations/providers/goo
 import { zohoProvider } from '../../services/crm/integrations/providers/zoho';
 import { salesforceProvider } from '../../services/crm/integrations/providers/salesforce';
 import { emailInboundProvider } from '../../services/crm/integrations/providers/emailInbound';
+import { ivrMissedCallProvider } from '../../services/crm/integrations/providers/ivrMissedCall';
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
 import { logger } from '../../lib/logger';
 
@@ -44,13 +45,14 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   zoho:            'Zoho CRM',
   salesforce:      'Salesforce',
   email_inbound:   'Inbound Email',
+  ivr_missed_call: 'IVR / Missed Call',
 };
 
 // All v1 providers are push-mode: an external system POSTs leads to our
 // webhook URL with `?key=<webhook_secret>`. OAuth / pull-mode (Zoho's
 // native API polling, Salesforce's REST sync) can come later as a
 // power-user upgrade — the webhook path covers 90% of real-world setups.
-const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads', 'zoho', 'salesforce', 'email_inbound'];
+const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads', 'zoho', 'salesforce', 'email_inbound', 'ivr_missed_call'];
 
 function getProvider(id: ProviderId) {
   if (id === 'web_form')        return webFormProvider;
@@ -60,6 +62,7 @@ function getProvider(id: ProviderId) {
   if (id === 'zoho')            return zohoProvider;
   if (id === 'salesforce')      return salesforceProvider;
   if (id === 'email_inbound')   return emailInboundProvider;
+  if (id === 'ivr_missed_call') return ivrMissedCallProvider;
   return null;
 }
 
