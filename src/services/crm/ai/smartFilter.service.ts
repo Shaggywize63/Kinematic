@@ -98,20 +98,33 @@ export async function interpretSmartFilter(query: string): Promise<SmartFilterRe
   const q = query.trim();
   if (!q) return { params: {}, explanation: 'Type a request to filter leads.', mine: false };
 
-  // Use the EXACT model expression + call wrapper the proven-working CRM-AI
-  // features use (summarize/nba/update-suggest all do `aiComplete({ model:
-  // process.env.CRM_NBA_MODEL || 'claude-haiku-4-5', ... })`). We deliberately
-  // do NOT read a smart-filter-specific `SMART_FILTER_MODEL` override: that was
-  // the ONE thing that diverged this call from the known-good path, and a stale
-  // or invalid value left on that env var in prod makes Anthropic 404 the model
-  // ("AI request failed"). Matching the working expression byte-for-byte means
-  // if summarize/nba work, this works too.
-  const text = await aiComplete({
-    model: process.env.CRM_NBA_MODEL || 'claude-haiku-4-5',
-    max_tokens: 500,
-    system: SYSTEM,
-    messages: [{ role: 'user', content: q.slice(0, 500) }],
-  });
+  // Self-healing model selection. `callKiniAI` maps a 404 "model not found"
+  // to the opaque "AI request failed" — which is what users saw. That happens
+  // when the configured model id is unknown to the API: e.g. CRM_NBA_MODEL is
+  // unset and the bare 'claude-haiku-4-5' alias is rejected, or CRM_NBA_MODEL
+  // holds a stale/aliased value. Rather than depend on any single env value
+  // being correct in prod, try the configured model first and, on failure,
+  // fall back ONCE to a pinned, known-valid id before giving up. This makes the
+  // feature resilient to a misconfigured model var instead of hard-failing.
+  const PINNED_MODEL = 'claude-haiku-4-5-20251001';
+  const runModel = (model: string) =>
+    aiComplete({
+      model,
+      max_tokens: 500,
+      system: SYSTEM,
+      messages: [{ role: 'user', content: q.slice(0, 500) }],
+    });
+  const primaryModel = process.env.CRM_NBA_MODEL || PINNED_MODEL;
+  let text: string;
+  try {
+    text = await runModel(primaryModel);
+  } catch (err) {
+    if (primaryModel === PINNED_MODEL) throw err; // nothing new to try
+    logger.warn(
+      `[smart-filter] model "${primaryModel}" failed (${err instanceof Error ? err.message : err}); retrying pinned ${PINNED_MODEL}`,
+    );
+    text = await runModel(PINNED_MODEL);
+  }
   // NOTE: a callKiniAI failure (bad key/model, upstream error) is deliberately
   // NOT swallowed here — it propagates so the UI shows a real error instead of a
   // misleading "showing all leads". Only a parse miss (model returned no usable
