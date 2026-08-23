@@ -159,7 +159,7 @@ app.get('/f/:id', cors({ origin: '*' }), withIntegrationProject, async function 
       return;
     }
     const { data: integration } = await supabaseAdmin.from('crm_lead_source_integrations')
-      .select('id, label, provider, webhook_secret, status')
+      .select('id, label, provider, webhook_secret, status, config')
       .eq('id', integrationId)
       .maybeSingle();
     if (!integration || integration.webhook_secret !== key || integration.status === 'disabled') {
@@ -170,7 +170,48 @@ app.get('/f/:id', cors({ origin: '*' }), withIntegrationProject, async function 
     const webhookBase = `${req.protocol}://${req.get('host')}`;
     const webhookUrl = `${webhookBase}/api/v1/integrations/webhook/${providerSlug}/${integration.id}?key=${encodeURIComponent(key)}`;
     const embedUrl   = `${webhookBase}/embed.js`;
-    const title      = (integration.label || 'Get a callback').replace(/</g, '&lt;');
+
+    // Per-form presentation is authored in the dashboard Form Designer and
+    // persisted on the integration row as `config.form`. Every field is
+    // optional — anything unset falls back to the sensible default, so legacy
+    // forms (config.form absent) render exactly as they did before.
+    const ALLOWED_FIELDS = ['name', 'email', 'phone', 'city', 'company', 'message'];
+    const esc = (v: unknown) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const formCfg = ((integration as { config?: { form?: Record<string, unknown> } }).config?.form) ?? {};
+
+    // Fields accept either ["name","phone"] or [{ key, required }] — keep the
+    // author's order, drop anything not whitelisted, de-dup, and fall back to
+    // the classic default set when nothing valid was configured.
+    const rawFields = Array.isArray((formCfg as { fields?: unknown }).fields)
+      ? (formCfg as { fields: unknown[] }).fields : [];
+    const seen = new Set<string>();
+    const orderedKeys: string[] = [];
+    const requiredKeys: string[] = [];
+    for (const f of rawFields) {
+      const rec = (f && typeof f === 'object') ? (f as { key?: unknown; required?: unknown }) : null;
+      const k = String(rec ? rec.key : f).trim().toLowerCase();
+      if (!ALLOWED_FIELDS.includes(k) || seen.has(k)) continue;
+      seen.add(k); orderedKeys.push(k);
+      if (rec && rec.required === true) requiredKeys.push(k);
+    }
+    const fieldsAttr   = (orderedKeys.length ? orderedKeys : ['name', 'email', 'phone', 'city', 'message']).join(',');
+    const requiredAttr = requiredKeys.join(',');
+
+    const cfg = formCfg as {
+      title?: unknown; description?: unknown; primary_color?: unknown;
+      success_message?: unknown; submit_label?: unknown; redirect_url?: unknown;
+    };
+    const title       = esc(cfg.title || integration.label || 'Get a callback');
+    const description = esc(cfg.description || '');
+    const primary     = /^#[0-9a-fA-F]{6}$/.test(String(cfg.primary_color || '')) ? String(cfg.primary_color) : '#E01E2C';
+    const success     = esc(cfg.success_message || '');
+    const submitLabel = esc(cfg.submit_label || '');
+    // Only allow http(s) redirects so a stored value can't become a javascript: sink.
+    const redirect    = /^https?:\/\//i.test(String(cfg.redirect_url || '')) ? esc(cfg.redirect_url) : '';
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=300');
     res.send(`<!doctype html>
@@ -189,13 +230,13 @@ app.get('/f/:id', cors({ origin: '*' }), withIntegrationProject, async function 
 <body>
   <main class="wrap">
     <div class="card">
-      <div data-kinematic-form="${webhookUrl}"
-           data-title="${title}"
-           data-primary-color="#E01E2C"
-           data-fields="name,email,phone,city,message"></div>
+      <div data-kinematic-form="${esc(webhookUrl)}"
+           data-title="${title}"${description ? `\n           data-description="${description}"` : ''}
+           data-primary-color="${primary}"
+           data-fields="${fieldsAttr}"${requiredAttr ? `\n           data-required="${requiredAttr}"` : ''}${success ? `\n           data-success="${success}"` : ''}${submitLabel ? `\n           data-submit-label="${submitLabel}"` : ''}${redirect ? `\n           data-redirect="${redirect}"` : ''}></div>
     </div>
   </main>
-  <script src="${embedUrl}" async></script>
+  <script src="${esc(embedUrl)}" async></script>
 </body>
 </html>`);
   } catch (e) { next(e); }

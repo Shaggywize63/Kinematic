@@ -9,8 +9,12 @@
  *   data-radius="10"               px corner radius (default 10)
  *   data-theme="light|dark"        auto-defaults to light
  *   data-title="Get a callback"    heading shown above the fields
+ *   data-description="..."         sub-heading under the title
  *   data-success="Thanks! We will be in touch shortly."  post-submit message
  *   data-fields="name,email,phone,city,company,message"  comma list, order kept
+ *   data-required="phone,city"     authoritative required list (overrides defaults)
+ *   data-submit-label="Get a callback"  submit button text (default "Submit")
+ *   data-redirect="https://..."    navigate here after a successful submit
  *
  * The script scans for every `[data-kinematic-form]` on load and again
  * when the DOM is mutated, so it works for SPAs that insert the host
@@ -145,18 +149,35 @@
     var fieldKeys = fieldsAttr.split(',').map(function (s) { return s.trim(); }).filter(function (k) { return FIELD_DEFS[k]; });
     if (fieldKeys.length === 0) fieldKeys = ['name', 'email', 'phone', 'city'];
 
+    var description = root.getAttribute('data-description') || '';
+    var submitLabel = root.getAttribute('data-submit-label') || 'Submit';
+    var redirect    = root.getAttribute('data-redirect') || '';
+    // data-required, when present, is the authoritative required-field list
+    // (overrides the built-in defaults). Absent → keep FIELD_DEFS defaults.
+    var hasReqAttr = root.hasAttribute('data-required');
+    var reqList = (root.getAttribute('data-required') || '').toLowerCase()
+      .split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    var reqSet = {};
+    fieldKeys.forEach(function (k) { reqSet[k] = hasReqAttr ? (reqList.indexOf(k) >= 0) : FIELD_DEFS[k].required; });
+
     applyTheme(root, primary, radius, theme);
 
-    var heading = el('div', { style: { fontSize: '16px', fontWeight: '700', marginBottom: '14px', color: 'var(--km-text)' } }, [title]);
+    var heading = el('div', { style: { fontSize: '16px', fontWeight: '700', marginBottom: description ? '4px' : '14px', color: 'var(--km-text)' } }, [title]);
+    var subhead = description
+      ? el('div', { style: { fontSize: '13px', marginBottom: '14px', color: 'var(--km-muted)' } }, [description])
+      : null;
     var form = el('form', { novalidate: 'novalidate', style: { margin: '0' } });
 
-    fieldKeys.forEach(function (k) { form.appendChild(field(k, FIELD_DEFS[k])); });
+    fieldKeys.forEach(function (k) {
+      var d = FIELD_DEFS[k];
+      form.appendChild(field(k, { label: d.label, type: d.type, placeholder: d.placeholder, required: reqSet[k] }));
+    });
 
     var btn = el('button', {
       type: 'submit',
       style: 'width:100%;background:var(--km-primary);color:#fff;border:none;padding:11px 16px;'
         + 'border-radius:var(--km-radius);font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;',
-    }, ['Submit']);
+    }, [submitLabel]);
     form.appendChild(btn);
 
     var poweredBy = el('div', {
@@ -173,7 +194,7 @@
       // Client-side validation — required + format checks.
       for (var i = 0; i < fieldKeys.length; i++) {
         var k = fieldKeys[i];
-        if (FIELD_DEFS[k].required && !data[k]) return showError(form, FIELD_DEFS[k].label + ' is required');
+        if (reqSet[k] && !data[k]) return showError(form, FIELD_DEFS[k].label + ' is required');
       }
       if (data.email && !validEmail(data.email)) return showError(form, 'Please enter a valid email address');
       if (data.phone && !validPhone(data.phone)) return showError(form, 'Mobile must be a 10-digit number');
@@ -188,16 +209,21 @@
       }).then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok && j && j.ok !== false, j: j, status: r.status }; });
       }).then(function (out) {
-        if (out.ok) showSuccess(root, success);
-        else { btn.disabled = false; btn.textContent = 'Submit'; showError(form, (out.j && (out.j.error || out.j.message)) || ('Submission failed (HTTP ' + out.status + ')')); }
+        if (out.ok) {
+          // Redirect to a thank-you page when configured, else show the
+          // inline success state. Only http(s) targets are honoured.
+          if (redirect && /^https?:\/\//i.test(redirect)) { window.location.href = redirect; return; }
+          showSuccess(root, success);
+        } else { btn.disabled = false; btn.textContent = submitLabel; showError(form, (out.j && (out.j.error || out.j.message)) || ('Submission failed (HTTP ' + out.status + ')')); }
       }).catch(function (err) {
-        btn.disabled = false; btn.textContent = 'Submit';
+        btn.disabled = false; btn.textContent = submitLabel;
         showError(form, err && err.message ? err.message : 'Network error — please retry');
       });
     });
 
     root.innerHTML = '';
     root.appendChild(heading);
+    if (subhead) root.appendChild(subhead);
     root.appendChild(form);
     root.appendChild(poweredBy);
   }
