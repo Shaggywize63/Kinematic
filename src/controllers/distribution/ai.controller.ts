@@ -25,7 +25,7 @@ import { PricerError } from '../../services/order-pricer';
 
 const num = (v: unknown) => Number(v || 0);
 const DAY = 86_400_000;
-const MODEL = process.env.DIST_AI_MODEL || 'claude-haiku-4-5';
+const MODEL = process.env.DIST_AI_MODEL || 'claude-haiku-4-5-20251001';
 
 const AGENTS = [
   { key: 'replenishment', name: 'Replenishment agent', icon: '🤖',

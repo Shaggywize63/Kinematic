@@ -315,7 +315,7 @@ async function streamAnthropicTurn(params: {
  */
 export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWithToolsOutput> {
   const apiKey = await AIService.getFunctionalKey();
-  const model = input.model || 'claude-haiku-4-5';
+  const model = input.model || 'claude-haiku-4-5-20251001';
   const max_tokens = input.max_tokens ?? 1500;
   const max_turns = input.max_turns ?? 5;
 

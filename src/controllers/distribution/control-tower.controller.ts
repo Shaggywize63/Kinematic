@@ -222,7 +222,7 @@ export const controlTower = asyncHandler(async (req: AuthRequest, res: Response)
     try {
       narrative = await aiComplete({
         org_id,
-        model: process.env.DIST_TOWER_MODEL || 'claude-haiku-4-5',
+        model: process.env.DIST_TOWER_MODEL || 'claude-haiku-4-5-20251001',
         system:
           'You are KINI, a supply-chain control tower for a distribution business. ' +
           'Given a JSON snapshot of the route-to-market (brand → distributor → retailer → consumer) ' +
