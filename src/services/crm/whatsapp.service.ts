@@ -4,8 +4,37 @@
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
+import { logger } from '../../lib/logger';
 import { resolveWhatsappProvider, fromPhoneFor } from './whatsappConnection.service';
 import { applyRecipientStatus, handleInbound } from './broadcast.service';
+import { findOrCreateLead } from './integrations/dedup.orchestrator';
+
+/** Get (or lazily create) the org's "WhatsApp" lead source so inbound-created
+ *  leads are attributed to the channel. */
+async function getOrCreateWhatsappSource(org_id: string): Promise<string | null> {
+  try {
+    const { data: existing } = await supabaseAdmin.from('crm_lead_sources')
+      .select('id').eq('org_id', org_id).ilike('name', 'WhatsApp').is('deleted_at', null).limit(1).maybeSingle();
+    if ((existing as any)?.id) return (existing as any).id;
+    const { data: created } = await supabaseAdmin.from('crm_lead_sources')
+      .insert({ org_id, name: 'WhatsApp' }).select('id').single();
+    return (created as any)?.id ?? null;
+  } catch (e: any) {
+    logger.warn(`[whatsapp] resolve source failed: ${e?.message || e}`);
+    return null;
+  }
+}
+
+/** WhatsApp lead-capture is OPT-IN per org (crm_settings.config.whatsapp_lead_capture
+ *  === true). Default OFF so existing tenants are unchanged — an unknown number
+ *  messaging in does not silently start creating leads unless the org enabled it. */
+async function whatsappLeadCaptureEnabled(org_id: string): Promise<boolean> {
+  try {
+    const { data } = await supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id).limit(1);
+    const cfg = ((data?.[0] as any)?.config ?? {}) as Record<string, unknown>;
+    return cfg.whatsapp_lead_capture === true;
+  } catch { return false; }
+}
 
 export interface SendWhatsappInput {
   org_id: string;
@@ -122,6 +151,32 @@ export async function recordInbound(payload: {
   const { data: contact } = await supabaseAdmin.from('crm_contacts').select('id, account_id')
     .eq('org_id', payload.org_id).eq('phone', payload.from_phone).is('deleted_at', null).maybeSingle();
 
+  // WhatsApp lead capture: an inbound message from a number that is NOT a known
+  // contact is a potential lead. Opt-in per org (default OFF). Dedup-safe — the
+  // shared intake orchestrator reuses an existing lead by phone hash, else
+  // creates one (inheriting owner assignment + scoring + the lead_created
+  // automation). The number consented by messaging us, so whatsapp_consent=true.
+  let leadId: string | null = null;
+  if (!(contact as any)?.id && payload.from_phone && await whatsappLeadCaptureEnabled(payload.org_id)) {
+    const source_id = await getOrCreateWhatsappSource(payload.org_id);
+    if (source_id) {
+      try {
+        const res = await findOrCreateLead({
+          org_id: payload.org_id,
+          source_id,
+          normalized: {
+            phone: payload.from_phone,
+            whatsapp_consent: true,
+            notes: payload.body_text ? `First WhatsApp message: ${payload.body_text.slice(0, 300)}` : null,
+          },
+        });
+        leadId = res.lead_id;
+      } catch (e: any) {
+        logger.warn(`[whatsapp] inbound lead capture failed: ${e?.message || e}`);
+      }
+    }
+  }
+
   const status = payload.in_reply_to ? 'replied' : 'received';
   const providerName = (await resolveWhatsappProvider(payload.org_id)).name;
   await supabaseAdmin.from('crm_whatsapp_logs').insert({
@@ -135,7 +190,8 @@ export async function recordInbound(payload: {
     status,
     provider: providerName,
     provider_message_id: payload.provider_message_id ?? null,
-    contact_id: contact?.id ?? null,
+    contact_id: (contact as any)?.id ?? null,
+    lead_id: leadId,
     replied_at: payload.in_reply_to ? new Date().toISOString() : null,
   });
 
