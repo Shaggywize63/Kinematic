@@ -231,8 +231,21 @@ For EACH product on the shelf:
   facing is nearly bare, otherwise "in_stock". Estimate conservatively; use null
   only when you genuinely cannot tell.
 - Report "shelf_index": 0 for the BOTTOM shelf, increasing upward.
-- Report "bbox" as [x, y, w, h] in 0..1 normalized image coordinates, and
-  "bbox_area" = w * h.
+- Report "bbox" as [x, y, w, h] in 0..1 normalized image coordinates, where
+  (x, y) is the TOP-LEFT corner and (w, h) are the width/height as fractions of
+  the image. x grows rightward; y grows DOWNWARD from 0 at the very top of the
+  image to 1 at the bottom. Also report "bbox_area" = w * h.
+- The box MUST tightly enclose the PRODUCT PACKAGE you identified — the visible
+  pack front (pouch / jar / bottle / box). Its TOP edge is the top of that pack;
+  its BOTTOM edge is where that SAME pack meets the shelf it stands on.
+- CRITICAL — get the vertical position right. Do NOT include the shelf-edge
+  price rail / label strip beneath the product, and do NOT let the box slide
+  down onto the DIFFERENT products sitting on the shelf BELOW. The single most
+  common mistake is drawing the box one shelf too LOW: the box must sit on the
+  SAME row as the pack you named and be vertically centred on that pack, so a
+  product on an upper shelf has a SMALL y and a product near the floor has a
+  LARGE y. Before returning each box, verify the pixels inside it actually show
+  the product you identified — not the item on the shelf underneath it.
 - You MAY hint a "zone" (low | eye | top) but the backend recomputes it
   canonically from shelf_index — do not agonize over it.
 - Give a one-line "reasoning" for the identification (what packaging/label cue
@@ -280,11 +293,21 @@ actually present somewhere on this shelf. Call "report_recall" exactly once.
 
 Return a detection ONLY for products you can actually SEE on the shelf: set its
 sku_id to the matching reference's sku_id, and give its bbox ([x, y, w, h] in
-0..1 normalized image coordinates), facings (product fronts visible), shelf_index
-(0 = bottom shelf, increasing upward) and confidence. Do NOT invent products, do
-NOT report ones you cannot clearly see, and do NOT report anything outside the
-reference set. Be conservative: if you are not sure a referenced product is on
-the shelf, OMIT it — omission means it is genuinely out of stock.`;
+0..1 normalized image coordinates, where (x, y) is the TOP-LEFT corner and y
+grows DOWNWARD from 0 at the top to 1 at the bottom), facings (product fronts
+visible), shelf_index (0 = bottom shelf, increasing upward) and confidence. Do
+NOT invent products, do NOT report ones you cannot clearly see, and do NOT
+report anything outside the reference set. Be conservative: if you are not sure a
+referenced product is on the shelf, OMIT it — omission means it is genuinely out
+of stock.
+
+The bbox MUST tightly enclose the actual product PACKAGE — top edge at the top of
+the pack, bottom edge where that same pack meets its shelf. Get the vertical
+position right: do NOT include the shelf-edge price rail beneath the pack, and do
+NOT slide the box down onto the different products on the shelf BELOW. The most
+common mistake is placing the box one shelf too LOW — it must sit on the SAME row
+as the pack, so a product on an upper shelf has a SMALL y. Before returning a
+box, confirm the pixels inside it show that product, not the item beneath it.`;
 
 // Focused pricing + promotion recovery pass. A single shelf photo forces the
 // model to split attention across identity, facings, position, price AND promo;
