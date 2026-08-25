@@ -190,6 +190,16 @@ async function refreshAccessToken(row: IntegrationRow): Promise<string> {
   });
   if (!r.ok) {
     const text = await r.text();
+    // A dead/expired/revoked refresh token (invalid_grant) can NEVER be
+    // refreshed — the only remedy is re-consent. Drop the stale row so the
+    // integration reads as disconnected and the UI offers "Connect/Reconnect
+    // Google" instead of a broken "Import Google contacts" that fails every
+    // time. (Very common with Testing-mode OAuth apps, whose refresh tokens
+    // Google expires after ~7 days — see the app-verification task.)
+    if (r.status === 400 && /invalid_grant/i.test(text)) {
+      await supabaseAdmin.from('user_google_integrations').delete().eq('user_id', row.user_id);
+      throw new Error('Google connection expired or was revoked — please reconnect Google.');
+    }
     throw new Error(`Google token refresh failed: ${r.status} ${text}`);
   }
   const j = await r.json() as TokenResponse;
