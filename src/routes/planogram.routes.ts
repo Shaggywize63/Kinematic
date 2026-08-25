@@ -280,6 +280,13 @@ const upsertPlanogramSchema = z.object({
     category_definition: z.string().optional(),
     // Opt-in dense-bay shelf-tiling augment for this planogram (default off).
     tiling: z.boolean().optional(),
+    // Own brand names: any shelf pack of one of these is recognised as an own
+    // product even when its variant is not in expected_skus. Optional — own
+    // brands are otherwise derived from expected_skus[].brand.
+    own_brands: z.array(z.string()).optional(),
+    // Brand / variant synonym map { term: [alternative spellings] } for packs
+    // that print a brand/flavour differently than the catalog.
+    brand_terms: z.record(z.string(), z.array(z.string())).optional(),
     // Tracked competitor SKUs (with optional reference pack shots) live on the
     // planogram layout and are threaded into the vision call at capture time.
     competitors: z.array(z.object({

@@ -23,7 +23,7 @@ import { randomUUID } from 'crypto';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { AppError } from '../utils';
-import { resolveVisionOverride } from '../lib/planogramVisionConfig';
+import { resolveVisionOverride, resolveScoringBasis, ScoringBasis } from '../lib/planogramVisionConfig';
 import {
   PlanogramVisionService,
   ShelfRecognition,
@@ -79,6 +79,16 @@ export interface PlanogramLayout {
   // by the POSM-compliance check (expected-vs-found). Stored on the planogram's
   // own `expected_posm` jsonb column. Empty/omitted → POSM compliance is N/A.
   expected_posm?: ExpectedPosm[];
+  // NEW — the retailer's OWN brand names. Any shelf pack of one of these brands
+  // is recognised as an own product even when its specific variant is not in
+  // expected_skus (so uncataloged own-brand packs are identified, not dropped).
+  // When omitted, own brands are derived from the distinct expected_skus[].brand.
+  // Stored on `layout.own_brands`.
+  own_brands?: string[];
+  // NEW — brand / variant synonym map { term: [alternative spellings] } so packs
+  // that print a brand or flavour differently than the catalog still match.
+  // Stored on `layout.brand_terms`.
+  brand_terms?: Record<string, string[]>;
 }
 
 /** One prescribed POSM / merchandising asset on a planogram. */
@@ -218,6 +228,13 @@ export interface ComplianceResult {
 export interface ScoreShelfArgs {
   recognition: ShelfRecognition;
   layout: PlanogramLayout;
+  /**
+   * How to score against the planogram (see resolveScoringBasis):
+   *   'catalog' (default) — measured against the FULL expected catalog.
+   *   'present' — measured only against expected SKUs actually on the shelf, so
+   *   not-stocked SKUs never penalise. Used for MoiSoi.
+   */
+  basis?: ScoringBasis;
 }
 
 const UNCATEGORIZED = 'Uncategorized';
@@ -231,6 +248,7 @@ export class PlanogramService {
    */
   static scoreShelf(args: ScoreShelfArgs): ComplianceResult {
     const { recognition, layout } = args;
+    const basis: ScoringBasis = args.basis ?? 'catalog';
     const expected = layout.expected_skus || [];
     const detected = recognition.detected_skus || [];
 
@@ -254,6 +272,14 @@ export class PlanogramService {
       if (d.sku_id && !d.is_competitor) detectedById.set(d.sku_id, d);
     }
 
+    // ── Scoring basis ──────────────────────────────────────────────────
+    // On a PRESENT basis, presence / facings / availability / missing are
+    // measured only over expected SKUs actually on the shelf, so a SKU the
+    // outlet simply does not stock never penalises the score. On the (default)
+    // CATALOG basis, scoringExpected === expected → behaviour is unchanged.
+    const presentExpected = expected.filter((e) => detectedById.has(e.sku_id));
+    const scoringExpected = basis === 'present' ? presentExpected : expected;
+
     // ── Canonical zone (backend-computed) ──────────────────────────────
     // Bottom third of shelves → low, middle → eye, top → top. Attach to each
     // detection (overwriting any model hint) and fill bbox_area if absent.
@@ -269,10 +295,13 @@ export class PlanogramService {
     }
 
     // ── Presence ───────────────────────────────────────────────
-    const totalWeight = expected.reduce((s, e) => s + (e.weight ?? 1), 0);
+    // On a present basis every scored SKU is present by construction, so
+    // presence resolves to 100 (or 0 for an empty shelf) and is not folded into
+    // the composite below.
+    const totalWeight = scoringExpected.reduce((s, e) => s + (e.weight ?? 1), 0);
     let presentWeight = 0;
     const presenceRows: MethodologyRow[] = [];
-    for (const e of expected) {
+    for (const e of scoringExpected) {
       const w = e.weight ?? 1;
       const present = detectedById.has(e.sku_id);
       if (present) presentWeight += w;
@@ -285,7 +314,7 @@ export class PlanogramService {
     let facingMax = 0;
     const facing_deltas: ComplianceResult['facing_deltas'] = [];
     const facingRows: MethodologyRow[] = [];
-    for (const e of expected) {
+    for (const e of scoringExpected) {
       const d = detectedById.get(e.sku_id);
       const actual = d?.facings ?? 0;
       const delta = actual - e.facings;
@@ -441,7 +470,9 @@ export class PlanogramService {
     }));
 
     // ── Missing ────────────────────────────────────────────────────
-    const missing_skus = expected
+    // On a present basis nothing is "missing" (we only score what's on shelf),
+    // so scoringExpected → all present → this is empty.
+    const missing_skus = scoringExpected
       .filter((e) => !detectedById.has(e.sku_id))
       .map((e) => ({
         sku_id: e.sku_id,
@@ -449,15 +480,27 @@ export class PlanogramService {
         expected_facings: e.facings,
       }));
 
-    // ── Composite score (UNCHANGED) ───────────────────────────────────
-    // Weighted: presence dominates, facings + position equal, competitor
-    // share lightly penalizes if it's eating shelf space.
+    // ── Composite score ────────────────────────────────────────────────
+    // CATALOG basis (default, UNCHANGED): presence dominates, facings + position
+    // equal, competitor share lightly penalizes if it's eating shelf space.
+    // PRESENT basis: presence is 100 by construction (we only score present
+    // SKUs), so folding it in at 0.5 would flatten every score to ≥50; instead we
+    // renormalise facings + position to fill the composite so the score reflects
+    // how well the present stock is merchandised, still minus the competitor
+    // penalty and still 0..100.
     const competitorPenalty = Math.max(0, competitor_share - 25); // tolerate 25%
-    const score =
-      0.5 * presence_score +
-      0.25 * facing_score +
-      0.2 * position_score -
-      0.05 * competitorPenalty;
+    let score: number;
+    if (basis === 'present') {
+      const wF = 0.25;
+      const wP = 0.2;
+      score = (wF * facing_score + wP * position_score) / (wF + wP) - 0.05 * competitorPenalty;
+    } else {
+      score =
+        0.5 * presence_score +
+        0.25 * facing_score +
+        0.2 * position_score -
+        0.05 * competitorPenalty;
+    }
     const finalScore = Math.max(0, Math.min(100, Math.round(score * 10) / 10));
 
     // ── Stock count (from image) ───────────────────────────────────────
@@ -473,7 +516,9 @@ export class PlanogramService {
         : Math.max(0, d.facings || 0);
     const own_units = ownDetected.reduce((s, d) => s + unitsOf(d), 0);
     const competitor_units = compDetected.reduce((s, d) => s + unitsOf(d), 0);
-    const out_of_stock_skus = expected
+    // On a present basis nothing counts as out-of-stock (not-stocked SKUs are not
+    // graded); scoringExpected → all present → empty.
+    const out_of_stock_skus = scoringExpected
       .filter((e) => !detectedById.has(e.sku_id))
       .map((e) => ({ sku_id: e.sku_id, sku_name: e.sku_name }));
     const low_stock_skus = ownDetected
@@ -488,8 +533,10 @@ export class PlanogramService {
         sku_name: d.sku_name,
         units_estimate: d.units_estimate ?? null,
       }));
-    const presentCount = expected.filter((e) => detectedById.has(e.sku_id)).length;
-    const availability_rate = expected.length ? round1((presentCount / expected.length) * 100) : 0;
+    const presentCount = scoringExpected.filter((e) => detectedById.has(e.sku_id)).length;
+    const availability_rate = scoringExpected.length
+      ? round1((presentCount / scoringExpected.length) * 100)
+      : 0;
     const stock_summary: StockSummary = {
       total_units: own_units + competitor_units,
       own_units,
@@ -524,6 +571,7 @@ export class PlanogramService {
       oos_count: stock_summary.oos_count,
       low_stock_count: stock_summary.low_count,
       methodology: this.buildMethodology({
+        basis,
         occupancyDenominator,
         occupancyCalc,
         occupancyScore: occupancy_score,
@@ -797,6 +845,7 @@ export class PlanogramService {
    * notes} still validate and render.
    */
   private static buildMethodology(m: {
+    basis: ScoringBasis;
     occupancyDenominator: string;
     occupancyCalc: string;
     occupancyScore: number;
@@ -822,12 +871,17 @@ export class PlanogramService {
     };
   }): Methodology {
     const c = m.composite;
+    const present = m.basis === 'present';
     return {
       presence: {
-        formula: 'Σ weight(expected SKUs present) / Σ weight(all expected SKUs) × 100',
+        formula: present
+          ? 'present basis — every scored SKU is one on the shelf, so presence = 100 and is NOT part of the composite'
+          : 'Σ weight(expected SKUs present) / Σ weight(all expected SKUs) × 100',
         inputs: ['expected_skus.weight', 'detected_skus.sku_id'],
-        notes: 'weight defaults to 1; only own (non-competitor) detections count as present.',
-        weight: 0.5,
+        notes: present
+          ? 'Scored on a PRESENT basis: only expected SKUs actually on the shelf are evaluated, so SKUs the outlet does not stock never penalise. Presence is therefore 100 and excluded from the composite.'
+          : 'weight defaults to 1; only own (non-competitor) detections count as present.',
+        weight: present ? 0 : 0.5,
         result: round1(m.presence.score),
         calc: `present weight ${round1(m.presence.presentWeight)} / total weight ${round1(
           m.presence.totalWeight,
@@ -942,33 +996,61 @@ export class PlanogramService {
         inputs: ['detected_skus.shelf_index', 'shelf_count'],
         notes: 'zone is computed by the backend; the model hint is ignored. A single-shelf image is treated as eye.',
       },
-      composite: {
-        formula: '0.5·presence + 0.25·facing + 0.2·position − 0.05·max(0, competitor_share − 25), clamped 0..100',
-        inputs: ['presence_score', 'facing_score', 'position_score', 'competitor_share'],
-        notes:
-          'Occupancy and shelf-share are reported alongside but NOT folded into the composite; competitor share is tolerated up to 25% before it penalizes.',
-        result: round1(c.score),
-        calc: `0.5×${round1(c.presence)} + 0.25×${round1(c.facing)} + 0.2×${round1(
-          c.position,
-        )} − 0.05×${round1(c.competitorPenalty)} = ${round1(c.score)}`,
-        columns: [
-          { key: 'component', label: 'Component' },
-          { key: 'value', label: 'Score' },
-          { key: 'weight', label: 'Weight' },
-          { key: 'contribution', label: 'Contribution' },
-        ],
-        rows: [
-          { component: 'Presence', value: round1(c.presence), weight: 0.5, contribution: round1(0.5 * c.presence) },
-          { component: 'Facings', value: round1(c.facing), weight: 0.25, contribution: round1(0.25 * c.facing) },
-          { component: 'Position', value: round1(c.position), weight: 0.2, contribution: round1(0.2 * c.position) },
-          {
-            component: 'Competitor penalty',
-            value: round1(c.competitorShare),
-            weight: -0.05,
-            contribution: round1(-0.05 * c.competitorPenalty),
+      composite: present
+        ? {
+            formula:
+              'present basis — (0.25·facing + 0.2·position) / 0.45 − 0.05·max(0, competitor_share − 25), clamped 0..100',
+            inputs: ['facing_score', 'position_score', 'competitor_share'],
+            notes:
+              'Scored on a PRESENT basis: presence is excluded (it is 100 by construction) and facings + position are renormalised to fill the composite, so the score reflects how well the products ACTUALLY on the shelf are merchandised. SKUs the outlet does not stock never penalise. Competitor share is tolerated up to 25% before it penalizes.',
+            result: round1(c.score),
+            calc: `(0.25×${round1(c.facing)} + 0.2×${round1(c.position)}) / 0.45 − 0.05×${round1(
+              c.competitorPenalty,
+            )} = ${round1(c.score)}`,
+            columns: [
+              { key: 'component', label: 'Component' },
+              { key: 'value', label: 'Score' },
+              { key: 'weight', label: 'Weight' },
+              { key: 'contribution', label: 'Contribution' },
+            ],
+            rows: [
+              { component: 'Facings', value: round1(c.facing), weight: 0.556, contribution: round1((0.25 / 0.45) * c.facing) },
+              { component: 'Position', value: round1(c.position), weight: 0.444, contribution: round1((0.2 / 0.45) * c.position) },
+              {
+                component: 'Competitor penalty',
+                value: round1(c.competitorShare),
+                weight: -0.05,
+                contribution: round1(-0.05 * c.competitorPenalty),
+              },
+            ],
+          }
+        : {
+            formula: '0.5·presence + 0.25·facing + 0.2·position − 0.05·max(0, competitor_share − 25), clamped 0..100',
+            inputs: ['presence_score', 'facing_score', 'position_score', 'competitor_share'],
+            notes:
+              'Occupancy and shelf-share are reported alongside but NOT folded into the composite; competitor share is tolerated up to 25% before it penalizes.',
+            result: round1(c.score),
+            calc: `0.5×${round1(c.presence)} + 0.25×${round1(c.facing)} + 0.2×${round1(
+              c.position,
+            )} − 0.05×${round1(c.competitorPenalty)} = ${round1(c.score)}`,
+            columns: [
+              { key: 'component', label: 'Component' },
+              { key: 'value', label: 'Score' },
+              { key: 'weight', label: 'Weight' },
+              { key: 'contribution', label: 'Contribution' },
+            ],
+            rows: [
+              { component: 'Presence', value: round1(c.presence), weight: 0.5, contribution: round1(0.5 * c.presence) },
+              { component: 'Facings', value: round1(c.facing), weight: 0.25, contribution: round1(0.25 * c.facing) },
+              { component: 'Position', value: round1(c.position), weight: 0.2, contribution: round1(0.2 * c.position) },
+              {
+                component: 'Competitor penalty',
+                value: round1(c.competitorShare),
+                weight: -0.05,
+                contribution: round1(-0.05 * c.competitorPenalty),
+              },
+            ],
           },
-        ],
-      },
     };
   }
 
@@ -1075,6 +1157,11 @@ export class PlanogramService {
       competitors: Array.isArray(data.layout?.competitors) ? data.layout.competitors : [],
       tiling: data.layout?.tiling === true,
       expected_posm: Array.isArray(data.expected_posm) ? data.expected_posm : [],
+      own_brands: Array.isArray(data.layout?.own_brands) ? data.layout.own_brands : undefined,
+      brand_terms:
+        data.layout?.brand_terms && typeof data.layout.brand_terms === 'object'
+          ? data.layout.brand_terms
+          : undefined,
     };
   }
 
@@ -1711,6 +1798,8 @@ export class PlanogramService {
         storeFormat,
         referenceImages,
         tiling: layout.tiling === true,
+        ownBrands: layout.own_brands,
+        brandTerms: layout.brand_terms,
         apiKey: vision.apiKey,
         model: vision.model,
       });
@@ -1723,8 +1812,9 @@ export class PlanogramService {
       );
     }
 
-    // 6. Score + quality gate (deterministic).
-    const result = this.scoreShelf({ recognition, layout });
+    // 6. Score + quality gate (deterministic). Same tenant basis as live capture.
+    const scoringBasis = resolveScoringBasis({ orgId: args.orgId, clientId: cap.client_id ?? null });
+    const result = this.scoreShelf({ recognition, layout, basis: scoringBasis });
     this.applyQualityGate(recognition, result, layout);
 
     // 7. UPSERT recognition + compliance for this capture.
@@ -1792,9 +1882,11 @@ export class PlanogramService {
       .not('planogram_id', 'is', null);
 
     // A page of stale rows. Ordered by id for a stable, resumable sweep.
+    // org_id / client_id are pulled so the re-score honours the tenant's scoring
+    // basis (MoiSoi = present) exactly like the live + reprocess paths.
     const { data: staleRows, error } = await supabaseAdmin
       .from('planogram_compliance')
-      .select('id, capture_id, planogram_id')
+      .select('id, capture_id, planogram_id, org_id, client_id')
       .or(STALE_OR)
       .not('planogram_id', 'is', null)
       .order('id', { ascending: true })
@@ -1805,6 +1897,8 @@ export class PlanogramService {
       id: string;
       capture_id: string;
       planogram_id: string | null;
+      org_id: string | null;
+      client_id: string | null;
     }>;
     if (rows.length === 0) return { processed: 0, remaining: totalStale ?? 0 };
 
@@ -1853,7 +1947,8 @@ export class PlanogramService {
           model_version: (rec.model_versions?.vision as string) || '',
         };
 
-        const result = this.scoreShelf({ recognition, layout });
+        const basis = resolveScoringBasis({ orgId: row.org_id, clientId: row.client_id });
+        const result = this.scoreShelf({ recognition, layout, basis });
 
         const { error: upErr } = await supabaseAdmin
           .from('planogram_compliance')
@@ -1963,11 +2058,17 @@ export class PlanogramService {
       // layout.tiling (the PLANOGRAM_TILING=1 env flag also forces it on inside
       // recognizeShelf). Default off → single-pass behavior is unchanged.
       tiling: layout.tiling === true,
+      // Brand-first lexicon: own brands (any pack → own product) + synonyms.
+      ownBrands: layout.own_brands,
+      brandTerms: layout.brand_terms,
       apiKey: vision.apiKey,
       model: vision.model,
     });
 
-    const result = this.scoreShelf({ recognition, layout });
+    // MoiSoi is scored on a present basis (not-stocked SKUs don't penalise);
+    // every other tenant keeps the catalog basis.
+    const scoringBasis = resolveScoringBasis({ orgId: args.orgId, clientId: args.clientId ?? null });
+    const result = this.scoreShelf({ recognition, layout, basis: scoringBasis });
 
     // ── Lever 3 — quality gate (flag only; never reject the capture) ──────
     this.applyQualityGate(recognition, result, layout);
