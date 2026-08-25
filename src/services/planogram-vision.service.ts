@@ -536,21 +536,37 @@ export class PlanogramVisionService {
     const skuLexicon = buildSkuLexicon(args.expectedSkus || []);
     const brandTerms = args.brandTerms;
 
+    // Anthropic rejects ANY image over 2000px per side once a request carries
+    // "many images" — which our reference pack-shots + the shelf photo now do.
+    // Downscale the shelf photo and every reference under that ceiling before
+    // sending; otherwise a dense capture with the full reference set fails with
+    // "image dimensions exceed max allowed size for many-image requests: 2000".
+    // Shelf keeps more detail (small SKUs); pack-shots need far less.
+    const SHELF_MAX_DIM = 1900;
+    const REF_MAX_DIM = 1024;
+    const shelf = await downscaleForApi(args.imageBase64, args.imageMediaType, SHELF_MAX_DIM);
+
     // Prepend up to MAX_REFERENCE_IMAGES front-facing pack shots (each labelled
     // with its sku_id) so the model matches shelf products by packaging. Bounded
-    // to keep token cost predictable.
+    // to keep token cost predictable, and each capped to REF_MAX_DIM.
     const MAX_REFERENCE_IMAGES = 32;
-    const refs = (args.referenceImages || []).slice(0, MAX_REFERENCE_IMAGES);
-    if ((args.referenceImages?.length || 0) > MAX_REFERENCE_IMAGES) {
-      logger.warn(`[PlanogramVision] ${args.referenceImages!.length} reference images supplied; using first ${MAX_REFERENCE_IMAGES}`);
+    const allRefsCapped = await Promise.all(
+      (args.referenceImages || []).map(async (r) => {
+        const c = await downscaleForApi(r.imageBase64, r.imageMediaType, REF_MAX_DIM);
+        return { ...r, imageBase64: c.base64, imageMediaType: c.mediaType };
+      }),
+    );
+    const refs = allRefsCapped.slice(0, MAX_REFERENCE_IMAGES);
+    if (allRefsCapped.length > MAX_REFERENCE_IMAGES) {
+      logger.warn(`[PlanogramVision] ${allRefsCapped.length} reference images supplied; using first ${MAX_REFERENCE_IMAGES}`);
     }
 
     const runPass1 = () =>
       this.callShelfRecognition({
         apiKey,
         model,
-        imageBase64: args.imageBase64,
-        imageMediaType: args.imageMediaType,
+        imageBase64: shelf.base64,
+        imageMediaType: shelf.mediaType,
         refs,
         expectedSkus: args.expectedSkus || [],
         competitorSkus: args.competitorSkus || [],
@@ -644,8 +660,8 @@ export class PlanogramVisionService {
         const tiled = await this.tileAugment({
           apiKey,
           model,
-          imageBase64: args.imageBase64,
-          imageMediaType: args.imageMediaType,
+          imageBase64: shelf.base64,
+          imageMediaType: shelf.mediaType,
           pass1: result.detected_skus,
           refs,
           expectedSkus: args.expectedSkus || [],
@@ -675,11 +691,11 @@ export class PlanogramVisionService {
       const recovered = await this.recallMissingSkus({
         apiKey,
         model,
-        imageBase64: args.imageBase64,
-        imageMediaType: args.imageMediaType,
+        imageBase64: shelf.base64,
+        imageMediaType: shelf.mediaType,
         pass1: result.detected_skus,
         expectedSkus: args.expectedSkus || [],
-        referenceImages: args.referenceImages || [],
+        referenceImages: allRefsCapped,
       });
       if (recovered.length) {
         result.detected_skus = result.detected_skus.concat(recovered);
@@ -704,8 +720,8 @@ export class PlanogramVisionService {
         const { priced, addedPromos } = await this.recoverPricingAndPromos({
           apiKey,
           model,
-          imageBase64: args.imageBase64,
-          imageMediaType: args.imageMediaType,
+          imageBase64: shelf.base64,
+          imageMediaType: shelf.mediaType,
           detected: result.detected_skus,
           promotions: result.promotions,
         });
@@ -1269,6 +1285,40 @@ function clamp01(v: any): number {
   const n = Number(v);
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(1, n));
+}
+
+/**
+ * Downscale a base64 image so neither side exceeds `maxDim`, returning JPEG.
+ * Anthropic rejects images over 2000px per side in "many-image" requests (our
+ * reference pack-shots + the shelf photo), so every image sent to the vision
+ * API is capped through this first. Auto-orients via EXIF (phone photos), only
+ * re-encodes when the image is actually too big, and — best-effort — returns the
+ * original untouched if `sharp` is unavailable or anything fails, so capping can
+ * never itself break a capture. Shared by the shelf image and every reference.
+ */
+async function downscaleForApi(
+  base64: string,
+  mediaType: 'image/jpeg' | 'image/png' | 'image/webp',
+  maxDim: number,
+): Promise<{ base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/webp' }> {
+  try {
+    const sharp = (await import('sharp')).default;
+    const buf = Buffer.from(base64, 'base64');
+    const meta = await sharp(buf).metadata();
+    const w = meta.width || 0;
+    const h = meta.height || 0;
+    if (!w || !h) return { base64, mediaType };
+    if (w <= maxDim && h <= maxDim) return { base64, mediaType }; // already within cap
+    const out = await sharp(buf)
+      .rotate() // apply EXIF orientation before resizing
+      .resize({ width: maxDim, height: maxDim, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 88 })
+      .toBuffer();
+    return { base64: out.toString('base64'), mediaType: 'image/jpeg' };
+  } catch (e) {
+    logger.warn(`[PlanogramVision] image downscale failed, sending original: ${(e as Error)?.message}`);
+    return { base64, mediaType };
+  }
 }
 
 function round4(v: number): number {
