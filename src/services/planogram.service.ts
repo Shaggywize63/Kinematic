@@ -23,6 +23,7 @@ import { randomUUID } from 'crypto';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { AppError } from '../utils';
+import { resolveVisionOverride } from '../lib/planogramVisionConfig';
 import {
   PlanogramVisionService,
   ShelfRecognition,
@@ -1684,6 +1685,12 @@ export class PlanogramService {
     // 5. Re-run vision — GUARDED. On failure return 502 and write NOTHING, so
     //    the existing recognition / compliance rows are never corrupted.
     const referenceImages = await this.loadReferenceImages(layout);
+    // Same per-tenant override as the live capture path so a re-analysis of a
+    // MoiSoi capture also runs on the dedicated high-model key.
+    const vision = resolveVisionOverride({ orgId: args.orgId, clientId: cap.client_id ?? null });
+    if (vision.label !== 'default') {
+      logger.info(`[planogram] reprocess vision override "${vision.label}" (model=${vision.model || 'default'}, dedicatedKey=${vision.apiKey ? 'yes' : 'no'})`);
+    }
     let recognition: ShelfRecognition;
     try {
       recognition = await PlanogramVisionService.recognizeShelf({
@@ -1704,6 +1711,8 @@ export class PlanogramService {
         storeFormat,
         referenceImages,
         tiling: layout.tiling === true,
+        apiKey: vision.apiKey,
+        model: vision.model,
       });
     } catch (e: any) {
       logger.warn(`[planogram] reprocess vision failed for capture ${args.captureId}: ${e?.message || e}`);
@@ -1921,6 +1930,14 @@ export class PlanogramService {
     // any unreachable image is simply skipped.
     const referenceImages = await this.loadReferenceImages(layout);
 
+    // Per-tenant vision credentials: MoiSoi runs on a dedicated high-model key
+    // for stronger SKU identification; every other tenant resolves to no
+    // override (shared functional key + default model).
+    const vision = resolveVisionOverride({ orgId: args.orgId, clientId: args.clientId ?? null });
+    if (vision.label !== 'default') {
+      logger.info(`[planogram] vision override "${vision.label}" (model=${vision.model || 'default'}, dedicatedKey=${vision.apiKey ? 'yes' : 'no'})`);
+    }
+
     const recognition = await PlanogramVisionService.recognizeShelf({
       imageBase64: args.imageBase64,
       imageMediaType: args.imageMediaType,
@@ -1946,6 +1963,8 @@ export class PlanogramService {
       // layout.tiling (the PLANOGRAM_TILING=1 env flag also forces it on inside
       // recognizeShelf). Default off → single-pass behavior is unchanged.
       tiling: layout.tiling === true,
+      apiKey: vision.apiKey,
+      model: vision.model,
     });
 
     const result = this.scoreShelf({ recognition, layout });
