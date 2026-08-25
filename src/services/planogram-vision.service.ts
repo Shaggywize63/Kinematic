@@ -127,6 +127,21 @@ export interface RecognizeArgs {
   tiling?: boolean;
   model?: string;
   /**
+   * Optional explicit list of the retailer's OWN brand names. Any shelf pack of
+   * one of these brands is treated as an own product (never a competitor), even
+   * when its specific variant is not in expectedSkus — so uncataloged own-brand
+   * packs are still identified instead of dropped. When omitted, own brands are
+   * derived from the distinct brands on `expectedSkus`. (e.g. ['MoiSoi'])
+   */
+  ownBrands?: string[];
+  /**
+   * Optional brand / variant synonym map — { term: [alternative spellings] } —
+   * so packaging that prints a brand or flavour differently than the catalog
+   * still matches (e.g. { 'MoiSoi': ['MOI SOI', 'MOISOI'], 'chowmein': ['chow
+   * mein'] }). Sourced from the planogram's `layout.brand_terms`.
+   */
+  brandTerms?: Record<string, string[]>;
+  /**
    * Optional per-tenant Anthropic key override. When set (e.g. MoiSoi's
    * dedicated high-model key), the whole recognition pipeline runs on this key
    * instead of the shared functional key. Omitted → shared functional key, so
@@ -177,6 +192,21 @@ For EACH product on the shelf:
   If it is clearly a competitor product but not in competitor_skus, set
   is_competitor = true with sku_id = null.
   If you cannot read the label confidently, set sku_id = null and lower confidence.
+- OWN BRANDS — read the BRAND MARK FIRST, then the variant. The "own_brands" list
+  names the retailer's OWN brands. ANY pack whose brand is in own_brands is an OWN
+  product: set is_competitor = false and put the brand in "brand". NEVER mark an
+  own-brand pack as a competitor. Then resolve the variant:
+    • If it matches an expected_skus entry, set that sku_id (use the "sku_lexicon"
+      variant keywords — flavour / product-type / size tokens — to pick the right
+      one among same-brand variants).
+    • If it is an own-brand pack that is NOT in expected_skus (a variant the list
+      doesn't include), STILL REPORT IT: is_competitor = false, sku_id = null,
+      brand = the own brand, sku_name = the full name you read (e.g. "MOI SOI Thai
+      Green Curry", "MOI SOI Konjac Udon"). Do NOT drop it and do NOT invent a
+      sku_id. Reporting every own-brand pack you can see — cataloged or not — is
+      the single most important thing: unidentified own-brand packs are failures.
+  "brand_terms" (when provided) maps a brand or variant to alternative spellings /
+  synonyms you may see on packs — treat any of those as the same brand/variant.
 - Assign a "brand" (the manufacturer/brand on the pack) and a "category". The
   category MUST be chosen from the provided category list (the real taxonomy for
   this shelf) whenever the product fits one — do not invent free-form categories.
@@ -499,6 +529,13 @@ export class PlanogramVisionService {
     for (const c of args.competitorSkus || []) if (c.category) categorySet.add(c.category);
     const categories = Array.from(categorySet);
 
+    // Brand-first lexicon: the retailer's OWN brands (any pack of these is an own
+    // product, even uncataloged variants) plus per-SKU variant keywords so the
+    // model resolves same-brand variants and never drops an own-brand pack.
+    const ownBrands = deriveOwnBrands(args.expectedSkus || [], args.ownBrands);
+    const skuLexicon = buildSkuLexicon(args.expectedSkus || []);
+    const brandTerms = args.brandTerms;
+
     // Prepend up to MAX_REFERENCE_IMAGES front-facing pack shots (each labelled
     // with its sku_id) so the model matches shelf products by packaging. Bounded
     // to keep token cost predictable.
@@ -518,6 +555,9 @@ export class PlanogramVisionService {
         expectedSkus: args.expectedSkus || [],
         competitorSkus: args.competitorSkus || [],
         categories,
+        ownBrands,
+        skuLexicon,
+        brandTerms,
         storeFormat: args.storeFormat,
       });
 
@@ -611,6 +651,9 @@ export class PlanogramVisionService {
           expectedSkus: args.expectedSkus || [],
           competitorSkus: args.competitorSkus || [],
           categories,
+          ownBrands,
+          skuLexicon,
+          brandTerms,
           storeFormat: args.storeFormat,
         });
         if (tiled.length) {
@@ -907,16 +950,32 @@ export class PlanogramVisionService {
     expectedSkus: NonNullable<RecognizeArgs['expectedSkus']>;
     competitorSkus: NonNullable<RecognizeArgs['competitorSkus']>;
     categories: string[];
+    ownBrands: string[];
+    skuLexicon: Array<{ sku_id: string; keywords: string[] }>;
+    brandTerms?: Record<string, string[]>;
     storeFormat?: string;
     timeoutMs?: number;
   }): Promise<any> {
     const userText = [
       'Identify every product on this shelf and call report_shelf exactly once.',
+      // Own brands go FIRST: any pack of these is an own product (never a
+      // competitor), even if its variant is not in expected_skus.
+      'own_brands (ANY pack of these is an OWN product — is_competitor=false) = ' +
+        JSON.stringify(opts.ownBrands),
       'expected_skus = ' + JSON.stringify(opts.expectedSkus),
+      // Variant anchor keywords per expected SKU — use them to pick the right
+      // same-brand variant (flavour / type / size tokens).
+      'sku_lexicon (variant keywords per sku_id) = ' + JSON.stringify(opts.skuLexicon),
       'competitor_skus = ' + JSON.stringify(opts.competitorSkus),
       'category list (choose category ONLY from these when a product fits) = ' +
         JSON.stringify(opts.categories),
+      ...(opts.brandTerms && Object.keys(opts.brandTerms).length
+        ? ['brand_terms (synonyms / alternative spellings) = ' + JSON.stringify(opts.brandTerms)]
+        : []),
       'store_format = ' + (opts.storeFormat || 'unknown'),
+      'REMINDER: report EVERY own-brand pack you can see. If an own-brand pack is',
+      'not in expected_skus, still report it with is_competitor=false, sku_id=null,',
+      'its brand, and the full variant name you read — never omit it.',
     ].join('\n');
 
     const content: Array<Record<string, unknown>> = [];
@@ -969,6 +1028,9 @@ export class PlanogramVisionService {
     expectedSkus: NonNullable<RecognizeArgs['expectedSkus']>;
     competitorSkus: NonNullable<RecognizeArgs['competitorSkus']>;
     categories: string[];
+    ownBrands: string[];
+    skuLexicon: Array<{ sku_id: string; keywords: string[] }>;
+    brandTerms?: Record<string, string[]>;
     storeFormat?: string;
   }): Promise<DetectedSKU[]> {
     // Lazy import so a missing/broken native binary can only ever disable tiling,
@@ -1024,6 +1086,9 @@ export class PlanogramVisionService {
           expectedSkus: opts.expectedSkus,
           competitorSkus: opts.competitorSkus,
           categories: opts.categories,
+          ownBrands: opts.ownBrands,
+          skuLexicon: opts.skuLexicon,
+          brandTerms: opts.brandTerms,
           storeFormat: opts.storeFormat,
           timeoutMs: this.TILE_TIMEOUT_MS,
         });
@@ -1245,6 +1310,86 @@ function normalizeStockStatus(v: any): StockStatus | null {
 
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+}
+
+/**
+ * Distinct OWN brand names for the planogram — the brands whose packs must be
+ * treated as own products (never competitors), even for variants not in the
+ * expected list. Derived from the distinct `brand` on expected_skus, unioned
+ * with any explicit override (e.g. layout.own_brands). Case-preserving,
+ * deduped case-insensitively, bounded.
+ */
+function deriveOwnBrands(
+  expectedSkus: NonNullable<RecognizeArgs['expectedSkus']>,
+  override?: string[],
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (b: unknown) => {
+    const s = String(b ?? '').trim();
+    if (!s) return;
+    const k = s.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(s);
+  };
+  for (const b of override || []) add(b);
+  for (const e of expectedSkus) add(e.brand);
+  return out.slice(0, 24);
+}
+
+// Generic pack tokens that carry no variant meaning — stripped from the lexicon
+// so the keywords are the flavour / product-type anchors that actually
+// disambiguate same-brand variants (e.g. "korean chilli oil" vs "sichuan chilli
+// oil", "grape" vs "strawberry").
+const LEXICON_STOPWORDS = new Set([
+  'g', 'gm', 'gms', 'gram', 'grams', 'kg', 'ml', 'ltr', 'l', 'litre', 'liter',
+  'btl', 'bottle', 'jar', 'tub', 'can', 'pack', 'pouch', 'box', 'pkt', 'packet',
+  'sachet', 'tin', 'pc', 'pcs', 'x', 'of', 'the', 'and', '&', 'with', 'in',
+]);
+
+/**
+ * Per-expected-SKU variant keyword lexicon: tokenise each sku_name, drop the
+ * brand tokens (already conveyed by own_brands) and generic size/pack tokens, and
+ * keep the flavour / product-type anchors. Given to the model so it can pick the
+ * correct same-brand variant instead of guessing or dropping the pack. SKUs that
+ * reduce to no keywords are omitted (nothing useful to anchor on).
+ */
+function buildSkuLexicon(
+  expectedSkus: NonNullable<RecognizeArgs['expectedSkus']>,
+): Array<{ sku_id: string; keywords: string[] }> {
+  // Drops "175g", "500ml", "1kg", "6pc" etc. — a number glued to a unit.
+  const SIZE_RE = /^\d+(g|gm|gms|kg|ml|l|ltr|litre|liter|oz|cl|pc|pcs)$/;
+  const out: Array<{ sku_id: string; keywords: string[] }> = [];
+  for (const e of expectedSkus) {
+    if (!e.sku_id) continue;
+    const brandTokens = new Set(
+      String(e.brand ?? '')
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean),
+    );
+    // Brand with all non-alphanumerics removed, so a brand written solid in the
+    // catalog ("MoiSoi") still matches the spaced-out tokens in the name
+    // ("MOI SOI" → "moi","soi" are both substrings of "moisoi").
+    const brandJoined = String(e.brand ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const kw: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of String(e.sku_name ?? '').toLowerCase().split(/[^a-z0-9]+/)) {
+      const t = raw.trim();
+      if (!t || t.length < 2) continue;          // drop single chars / empties
+      if (/^\d+$/.test(t)) continue;             // drop pure numbers
+      if (SIZE_RE.test(t)) continue;             // drop size tokens (175g, 500ml)
+      if (brandTokens.has(t)) continue;          // drop exact brand tokens
+      if (brandJoined && brandJoined.includes(t)) continue; // drop spaced brand fragments
+      if (LEXICON_STOPWORDS.has(t)) continue;    // drop generic pack tokens
+      if (seen.has(t)) continue;
+      seen.add(t);
+      kw.push(t);
+    }
+    if (kw.length) out.push({ sku_id: e.sku_id, keywords: kw.slice(0, 8) });
+  }
+  return out;
 }
 
 /**

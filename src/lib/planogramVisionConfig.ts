@@ -81,3 +81,30 @@ export function resolveVisionOverride(ctx: {
   if (!apiKey && !model) return { label: 'default' };
   return { apiKey, model, label: 'moisoi' };
 }
+
+/**
+ * How a capture is scored against its planogram:
+ *   'catalog' — the historical basis: presence / facings / availability are
+ *               measured against the FULL expected catalog, so a SKU the outlet
+ *               simply does not stock counts against the score.
+ *   'present' — measured only against the expected SKUs actually PRESENT on the
+ *               shelf, so not-stocked SKUs never penalise; the score reflects how
+ *               well the products that ARE there are merchandised.
+ */
+export type ScoringBasis = 'catalog' | 'present';
+
+/**
+ * Resolve the scoring basis for a capture's tenant. MoiSoi is evaluated on a
+ * PRESENT basis (its outlets stock only part of the range, so full-catalog
+ * scoring is misleading); every other tenant keeps the historical CATALOG basis,
+ * so the Tata prod composite is byte-for-byte unchanged. Overridable via
+ * MOISOI_SCORING_BASIS (set to 'catalog' to revert MoiSoi).
+ */
+export function resolveScoringBasis(ctx: {
+  orgId?: string | null;
+  clientId?: string | null;
+}): ScoringBasis {
+  if (!isMoiSoi(ctx)) return 'catalog';
+  const v = (process.env.MOISOI_SCORING_BASIS || 'present').trim().toLowerCase();
+  return v === 'catalog' ? 'catalog' : 'present';
+}
