@@ -491,9 +491,17 @@ export class PlanogramService {
     const competitorPenalty = Math.max(0, competitor_share - 25); // tolerate 25%
     let score: number;
     if (basis === 'present') {
-      const wF = 0.25;
-      const wP = 0.2;
-      score = (wF * facing_score + wP * position_score) / (wF + wP) - 0.05 * competitorPenalty;
+      if (scoringExpected.length === 0) {
+        // No expected own SKU is on the shelf → there is nothing to grade on a
+        // present basis. Score 0 rather than the degenerate value the renormalised
+        // formula would give (facing defaults to 100 when nothing is present),
+        // which would otherwise make a shelf with no own product score ~56.
+        score = 0;
+      } else {
+        const wF = 0.25;
+        const wP = 0.2;
+        score = (wF * facing_score + wP * position_score) / (wF + wP) - 0.05 * competitorPenalty;
+      }
     } else {
       score =
         0.5 * presence_score +
