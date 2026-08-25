@@ -126,6 +126,17 @@ export interface RecognizeArgs {
    */
   tiling?: boolean;
   model?: string;
+  /**
+   * Optional per-tenant Anthropic key override. When set (e.g. MoiSoi's
+   * dedicated high-model key), the whole recognition pipeline runs on this key
+   * instead of the shared functional key. Omitted → shared functional key, so
+   * every other tenant is unaffected. Paired with `model` for the high-tier
+   * model. If this key/model fails the FIRST recognition pass with an
+   * auth/model error (401/403/404), the pipeline transparently falls back to
+   * the shared key + default model so a misconfigured override never breaks a
+   * capture.
+   */
+  apiKey?: string;
 }
 
 export interface ParsedPlanogramSku {
@@ -472,8 +483,12 @@ export class PlanogramVisionService {
   }
 
   static async recognizeShelf(args: RecognizeArgs): Promise<ShelfRecognition> {
-    const apiKey = await AIService.getFunctionalKey();
-    const model = args.model || this.defaultModel();
+    // Per-tenant override (e.g. MoiSoi's dedicated high-model key). When absent,
+    // this resolves to the shared functional key + default model, so every other
+    // tenant behaves exactly as before.
+    let apiKey = args.apiKey || (await AIService.getFunctionalKey());
+    let model = args.model || this.defaultModel();
+    const usingOverride = !!(args.apiKey || args.model);
 
     // Constrain classification to the real taxonomy present on this planogram:
     // pass the distinct categories from expected + competitor SKUs as few-shot
@@ -493,17 +508,42 @@ export class PlanogramVisionService {
       logger.warn(`[PlanogramVision] ${args.referenceImages!.length} reference images supplied; using first ${MAX_REFERENCE_IMAGES}`);
     }
 
-    const parsed = await this.callShelfRecognition({
-      apiKey,
-      model,
-      imageBase64: args.imageBase64,
-      imageMediaType: args.imageMediaType,
-      refs,
-      expectedSkus: args.expectedSkus || [],
-      competitorSkus: args.competitorSkus || [],
-      categories,
-      storeFormat: args.storeFormat,
-    });
+    const runPass1 = () =>
+      this.callShelfRecognition({
+        apiKey,
+        model,
+        imageBase64: args.imageBase64,
+        imageMediaType: args.imageMediaType,
+        refs,
+        expectedSkus: args.expectedSkus || [],
+        competitorSkus: args.competitorSkus || [],
+        categories,
+        storeFormat: args.storeFormat,
+      });
+
+    // Pass-1 is the only capture-breaking call (recall / tiling / pricing are all
+    // best-effort). If a per-tenant OVERRIDE key/model fails it with an auth or
+    // model-availability error (bad key / model not provisioned for the key), fall
+    // back ONCE to the shared functional key + default model and reassign apiKey/
+    // model so the rest of the pipeline uses the working creds too. A misconfigured
+    // MoiSoi high-model key therefore degrades to today's behaviour instead of
+    // failing the capture.
+    let parsed: any;
+    try {
+      parsed = await runPass1();
+    } catch (e) {
+      const status = (e as { statusCode?: number })?.statusCode;
+      if (usingOverride && (status === 401 || status === 403 || status === 404)) {
+        logger.warn(
+          `[PlanogramVision] override key/model failed pass-1 (status ${status}); falling back to shared key + default model`,
+        );
+        apiKey = await AIService.getFunctionalKey();
+        model = this.defaultModel();
+        parsed = await runPass1();
+      } else {
+        throw e;
+      }
+    }
 
     const detected_skus: DetectedSKU[] = (Array.isArray(parsed.detected_skus) ? parsed.detected_skus : [])
       .map((s: any): DetectedSKU => toDetectedSku(s))
