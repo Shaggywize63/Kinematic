@@ -764,6 +764,10 @@ export class PlanogramVisionService {
       }
     }
 
+    // Final deterministic pass: snap any box that drifted off its shelf back into
+    // its shelf's vertical band (shelf_index is reliable, the y-pixel is not).
+    reconcileShelfBands(result.detected_skus);
+
     return result;
   }
 
@@ -1656,6 +1660,48 @@ function toDetectedSku(s: any): DetectedSKU {
     is_competitor: Boolean(s.is_competitor),
     reasoning: s.reasoning == null ? null : String(s.reasoning),
   };
+}
+
+/**
+ * Deterministic vertical correction — the decisive fix for box drift.
+ *
+ * Vision models reliably know WHICH shelf a product sits on (shelf_index is
+ * consistent) but are poor at the product's y-pixel, so boxes drift down a shelf
+ * or get dumped at the image bottom — even with the grid overlay, which fixes
+ * horizontal placement but not shelf assignment. We therefore rebuild each box's
+ * VERTICAL band from its shelf rank and keep the model's horizontal x/w. A box
+ * can then never land off its own shelf.
+ *
+ * shelf_index 0 = bottom shelf (largest y). Ranks are taken from the DISTINCT
+ * shelf indices present (robust to gaps / non-zero-based numbering). Only boxes
+ * whose vertical CENTER falls outside their shelf band are relocated, so boxes
+ * the model already placed on the right shelf keep their exact position. Needs
+ * >=2 shelves to reason about; kill switch PLANOGRAM_SHELF_SNAP=0.
+ */
+function reconcileShelfBands(dets: DetectedSKU[]): void {
+  if (process.env.PLANOGRAM_SHELF_SNAP === '0') return;
+  const idxs = Array.from(
+    new Set(dets.map((d) => d.shelf_index).filter((n) => Number.isFinite(n))),
+  ).sort((a, b) => a - b); // ascending: 0 = bottom … highest = top
+  const S = idxs.length;
+  if (S < 2) return;
+  const rankOf = new Map<number, number>(idxs.map((v, i) => [v, i]));
+  const TOL = 0.03;
+  for (const d of dets) {
+    const r = rankOf.get(d.shelf_index);
+    if (r == null || !Array.isArray(d.bbox) || d.bbox.length !== 4) continue;
+    // rank 0 = bottom shelf = bottom of image (largest y).
+    const bandTop = 1 - (r + 1) / S;
+    const bandBot = 1 - r / S;
+    const bandH = bandBot - bandTop;
+    const [x, y, w, h] = d.bbox;
+    const yc = y + h / 2;
+    if (yc >= bandTop - TOL && yc <= bandBot + TOL) continue; // already on its shelf
+    const newH = Math.min(h > 0 ? h : bandH, bandH);
+    const newY = Math.max(bandTop, Math.min(bandBot - newH, bandTop + (bandH - newH) / 2));
+    d.bbox = [x, round4(newY), w, round4(newH)];
+    d.bbox_area = round4(w * newH);
+  }
 }
 
 /** Keep only detections with a usable bbox (tolerate slight over-1 values). */
