@@ -388,6 +388,13 @@ const REPORT_SHELF_SCHEMA = {
           facings: { type: 'integer' },
           shelf_index: { type: 'integer', description: '0 = bottom shelf, increases upward' },
           zone: { type: ['string', 'null'], enum: ['low', 'eye', 'top', null] },
+          grid_box: {
+            type: ['array', 'null'],
+            items: { type: 'integer' },
+            minItems: 4,
+            maxItems: 4,
+            description: 'REQUIRED when a numbered grid is overlaid on the image: [col_start, row_start, col_end, row_end], 1-based INCLUSIVE grid cells the visible pack covers (top-left cell to bottom-right cell). Read the numbers printed along the top (columns) and left (rows) edges — do not estimate. The backend derives the box from this.',
+          },
           bbox: BBOX_SCHEMA,
           bbox_area: { type: ['number', 'null'], description: 'w * h of the bbox' },
           price: { type: ['number', 'null'], description: 'Selling price the shopper pays, as a plain number — no currency symbol, thousands separators or "/-". Read from the shelf-edge tag, pack MRP, or promo. null only when no price is legible.' },
@@ -931,13 +938,21 @@ export class PlanogramVisionService {
       content.push({ type: 'image', source: { type: 'base64', media_type: r.imageMediaType, data: r.imageBase64 } });
     }
     content.push({ type: 'text', text: 'End of references. Now analyze this SHELF image:' });
-    content.push({ type: 'image', source: { type: 'base64', media_type: opts.imageMediaType, data: opts.imageBase64 } });
+    // Same Set-of-Mark grid as pass-1 so recovered boxes are read off cells, not
+    // estimated (recovered detections were the ones that drifted worst before).
+    const grid = await overlayGrid(opts.imageBase64, opts.imageMediaType, GRID_COLS, GRID_ROWS);
+    content.push({ type: 'image', source: { type: 'base64', media_type: grid.mediaType, data: grid.base64 } });
     content.push({
       type: 'text',
       text: [
         'For EACH referenced product, decide if it is present on this shelf; if yes',
         'return its sku_id, bbox, facings, shelf_index and confidence. Only report',
         'ones you can actually see — omit the rest (they are out of stock).',
+        ...(grid.ok
+          ? [
+              `GRID: a reference grid is drawn over the shelf — ${GRID_COLS} columns (1..${GRID_COLS}, labels along the TOP) and ${GRID_ROWS} rows (1..${GRID_ROWS}, labels down the LEFT). For each product set grid_box=[col_start,row_start,col_end,row_end] (1-based, inclusive) by READING the cell numbers it covers — row_start where the pack's TOP is, row_end where its BASE is. Do not estimate; the grid lines are an overlay, not merchandise.`,
+            ]
+          : []),
         'candidate_missing_skus = ' + JSON.stringify(candidateRefs.map((r) => ({ sku_id: r.sku_id, sku_name: r.sku_name }))),
       ].join('\n'),
     });
@@ -953,6 +968,14 @@ export class PlanogramVisionService {
       errorCode: 'VISION_RECALL_ERROR',
       timeoutMs: this.RECALL_TIMEOUT_MS,
     });
+
+    // Derive recovered boxes from their grid cells when the grid was drawn.
+    if (grid.ok && Array.isArray(parsed.detected_skus)) {
+      for (const d of parsed.detected_skus) {
+        const box = gridBoxToBbox((d as any)?.grid_box, GRID_COLS, GRID_ROWS);
+        if (box) { (d as any).bbox = box; (d as any).bbox_area = round4(box[2] * box[3]); }
+      }
+    }
 
     const found: DetectedSKU[] = (Array.isArray(parsed.detected_skus) ? parsed.detected_skus : [])
       .map((s: any): DetectedSKU => ({ ...toDetectedSku(s), is_competitor: false, recovered: true }))
@@ -1015,7 +1038,20 @@ export class PlanogramVisionService {
       'REMINDER: report EVERY own-brand pack you can see. If an own-brand pack is',
       'not in expected_skus, still report it with is_competitor=false, sku_id=null,',
       'its brand, and the full variant name you read — never omit it.',
-    ].join('\n');
+    ];
+
+    // Set-of-Mark localization: burn a numbered grid onto the shelf image and
+    // ask for the CELLS each pack covers instead of estimated pixel floats. The
+    // backend derives the box from the cells, which stops the box drifting down
+    // a shelf and stops phantom duplicate rows. Best-effort — if the overlay
+    // fails we send the plain image and keep the estimated bbox.
+    const grid = await overlayGrid(opts.imageBase64, opts.imageMediaType, GRID_COLS, GRID_ROWS);
+    if (grid.ok) {
+      userText.push(
+        '',
+        `GRID: a reference grid is drawn over the shelf image — ${GRID_COLS} columns numbered 1..${GRID_COLS} left-to-right (labels along the TOP edge) and ${GRID_ROWS} rows numbered 1..${GRID_ROWS} top-to-bottom (labels down the LEFT edge). For EVERY product, promotion and POSM, look at which cells its visible pack actually covers and set grid_box = [col_start, row_start, col_end, row_end] (1-based, inclusive, the top-left cell to the bottom-right cell). READ the printed numbers off the grid — do not estimate. row_start is the row where the TOP of the pack sits and row_end where its BASE sits, so a pack high on the shelf has a SMALL row_start. Two facings of the same product on the same shelf are separate detections with different columns — never repeat one product down several rows. The grid lines are an overlay, not merchandise.`,
+      );
+    }
 
     const content: Array<Record<string, unknown>> = [];
     if (opts.refs.length) {
@@ -1026,10 +1062,10 @@ export class PlanogramVisionService {
       }
       content.push({ type: 'text', text: 'End of references. Now analyze this SHELF image:' });
     }
-    content.push({ type: 'image', source: { type: 'base64', media_type: opts.imageMediaType, data: opts.imageBase64 } });
-    content.push({ type: 'text', text: userText });
+    content.push({ type: 'image', source: { type: 'base64', media_type: grid.mediaType, data: grid.base64 } });
+    content.push({ type: 'text', text: userText.join('\n') });
 
-    return this.callVisionTool({
+    const parsed = await this.callVisionTool({
       apiKey: opts.apiKey,
       model: opts.model,
       system: SYSTEM_PROMPT,
@@ -1040,6 +1076,23 @@ export class PlanogramVisionService {
       errorCode: 'VISION_ERROR',
       timeoutMs: opts.timeoutMs,
     });
+
+    // Derive each box from its grid cells (deterministic). Only when the grid
+    // was actually drawn; otherwise the model's estimated bbox stands.
+    if (grid.ok && parsed && typeof parsed === 'object') {
+      for (const key of ['detected_skus', 'promotions', 'posm']) {
+        const arr = (parsed as Record<string, unknown>)[key];
+        if (!Array.isArray(arr)) continue;
+        for (const d of arr) {
+          const box = gridBoxToBbox((d as any)?.grid_box, GRID_COLS, GRID_ROWS);
+          if (box) {
+            (d as any).bbox = box;
+            (d as any).bbox_area = round4(box[2] * box[3]);
+          }
+        }
+      }
+    }
+    return parsed;
   }
 
   /**
@@ -1364,6 +1417,95 @@ async function downscaleForApi(
 
 function round4(v: number): number {
   return Math.round(v * 10000) / 10000;
+}
+
+// Set-of-Mark localization grid. Vision models estimate free-form pixel
+// coordinates poorly (boxes drift down a shelf, and duplicate across imagined
+// rows). Overlaying a numbered grid and asking which CELLS a product covers
+// turns localization into reading visible labels — far more reliable — and the
+// box is then derived deterministically from the cells. 12x8 keeps each cell a
+// sensible fraction of a shelf pack.
+const GRID_COLS = 12;
+const GRID_ROWS = 8;
+
+/**
+ * Burn a numbered reference grid over a base64 image (Set-of-Mark): faint cyan
+ * cell lines, with column numbers along the top edge and row numbers down the
+ * left edge, each on a dark chip for legibility. Best-effort — returns the
+ * original with ok=false if `sharp` is missing or anything fails, so the caller
+ * falls back to plain-image + estimated bbox.
+ */
+async function overlayGrid(
+  base64: string,
+  mediaType: 'image/jpeg' | 'image/png' | 'image/webp',
+  cols: number,
+  rows: number,
+): Promise<{ base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/webp'; ok: boolean }> {
+  try {
+    const sharp = (await import('sharp')).default;
+    const buf = Buffer.from(base64, 'base64');
+    const meta = await sharp(buf).metadata();
+    const W = meta.width || 0;
+    const H = meta.height || 0;
+    if (!W || !H) return { base64, mediaType, ok: false };
+
+    const parts: string[] = [];
+    for (let c = 1; c < cols; c++) {
+      const x = Math.round((W * c) / cols);
+      parts.push(`<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="#00E5FF" stroke-width="2" stroke-opacity="0.45"/>`);
+    }
+    for (let r = 1; r < rows; r++) {
+      const y = Math.round((H * r) / rows);
+      parts.push(`<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="#00E5FF" stroke-width="2" stroke-opacity="0.45"/>`);
+    }
+    const fs = Math.max(13, Math.round(Math.min(W, H) / 42));
+    const pad = Math.round(fs * 0.35);
+    const chip = (cx: number, cy: number, text: string) => {
+      const tw = text.length * fs * 0.62 + pad * 2;
+      const th = fs + pad * 2;
+      const x = Math.round(cx - tw / 2);
+      const y = Math.round(cy - th / 2);
+      return (
+        `<rect x="${x}" y="${y}" width="${Math.round(tw)}" height="${Math.round(th)}" rx="4" fill="#0B1220" fill-opacity="0.7"/>` +
+        `<text x="${Math.round(cx)}" y="${Math.round(cy + fs * 0.35)}" font-family="Arial, sans-serif" font-size="${fs}" font-weight="700" fill="#00E5FF" text-anchor="middle">${text}</text>`
+      );
+    };
+    // Column numbers along the top edge, row numbers down the left edge.
+    for (let c = 1; c <= cols; c++) parts.push(chip(Math.round((W * (c - 0.5)) / cols), Math.round(fs * 0.9), String(c)));
+    for (let r = 1; r <= rows; r++) parts.push(chip(Math.round(fs * 1.1), Math.round((H * (r - 0.5)) / rows), String(r)));
+
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">${parts.join('')}</svg>`;
+    const out = await sharp(buf)
+      .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    return { base64: out.toString('base64'), mediaType: 'image/jpeg', ok: true };
+  } catch (e) {
+    logger.warn(`[PlanogramVision] grid overlay failed, sending plain image: ${(e as Error)?.message}`);
+    return { base64, mediaType, ok: false };
+  }
+}
+
+/**
+ * Convert a 1-based inclusive [col_start,row_start,col_end,row_end] grid_box
+ * into a normalized [x,y,w,h] bbox. Returns null if the value is malformed or
+ * out of range, so the caller keeps the model's estimated bbox as a fallback.
+ */
+function gridBoxToBbox(v: any, cols: number, rows: number): [number, number, number, number] | null {
+  if (!Array.isArray(v) || v.length !== 4) return null;
+  let [c1, r1, c2, r2] = v.map((n) => Math.round(Number(n)));
+  if (![c1, r1, c2, r2].every((n) => Number.isFinite(n))) return null;
+  // Clamp into range and normalize ordering (tolerate a swapped corner).
+  c1 = Math.min(Math.max(c1, 1), cols); c2 = Math.min(Math.max(c2, 1), cols);
+  r1 = Math.min(Math.max(r1, 1), rows); r2 = Math.min(Math.max(r2, 1), rows);
+  const cl = Math.min(c1, c2), cr = Math.max(c1, c2);
+  const rt = Math.min(r1, r2), rb = Math.max(r1, r2);
+  const x = (cl - 1) / cols;
+  const y = (rt - 1) / rows;
+  const w = (cr - cl + 1) / cols;
+  const h = (rb - rt + 1) / rows;
+  if (w <= 0 || h <= 0) return null;
+  return [round4(x), round4(y), round4(w), round4(h)];
 }
 
 function normalizeBbox(v: any): [number, number, number, number] | null {
