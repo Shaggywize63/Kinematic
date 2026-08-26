@@ -32,10 +32,12 @@
 const DEFAULT_MOISOI_ORG_IDS = ['d0000000-0000-4000-a000-000000000001'];
 const DEFAULT_MOISOI_CLIENT_IDS = ['d0000000-0000-4000-a000-000000000002'];
 
-// Default high-tier vision model for MoiSoi when a dedicated key is configured
-// but no explicit MOISOI_VISION_MODEL is set. Opus is the strongest packaging /
-// small-text reader available and is what lifts SKU identification.
-const DEFAULT_MOISOI_VISION_MODEL = 'claude-opus-4-8';
+// Default vision model for MoiSoi when a dedicated key is configured but no
+// explicit MOISOI_VISION_MODEL is set. Sonnet is a strong packaging / small-text
+// reader at ~40% of Opus' per-token cost, which is the dominant lever on the
+// per-analysis bill (each pass ships the full MoiSoi reference pack). Revert to
+// Opus for a capture-quality comparison via MOISOI_VISION_MODEL=claude-opus-4-8.
+const DEFAULT_MOISOI_VISION_MODEL = 'claude-sonnet-5';
 
 export interface VisionOverride {
   /** Dedicated key; undefined → caller uses the shared functional key. */
