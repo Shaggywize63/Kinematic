@@ -936,7 +936,16 @@ export class PlanogramVisionService {
     if (candidateRefs.length === 0) return [];
 
     const content: Array<Record<string, unknown>> = [];
-    content.push({ type: 'text', text: 'A first scan may have missed these specific products. Their reference pack-shots follow, each labelled with its sku_id.' });
+    // Prompt-cache breakpoint on the stable HEAD only (tool schema + recall system
+    // prompt + this intro). Unlike pass-1, the candidate refs below are the subset
+    // of SKUs pass-1 missed, so they VARY per capture — caching them would pay the
+    // write surcharge for near-zero reads. Placing the breakpoint before the refs
+    // caches just the head, which is identical across every capture's recall.
+    content.push({
+      type: 'text',
+      text: 'A first scan may have missed these specific products. Their reference pack-shots follow, each labelled with its sku_id.',
+      cache_control: { type: 'ephemeral' },
+    });
     for (const r of candidateRefs) {
       content.push({ type: 'text', text: `Reference - sku_id=${r.sku_id}: ${r.sku_name}` });
       content.push({ type: 'image', source: { type: 'base64', media_type: r.imageMediaType, data: r.imageBase64 } });
@@ -1064,7 +1073,18 @@ export class PlanogramVisionService {
         content.push({ type: 'text', text: `Reference - sku_id=${r.sku_id}${r.is_competitor ? ' (competitor)' : ''}: ${r.sku_name}` });
         content.push({ type: 'image', source: { type: 'base64', media_type: r.imageMediaType, data: r.imageBase64 } });
       }
-      content.push({ type: 'text', text: 'End of references. Now analyze this SHELF image:' });
+      // Prompt-cache breakpoint on the LAST stable block. Everything up to here —
+      // the tool schema, system prompt and the whole reference pack — is byte-for-
+      // byte identical across pass-1, every tile crop, and successive captures of
+      // the same planogram, so it caches once and is read back at ~10% input cost.
+      // The volatile shelf image + userText come AFTER this point and are never
+      // cached. For MoiSoi (~31 pack-shots re-sent per pass) this is the dominant
+      // per-analysis cost lever.
+      content.push({
+        type: 'text',
+        text: 'End of references. Now analyze this SHELF image:',
+        cache_control: { type: 'ephemeral' },
+      });
     }
     content.push({ type: 'image', source: { type: 'base64', media_type: grid.mediaType, data: grid.base64 } });
     content.push({ type: 'text', text: userText.join('\n') });
@@ -1350,6 +1370,18 @@ export class PlanogramVisionService {
     }
 
     const data: any = await response.json();
+    // Cache observability: cache_read_input_tokens bill at ~10% and confirm the
+    // reference-pack breakpoint is actually being reused across passes/captures;
+    // cache_creation_input_tokens is the one-time write (~125%). Lets us report
+    // the real per-analysis saving from live MoiSoi captures.
+    const u = data?.usage;
+    if (u) {
+      logger.info(
+        `[PlanogramVision] ${opts.toolName} usage: in=${u.input_tokens ?? 0} ` +
+          `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
+          `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`,
+      );
+    }
     const block = Array.isArray(data?.content)
       ? data.content.find((c: any) => c?.type === 'tool_use' && c?.name === opts.toolName)
       : null;
