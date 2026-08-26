@@ -1311,13 +1311,26 @@ function clamp01(v: any): number {
 }
 
 /**
- * Downscale a base64 image so neither side exceeds `maxDim`, returning JPEG.
- * Anthropic rejects images over 2000px per side in "many-image" requests (our
- * reference pack-shots + the shelf photo), so every image sent to the vision
- * API is capped through this first. Auto-orients via EXIF (phone photos), only
- * re-encodes when the image is actually too big, and — best-effort — returns the
- * original untouched if `sharp` is unavailable or anything fails, so capping can
- * never itself break a capture. Shared by the shelf image and every reference.
+ * Normalize a base64 image for the vision API: bake in EXIF orientation and cap
+ * it at `maxDim` per side, returning JPEG.
+ *
+ * Two jobs, both required for correct bounding boxes:
+ *  1. ORIENTATION. Phone photos — especially PORTRAIT ones — are stored as
+ *     landscape pixels plus an EXIF "rotate" tag. Browsers auto-apply that tag
+ *     when they render the capture, so the dashboard shows the shelf upright.
+ *     The model must see the SAME upright pixels, or every competitor / own-SKU
+ *     box lands rotated and shifted (the whole coordinate frame is turned). We
+ *     therefore ALWAYS `.rotate()` (which applies EXIF and strips the tag)
+ *     whenever the tag is set — even when no resize is needed. This also means
+ *     the tiling pass, which extracts crops from this same buffer, cuts from the
+ *     upright pixels and its remapped bboxes stay in the display frame.
+ *  2. SIZE. Anthropic rejects images over 2000px per side in "many-image"
+ *     requests (our reference pack-shots + the shelf photo), so we cap here too.
+ *
+ * Skips re-encoding only when the image is already upright (orientation ≤ 1) AND
+ * within the cap — so an already-normalized upload is untouched. Best-effort:
+ * returns the original if `sharp` is unavailable or anything fails, so image
+ * prep can never itself break a capture. Shared by the shelf image and refs.
  */
 async function downscaleForApi(
   base64: string,
@@ -1331,15 +1344,20 @@ async function downscaleForApi(
     const w = meta.width || 0;
     const h = meta.height || 0;
     if (!w || !h) return { base64, mediaType };
-    if (w <= maxDim && h <= maxDim) return { base64, mediaType }; // already within cap
-    const out = await sharp(buf)
-      .rotate() // apply EXIF orientation before resizing
-      .resize({ width: maxDim, height: maxDim, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 88 })
-      .toBuffer();
+    const needsResize = w > maxDim || h > maxDim;
+    // EXIF orientation 2..8 = the stored pixels are NOT in display orientation
+    // (rotated/mirrored). Anything >1 must be baked in so the model matches the
+    // browser-rendered capture. `undefined`/1 means upright already.
+    const needsOrient = typeof meta.orientation === 'number' && meta.orientation > 1;
+    if (!needsResize && !needsOrient) return { base64, mediaType }; // already upright + within cap
+    let pipeline = sharp(buf).rotate(); // apply EXIF orientation, strip the tag
+    if (needsResize) {
+      pipeline = pipeline.resize({ width: maxDim, height: maxDim, fit: 'inside', withoutEnlargement: true });
+    }
+    const out = await pipeline.jpeg({ quality: 88 }).toBuffer();
     return { base64: out.toString('base64'), mediaType: 'image/jpeg' };
   } catch (e) {
-    logger.warn(`[PlanogramVision] image downscale failed, sending original: ${(e as Error)?.message}`);
+    logger.warn(`[PlanogramVision] image normalize/downscale failed, sending original: ${(e as Error)?.message}`);
     return { base64, mediaType };
   }
 }
