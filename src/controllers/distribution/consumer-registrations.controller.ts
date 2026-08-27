@@ -43,6 +43,8 @@ const registrationSchema = z.object({
   registered_via:   z.enum(['whatsapp', 'app', 'dealer', 'cashback_form', 'sms', 'webform', 'qr']),
   cashback_amount:  z.number().nonnegative().optional().default(0),
   evidence_url:     z.string().url().nullable().optional(),
+  // Custom-field answers from a configurable capture form, keyed by field label.
+  capture_extra:    z.record(z.any()).nullable().optional(),
 });
 
 export type RegistrationInput = z.infer<typeof registrationSchema>;
@@ -106,12 +108,20 @@ export async function registerConsumerPurchase(
       registered_via: input.registered_via,
       cashback_amount: input.cashback_amount ?? 0,
       evidence_url: input.evidence_url ?? null,
+      capture_extra: input.capture_extra ?? null,
       org_id: ctx.org_id,
       client_id: ctx.client_id ?? null,
     })
     .select()
     .single();
   if (regErr) throw new Error(regErr.message);
+
+  // Readable summary of any custom-field answers, for the lead notes below.
+  const extraNotes = input.capture_extra
+    ? Object.entries(input.capture_extra)
+        .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+        .map(([k, v]) => `${k}: ${String(v)}`)
+    : [];
 
   // ── 3. Side-effect: tertiary_sale so brand sell-through sees the unit.
   let tertiary_sale_id: string | null = null;
@@ -160,6 +170,7 @@ export async function registerConsumerPurchase(
           `Auto-created from consumer registration ${reg.id}`,
           reg.vehicle_reg ? `Vehicle: ${reg.vehicle_reg}` : null,
           retailer_id ? `Retailer: ${retailer_id}` : null,
+          ...extraNotes,
         ].filter(Boolean).join('\n'),
         tags: ['consumer_registration', reg.registered_via],
       })

@@ -30,6 +30,46 @@ function genToken(): string {
   return crypto.randomBytes(18).toString('base64url');
 }
 
+// ── Configurable capture form ───────────────────────────────────────────────
+// One form per org (applied to every outlet's QR page). Phone is implicit
+// (always shown + required) and NOT part of this list. Built-in keys map to
+// registration columns; custom keys (cf_*) land in capture_extra.
+
+const BUILTIN_FIELD_KEYS = new Set(['consumer_name', 'consumer_email', 'sku_id', 'vehicle_reg']);
+
+const captureFieldSchema = z.object({
+  key: z.string().min(1).max(60),
+  label: z.string().min(1).max(80),
+  type: z.enum(['text', 'email', 'tel', 'number', 'select', 'product']),
+  enabled: z.boolean(),
+  required: z.boolean(),
+  builtin: z.boolean(),
+  options: z.array(z.string().max(80)).max(40).optional(),
+});
+type CaptureField = z.infer<typeof captureFieldSchema>;
+
+const DEFAULT_FIELDS: CaptureField[] = [
+  { key: 'consumer_name', label: 'Your name', type: 'text', enabled: true, required: false, builtin: true },
+  { key: 'sku_id', label: 'Which product did you buy?', type: 'product', enabled: true, required: false, builtin: true },
+  { key: 'vehicle_reg', label: 'Vehicle / serial (optional)', type: 'text', enabled: true, required: false, builtin: true },
+  { key: 'consumer_email', label: 'Email', type: 'email', enabled: false, required: false, builtin: true },
+];
+
+async function loadFields(orgId: string): Promise<CaptureField[]> {
+  const { data } = await supabaseAdmin
+    .from('distribution_capture_config')
+    .select('fields')
+    .eq('org_id', orgId)
+    .maybeSingle();
+  const raw = (data as { fields?: unknown } | null)?.fields;
+  if (!Array.isArray(raw) || raw.length === 0) return DEFAULT_FIELDS;
+  const parsed = z.array(captureFieldSchema).safeParse(raw);
+  return parsed.success ? parsed.data : DEFAULT_FIELDS;
+}
+
+const isUuid = (v: unknown): v is string =>
+  typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
 // ── PUBLIC ────────────────────────────────────────────────────────────────
 
 async function outletForToken(token: string) {
@@ -50,7 +90,7 @@ export const publicGet = asyncHandler<Request>(async (req: Request, res: Respons
     res.status(404).json({ success: false, error: 'This capture link is not active.' });
     return;
   }
-  const [{ data: store }, { data: skus }] = await Promise.all([
+  const [{ data: store }, { data: skus }, fields] = await Promise.all([
     supabaseAdmin.from('stores').select('name').eq('id', outlet.outlet_id).maybeSingle(),
     supabaseAdmin.from('skus')
       .select('id, name, sku_code')
@@ -58,26 +98,35 @@ export const publicGet = asyncHandler<Request>(async (req: Request, res: Respons
       .eq('is_active', true)
       .order('name', { ascending: true })
       .limit(300),
+    loadFields(outlet.org_id),
   ]);
   res.status(200).json({
     success: true,
     data: {
       outlet_name: (store as { name?: string } | null)?.name || 'this store',
       products: (skus || []).map((s: any) => ({ sku_id: s.id, name: s.name, sku_code: s.sku_code })),
+      // Only the enabled fields, in admin order, drive the public page.
+      fields: fields.filter((f) => f.enabled),
     },
   });
 });
 
 const publicSubmitSchema = z.object({
   consumer_phone: z.string().min(7).max(20),
-  consumer_name:  z.string().max(120).nullable().optional(),
-  sku_id:         z.string().uuid().nullable().optional(),
-  serial_text:    z.string().max(120).nullable().optional(),
-  vehicle_reg:    z.string().max(40).nullable().optional(),
+  // Answers keyed by field key (built-in keys + custom cf_* keys). Values are
+  // coerced to strings; the server maps built-ins to columns and the rest to
+  // capture_extra per the org's form config.
+  fields:         z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
   // How the consumer arrived — a scanned QR (default), the wa.me link, or a
   // plain web form. Anything else is coerced to 'qr'.
   channel:        z.enum(['qr', 'whatsapp', 'webform']).optional(),
 });
+
+const strOrNull = (v: unknown): string | null => {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s;
+};
 
 /** POST /api/v1/distribution/capture/:token — record a consumer registration. */
 export const publicSubmit = asyncHandler<Request>(async (req: Request, res: Response) => {
@@ -88,25 +137,46 @@ export const publicSubmit = asyncHandler<Request>(async (req: Request, res: Resp
     return;
   }
   const parsed = publicSubmitSchema.safeParse(req.body);
-  if (!parsed.success) {
+  if (!parsed.success || strOrNull(parsed.data.consumer_phone) === null) {
     res.status(400).json({ success: false, error: 'Please enter a valid phone number.' });
     return;
   }
+  const answers = parsed.data.fields || {};
+  const fieldDefs = (await loadFields(outlet.org_id)).filter((f) => f.enabled);
+
+  // Enforce required fields (phone is always required and already checked).
+  for (const f of fieldDefs) {
+    if (f.required && strOrNull(answers[f.key]) === null) {
+      res.status(400).json({ success: false, error: `${f.label} is required.` });
+      return;
+    }
+  }
+
+  // Split answers into built-in columns vs custom (capture_extra, keyed by label).
+  const captureExtra: Record<string, string> = {};
+  for (const f of fieldDefs) {
+    if (BUILTIN_FIELD_KEYS.has(f.key)) continue;
+    const v = strOrNull(answers[f.key]);
+    if (v !== null) captureExtra[f.label] = v;
+  }
+  const rawSku = strOrNull(answers['sku_id']);
+
   try {
     const result = await registerConsumerPurchase(
       {
         consumer_phone: parsed.data.consumer_phone,
-        consumer_name:  parsed.data.consumer_name ?? null,
-        consumer_email: null,
-        sku_id:         parsed.data.sku_id ?? null,
+        consumer_name:  strOrNull(answers['consumer_name']),
+        consumer_email: strOrNull(answers['consumer_email']),
+        sku_id:         isUuid(rawSku) ? rawSku : null,
         serial_id:      null,
-        serial_text:    parsed.data.serial_text ?? null,
+        serial_text:    null,
         // Attribute the sale to this outlet as the servicing retailer.
         retailer_id:    outlet.outlet_id,
-        vehicle_reg:    parsed.data.vehicle_reg ?? null,
+        vehicle_reg:    strOrNull(answers['vehicle_reg']),
         registered_via: parsed.data.channel || 'qr',
         cashback_amount: 0,
         evidence_url:   null,
+        capture_extra:  Object.keys(captureExtra).length ? captureExtra : null,
       },
       { org_id: outlet.org_id, client_id: outlet.client_id ?? null, actor_id: null },
     );
@@ -115,6 +185,49 @@ export const publicSubmit = asyncHandler<Request>(async (req: Request, res: Resp
     // Never leak internals to an anonymous caller; the write path logs the cause.
     res.status(400).json({ success: false, error: 'Could not save. Please try again.' });
   }
+});
+
+// ── ADMIN: form config ──────────────────────────────────────────────────────
+
+/** GET /api/v1/distribution/capture-admin/config — the org's capture form. */
+export const adminGetConfig = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const fields = await loadFields(user.org_id);
+  ok(res, { fields });
+});
+
+/** PUT /api/v1/distribution/capture-admin/config — save the org's capture form. */
+export const adminSaveConfig = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const parsed = z.object({ fields: z.array(captureFieldSchema).max(40) }).safeParse(req.body);
+  if (!parsed.success) return badRequest(res, 'Invalid form fields', parsed.error.errors);
+
+  // Guard the built-in contract: built-in keys must be known; custom keys must
+  // not collide with a built-in or with phone. Dedupe keys (last wins would be
+  // ambiguous, so reject).
+  const seen = new Set<string>();
+  for (const f of parsed.data.fields) {
+    if (f.key === 'consumer_phone') return badRequest(res, 'Phone is always captured and cannot be configured here.');
+    if (f.builtin && !BUILTIN_FIELD_KEYS.has(f.key)) return badRequest(res, `Unknown built-in field: ${f.key}`);
+    if (!f.builtin && BUILTIN_FIELD_KEYS.has(f.key)) return badRequest(res, `Reserved field key: ${f.key}`);
+    if (seen.has(f.key)) return badRequest(res, `Duplicate field: ${f.key}`);
+    seen.add(f.key);
+    if (f.type === 'select' && (!f.options || f.options.length === 0)) {
+      return badRequest(res, `Dropdown "${f.label}" needs at least one option.`);
+    }
+  }
+
+  const { error } = await supabaseAdmin.from('distribution_capture_config').upsert(
+    {
+      org_id: user.org_id,
+      client_id: user.client_id ?? null,
+      fields: parsed.data.fields,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'org_id' },
+  );
+  if (error) return badRequest(res, error.message);
+  ok(res, { fields: parsed.data.fields });
 });
 
 // ── ADMIN (authed, requireModule distribution_consumer) ─────────────────────
