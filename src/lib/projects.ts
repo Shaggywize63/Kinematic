@@ -483,6 +483,46 @@ export async function resolveProjectForIntegrationAsync(integrationId?: string |
   return fallbackProjectKey();
 }
 
+// Short TTL cache for capture-token→project so a burst of hits on one outlet's
+// public QR link doesn't probe every project DB each time.
+const captureProjectCache = new Map<string, { project: string; at: number }>();
+const CAPTURE_PROJECT_TTL_MS = 5 * 60_000;
+
+/** Forget a cached capture-token routing (call after rotating/deleting a token). */
+export function clearCaptureProjectCache(token?: string | null): void {
+  if (token) captureProjectCache.delete(token.trim());
+  else captureProjectCache.clear();
+}
+
+/**
+ * Resolve which Supabase project owns an outlet capture token. The public
+ * consumer-capture surface (`/api/v1/distribution/capture/:token`) is
+ * unauthenticated and carries NO `X-Kinematic-Project` header, so without this it
+ * always falls back to the default project and can't find a Kinematic-tenant
+ * outlet's token. We probe each known project's `outlet_distribution_ext` for the
+ * token; unknown tokens fall back to the default project, where the handler
+ * returns its own not-found response.
+ */
+export async function resolveProjectForCaptureTokenAsync(token?: string | null): Promise<string> {
+  const t = (token || '').trim();
+  if (!t) return fallbackProjectKey();
+
+  const cached = captureProjectCache.get(t);
+  if (cached && Date.now() - cached.at < CAPTURE_PROJECT_TTL_MS) return cached.project;
+
+  for (const key of projectSearchOrder()) {
+    try {
+      const { data } = await adminClientFor(key)
+        .from('outlet_distribution_ext').select('outlet_id').eq('capture_token', t).limit(1).maybeSingle();
+      if (data) {
+        captureProjectCache.set(t, { project: key, at: Date.now() });
+        return key;
+      }
+    } catch { /* project unreachable — skip it */ }
+  }
+  return fallbackProjectKey();
+}
+
 /**
  * Resolve which Supabase project a user id lives in by finding the project whose
  * `users` table holds that id. Used by the Google OAuth callback — an

@@ -58,6 +58,8 @@ import messagingRoutes           from './routes/messaging.routes';
 import integrationsPublicRoutes  from './routes/integrations-public.routes';
 import distIntegrationsRoutes    from './routes/distribution/integrations.routes';
 import tallyAgentPublicRoutes    from './routes/tally-agent-public.routes';
+import capturePublicRoutes       from './routes/distribution/capture-public.routes';
+import distCaptureAdminRoutes    from './routes/distribution/capture-admin.routes';
 import kiniPublicRoutes          from './routes/kini-public.routes';
 import appVersionRoutes          from './routes/app-version.routes';
 import orgSettingsRoutes         from './routes/org-settings.routes';
@@ -248,6 +250,12 @@ app.get('/f/:id', cors({ origin: '*' }), withIntegrationProject, async function 
 // already authorised.
 app.use('/api/v1/integrations/webhook', cors({ origin: '*' }));
 
+// Wildcard CORS for the public consumer-capture endpoints. They are hit
+// cross-origin from the outlet QR landing page and carry no credentials — the
+// `:token` in the URL is the only authorisation — so opening them to all origins
+// is intentional. Placed BEFORE the strict allowlist so the preflight succeeds.
+app.use('/api/v1/distribution/capture', cors({ origin: '*' }));
+
 // Strict CORS for the dashboard/app API surface — origin must be allowlisted.
 const STRICT_CORS = {
   origin: corsOrigin,
@@ -426,6 +434,14 @@ app.get(`${V1}/integrations/google/callback`, async (req, res, next) => {
 // the controller). Mounted BEFORE the auth catch-all so the agent never
 // needs a JWT.
 app.use(`${V1}/integrations/tally`, tallyAgentPublicRoutes);
+
+// ── Public consumer self-registration capture (NO auth) ──────────────
+// A consumer scans an outlet's QR (or opens its wa.me link) and lands on a
+// no-login page that POSTs here. The `:token` in the path is the outlet's
+// capture secret — the route resolves the outlet (and its Supabase project) from
+// it, then reuses the consumer-registration pipeline (tertiary sale + CRM lead).
+// Per-IP rate-limited in the router. Mounted BEFORE the requireAuth catch-all.
+app.use(`${V1}/distribution/capture`, capturePublicRoutes);
 
 // ── Public KINI website-chatbot ingestion (NO user JWT) ──────────────
 // The marketing website's kini-chat.php proxy POSTs each conversation
@@ -617,6 +633,10 @@ app.use(`${V1}/distribution/secondary-sales`,requireAuth, requireModule('distrib
 // facing surface always travels as a single module purchase.
 app.use(`${V1}/distribution/tertiary-sales`,         requireAuth, requireModule('distribution_consumer'), distTertiaryRoutes);
 app.use(`${V1}/distribution/consumer-registrations`, requireAuth, requireModule('distribution_consumer'), distConsumerRegRoutes);
+// Consumer-capture admin: mint/rotate per-outlet QR tokens + list outlets for
+// the printable QR pack. Same module gate as the consumer surfaces. (The public
+// capture endpoint the QR points at is mounted, unauthenticated, above.)
+app.use(`${V1}/distribution/capture-admin`, requireAuth, requireModule('distribution_consumer'), distCaptureAdminRoutes);
 // External-facing / abuse-prone endpoints get tighter per-route limits.
 app.use(`${V1}/distribution/gstin`,          requireAuth, perRouteLimit({ windowMs: 60_000, max: 30 }),  distGstinRoutes);
 app.use(`${V1}/organisations`,               requireAuth,                                                organisationsRoutes);
