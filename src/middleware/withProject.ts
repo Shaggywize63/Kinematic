@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../types';
-import { runWithProject, isKnownProject, fallbackProjectKey, resolveProjectForIntegrationAsync, resolveProjectForTokenAsync } from '../lib/projects';
+import { runWithProject, isKnownProject, fallbackProjectKey, resolveProjectForIntegrationAsync, resolveProjectForTokenAsync, resolveProjectForCaptureTokenAsync } from '../lib/projects';
 
 // Reads the X-Kinematic-Project header and runs the remainder of the request
 // inside that project's AsyncLocalStorage context, so supabase / supabaseAdmin
@@ -56,6 +56,21 @@ export async function withProject(req: AuthRequest, _res: Response, next: NextFu
 export async function withIntegrationProject(req: AuthRequest, _res: Response, next: NextFunction) {
   const id = String(req.params.id || '').trim();
   const project = await resolveProjectForIntegrationAsync(id);
+  (req as AuthRequest & { projectKey?: string }).projectKey = project;
+  runWithProject(project, () => next());
+}
+
+// Routes the unauthenticated consumer-capture surface
+// (`/api/v1/distribution/capture/:token`) to whichever project owns the outlet
+// capture token, instead of the header/default. The consumer's browser sends no
+// auth and no project header, so without this a Kinematic-tenant outlet's token
+// would fall back to the default (Tata) project and 404. Resolution is a DB probe
+// (async, TTL-cached); the remainder runs inside that project's context so
+// supabaseAdmin hits the right database. Applied at ROUTE level (not the mount)
+// so `:token` is in scope.
+export async function withCaptureProject(req: AuthRequest, _res: Response, next: NextFunction) {
+  const token = String(req.params.token || '').trim();
+  const project = await resolveProjectForCaptureTokenAsync(token);
   (req as AuthRequest & { projectKey?: string }).projectKey = project;
   runWithProject(project, () => next());
 }
