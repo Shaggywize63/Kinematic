@@ -48,7 +48,7 @@ export const getRoutePlans = asyncHandler(async (req, res) => {
     ...p,
     outlets: (outletsByPlan[p.id] || []).map((o: any) => ({
         ...o,
-        activities: [{ id: p.activity_id, name: p.activity_name || "Activity", status: o.status }]
+        activities: [{ id: p.activity_id, name: p.activity_name || "Activity", status: o.status, target_type: o.target_type || 'general' }]
     }))
   })));
 });
@@ -79,7 +79,10 @@ export const getMyRoutePlan = asyncHandler(async (req, res) => {
     const activity = {
         id: o.activity_id,
         name: o.activity_name || "Activity",
-        status: o.status || "pending"
+        status: o.status || "pending",
+        // target_type drives which per-visit actions the mobile app shows
+        // (planogram audit vs order collection etc.) — so gate, not default-on.
+        target_type: o.target_type || 'general'
     };
 
     if (!storeMap.has(key)) {
