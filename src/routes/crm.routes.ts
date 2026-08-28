@@ -802,6 +802,22 @@ leads.post('/', wrap(async (req, res) => {
 
   res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse });
 }));
+// Approve / reject a pending lead. Restricted to managers — a supervisor/admin
+// role, or any user with HR-module access (matches "notify the manager or a
+// person with HR access"). Notifies the rep who captured the lead.
+leads.post('/:id/approval', wrap(async (req, res) => {
+  const u = (req as unknown as { user?: { role?: string; enabled_modules?: string[]; permissions?: string[] } }).user || {};
+  const role = (u.role ?? '').toLowerCase();
+  const CAN_DECIDE = ['admin', 'super_admin', 'main_admin', 'org_admin', 'sub_admin', 'client', 'master_admin', 'supervisor', 'manager', 'team_lead', 'asm', 'rsm'];
+  const hasHr = !!u.enabled_modules?.includes('hr') || !!u.permissions?.includes('hr');
+  if (!CAN_DECIDE.includes(role) && !hasHr) {
+    return res.status(403).json({ success: false, error: 'Only a manager can approve or reject leads.' });
+  }
+  const decision = req.body?.decision === 'rejected' ? 'rejected' : 'approved';
+  const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+  const updated = await leadsSvc.decideLeadApproval(orgId(req), userId(req) as string, req.params.id, decision, note);
+  return res.json({ success: true, data: updated });
+}));
 // CSV export — same filters as the list endpoint (status, owner, source,
 // state/city/district/block, score_gte, q, from, to, etc.) but caps at
 // 10k rows server-side and streams a real CSV file. Auth + tenant cap +

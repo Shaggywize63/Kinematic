@@ -95,15 +95,27 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
   // it. Sequence: payload value → creator's user.city → null. The
   // creator is typically the Consumer Champion who captured the lead
   // on the ground, so their assigned city is the right inference.
-  if (!payload.city && user_id) {
+  // Fetch the creator once — used for both the city fallback and the lead
+  // approval gate. Leads captured by a FIELD REP enter a 'pending' approval
+  // state (and notify their manager); admin/system/inbound leads (no user_id or
+  // an admin creator) are auto-approved so existing flows are unchanged.
+  let approvalStatus: 'pending' | 'approved' = 'approved';
+  let creatorSupervisorId: string | null = null;
+  if (user_id) {
     const { data: creator } = await supabaseAdmin
       .from('users')
-      .select('city')
+      .select('city, role, supervisor_id')
       .eq('id', user_id)
       .maybeSingle();
-    const champCity = (creator as { city?: string | null } | null)?.city;
-    if (champCity && champCity.trim()) {
-      payload.city = champCity.trim();
+    const c = creator as { city?: string | null; role?: string | null; supervisor_id?: string | null } | null;
+    if (!payload.city) {
+      const champCity = c?.city;
+      if (champCity && champCity.trim()) payload.city = champCity.trim();
+    }
+    const isFieldRep = !!c && !LEAD_APPROVAL_ADMIN_ROLES.includes((c.role ?? '').toLowerCase());
+    if (isFieldRep) {
+      approvalStatus = 'pending';
+      creatorSupervisorId = c?.supervisor_id ?? null;
     }
   }
   // Unified scorer — branches B2B/B2C correctly, no zero-padding of
@@ -201,6 +213,9 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
     landing_page: (p.landing_page as string | undefined) ?? null,
     photo_url:    (p.photo_url    as string | undefined) ?? null,
     created_by: user_id ?? null,
+    // Lead approval (default 'approved'; 'pending' only for field-rep captures).
+    approval_status: approvalStatus,
+    approval_requested_by: approvalStatus === 'pending' ? (user_id ?? null) : null,
   };
 
   const { data, error } = await supabaseAdmin.from('crm_leads').insert(insertRow).select('*').single();
@@ -230,7 +245,78 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
     data: { lead: data, client_id: data.client_id },
   }).catch(() => {});
 
+  // Field-rep lead → notify the approving manager. Best-effort; never fails create.
+  if (approvalStatus === 'pending') {
+    notifyLeadApprover(org_id, user_id ?? null, creatorSupervisorId, data).catch(() => {});
+  }
+
   return data as Lead;
+}
+
+// Roles that DON'T require lead approval (admins/system). A creator with any
+// other role is treated as a field rep whose leads need manager sign-off.
+const LEAD_APPROVAL_ADMIN_ROLES = [
+  'admin', 'super_admin', 'main_admin', 'org_admin', 'sub_admin', 'client', 'master_admin',
+];
+
+function leadDisplayName(lead: any): string {
+  return [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim() || lead.company || 'A new lead';
+}
+
+/** Notify the rep's manager (supervisor, else an admin in the org) that a lead
+ *  is awaiting approval. Reuses the `general` notification_type. */
+async function notifyLeadApprover(
+  org_id: string, creatorId: string | null, supervisorId: string | null, lead: any,
+): Promise<void> {
+  let recipient = supervisorId;
+  if (!recipient) {
+    const { data: admins } = await supabaseAdmin
+      .from('users').select('id, role').eq('org_id', org_id).eq('is_active', true).limit(100);
+    recipient = (admins ?? []).find((u: any) =>
+      LEAD_APPROVAL_ADMIN_ROLES.includes((u.role ?? '').toLowerCase()) && u.id !== creatorId,
+    )?.id ?? null;
+  }
+  if (!recipient) return;
+  await supabaseAdmin.from('notifications').insert({
+    org_id, user_id: recipient,
+    title: 'Lead needs approval',
+    body: `${leadDisplayName(lead)} was captured and is awaiting your approval.`,
+    type: 'general',
+    data: { kind: 'lead_pending_approval', lead_id: lead.id },
+    is_read: false, sent_at: null,
+  });
+}
+
+/** Approve / reject a pending lead. Notifies the rep who captured it. */
+export async function decideLeadApproval(
+  org_id: string, actorId: string, leadId: string,
+  decision: 'approved' | 'rejected', note?: string,
+): Promise<Lead> {
+  const { data: lead } = await supabaseAdmin
+    .from('crm_leads').select('*').eq('org_id', org_id).eq('id', leadId).maybeSingle();
+  if (!lead) throw new AppError(404, 'Lead not found', 'NOT_FOUND');
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('crm_leads')
+    .update({ approval_status: decision, approved_by: actorId, approved_at: new Date().toISOString() })
+    .eq('id', leadId).eq('org_id', org_id)
+    .select('*').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  const requester = (lead as any).approval_requested_by ?? (lead as any).created_by;
+  if (requester) {
+    try {
+      await supabaseAdmin.from('notifications').insert({
+        org_id, user_id: requester,
+        title: decision === 'approved' ? 'Lead approved' : 'Lead rejected',
+        body: `${leadDisplayName(lead)} was ${decision}${note ? `: ${note}` : ''}.`,
+        type: 'general',
+        data: { kind: 'lead_approval_decided', lead_id: leadId, decision },
+        is_read: false, sent_at: null,
+      });
+    } catch { /* best-effort */ }
+  }
+  return updated as Lead;
 }
 
 export async function listLeads(
@@ -333,6 +419,7 @@ export async function listLeadsWithCount(
     q = q.or(orParts.join(','));
   }
   if (filters.status) q = q.eq('status', String(filters.status));
+  if (filters.approval_status) q = q.eq('approval_status', String(filters.approval_status));
   if (filters.lifecycle_stage) q = q.eq('lifecycle_stage', String(filters.lifecycle_stage));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
