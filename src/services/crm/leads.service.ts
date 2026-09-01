@@ -113,7 +113,11 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
       if (champCity && champCity.trim()) payload.city = champCity.trim();
     }
     const isFieldRep = !!c && !LEAD_APPROVAL_ADMIN_ROLES.includes((c.role ?? '').toLowerCase());
-    if (isFieldRep) {
+    // Lead approval is OPT-IN per org (default OFF) so shipping the workflow
+    // changes no existing tenant's behaviour — a field rep's lead only enters
+    // 'pending' (and notifies a manager) once an org turns it on. See
+    // leadApprovalEnabled().
+    if (isFieldRep && await leadApprovalEnabled(org_id)) {
       approvalStatus = 'pending';
       creatorSupervisorId = c?.supervisor_id ?? null;
     }
@@ -258,6 +262,24 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
 const LEAD_APPROVAL_ADMIN_ROLES = [
   'admin', 'super_admin', 'main_admin', 'org_admin', 'sub_admin', 'client', 'master_admin',
 ];
+
+/**
+ * Is the lead-approval workflow enabled for this org? OFF by default — enabling
+ * it is an explicit `org_settings` opt-in (key `crm.lead_approval`, value
+ * on/true/1/enabled). This keeps the deployed workflow inert for every existing
+ * tenant (no leads go 'pending', no manager notifications fire) until an org
+ * turns it on, so shipping it changes no client's usage.
+ */
+async function leadApprovalEnabled(org_id: string): Promise<boolean> {
+  const { data } = await supabaseAdmin
+    .from('org_settings')
+    .select('value')
+    .eq('org_id', org_id)
+    .eq('key', 'crm.lead_approval')
+    .maybeSingle();
+  const v = String((data as { value?: unknown } | null)?.value ?? '').toLowerCase();
+  return v === 'on' || v === 'true' || v === '1' || v === 'enabled';
+}
 
 function leadDisplayName(lead: any): string {
   return [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim() || lead.company || 'A new lead';
