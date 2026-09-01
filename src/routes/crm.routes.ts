@@ -15,6 +15,7 @@ import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
+import { chunk } from '../lib/chunk';
 
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
@@ -891,13 +892,24 @@ leads.get('/export', wrap(async (req, res) => {
   }
   const updatesByLead = new Map<string, Array<{ created_at: string; body: string; author: string }>>();
   if (leadIds.length) {
-    const { data: us } = await supabaseAdmin
-      .from('crm_lead_updates')
-      .select('lead_id, body, created_at, author_id')
-      .in('lead_id', leadIds)
-      .order('created_at', { ascending: false })
-      .limit(20 * leadIds.length);
-    const authorIds = Array.from(new Set((us ?? []).map((u: any) => u.author_id).filter(Boolean))) as string[];
+    // Fetch the updates timeline in batches of 200 lead ids. A single
+    // `.in('lead_id', …)` over EVERY exported lead builds a 60-160 KB request
+    // URL that exceeds the Supabase/Kong URI-length limit and hangs the whole
+    // export for large tenants (the list view sidesteps this via the
+    // denormalised latest_update columns). Each lead's updates live entirely
+    // within one batch, so per-lead latest-first ordering is preserved without
+    // a cross-batch sort; the per-lead cap of 20 is applied below.
+    const us: Array<{ lead_id: string; body: string; created_at: string; author_id: string | null }> = [];
+    for (const batch of chunk(leadIds, 200)) {
+      const { data } = await supabaseAdmin
+        .from('crm_lead_updates')
+        .select('lead_id, body, created_at, author_id')
+        .in('lead_id', batch)
+        .order('created_at', { ascending: false })
+        .limit(20 * batch.length);
+      if (data) us.push(...(data as any[]));
+    }
+    const authorIds = Array.from(new Set(us.map((u) => u.author_id).filter(Boolean))) as string[];
     const authorNameById = new Map<string, string>();
     if (authorIds.length) {
       const { data: au } = await supabaseAdmin.from('users').select('id, name, email').in('id', authorIds);
@@ -905,7 +917,7 @@ leads.get('/export', wrap(async (req, res) => {
         authorNameById.set((a as any).id, ((a as any).name as string) || ((a as any).email as string) || '');
       }
     }
-    for (const u of (us ?? []) as any[]) {
+    for (const u of us) {
       if (!updatesByLead.has(u.lead_id)) updatesByLead.set(u.lead_id, []);
       const list = updatesByLead.get(u.lead_id)!;
       if (list.length >= 20) continue;
