@@ -4663,7 +4663,16 @@ emailCampaigns.get('/usage', wrap(async (req, res) => res.json({ success: true, 
 // Connect Google → import the rep's Google contacts as leads (the directory the
 // audience picks from). Status is open; the sync is admin- + entitlement-gated.
 emailCampaigns.get('/google/status', wrap(async (req, res) => res.json({ success: true, data: await googleContactsSvc.getConnectionStatus(userId(req)) })));
-emailCampaigns.post('/google/sync', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await googleContactsSvc.syncContacts(ecScope(req)) })));
+// Google Contacts → leads auto-sync is REMOVED. It pulled in every
+// auto-collected "other contact" (everyone the user had ever emailed) as a
+// lead, flooding the CRM with junk. The endpoint is kept as an inert no-op so
+// any stale client gets a graceful response instead of an error — it never
+// creates leads. `/google/status` stays (it only reports the OAuth connection,
+// which Calendar also uses).
+emailCampaigns.post('/google/sync', waAdminOnly, emailCampaignEntitled, wrap(async (_req, res) => res.json({
+  success: true,
+  data: { imported: 0, merged: 0, skipped: 0, total: 0, partial: false, disabled: true },
+})));
 emailCampaigns.post('/preview', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => {
   const body = parse(v.emailCampaignPreviewSchema, req.body);
   res.json({ success: true, data: await emailCampaignSvc.previewCampaign(ecScope(req), {
