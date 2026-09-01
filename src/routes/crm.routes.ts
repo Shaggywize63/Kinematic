@@ -15,6 +15,7 @@ import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
+import { chunk } from '../lib/chunk';
 
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
@@ -802,6 +803,22 @@ leads.post('/', wrap(async (req, res) => {
 
   res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse });
 }));
+// Approve / reject a pending lead. Restricted to managers — a supervisor/admin
+// role, or any user with HR-module access (matches "notify the manager or a
+// person with HR access"). Notifies the rep who captured the lead.
+leads.post('/:id/approval', wrap(async (req, res) => {
+  const u = (req as unknown as { user?: { role?: string; enabled_modules?: string[]; permissions?: string[] } }).user || {};
+  const role = (u.role ?? '').toLowerCase();
+  const CAN_DECIDE = ['admin', 'super_admin', 'main_admin', 'org_admin', 'sub_admin', 'client', 'master_admin', 'supervisor', 'manager', 'team_lead', 'asm', 'rsm'];
+  const hasHr = !!u.enabled_modules?.includes('hr') || !!u.permissions?.includes('hr');
+  if (!CAN_DECIDE.includes(role) && !hasHr) {
+    return res.status(403).json({ success: false, error: 'Only a manager can approve or reject leads.' });
+  }
+  const decision = req.body?.decision === 'rejected' ? 'rejected' : 'approved';
+  const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+  const updated = await leadsSvc.decideLeadApproval(orgId(req), userId(req) as string, req.params.id, decision, note);
+  return res.json({ success: true, data: updated });
+}));
 // CSV export — same filters as the list endpoint (status, owner, source,
 // state/city/district/block, score_gte, q, from, to, etc.) but caps at
 // 10k rows server-side and streams a real CSV file. Auth + tenant cap +
@@ -875,13 +892,24 @@ leads.get('/export', wrap(async (req, res) => {
   }
   const updatesByLead = new Map<string, Array<{ created_at: string; body: string; author: string }>>();
   if (leadIds.length) {
-    const { data: us } = await supabaseAdmin
-      .from('crm_lead_updates')
-      .select('lead_id, body, created_at, author_id')
-      .in('lead_id', leadIds)
-      .order('created_at', { ascending: false })
-      .limit(20 * leadIds.length);
-    const authorIds = Array.from(new Set((us ?? []).map((u: any) => u.author_id).filter(Boolean))) as string[];
+    // Fetch the updates timeline in batches of 200 lead ids. A single
+    // `.in('lead_id', …)` over EVERY exported lead builds a 60-160 KB request
+    // URL that exceeds the Supabase/Kong URI-length limit and hangs the whole
+    // export for large tenants (the list view sidesteps this via the
+    // denormalised latest_update columns). Each lead's updates live entirely
+    // within one batch, so per-lead latest-first ordering is preserved without
+    // a cross-batch sort; the per-lead cap of 20 is applied below.
+    const us: Array<{ lead_id: string; body: string; created_at: string; author_id: string | null }> = [];
+    for (const batch of chunk(leadIds, 200)) {
+      const { data } = await supabaseAdmin
+        .from('crm_lead_updates')
+        .select('lead_id, body, created_at, author_id')
+        .in('lead_id', batch)
+        .order('created_at', { ascending: false })
+        .limit(20 * batch.length);
+      if (data) us.push(...(data as any[]));
+    }
+    const authorIds = Array.from(new Set(us.map((u) => u.author_id).filter(Boolean))) as string[];
     const authorNameById = new Map<string, string>();
     if (authorIds.length) {
       const { data: au } = await supabaseAdmin.from('users').select('id, name, email').in('id', authorIds);
@@ -889,7 +917,7 @@ leads.get('/export', wrap(async (req, res) => {
         authorNameById.set((a as any).id, ((a as any).name as string) || ((a as any).email as string) || '');
       }
     }
-    for (const u of (us ?? []) as any[]) {
+    for (const u of us) {
       if (!updatesByLead.has(u.lead_id)) updatesByLead.set(u.lead_id, []);
       const list = updatesByLead.get(u.lead_id)!;
       if (list.length >= 20) continue;
@@ -4635,7 +4663,16 @@ emailCampaigns.get('/usage', wrap(async (req, res) => res.json({ success: true, 
 // Connect Google → import the rep's Google contacts as leads (the directory the
 // audience picks from). Status is open; the sync is admin- + entitlement-gated.
 emailCampaigns.get('/google/status', wrap(async (req, res) => res.json({ success: true, data: await googleContactsSvc.getConnectionStatus(userId(req)) })));
-emailCampaigns.post('/google/sync', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await googleContactsSvc.syncContacts(ecScope(req)) })));
+// Google Contacts → leads auto-sync is REMOVED. It pulled in every
+// auto-collected "other contact" (everyone the user had ever emailed) as a
+// lead, flooding the CRM with junk. The endpoint is kept as an inert no-op so
+// any stale client gets a graceful response instead of an error — it never
+// creates leads. `/google/status` stays (it only reports the OAuth connection,
+// which Calendar also uses).
+emailCampaigns.post('/google/sync', waAdminOnly, emailCampaignEntitled, wrap(async (_req, res) => res.json({
+  success: true,
+  data: { imported: 0, merged: 0, skipped: 0, total: 0, partial: false, disabled: true },
+})));
 emailCampaigns.post('/preview', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => {
   const body = parse(v.emailCampaignPreviewSchema, req.body);
   res.json({ success: true, data: await emailCampaignSvc.previewCampaign(ecScope(req), {

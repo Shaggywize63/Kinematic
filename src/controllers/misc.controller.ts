@@ -651,7 +651,11 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
   // (and the modules it inherits) without having to delete + recreate. The
   // column exists on `users`; missing it from this list silently dropped
   // every hierarchy change posted from the dashboard.
-  const allowed = ['name', 'mobile', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id', 'org_role_id']
+  // base_lat / base_lng / geofence_radius_m: the FE's per-user attendance
+  // geofence location (set from the Field Executives edit form). Omitting them
+  // here silently dropped every location update, so geofence attendance could
+  // never be configured.
+  const allowed = ['name', 'mobile', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id', 'org_role_id', 'base_lat', 'base_lng', 'geofence_radius_m']
   const updates: any = {}
   for (const key of allowed) { 
     if (req.body[key] !== undefined && req.body[key] !== '') {

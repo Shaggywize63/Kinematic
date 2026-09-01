@@ -54,7 +54,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   // Idempotency + zone fetch run in parallel — neither depends on the other.
   // Saves ~150-300ms vs. sequential awaits on a typical Supabase round-trip.
   const resolvedZoneId = zone_id || user.zone_id;
-  const [existingResult, zoneResult] = await Promise.all([
+  const [existingResult, zoneResult, feResult] = await Promise.all([
     supabaseAdmin
       .from('attendance')
       .select('*, breaks(*)')
@@ -68,6 +68,13 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
           .eq('id', resolvedZoneId)
           .maybeSingle()                                    // was .single() — would throw on missing row
       : Promise.resolve({ data: null, error: null }),
+    // The FE's own configured base location (set per user in the dashboard).
+    // When present it geofences attendance against THIS point (and enforces it).
+    supabaseAdmin
+      .from('users')
+      .select('base_lat, base_lng, geofence_radius_m')
+      .eq('id', user.id)
+      .maybeSingle(),
   ]);
 
   const existing = existingResult.data;
@@ -84,8 +91,26 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     return;
   }
 
+  // Resolve the expected location: the FE's own base location takes priority
+  // (and is ENFORCED); otherwise fall back to the assigned zone (distance is
+  // only recorded, never enforced — zones frequently default to 0,0).
   let distanceMetres = 0;
-  if (zoneResult.data) {
+  const fe = feResult.data as { base_lat?: number | null; base_lng?: number | null; geofence_radius_m?: number | null } | null;
+  const hasFeFence = !!fe && fe.base_lat != null && fe.base_lng != null && (fe.geofence_radius_m ?? 0) > 0;
+
+  if (hasFeFence) {
+    const { withinFence, distanceMetres: dist } = isWithinGeofence(
+      latitude, longitude, fe!.base_lat!, fe!.base_lng!, fe!.geofence_radius_m!
+    );
+    distanceMetres = dist;
+    if (!withinFence) {
+      badRequest(
+        res,
+        `You are about ${Math.round(dist)}m from your assigned location. Move within ${fe!.geofence_radius_m}m to check in.`
+      );
+      return;
+    }
+  } else if (zoneResult.data) {
     const { distanceMetres: dist } = isWithinGeofence(
       latitude, longitude,
       zoneResult.data.meeting_lat, zoneResult.data.meeting_lng,

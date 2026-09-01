@@ -12,6 +12,7 @@
  * "Unassigned".
  */
 import { supabaseAdmin } from '../../lib/supabase';
+import { chunk } from '../../lib/chunk';
 
 type Row = {
   owner_id?: string | null;
@@ -387,15 +388,20 @@ export async function resolveLookupLabels(
     // Soft-fail per target so a broken lookup target doesn't 500 the
     // whole CSV — unresolved ids fall back to the raw UUID.
     try {
-      const { data } = await supabaseAdmin
-        .from(target)
-        .select('*')
-        .in('id', Array.from(ids));
-      for (const row of (data ?? []) as Record<string, unknown>[]) {
-        const id = row.id as string | undefined;
-        if (!id) continue;
-        const label = lookupRowLabel(row);
-        if (label) out.set(`${target}:${id}`, label);
+      // Batch the `.in('id', …)` so a big tenant (thousands of distinct lookup
+      // references across the exported rows) doesn't build a URL past the
+      // Supabase/Kong URI limit. See src/lib/chunk.ts.
+      for (const batch of chunk(Array.from(ids), 200)) {
+        const { data } = await supabaseAdmin
+          .from(target)
+          .select('*')
+          .in('id', batch);
+        for (const row of (data ?? []) as Record<string, unknown>[]) {
+          const id = row.id as string | undefined;
+          if (!id) continue;
+          const label = lookupRowLabel(row);
+          if (label) out.set(`${target}:${id}`, label);
+        }
       }
     } catch {
       /* leave UUIDs as-is when the target table can't be read */

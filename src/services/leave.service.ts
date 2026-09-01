@@ -280,11 +280,19 @@ export async function cancelLeave(actor: Actor, id: string) {
   if (!req) throw new AppError(404, 'Request not found', 'NOT_FOUND');
   if ((req as any).user_id !== actor.id) throw new AppError(403, 'Not your request', 'FORBIDDEN');
   if (!['pending', 'approved'].includes((req as any).status)) throw new AppError(400, 'Only pending/approved leave can be cancelled', 'BAD_STATE');
-  await supabaseAdmin.from('leave_requests').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', id);
+  // Return the updated row (not `{ok:true}`) so typed clients — notably iOS,
+  // which decodes the response as a LeaveRequest — don't fail to decode and
+  // report a false failure (the leave WAS cancelled server-side).
+  const { data: updated } = await supabaseAdmin
+    .from('leave_requests')
+    .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select('*')
+    .single();
   // Remove any attendance placeholders we created for an approved leave.
   if ((req as any).status === 'approved') await clearAttendanceForLeave(id);
   await notify(actor.org_id, (req as any).approver_id, 'Leave cancelled', `A leave request was cancelled by the applicant.`, { type: 'leave_cancelled', request_id: id });
-  return { ok: true };
+  return updated ?? { ...(req as any), status: 'cancelled' };
 }
 
 const ADMIN_ROLES = ['admin', 'super_admin', 'main_admin', 'org_admin', 'sub_admin', 'client'];
