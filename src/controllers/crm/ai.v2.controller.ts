@@ -24,6 +24,7 @@ import {
   planningInstruction,
   type KiniContext,
 } from '../../services/crm/ai/kiniContext.service';
+import { getKiniDomainContext } from '../../services/crm/ai/orgAiContext';
 import {
   formatMemoryForPrompt,
   listMemory,
@@ -196,6 +197,8 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     city,
   });
 
+  const domainContext = await getKiniDomainContext(org_id);
+
   const systemPrompt = [
     extraSystem || '',
     "You are KINI, Kinematic's agentic platform copilot.",
@@ -206,6 +209,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     'Default currency is INR (₹). Indian numbering: "2 lakh" = 200000, "1 crore" = 10000000.',
     'When a tool returns a card, the UI renders it — confirm in 1-2 short sentences and do not repeat full record details in your text reply.',
     contextBlock,
+    domainContext ? `Company and product knowledge (use when relevant):\n${domainContext}` : '',
     memoryBlock,
     planningInstruction(),
   ]
@@ -482,6 +486,8 @@ export const chatStream = asyncHandler(async (req: AuthRequest, res: Response) =
     city,
   });
 
+  const domainContext = await getKiniDomainContext(org_id);
+
   const systemPrompt = [
     extraSystem || '',
     "You are KINI, Kinematic's agentic platform copilot.",
@@ -492,6 +498,7 @@ export const chatStream = asyncHandler(async (req: AuthRequest, res: Response) =
     'Default currency is INR (₹). Indian numbering: "2 lakh" = 200000, "1 crore" = 10000000.',
     'When a tool returns a card, the UI renders it — confirm in 1-2 short sentences and do not repeat full record details in your text reply.',
     contextBlock,
+    domainContext ? `Company and product knowledge (use when relevant):\n${domainContext}` : '',
     memoryBlock,
     planningInstruction(),
   ]

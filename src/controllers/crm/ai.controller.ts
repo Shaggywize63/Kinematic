@@ -5,6 +5,7 @@ import { asyncHandler, ok, badRequest, notFound } from '../../utils';
 import { AIService } from '../../services/ai.service';
 import { chatWithTools } from '../../services/crm/ai/aiClient';
 import { toAnthropicTools, executeTool } from '../../services/crm/ai/kiniTools.service';
+import { getKiniDomainContext } from '../../services/crm/ai/orgAiContext';
 
 // Lead scoring was previously implemented inline here and exported as
 // `scoreLead` / `computeLeadScore`. Those functions were orphaned — no
@@ -172,6 +173,8 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { messages, system, context } = req.body;
   if (!messages?.length) return badRequest(res, 'messages is required');
 
+  const domainContext = await getKiniDomainContext(org_id);
+
   const systemPrompt = [
     system || '',
     "You are KINI, Kinematic's agentic CRM copilot.",
@@ -181,6 +184,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     'After tools run, confirm what was done in 1-2 short sentences. The UI renders rich cards for tool results — do not repeat full record details in the text.',
     'Default currency is INR (₹). Indian numbering: "2 lakh" = 200000, "1 crore" = 10000000.',
     context?.module === 'crm' ? 'The user is in the CRM module.' : '',
+    domainContext ? `\nCompany and product knowledge (use when relevant):\n${domainContext}` : '',
   ].filter(Boolean).join(' ');
 
   try {
