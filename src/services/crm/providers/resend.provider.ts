@@ -38,6 +38,19 @@ export const resendProvider: EmailProvider = {
       body.headers = input.headers;
     }
 
+    // Attachments. Resend accepts either `path` (a URL it fetches) or an
+    // inline base64 `content`; we map our vendor-agnostic shape onto that.
+    // A signed Supabase Storage URL as `path` is how a proposal PDF rides
+    // along without us base64-inlining a multi-MB file into the request.
+    if (input.attachments && input.attachments.length > 0) {
+      body.attachments = input.attachments.map((a) => ({
+        filename: a.filename,
+        ...(a.path ? { path: a.path } : {}),
+        ...(a.content ? { content: a.content } : {}),
+        ...(a.content_type ? { content_type: a.content_type } : {}),
+      }));
+    }
+
     const res = await fetch(RESEND_ENDPOINT, {
       method: 'POST',
       headers: {

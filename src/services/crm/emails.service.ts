@@ -8,7 +8,7 @@ import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
 import { stubProvider } from './providers/stub.provider';
 import { resendProvider } from './providers/resend.provider';
-import type { EmailProvider } from './providers/emailProvider.interface';
+import type { EmailProvider, EmailAttachment } from './providers/emailProvider.interface';
 
 // Provider is picked once at module load via EMAIL_PROVIDER env. Falling
 // back to the stub on unknown values keeps dev/test envs running without
@@ -51,6 +51,13 @@ export interface SendEmailInput {
    * env default when omitted.
    */
   from_email?: string;
+  /**
+   * Optional file attachments (e.g. a generated proposal PDF). Passed
+   * straight through to the provider. Each entry carries a `path`
+   * (a URL the provider fetches, e.g. a signed Storage URL) or inline
+   * base64 `content`.
+   */
+  attachments?: EmailAttachment[];
 }
 
 export async function sendEmail(input: SendEmailInput) {
@@ -130,6 +137,7 @@ export async function sendEmail(input: SendEmailInput) {
       from: fromEmail, to: input.to, cc: input.cc, bcc: input.bcc,
       subject: input.subject, html: trackedHtml, text: bodyText,
       headers,
+      attachments: input.attachments,
     });
     await supabaseAdmin.from('crm_email_logs').update({
       status: 'sent', provider_message_id: result.message_id ?? null, sent_at: new Date().toISOString(),
