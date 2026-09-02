@@ -17,6 +17,7 @@ import { AppError } from '../../../utils';
 import { logger } from '../../../lib/logger';
 import { AIService } from '../../ai.service';
 import { transcribe, sarvamConfigured, type DiarizedSegment } from '../../integrations/sarvam';
+import { getConversationPersona } from './orgAiContext';
 
 export interface Actor { id: string; org_id: string; client_id?: string | null; role?: string | null }
 
@@ -119,7 +120,7 @@ async function processAsync(id: string): Promise<void> {
     const { data: lead } = await supabaseAdmin.from('crm_leads')
       .select('name, city, state, status, lifecycle_stage, source, score').eq('id', r.lead_id).maybeSingle();
 
-    const insights = await analyze(t.transcript, t.segments, lead as any);
+    const insights = await analyze(t.transcript, t.segments, lead as any, r.org_id);
 
     await supabaseAdmin.from('conversation_recordings').update({
       status: 'complete', insights, updated_at: new Date().toISOString(),
@@ -160,9 +161,13 @@ Return ONLY a JSON object (no prose, no markdown) with EXACTLY these keys:
 }
 Use "" or [] where unknown. Base everything strictly on the transcript. Compute talk_listen_ratio from the diarized speakers when possible.`;
 
-/** Analyze the transcript with Claude Sonnet 5 -> structured insights JSON. */
-export async function analyze(transcript: string, segments: DiarizedSegment[], lead?: any): Promise<any> {
+/** Analyze the transcript with Claude Sonnet 5 -> structured insights JSON.
+ *  `orgId` lets a tenant override the analyst persona (industry / product
+ *  catalogue) via the `conversation_intel_persona` org setting; when absent the
+ *  built-in default persona is used, so other tenants are unaffected. */
+export async function analyze(transcript: string, segments: DiarizedSegment[], lead?: any, orgId?: string | null): Promise<any> {
   if (!transcript?.trim()) return { summary: 'Empty or inaudible recording.', risk_flags: ['no_transcript'] };
+  const system = (await getConversationPersona(orgId)) || SYSTEM;
 
   const ctx = lead ? `Lead context: name=${lead.name ?? ''}, city=${lead.city ?? ''}, status=${lead.status ?? ''}, stage=${lead.lifecycle_stage ?? ''}, score=${lead.score ?? ''}.` : '';
   const diar = segments?.length
@@ -181,7 +186,7 @@ export async function analyze(transcript: string, segments: DiarizedSegment[], l
       // put an (empty) thinking block first in `content`. Disable it so the
       // first block is our JSON text and cost stays predictable.
       thinking: { type: 'disabled' },
-      system: SYSTEM,
+      system,
       messages: [{ role: 'user', content: userMsg }],
     }),
   }, 90_000);

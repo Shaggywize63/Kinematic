@@ -24,18 +24,12 @@ const CALENDAR_API_BASE = 'https://www.googleapis.com/calendar/v3';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/calendar.events',
-  // Read-only Google Contacts (People API) so a rep can import their address
-  // book into the CRM for email campaigns. Incremental — include_granted_scopes
-  // below merges it with any grant an existing calendar user already gave, so
-  // nothing that only needs calendar breaks; they just also grant contacts on
-  // their next (re)connect. NOTE: this is a Google "sensitive" scope — the OAuth
-  // app must be verified (or the user added as a test user) to use it in prod.
-  'https://www.googleapis.com/auth/contacts.readonly',
-  // "Other contacts" — addresses Google auto-collected from the user's mail
-  // (i.e. everyone they've emailed). Most real address books live here rather
-  // than in manually-saved contacts, so without this the import comes back
-  // empty for users who never hit "save contact". Also a sensitive scope.
-  'https://www.googleapis.com/auth/contacts.other.readonly',
+  // NOTE: the Google Contacts scopes (contacts.readonly / contacts.other.readonly)
+  // were intentionally removed. The Contacts → CRM leads auto-sync has been retired,
+  // so we no longer request contacts access on connect — a Google connection is now
+  // only used for Calendar sync (and identity). Do NOT re-add these scopes; doing so
+  // would re-grant contacts to existing calendar users on their next reconnect and
+  // silently resurrect the removed auto-sync.
   'https://www.googleapis.com/auth/userinfo.email',
 ].join(' ');
 
