@@ -18,6 +18,22 @@ export interface EmailSendInput {
    * Providers that don't surface arbitrary headers may ignore this.
    */
   headers?: Record<string, string>;
+  /**
+   * Optional file attachments. Each entry supplies either a `path`
+   * (a URL the provider fetches — e.g. a signed Storage URL) or an
+   * inline base64 `content`. Used to attach a generated proposal PDF.
+   * Providers that don't support attachments may ignore this.
+   */
+  attachments?: EmailAttachment[];
+}
+
+export interface EmailAttachment {
+  filename: string;
+  /** A URL the provider will fetch and attach (mutually exclusive with content). */
+  path?: string;
+  /** Base64-encoded file contents (mutually exclusive with path). */
+  content?: string;
+  content_type?: string;
 }
 
 export interface EmailSendResult {

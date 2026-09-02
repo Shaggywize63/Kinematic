@@ -17,9 +17,37 @@ import { logger } from '../../lib/logger';
 import { AIService } from '../ai.service';
 import { getOrgAnthropicKey, getKiniDomainContext } from './ai/orgAiContext';
 import { sendWhatsapp } from './whatsapp.service';
+import { sendEmail } from './emails.service';
 
 const BUCKET = process.env.SUPABASE_PROPOSAL_BUCKET || 'proposals';
 const SIGNED_TTL = 7 * 24 * 60 * 60; // 7 days — long enough for a WhatsApp/email recipient
+
+/**
+ * Fetch an org logo for embedding in the PDF header. pdfkit only renders
+ * PNG / JPEG, so we sniff the magic bytes and drop anything else (SVG,
+ * WebP) rather than throwing mid-render. Best-effort and size-capped —
+ * a missing or odd logo just falls back to the typographic header.
+ */
+async function fetchLogo(url: string | null | undefined): Promise<Buffer | null> {
+  if (!url) return null;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 3 * 1024 * 1024) return null; // 3MB cap
+    const isPng = buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+    const isJpg = buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    return (isPng || isJpg) ? buf : null;
+  } catch (e: any) {
+    logger.warn(`[proposals] logo fetch failed: ${e?.message || e}`);
+    return null;
+  }
+}
+
+/** HTML-escape for the email body so a lead's name/company can't inject markup. */
+function esc(s: string | null | undefined): string {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 export interface Actor { id: string; org_id: string; client_id?: string | null; role?: string | null }
 
@@ -84,8 +112,9 @@ async function coverNote(orgName: string, lead: any, items: ProposalItemInput[],
 function buildPdf(opts: {
   orgName: string; org: any; lead: any; proposalNumber: string; title: string;
   cover: string; terms: string; validUntil: string | null; c: Computed; currency: string;
+  logoBuf?: Buffer | null;
 }): Promise<Buffer> {
-  const { orgName, org, lead, proposalNumber, title, cover, terms, validUntil, c } = opts;
+  const { orgName, org, lead, proposalNumber, title, cover, terms, validUntil, c, logoBuf } = opts;
   const doc = new PDFDocument({ size: 'A4', margin: 48 });
   const chunks: Buffer[] = [];
   const done = new Promise<Buffer>((resolve, reject) => {
@@ -101,18 +130,33 @@ function buildPdf(opts: {
   const right = doc.page.width - doc.page.margins.right;
   const width = right - left;
 
-  // Header band
-  doc.rect(0, 0, doc.page.width, 96).fill(ACCENT);
-  doc.fillColor('#ffffff').fontSize(22).font('Helvetica-Bold').text(orgName, left, 30);
-  doc.fontSize(10).font('Helvetica').fillColor('#dbe4f5')
-    .text([org?.address, [org?.city, org?.state].filter(Boolean).join(', '), org?.country].filter(Boolean).join('  |  '), left, 60, { width: width * 0.7 });
-  doc.fillColor('#ffffff').fontSize(16).font('Helvetica-Bold').text('PROPOSAL', right - 160, 34, { width: 160, align: 'right' });
+  // Header band. When the org has a (PNG/JPEG) logo we set it in a white
+  // rounded chip so it reads on the blue band regardless of the artwork's
+  // own background, and shift the org name to sit beside it.
+  const bandH = 104;
+  doc.rect(0, 0, doc.page.width, bandH).fill(ACCENT);
+  let textX = left;
+  if (logoBuf) {
+    try {
+      const chipW = 132, chipH = 60, chipY = 22;
+      doc.roundedRect(left, chipY, chipW, chipH, 8).fill('#ffffff');
+      doc.image(logoBuf, left + 12, chipY + 8, { fit: [chipW - 24, chipH - 16], align: 'center', valign: 'center' });
+      textX = left + chipW + 18;
+    } catch { textX = left; } // unsupported/corrupt image — fall back to text-only
+  }
+  const headTextW = (right - 168) - textX;
+  doc.fillColor('#ffffff').fontSize(logoBuf ? 18 : 22).font('Helvetica-Bold')
+    .text(orgName, textX, logoBuf ? 34 : 30, { width: Math.max(headTextW, 120) });
   doc.fontSize(9).font('Helvetica').fillColor('#dbe4f5')
-    .text(`No: ${proposalNumber}`, right - 160, 58, { width: 160, align: 'right' })
-    .text(`Date: ${new Date().toLocaleDateString('en-IN')}`, right - 160, 70, { width: 160, align: 'right' });
+    .text([org?.address, [org?.city, org?.state].filter(Boolean).join(', '), org?.country].filter(Boolean).join('  |  '),
+      textX, logoBuf ? 58 : 60, { width: Math.max(headTextW, 120) });
+  doc.fillColor('#ffffff').fontSize(16).font('Helvetica-Bold').text('PROPOSAL', right - 168, 30, { width: 168, align: 'right' });
+  doc.fontSize(9).font('Helvetica').fillColor('#dbe4f5')
+    .text(`No: ${proposalNumber}`, right - 168, 54, { width: 168, align: 'right' })
+    .text(`Date: ${new Date().toLocaleDateString('en-IN')}`, right - 168, 66, { width: 168, align: 'right' });
 
   doc.fillColor(INK);
-  let y = 120;
+  let y = bandH + 24;
 
   // Prepared for
   doc.fontSize(9).font('Helvetica-Bold').fillColor(MUTE).text('PREPARED FOR', left, y);
@@ -228,8 +272,9 @@ export async function createProposal(actor: Actor, input: CreateProposalInput) {
   }));
   await supabaseAdmin.from('crm_proposal_items').insert(itemRows);
 
-  // Render + upload the PDF.
-  const pdf = await buildPdf({ orgName, org, lead, proposalNumber, title, cover, terms, validUntil: input.valid_until ?? null, c, currency: 'INR' });
+  // Render + upload the PDF (with the org logo in the header when available).
+  const logoBuf = await fetchLogo((org as any)?.logo_url);
+  const pdf = await buildPdf({ orgName, org, lead, proposalNumber, title, cover, terms, validUntil: input.valid_until ?? null, c, currency: 'INR', logoBuf });
   const path = `org/${actor.org_id}/proposals/${proposal.id}.pdf`;
   const { error: upErr } = await supabaseAdmin.storage.from(BUCKET).upload(path, pdf, { contentType: 'application/pdf', upsert: true });
   if (upErr) throw new AppError(500, `PDF upload failed: ${upErr.message}`, 'STORAGE');
@@ -263,27 +308,117 @@ export async function listForLead(actor: Actor, lead_id: string) {
   return data ?? [];
 }
 
-/** Share a generated proposal by WhatsApp (as a document) or return the link for
- *  email / download. Returns the signed URL so clients can also save-to-phone. */
-export async function shareProposal(actor: Actor, id: string, opts: { channel: 'whatsapp' | 'email' | 'link'; to?: string }) {
+/** Branded HTML email body for a proposal — org header, greeting, cover-note
+ *  excerpt, headline total, and a download button. The PDF also rides along as
+ *  an attachment; the button is the fallback for clients that strip attachments. */
+function buildProposalEmailHtml(opts: {
+  orgName: string; logoUrl: string | null; leadName: string; cover: string;
+  proposalNumber: string; grandTotal: string; validUntil: string | null; url: string;
+}): string {
+  const { orgName, logoUrl, leadName, cover, proposalNumber, grandTotal, validUntil, url } = opts;
+  const ACCENT = '#0a3d91';
+  const coverHtml = esc(cover).replace(/\n{2,}/g, '</p><p style="margin:0 0 12px">').replace(/\n/g, '<br/>');
+  const logo = logoUrl
+    ? `<img src="${esc(logoUrl)}" alt="${esc(orgName)}" height="40" style="max-height:40px;display:block" />`
+    : `<span style="font:700 20px Arial,Helvetica,sans-serif;color:#ffffff">${esc(orgName)}</span>`;
+  return `<!doctype html><html><body style="margin:0;background:#f3f4f6;padding:24px 0">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:10px;overflow:hidden;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a">
+    <tr><td style="background:${ACCENT};padding:22px 28px">${logo}</td></tr>
+    <tr><td style="padding:28px 28px 8px">
+      <p style="margin:0 0 4px;font-size:12px;letter-spacing:.06em;color:#6b7280;text-transform:uppercase">Proposal ${esc(proposalNumber)}</p>
+      <h1 style="margin:0 0 16px;font-size:20px;color:${ACCENT}">Dear ${esc(leadName)},</h1>
+      <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#374151">${coverHtml}</p>
+    </td></tr>
+    <tr><td style="padding:4px 28px 8px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2fb;border-radius:8px">
+        <tr>
+          <td style="padding:16px 20px;font-size:13px;color:#6b7280">Proposal total${validUntil ? ` &middot; valid until ${esc(new Date(validUntil).toLocaleDateString('en-IN'))}` : ''}</td>
+          <td style="padding:16px 20px;font-size:20px;font-weight:700;color:${ACCENT};text-align:right">${esc(grandTotal)}</td>
+        </tr>
+      </table>
+    </td></tr>
+    <tr><td style="padding:16px 28px 4px">
+      <a href="${esc(url)}" style="display:inline-block;background:${ACCENT};color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;padding:12px 22px;border-radius:8px">View / download proposal (PDF)</a>
+      <p style="margin:12px 0 0;font-size:12px;color:#9ca3af">The full proposal is attached to this email as a PDF. This link is valid for 7 days.</p>
+    </td></tr>
+    <tr><td style="padding:20px 28px 28px">
+      <p style="margin:0;font-size:14px;color:#374151">Warm regards,<br/><strong>${esc(orgName)}</strong></p>
+    </td></tr>
+  </table></body></html>`;
+}
+
+/**
+ * Share a generated proposal.
+ *  - `whatsapp`: sends the PDF as a WhatsApp document with a proper message.
+ *  - `email`: actually SENDS a branded email with the PDF attached, a proper
+ *    subject and body (falls back to the lead's email when `to` is omitted).
+ *  - `link`: returns the signed URL for save-to-phone / manual share.
+ * Returns the signed URL so clients can also save-to-phone.
+ */
+export async function shareProposal(
+  actor: Actor,
+  id: string,
+  opts: { channel: 'whatsapp' | 'email' | 'link'; to?: string; subject?: string; message?: string },
+) {
   const p = await getProposal(actor, id);
   if (!(p as any).pdf_path) throw new AppError(409, 'Proposal PDF not generated yet', 'NO_PDF');
   const url = (p as any).pdf_url as string | null;
   if (!url) throw new AppError(500, 'Could not sign proposal URL', 'STORAGE');
 
+  const proposalNumber = (p as any).proposal_number as string;
+  const leadId = (p as any).lead_id as string | null;
+  const grandTotal = money(Number((p as any).grand_total || 0));
+
+  // Lead + org context for a properly addressed, branded message.
+  const { data: lead } = leadId
+    ? await supabaseAdmin.from('crm_leads')
+        .select('first_name, last_name, company, email, phone').eq('id', leadId).eq('org_id', actor.org_id).maybeSingle()
+    : { data: null as any };
+  const { data: org } = await supabaseAdmin.from('organisations')
+    .select('name, logo_url').eq('id', actor.org_id).maybeSingle();
+  const orgName = (org as any)?.name || 'Kinematic';
+  const leadName = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || (lead as any)?.company || 'there';
+
   if (opts.channel === 'whatsapp') {
-    const toPhone = opts.to;
+    const toPhone = opts.to || (lead as any)?.phone;
     if (!toPhone) throw new AppError(400, 'Recipient phone (to) is required for WhatsApp', 'BAD_REQUEST');
+    const firstName = lead?.first_name ? ` ${lead.first_name}` : '';
+    const body = opts.message
+      || `Hello${firstName}, thank you for your interest in ${orgName}. `
+        + `Please find attached our proposal ${proposalNumber} (total ${grandTotal}). `
+        + `Do let us know if you have any questions — we'd be glad to help.`;
     await sendWhatsapp({
       org_id: actor.org_id, user_id: actor.id, to: toPhone,
-      body_text: `Please find your proposal ${(p as any).proposal_number} attached.`,
-      media_url: url, media_type: 'document', lead_id: (p as any).lead_id ?? null,
+      body_text: body, media_url: url, media_type: 'document', lead_id: leadId,
     });
     await supabaseAdmin.from('crm_proposals').update({ status: 'sent' }).eq('id', id);
     return { channel: 'whatsapp', sent: true, pdf_url: url };
   }
 
-  // email / link: return the signed URL (the client opens a mail composer or a
-  // download). Marking 'sent' is left to an explicit email-send integration.
-  return { channel: opts.channel, sent: false, pdf_url: url };
+  if (opts.channel === 'email') {
+    const toEmail = (opts.to || (lead as any)?.email || '').trim();
+    if (!toEmail) throw new AppError(400, 'Recipient email (to) is required, and the lead has no email on file', 'BAD_REQUEST');
+    const subject = opts.subject || `${orgName} — Proposal ${proposalNumber}`;
+    const html = opts.message
+      ? `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#1a1a1a">${esc(opts.message).replace(/\n/g, '<br/>')}</div>`
+      : buildProposalEmailHtml({
+          orgName, logoUrl: (org as any)?.logo_url ?? null, leadName,
+          cover: (p as any).cover_note || '', proposalNumber, grandTotal,
+          validUntil: (p as any).valid_until ?? null, url,
+        });
+    const safeName = proposalNumber.replace(/[^\w.-]+/g, '-');
+    const result = await sendEmail({
+      org_id: actor.org_id, user_id: actor.id, to: toEmail, subject,
+      body_html: html, lead_id: leadId,
+      attachments: [{ filename: `Proposal-${safeName}.pdf`, path: url, content_type: 'application/pdf' }],
+    });
+    if ((result as any).status === 'failed') {
+      throw new AppError(502, `Email send failed: ${(result as any).error || 'unknown error'}`, 'EMAIL_FAILED');
+    }
+    await supabaseAdmin.from('crm_proposals').update({ status: 'sent' }).eq('id', id);
+    return { channel: 'email', sent: true, to: toEmail, pdf_url: url };
+  }
+
+  // link: return the signed URL for save-to-phone / manual share.
+  return { channel: 'link', sent: false, pdf_url: url };
 }

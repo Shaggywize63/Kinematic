@@ -1486,6 +1486,8 @@ const proposalCreateSchema = z.object({
 const proposalShareSchema = z.object({
   channel: z.enum(['whatsapp', 'email', 'link']),
   to: z.string().max(200).optional(),
+  subject: z.string().max(300).optional(),
+  message: z.string().max(4000).optional(),
 });
 // Create a recording (consent gate) → returns a signed upload URL for the audio.
 leads.post('/:id/conversations', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
@@ -1558,7 +1560,7 @@ router.get('/proposals/:pid', rbac.requireModuleAccess('crm_leads'), wrap(async 
 // Share a generated proposal: WhatsApp (as a document), or return the signed
 // link for email / download / save-to-phone.
 router.post('/proposals/:pid/share', rbac.requireModuleAccess('crm_leads'), wrap(async (req, res) => {
-  const body = parse(proposalShareSchema, req.body ?? {}) as unknown as { channel: 'whatsapp' | 'email' | 'link'; to?: string };
+  const body = parse(proposalShareSchema, req.body ?? {}) as unknown as { channel: 'whatsapp' | 'email' | 'link'; to?: string; subject?: string; message?: string };
   res.json(await proposals.shareProposal(convActor(req), req.params.pid, body));
 }));
 
