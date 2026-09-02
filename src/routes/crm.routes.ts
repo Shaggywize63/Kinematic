@@ -53,6 +53,7 @@ import * as dailyBriefingSvc from '../services/crm/ai/dailyBriefing.service';
 import * as cardScanSvc from '../services/crm/ai/cardScan.service';
 import * as smartFilterSvc from '../services/crm/ai/smartFilter.service';
 import * as convIntel from '../services/crm/ai/conversationIntel.service';
+import * as proposals from '../services/crm/proposals.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as webChatCtrl from '../controllers/crm/webChat.controller';
 import * as locationsSvc from '../services/crm/locations.service';
@@ -1465,6 +1466,27 @@ const convRecordSchema = z.object({
   ext: z.string().max(8).optional(),
   language: z.string().max(20).optional(),
 });
+const proposalItemSchema = z.object({
+  product_id: z.string().uuid().optional().nullable(),
+  name: z.string().min(1).max(300),
+  description: z.string().max(2000).optional().nullable(),
+  sku: z.string().max(100).optional().nullable(),
+  unit: z.string().max(40).optional().nullable(),
+  unit_price: z.number().min(0),
+  quantity: z.number().min(0.01),
+  discount_pct: z.number().min(0).max(100).optional(),
+  tax_rate_pct: z.number().min(0).max(100).optional(),
+});
+const proposalCreateSchema = z.object({
+  title: z.string().max(200).optional(),
+  items: z.array(proposalItemSchema).min(1).max(50),
+  terms: z.string().max(4000).optional(),
+  valid_until: z.string().max(40).optional().nullable(),
+});
+const proposalShareSchema = z.object({
+  channel: z.enum(['whatsapp', 'email', 'link']),
+  to: z.string().max(200).optional(),
+});
 // Create a recording (consent gate) → returns a signed upload URL for the audio.
 leads.post('/:id/conversations', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
   res.json(await convIntel.createRecording(convActor(req), req.params.id, parse(convRecordSchema, req.body ?? {})));
@@ -1472,6 +1494,16 @@ leads.post('/:id/conversations', rbac.requireModuleAccess('crm_conversation_inte
 // A rep's conversations on this lead (list, own-scope) — no transcript.
 leads.get('/:id/conversations', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
   res.json(await convIntel.listForLead(convActor(req), req.params.id));
+}));
+// Generate an AI-tailored, branded proposal PDF from the products a lead is
+// interested in. Gated by the crm_leads mount above.
+leads.post('/:id/proposals', wrap(async (req, res) => {
+  const body = parse(proposalCreateSchema, req.body ?? {}) as unknown as Omit<proposals.CreateProposalInput, 'lead_id'>;
+  res.json(await proposals.createProposal(convActor(req), { lead_id: req.params.id, ...body }));
+}));
+// This lead's proposal history (most recent first).
+leads.get('/:id/proposals', wrap(async (req, res) => {
+  res.json(await proposals.listForLead(convActor(req), req.params.id));
 }));
 // Home aggregator — composes today's target + near-to-close leads +
 // next-best-actions (rules-based, no LLM round-trip) + today's activity
@@ -1516,6 +1548,18 @@ router.get('/conversations/analytics', rbac.requireModuleAccess('crm_conversatio
 // Full record incl. insights + a short-lived signed playback URL.
 router.get('/conversations/:cid', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
   res.json(await convIntel.getOne(convActor(req), req.params.cid));
+}));
+
+// ---------- PROPOSALS (fetch a generated proposal + share it) --------------
+// Full proposal record + items + a short-lived signed PDF URL (download/save).
+router.get('/proposals/:pid', rbac.requireModuleAccess('crm_leads'), wrap(async (req, res) => {
+  res.json(await proposals.getProposal(convActor(req), req.params.pid));
+}));
+// Share a generated proposal: WhatsApp (as a document), or return the signed
+// link for email / download / save-to-phone.
+router.post('/proposals/:pid/share', rbac.requireModuleAccess('crm_leads'), wrap(async (req, res) => {
+  const body = parse(proposalShareSchema, req.body ?? {}) as unknown as { channel: 'whatsapp' | 'email' | 'link'; to?: string };
+  res.json(await proposals.shareProposal(convActor(req), req.params.pid, body));
 }));
 
 // ---------- CONTACTS -------------------------------------------------
