@@ -939,7 +939,7 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const feed = [
     ...(attRes.data || []).map((a: any) => ({ 
       type: 'attendance', 
-      event: a.status === 'checked_in' || a.status === 'on-break' ? 'Check-in' : 'Check-out', 
+      event: a.status === 'checked_in' || a.status === 'on_break' ? 'Check-in' : 'Check-out',
       user: a.users?.name, 
       zone: a.users?.zones?.name, 
       time: a.status === 'checked_out' ? a.checkout_at : a.checkin_at, 

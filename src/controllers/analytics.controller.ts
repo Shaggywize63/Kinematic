@@ -844,7 +844,7 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     .from('attendance')
     .select('*, breaks(*)')
     .eq('user_id', user.id)
-    .in('status', ['checked_in', 'on_break', 'on-break'])
+    .in('status', ['checked_in', 'on_break'])
     .order('created_at', { ascending: false });
 
   // Fallback to today specifically if no active session
