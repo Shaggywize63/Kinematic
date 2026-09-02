@@ -9,6 +9,7 @@
  */
 import { AIService } from '../../ai.service';
 import { AppError } from '../../../utils';
+import { getOrgAnthropicKey } from './orgAiContext';
 // AIService.anthropicFetch wraps fetch with an AbortController so we
 // don't tie up a Node worker on a slow Anthropic response.
 
@@ -314,7 +315,9 @@ async function streamAnthropicTurn(params: {
  * final assistant text plus any cards produced by tools.
  */
 export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWithToolsOutput> {
-  const apiKey = await AIService.getFunctionalKey();
+  // Per-org key override (Conversation Analysis + KINI billing isolation);
+  // falls back to the shared functional key when the org has none configured.
+  const apiKey = (await getOrgAnthropicKey(input.org_id)) || await AIService.getFunctionalKey();
   const model = input.model || 'claude-sonnet-5';
   const max_tokens = input.max_tokens ?? 1500;
   const max_turns = input.max_turns ?? 5;
