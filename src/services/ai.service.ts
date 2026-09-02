@@ -188,8 +188,8 @@ export class AIService {
   /**
    * Centralized helper for Anthropics Messages API
    */
-  static async callKiniAI(payload: { system?: string; messages: any[]; model?: string; max_tokens?: number }) {
-    const apiKey = await this.getFunctionalKey();
+  static async callKiniAI(payload: { system?: string; messages: any[]; model?: string; max_tokens?: number; apiKey?: string }) {
+    const apiKey = payload.apiKey || await this.getFunctionalKey();
     const requested = payload.model || 'claude-sonnet-5';
 
     const doCall = (model: string) =>
