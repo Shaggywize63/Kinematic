@@ -17,7 +17,7 @@ import { AppError } from '../../../utils';
 import { logger } from '../../../lib/logger';
 import { AIService } from '../../ai.service';
 import { transcribe, sarvamConfigured, type DiarizedSegment } from '../../integrations/sarvam';
-import { getConversationPersona } from './orgAiContext';
+import { getConversationPersona, getOrgAnthropicKey } from './orgAiContext';
 
 export interface Actor { id: string; org_id: string; client_id?: string | null; role?: string | null }
 
@@ -175,7 +175,7 @@ export async function analyze(transcript: string, segments: DiarizedSegment[], l
     : transcript.slice(0, 12000);
   const userMsg = `${ctx}\n\nDiarized transcript:\n${diar}`;
 
-  const apiKey = await AIService.getFunctionalKey();
+  const apiKey = (await getOrgAnthropicKey(orgId)) || await AIService.getFunctionalKey();
   const res = await AIService.anthropicFetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },

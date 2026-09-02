@@ -54,3 +54,27 @@ export async function getConversationPersona(orgId?: string | null): Promise<str
 export async function getKiniDomainContext(orgId?: string | null): Promise<string | null> {
   return asText(await readOrgSetting(orgId, 'ai_domain_context'), 'text');
 }
+
+/**
+ * Resolve a tenant-specific Anthropic API key for this org, or null to fall back
+ * to the shared/global key (AIService.getFunctionalKey). The org_settings key
+ * `anthropic_key_env` holds the NAME of an environment variable (e.g.
+ * "ANTHROPIC_API_KEY_KONICA") — the secret value itself lives only in the
+ * process environment (Railway secret store), never in the database. Used so a
+ * tenant's Conversation Analysis + KINI usage bills to a dedicated key/workspace.
+ * Returns null (→ shared key) when unset or misconfigured, so other tenants
+ * (e.g. the Tata prod tenant) are completely unaffected.
+ */
+export async function getOrgAnthropicKey(orgId?: string | null): Promise<string | null> {
+  const envName = asText(await readOrgSetting(orgId, 'anthropic_key_env'), 'name');
+  if (!envName) return null;
+  // Defensive: only ever read an env var explicitly namespaced for Anthropic
+  // keys, so a stray/tampered org_settings value can never surface an unrelated
+  // secret (DB creds, service keys, …).
+  if (!/^ANTHROPIC_[A-Z0-9_]{1,64}$/.test(envName)) {
+    logger.warn(`[orgAiContext] ignoring unsafe anthropic_key_env "${envName}" for org ${orgId}`);
+    return null;
+  }
+  const val = process.env[envName];
+  return val && val.trim() ? val.trim() : null;
+}
