@@ -35,6 +35,7 @@ import { salesforceProvider } from '../../services/crm/integrations/providers/sa
 import { emailInboundProvider } from '../../services/crm/integrations/providers/emailInbound';
 import { ivrMissedCallProvider } from '../../services/crm/integrations/providers/ivrMissedCall';
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
+import { ingestCallRecording } from '../../services/crm/ai/callRecordingIngest.service';
 import { logger } from '../../lib/logger';
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
@@ -46,13 +47,14 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   salesforce:      'Salesforce',
   email_inbound:   'Inbound Email',
   ivr_missed_call: 'IVR / Missed Call',
+  call_recording:  'Call Recording (Conversation Analysis)',
 };
 
 // All v1 providers are push-mode: an external system POSTs leads to our
 // webhook URL with `?key=<webhook_secret>`. OAuth / pull-mode (Zoho's
 // native API polling, Salesforce's REST sync) can come later as a
 // power-user upgrade — the webhook path covers 90% of real-world setups.
-const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads', 'zoho', 'salesforce', 'email_inbound', 'ivr_missed_call'];
+const PUSH_PROVIDERS: ProviderId[] = ['web_form', 'generic_webhook', 'meta_lead_ads', 'google_ads', 'zoho', 'salesforce', 'email_inbound', 'ivr_missed_call', 'call_recording'];
 
 function getProvider(id: ProviderId) {
   if (id === 'web_form')        return webFormProvider;
@@ -300,6 +302,18 @@ async function bumpIntegrationCounters(integration_id: string, errored: boolean,
   }).eq('id', integration_id);
 }
 
+/** Constant-time compare of the `?key=` / `x-webhook-key` secret against the
+ *  integration's webhook_secret. Used for providers (e.g. call_recording) that
+ *  don't ship their own verifyWebhook. */
+function verifyKeySecret(req: Request, integration: IntegrationRow): boolean {
+  const provided = (req.query.key as string | undefined) ?? (req.headers['x-webhook-key'] as string | undefined);
+  if (!provided || !integration.webhook_secret) return false;
+  if (provided.length !== integration.webhook_secret.length) return false;
+  let diff = 0;
+  for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ integration.webhook_secret.charCodeAt(i);
+  return diff === 0;
+}
+
 export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
   // ALWAYS return 200 to the caller. Errors are recorded to the inbound
   // event log and surfaced in the admin UI. Returning non-200 makes Meta /
@@ -322,6 +336,37 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
   }
   if (integration.status === 'disabled') {
     res.status(200).json({ ok: true, message: 'integration disabled' });
+    return;
+  }
+
+  // Call-recording ingest is a different shape — it produces an analyzed
+  // conversation_recording (Sarvam -> KINI), not a lead — so handle it before
+  // the lead-source provider path below. Same URL scheme + secret verification.
+  if (providerId === 'call_recording') {
+    const ok = verifyKeySecret(req, integration as IntegrationRow);
+    const event_id = await logInboundEvent(integration_id, integration.org_id, providerId, req.body, ok);
+    if (!ok) {
+      await finishEvent(event_id, { error: 'signature verification failed' });
+      res.status(200).json({ ok: true });
+      return;
+    }
+    try {
+      const r = await ingestCallRecording({
+        org_id: integration.org_id,
+        client_id: (integration as { client_id?: string | null }).client_id ?? null,
+        source_id: integration.source_id,
+        config: (integration as { config?: Record<string, unknown> | null }).config ?? null,
+      }, (req.body ?? {}) as Record<string, unknown>);
+      await finishEvent(event_id, 'recording_id' in r ? { lead_id: r.lead_id } : { error: r.skipped });
+      await bumpIntegrationCounters(integration_id, false);
+      res.status(200).json({ ok: true, ...r });
+    } catch (e) {
+      const err = (e as Error).message;
+      logger.error({ integration_id, err }, 'callRecordingWebhook: processing failed');
+      await finishEvent(event_id, { error: err });
+      await bumpIntegrationCounters(integration_id, true, err);
+      res.status(200).json({ ok: true });
+    }
     return;
   }
 

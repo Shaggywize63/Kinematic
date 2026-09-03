@@ -82,6 +82,52 @@ export async function markUploaded(actor: Actor, id: string) {
   return { ok: true, status: 'processing' };
 }
 
+function contentTypeFor(ext?: string | null): string {
+  switch ((ext || '').toLowerCase()) {
+    case 'wav': return 'audio/wav';
+    case 'm4a': return 'audio/mp4';
+    case 'ogg': case 'opus': return 'audio/ogg';
+    case 'amr': return 'audio/amr';
+    default: return 'audio/mpeg'; // mp3
+  }
+}
+
+/**
+ * Ingest a recording captured OUTSIDE the app (e.g. a telephony provider's
+ * call recording) — the audio is already in hand as a Buffer. Uploads it,
+ * creates the recording row (consent required, like the mic flow), and kicks
+ * off the same transcribe -> analyze pipeline. The lead + rep are resolved by
+ * the caller (telephony ingest); user_id is NOT NULL on the table so a rep
+ * must be attributed.
+ */
+export async function ingestExternalRecording(params: {
+  org_id: string; client_id?: string | null; lead_id: string; user_id: string;
+  audio: Buffer; ext?: string | null; duration_seconds?: number | null; language?: string | null;
+  consent_captured: boolean; consent_method?: string;
+}): Promise<{ id: string; status: 'processing' }> {
+  if (!params.consent_captured) throw new AppError(400, 'Recording consent is required', 'CONSENT_REQUIRED');
+  if (!params.lead_id || !params.user_id) throw new AppError(400, 'lead_id and user_id are required', 'BAD_REQUEST');
+
+  const path = audioPath(params.org_id, params.lead_id, params.ext || 'mp3');
+  const { error: upErr } = await supabaseAdmin.storage.from(BUCKET)
+    .upload(path, params.audio, { contentType: contentTypeFor(params.ext), upsert: true });
+  if (upErr) throw new AppError(500, `Recording upload failed: ${upErr.message}`, 'STORAGE');
+
+  const { data, error } = await supabaseAdmin.from('conversation_recordings').insert({
+    org_id: params.org_id, client_id: params.client_id ?? null,
+    lead_id: params.lead_id, user_id: params.user_id,
+    consent_captured: true, consent_method: params.consent_method || 'telephony_recorded', consent_at: new Date().toISOString(),
+    audio_path: path, duration_seconds: params.duration_seconds ?? null, language: params.language ?? null,
+    status: 'uploaded',
+  }).select('id').single();
+  if (error) throw new AppError(500, error.message, 'DB');
+
+  const id = (data as any).id as string;
+  // Fire-and-forget: transcription + analysis take tens of seconds.
+  processAsync(id).catch((e) => logger.error(`[conv-intel] external ingest ${id} failed: ${e?.message || e}`));
+  return { id, status: 'processing' };
+}
+
 /** The heavy pipeline: transcribe -> analyze -> store. Runs detached. */
 async function processAsync(id: string): Promise<void> {
   const { data: rec } = await supabaseAdmin.from('conversation_recordings').select('*').eq('id', id).maybeSingle();
