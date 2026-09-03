@@ -54,6 +54,7 @@ import * as cardScanSvc from '../services/crm/ai/cardScan.service';
 import * as smartFilterSvc from '../services/crm/ai/smartFilter.service';
 import * as convIntel from '../services/crm/ai/conversationIntel.service';
 import * as proposals from '../services/crm/proposals.service';
+import * as telephony from '../services/crm/telephony.service';
 import * as kiniTools from '../services/crm/ai/kiniTools.service';
 import * as webChatCtrl from '../controllers/crm/webChat.controller';
 import * as locationsSvc from '../services/crm/locations.service';
@@ -1459,6 +1460,24 @@ const convActor = (req: Request): convIntel.Actor => {
   const me = (req as AuthRequest).user as any;
   return { id: userId(req)!, org_id: orgId(req), client_id: clientId(req), role: me?.role ?? null };
 };
+// Recorded click-to-call — LIMITED TRIAL: enabled for a single operator while
+// the telephony provider is validated end to end. Placing a call bridges the
+// rep and the customer on the provider and records it; the recording is
+// delivered back through the call_recording webhook into Conversation Analysis.
+// Remove this email gate to roll it out org-wide.
+const TELEPHONY_TRIAL_EMAIL = 's@kinematicapp.com';
+router.post('/telephony/click-to-call', wrap(async (req, res) => {
+  const me = (req as AuthRequest).user as { email?: string } | undefined;
+  if (String(me?.email ?? '').toLowerCase() !== TELEPHONY_TRIAL_EMAIL) {
+    throw new AppError(403, 'Recorded calling is in limited trial', 'FORBIDDEN');
+  }
+  const b = (req.body ?? {}) as { lead_id?: string; to?: string; from?: string };
+  res.json(await telephony.clickToCallForLead({
+    org_id: orgId(req), user_id: userId(req)!,
+    lead_id: String(b.lead_id ?? ''), to: b.to ?? null, from: b.from ?? null,
+  }));
+}));
+
 const convRecordSchema = z.object({
   consent: z.boolean(),
   consent_method: z.enum(['in_app', 'verbal']).optional(),
