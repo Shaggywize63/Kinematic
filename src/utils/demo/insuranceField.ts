@@ -317,19 +317,31 @@ export const getMockOutletCoverage = () => ({
   ]
 });
 
-export const getMockMobileHome = () => ({
-  attendance: { status: 'checked_in', time: '09:00 AM' },
-  today_plan: { total: 5, visited: 2, pending: 3 },
-  announcements: [
-    { title: 'New ULIP NFO live', body: 'Aviva Wealth Builder NFO open from tomorrow. Use the latest illustration tool for pitches.' },
-    { title: 'Q3 Persistency Push', body: 'Renewal premium-collection drive live. Target 90% 13th-month persistency.' }
-  ],
-  kpis: {
-    monthly_tff: 124,
-    monthly_earnings: 15400,
-    target_pct: 85
-  }
-});
+// Real GET /analytics/mobile-home shape — routePlan[].outlets feeds the app's
+// "Today's Route" + "Store Target", reusing this vertical's own route plan.
+export const getMockMobileHome = () => {
+  const today = isoDate(new Date());
+  const plan = getMockRoutePlans(today)[0];
+  const outlets = (plan.outlets || []).map((o: any) => ({
+    ...o,
+    status: (o.status === 'completed' || o.status === 'visited') ? 'visited' : 'pending',
+  }));
+  return {
+    today: null,
+    summary: { tff_count: 0 },
+    routePlan: [{
+      id: 'consolidated_daily_plan',
+      plan_date: today,
+      total_outlets: plan.total_outlets,
+      visited_outlets: plan.visited_outlets,
+      outlets,
+    }],
+    unreadCount: 0,
+    quote: null,
+    broadcast: null,
+    timestamp: new Date().toISOString(),
+  };
+};
 
 export const getMockUsers = () => [
   { id: 'fe1', name: 'Arjun Sharma', employee_id: 'AV-001', role: 'executive', city: 'Bengaluru', is_active: true, zones: { name: 'Bengaluru North Branch' } },

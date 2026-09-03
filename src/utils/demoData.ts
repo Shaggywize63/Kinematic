@@ -444,19 +444,38 @@ export const getMockOutletCoverage = () => activeFieldMod()?.getMockOutletCovera
   ]
 });
 
-export const getMockMobileHome = () => activeFieldMod()?.getMockMobileHome() ?? ({
-  attendance: { status: 'checked_in', time: '09:00 AM' },
-  today_plan: { total: 5, visited: 2, pending: 3 },
-  announcements: [
-    { title: 'New Product Launch', body: 'Introducing the new Organic Range tomorrow.' },
-    { title: 'Holiday Notice', body: 'Stores will remain closed on May 1st.' }
-  ],
-  kpis: {
-    monthly_tff: 124,
-    monthly_earnings: 15400,
-    target_pct: 85
-  }
-});
+// Mobile home ("Field Operations Hub") payload. MUST match the real
+// GET /analytics/mobile-home shape the apps decode — { today, summary,
+// routePlan:[{ id, plan_date, outlets:[...] }], unreadCount, quote, broadcast }.
+// The home screen's "Today's Route" + "Store Target" read routePlan[].outlets,
+// so we reuse the same permanent demo route plan (getMockRoutePlans) — that's
+// why the demo now shows its assigned stores on the app, not "No stores
+// assigned". `today` stays null so the app keeps its own live attendance state.
+export const getMockMobileHome = () => {
+  const fromMod = activeFieldMod()?.getMockMobileHome();
+  if (fromMod) return fromMod;
+  const today = isoDate(new Date());
+  const plan = getMockRoutePlans(today)[0];
+  const outlets = (plan.outlets || []).map((o: any) => ({
+    ...o,
+    status: (o.status === 'completed' || o.status === 'visited') ? 'visited' : 'pending',
+  }));
+  return {
+    today: null,
+    summary: { tff_count: 0 },
+    routePlan: [{
+      id: 'consolidated_daily_plan',
+      plan_date: today,
+      total_outlets: plan.total_outlets,
+      visited_outlets: plan.visited_outlets,
+      outlets,
+    }],
+    unreadCount: 0,
+    quote: null,
+    broadcast: null,
+    timestamp: new Date().toISOString(),
+  };
+};
 
 export const getMockWMSInventory = () => [
   { id: 'p1', name: 'Product A', sku: 'SKU-001', category: 'FMCG', stock_level: 450, warehouse: 'Bangalore-Central' },
