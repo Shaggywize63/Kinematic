@@ -181,7 +181,12 @@ export async function analyze(transcript: string, segments: DiarizedSegment[], l
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 1800,
+      // Rich conversations (long, multi-speaker transcripts) produce a large
+      // insights object; 1800 truncated the JSON mid-object on the longest
+      // calls, so JSON.parse failed and the record fell back to
+      // analysis_parse_error. 4096 gives comfortable headroom for the full
+      // schema (and any thinking tokens) while staying cheap.
+      max_tokens: 4096,
       // Sonnet 5 runs adaptive thinking when `thinking` is omitted, which would
       // put an (empty) thinking block first in `content`. Disable it so the
       // first block is our JSON text and cost stays predictable.
@@ -204,9 +209,15 @@ export async function analyze(transcript: string, segments: DiarizedSegment[], l
 }
 
 function extractJson(s: string): string {
-  const start = s.indexOf('{');
-  const end = s.lastIndexOf('}');
-  return start >= 0 && end > start ? s.slice(start, end + 1) : s;
+  // The model sometimes wraps the object in a ```json … ``` fence despite the
+  // "no markdown" instruction. Strip a surrounding fence first, then slice to
+  // the outermost { … } so leading/trailing prose can't break JSON.parse.
+  let t = (s || '').trim();
+  const fence = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fence) t = fence[1].trim();
+  const start = t.indexOf('{');
+  const end = t.lastIndexOf('}');
+  return start >= 0 && end > start ? t.slice(start, end + 1) : t;
 }
 
 // ── reads ──────────────────────────────────────────────────────────────────
