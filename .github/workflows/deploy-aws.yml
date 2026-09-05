@@ -1,0 +1,62 @@
+name: Deploy backend to AWS (Mumbai)
+
+# Builds the backend Docker image and pushes it to Amazon ECR in ap-south-1.
+# Auth is keyless via GitHub OIDC assuming the kinematic-github-deploy role —
+# there are NO long-lived AWS keys in GitHub secrets.
+#
+# The ECS deploy step is intentionally left commented out until the ECS
+# cluster + service + task definition exist (migration checklist Order 32).
+# Until then this workflow just publishes the image so the service can be
+# created from it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+
+permissions:
+  id-token: write   # required to request the OIDC token
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: kinematic-backend
+  AWS_ROLE_ARN: arn:aws:iam::023620758744:role/kinematic-github-deploy
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/${ECR_REPOSITORY}"
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+          echo "Pushed $IMAGE:${{ github.sha }}"
+
+      # --- Enable after migration checklist Order 32 (ECS cluster/service) ---
+      # - name: Deploy to ECS
+      #   uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      #   with:
+      #     task-definition: taskdef.json      # rendered with the new image tag
+      #     service: kinematic-backend
+      #     cluster: kinematic
+      #     wait-for-service-stability: true

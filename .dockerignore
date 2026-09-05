@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.github
+.env
+.env.*
+*.md
+coverage
+src/scratch
+src/test
