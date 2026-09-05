@@ -107,7 +107,7 @@ async function dispatchVerificationEmail(
   const apiBase = (
     process.env.PUBLIC_API_BASE_URL ||
     process.env.CRM_TRACKING_BASE_URL ||
-    'https://kinematic-production.up.railway.app'
+    'https://api.kinematicapp.com'
   ).replace(/\/+$/, '');
   const link = `${apiBase}/api/v1/crm/verified-senders/verify/${encodeURIComponent(token)}`;
   const html = `
