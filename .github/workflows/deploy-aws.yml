@@ -12,7 +12,7 @@ name: Deploy backend to AWS (Mumbai)
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, claude/intelligent-cannon-pgp9vy]
     paths-ignore:
       - '**.md'
 

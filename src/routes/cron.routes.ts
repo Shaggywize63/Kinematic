@@ -27,6 +27,11 @@ import {
 import { PlanogramService } from '../services/planogram.service';
 import { runAutoReplenishment, runAutoReplenishmentAllProjects } from '../services/distribution/replenishment.service';
 import { runWithProject, isKnownProject, fallbackProjectKey, knownProjectKeys } from '../lib/projects';
+import {
+  recomputeWinProbabilities,
+  runEmailQueue,
+  runWorkflowAutomations,
+} from '../services/crm/portedCronJobs.service';
 import { runCarryForward } from '../services/leave.service';
 import { runRouteDeviationScan } from '../services/routeDeviation.service';
 import { supabaseAdmin } from '../lib/supabase';
@@ -463,6 +468,92 @@ router.post('/route-deviation-scan', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: { project, ...result } });
   } catch (err: any) {
     logger.error(`[cron] route-deviation-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * Run a ported edge-function job for the requested project(s). The original
+ * edge functions ran INSIDE a single project's context (their own SUPABASE_*),
+ * so faithful replication fans out per-tenant:
+ *   - all_projects: true  → run once per known project (what each tenant's own
+ *     pg_cron did collectively).
+ *   - project: "<key>"    → run for exactly that project.
+ *   - neither              → the production fallback project (default/Tata).
+ * Best-effort per project so one tenant's failure never fails the others.
+ */
+async function runForRequestedProjects<T>(
+  body: { project?: string; all_projects?: boolean },
+  fn: () => Promise<T>,
+): Promise<
+  | { all_projects: true; projects: Record<string, T | { error: string }> }
+  | { project: string; result: T }
+> {
+  if (body.all_projects) {
+    const projects: Record<string, T | { error: string }> = {};
+    for (const key of knownProjectKeys()) {
+      try {
+        projects[key] = await runWithProject(key, fn);
+      } catch (e: any) {
+        projects[key] = { error: String(e?.message || e) };
+        logger.error(`[cron] job failed for project ${key}: ${e?.message || e}`);
+      }
+    }
+    return { all_projects: true, projects };
+  }
+  const requested = typeof body.project === 'string' ? body.project.trim().toLowerCase() : '';
+  const project = requested && isKnownProject(requested) ? requested : fallbackProjectKey();
+  const result = await runWithProject(project, fn);
+  return { project, result };
+}
+
+/**
+ * POST /api/v1/cron/recompute-win-prob   (ported from edge crm-recompute-win-prob)
+ *
+ * Hourly refresh of AI win probability for open deals. Both tenants scheduled
+ * this in their own project, so drive it with { all_projects: true }; a
+ * { project } body restricts it to one tenant. Body: { project?, all_projects? }.
+ */
+router.post('/recompute-win-prob', requireEdgeSecret, async (req, res) => {
+  try {
+    const out = await runForRequestedProjects(req.body ?? {}, () => recomputeWinProbabilities());
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] recompute-win-prob crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/send-email-queue   (ported from edge crm-send-email-queue)
+ *
+ * Per-minute drain of queued crm_email_logs rows. STUB provider (marks sent) —
+ * behaviour preserved verbatim. Both tenants scheduled it; drive with
+ * { all_projects: true }. Body: { project?, all_projects? }.
+ */
+router.post('/send-email-queue', requireEdgeSecret, async (req, res) => {
+  try {
+    const out = await runForRequestedProjects(req.body ?? {}, () => runEmailQueue());
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] send-email-queue crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/process-automations   (ported from edge crm-process-automations)
+ *
+ * Every-5-minute evaluation of active workflow automations. Both tenants
+ * scheduled it in their own project; drive with { all_projects: true }. Body:
+ * { project?, all_projects? }.
+ */
+router.post('/process-automations', requireEdgeSecret, async (req, res) => {
+  try {
+    const out = await runForRequestedProjects(req.body ?? {}, () => runWorkflowAutomations());
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] process-automations crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });
