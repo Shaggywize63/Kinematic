@@ -6,8 +6,8 @@
 # ---- builder ----
 FROM node:20-slim AS builder
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json ./
+RUN npm install
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
@@ -19,9 +19,10 @@ WORKDIR /app
 RUN chown node:node /app
 USER node
 # Production dependencies only. sharp / @ffmpeg-installer fetch their
-# Linux binaries into node_modules during this install.
-COPY --chown=node:node package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# Linux binaries into node_modules during this install. No package-lock.json
+# is committed (it's gitignored), so use npm install to match the Railway build.
+COPY --chown=node:node package.json ./
+RUN npm install --omit=dev && npm cache clean --force
 # Compiled application
 COPY --chown=node:node --from=builder /app/dist ./dist
 # PORT is provided by the ECS task definition (defaults to 3000).
