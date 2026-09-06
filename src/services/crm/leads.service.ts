@@ -6,7 +6,6 @@ import { AppError, sanitisePostgrestSearch } from '../../utils';
 import * as scoring from './ai/leadScoring.service';
 import * as dedup from './dedup.service';
 import * as assignment from './assignment.service';
-import { triggerEdgeFunction } from './edge.client';
 import * as automations from './automations.service';
 import { validateAndStampCustomFields } from './customFields.service';
 import { isMinor } from '../../lib/age';
@@ -240,7 +239,8 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
     lead_id: data.id, org_id, score, model: 'heuristic_v1', breakdown,
   });
 
-  triggerEdgeFunction('crm-rescore-lead', { lead_id: data.id, org_id }).catch(() => {});
+  // Async LLM rerank, in-process (was the crm-rescore-lead edge function).
+  scoring.rerankLeadAsync(org_id, data.id).catch(() => {});
 
   // Fire any automations subscribed to lead_created. Non-blocking — a
   // misconfigured automation can't 500 the create call.
@@ -684,7 +684,7 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
   const profileChanged = ['title','company','industry','country','source_id'].some(k =>
     asRow(payload)[k] !== undefined);
   if (profileChanged) {
-    triggerEdgeFunction('crm-rescore-lead', { lead_id: id, org_id }).catch(() => {});
+    scoring.rerankLeadAsync(org_id, id).catch(() => {});
   }
 
   return data as Lead;
@@ -717,9 +717,9 @@ export async function rescoreLead(org_id: string, id: string) {
     lead_id: id, org_id, score: result.score, grade: result.grade,
     model: result.breakdown.model || 'heuristic_v2', breakdown: result.breakdown,
   });
-  // Edge function still runs the async LLM rerank with profile-aware
-  // prompt; it'll update score + breakdown in place when it finishes.
-  triggerEdgeFunction('crm-rescore-lead', { lead_id: id, org_id }).catch(() => {});
+  // Async LLM rerank runs in-process (was the crm-rescore-lead edge
+  // function); it updates score + breakdown in place when it finishes.
+  scoring.rerankLeadAsync(org_id, id).catch(() => {});
   return { score: result.score, breakdown: result.breakdown, grade: result.grade };
 }
 

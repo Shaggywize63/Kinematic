@@ -4,7 +4,11 @@
 # build (tsc -> dist, then `node dist/server.js`).
 
 # ---- builder ----
-FROM node:20-slim AS builder
+# Node 22 (not 20): supabase-js constructs an internal RealtimeClient that throws
+# "Node.js 20 detected without native WebSocket support" on Node < 22. The app uses
+# only REST/Auth/Storage (no realtime subscriptions), so native WebSocket in Node 22
+# is a full fix — no self-hosted Realtime service required.
+FROM node:22-slim AS builder
 WORKDIR /app
 COPY package.json ./
 RUN npm install
@@ -13,7 +17,7 @@ COPY src ./src
 RUN npm run build
 
 # ---- runtime ----
-FROM node:20-slim AS runtime
+FROM node:22-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 RUN chown node:node /app

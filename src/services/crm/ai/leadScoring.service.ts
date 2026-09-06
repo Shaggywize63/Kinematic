@@ -493,6 +493,42 @@ export async function rerankWithLlmV2(
   }
 }
 
+/**
+ * Async single-lead LLM rerank — the in-process replacement for the
+ * `crm-rescore-lead` Supabase edge function (retired in the AWS migration).
+ * The backend used to fire that edge function fire-and-forget on lead
+ * create / profile-update / rescore; this does the identical work in-process
+ * via the canonical rerankWithLlmV2, so no Deno edge runtime is required.
+ *
+ * Mirrors the edge function 1:1: reload the lead, rerank from its STORED
+ * heuristic score/breakdown, and persist the new score + a crm_lead_scores
+ * history row — but ONLY when the rerank actually ran. rerankWithLlmV2 returns
+ * the *same* base breakdown object when it skips (no org Anthropic key, a
+ * DPDP-protected minor, or an LLM error), so reference-identity is an exact
+ * "did it run?" test regardless of any prior llm_* fields on the stored row.
+ * Best-effort: callers invoke it fire-and-forget and swallow failures.
+ */
+export async function rerankLeadAsync(org_id: string, lead_id: string): Promise<void> {
+  const { data: lead } = await supabaseAdmin
+    .from('crm_leads').select('*').eq('id', lead_id).eq('org_id', org_id).maybeSingle();
+  if (!lead) return;
+  const l = lead as Partial<Lead> & { score?: number; score_breakdown?: ScoreBreakdown; is_b2c?: boolean };
+  const base = {
+    score: l.score ?? 0,
+    breakdown: (l.score_breakdown ?? {}) as ScoreBreakdown,
+    engagement: { ...EMPTY_ENGAGEMENT },
+    profile: (l.is_b2c === true ? 'b2c' : 'b2b') as 'b2c' | 'b2b',
+  };
+  const result = await rerankWithLlmV2(org_id, l, base);
+  if (result.breakdown === base.breakdown) return; // skipped (no key / minor / error)
+  await supabaseAdmin.from('crm_leads').update({
+    score: result.score, score_breakdown: result.breakdown, score_updated_at: new Date().toISOString(),
+  }).eq('id', lead_id).eq('org_id', org_id);
+  await supabaseAdmin.from('crm_lead_scores').insert({
+    lead_id, org_id, score: result.score, model: 'heuristic_v1+llm_rerank_v1', breakdown: result.breakdown,
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Back-compat — kept so older callers don't break. New code should use
 // computeUnifiedScore + rerankWithLlmV2 directly.
