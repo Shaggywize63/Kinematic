@@ -73,6 +73,13 @@ const KNOWN_ORIGINS = new Set<string>([
 // a wildcard.
 const KNOWN_PATTERNS: RegExp[] = [
   /^https:\/\/kinematic-dashboard-[a-z0-9-]+-shaggywize63s-projects\.vercel\.app$/i,
+  // AWS Amplify hosting for the dashboard (migration target). Pinned to OUR
+  // app id `d2xwgojs475bh0` — that host prefix is unique to this AWS account,
+  // so nobody else can register a subdomain under it. `[a-z0-9-]+` covers the
+  // `main` branch domain plus any Amplify branch/preview domain of this app,
+  // mirroring the Vercel-preview pattern above. NOT a wildcard over all of
+  // amplifyapp.com (which would repeat the C1 subdomain-takeover finding).
+  /^https:\/\/[a-z0-9-]+\.d2xwgojs475bh0\.amplifyapp\.com$/i,
 ];
 
 const PARSED_EXTRA = (process.env.CORS_ORIGINS || '')
