@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
-import { receiveBatch, consumeStock, listBatches, expiryReport, BatchStatus } from '../../services/distribution/batchStock.service';
+import { receiveBatch, consumeStock, listBatches, expiryReport, expiryAlerts, BatchStatus } from '../../services/distribution/batchStock.service';
 
 // ── GET /distribution/batches?distributor_id=&sku_id=&status=&near_days= ──────
 export const list = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -30,6 +30,20 @@ export const expiry = asyncHandler(async (req: AuthRequest, res: Response) => {
     withinDays: req.query.within_days ? parseInt(req.query.within_days as string, 10) : undefined,
   });
   ok(res, rep);
+});
+
+// ── GET /distribution/batches/alerts?distributor_id=&within_days= ─────────────
+// Near-expiry + expired batches for proactive alerting, with roll-up counts.
+// (SCM Phase 2 — same near-expiry window rules as listBatches / expiry-report.)
+export const alerts = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, { near_expiry: [], expired: [], counts: { near_expiry: 0, expired: 0, total: 0 } });
+  const out = await expiryAlerts({
+    orgId: user.org_id,
+    distributorId: (req.query.distributor_id as string) || null,
+    withinDays: req.query.within_days ? parseInt(req.query.within_days as string, 10) : undefined,
+  });
+  ok(res, out);
 });
 
 // ── POST /distribution/receiving  — GRN (module distribution_receiving) ───────

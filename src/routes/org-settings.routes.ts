@@ -7,6 +7,8 @@ import {
   setCrmReminderThresholds,
   getUiFlags,
   setUserLimit,
+  getScmDispatchConsumeMode,
+  setScmDispatchConsumeMode,
 } from '../controllers/org-settings.controller';
 
 const router = Router();
@@ -36,6 +38,19 @@ router.patch('/crm-reminder-thresholds',
   requireAuth,
   requireRole(...ADMIN_ROLES),
   setCrmReminderThresholds,
+);
+
+// Supply-Chain dispatch/invoice consume mode (off | advisory | enforce).
+// Same admin gate as the other org-wide toggles — 'enforce' mutates stock.
+router.get('/scm-dispatch-consume-mode',
+  requireAuth,
+  requireRole(...ADMIN_ROLES),
+  getScmDispatchConsumeMode,
+);
+router.patch('/scm-dispatch-consume-mode',
+  requireAuth,
+  requireRole(...ADMIN_ROLES),
+  setScmDispatchConsumeMode,
 );
 
 // UI flags are readable by any authenticated user (drives layout rendering).

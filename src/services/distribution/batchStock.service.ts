@@ -110,6 +110,53 @@ export async function consumeStock(opts: {
   return { consumed, totalCost, balance };
 }
 
+export interface PreviewLayer {
+  batch_id: string; batch_no: string | null; qty: number; unit_cost: number | null; expiry_date: string | null;
+}
+
+/** READ-ONLY FEFO/FIFO preview (SCM Phase 2). Given a requested `qty`, works out
+ *  which open layers WOULD be drawn down — using the *exact* same ordering as
+ *  `consumeStock` (FEFO default: soonest expiry first with no-expiry layers last,
+ *  then earliest received; FIFO: earliest received only) — and what that draw
+ *  down would cost, WITHOUT performing any insert/update.
+ *
+ *  Unlike `consumeStock` it NEVER throws on short stock: it reports
+ *  `shortfall = max(0, qty - available)` instead (a DB query error still
+ *  throws, matching `consumeStock`). Used by the advisory dispatch/invoice hook
+ *  so a plan can be surfaced without ever touching stock. */
+export async function previewConsume(opts: {
+  orgId: string; distributorId: string; skuId: string; qty: number; strategy?: RotationStrategy;
+}): Promise<{ plan: PreviewLayer[]; totalCost: number; available: number; shortfall: number }> {
+  const strategy: RotationStrategy = opts.strategy ?? 'fefo';
+  const qty = Number(opts.qty) > 0 ? Number(opts.qty) : 0;
+
+  // Same open-layer selection + draw-down ordering as consumeStock — READ-ONLY.
+  let q = supabaseAdmin.from('distribution_stock_batches').select('*')
+    .eq('org_id', opts.orgId).eq('distributor_id', opts.distributorId).eq('sku_id', opts.skuId)
+    .gt('qty_remaining', 0);
+  q = strategy === 'fefo'
+    ? q.order('expiry_date', { ascending: true, nullsFirst: false }).order('received_at', { ascending: true })
+    : q.order('received_at', { ascending: true });
+  const { data, error } = await q;
+  if (error) throw new Error(error.message);
+  const layers = (data || []) as BatchRow[];
+
+  const available = layers.reduce((s, b) => s + Number(b.qty_remaining || 0), 0);
+
+  let remaining = qty;
+  let totalCost = 0;
+  const plan: PreviewLayer[] = [];
+  for (const b of layers) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, Number(b.qty_remaining));
+    if (take <= 0) continue;
+    totalCost += take * Number(b.unit_cost ?? 0);
+    plan.push({ batch_id: b.id, batch_no: b.batch_no, qty: take, unit_cost: b.unit_cost, expiry_date: b.expiry_date });
+    remaining -= take;
+  }
+  return { plan, totalCost, available, shortfall: Math.max(0, qty - available) };
+}
+
 export type BatchStatus = 'active' | 'near_expiry' | 'expired';
 
 /** List batches for a distributor (optionally one SKU), annotating each with a
@@ -157,5 +204,20 @@ export async function expiryReport(opts: { orgId: string; distributorId?: string
   return {
     near_expiry: all.filter((r) => r.status === 'near_expiry'),
     expired: all.filter((r) => r.status === 'expired'),
+  };
+}
+
+/** Near-expiry alert scan (SCM Phase 2) — `expiryReport` plus roll-up counts, so
+ *  a proactive alerting caller (an endpoint today; a scheduled scan later) can
+ *  cheaply see "how many need attention" without counting the arrays itself. */
+export async function expiryAlerts(opts: { orgId: string; distributorId?: string | null; withinDays?: number }) {
+  const rep = await expiryReport(opts);
+  return {
+    ...rep,
+    counts: {
+      near_expiry: rep.near_expiry.length,
+      expired: rep.expired.length,
+      total: rep.near_expiry.length + rep.expired.length,
+    },
   };
 }

@@ -8,6 +8,7 @@ import { idempotency } from '../../middleware/idempotency';
 export const batchesRouter = Router();
 batchesRouter.get('/', ctrl.list);
 batchesRouter.get('/expiry-report', ctrl.expiry);
+batchesRouter.get('/alerts', ctrl.alerts);
 batchesRouter.post('/consume', requireAdminOrAbove, idempotency, ctrl.consume);
 
 // Goods receiving (GRN) — creates a costed, dated batch layer.
