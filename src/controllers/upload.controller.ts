@@ -20,6 +20,14 @@ const BUCKET_MAP: Record<string, string> = {
   file: process.env.BUCKET_FORM_PHOTOS || 'form-responses',
   material: process.env.BUCKET_MATERIALS || 'kinematic-materials',
   avatar: process.env.BUCKET_AVATARS || 'kinematic-avatars',
+  // iOS (ParityViews) and Android (AppViewModel) post the profile-photo / DP
+  // upload with type 'profile_photo'. It was missing from BUCKET_MAP, so every
+  // DP update returned 400 "Invalid upload type", the app surfaced an upload
+  // error, and the avatar never saved. Alias it to the same PRIVATE avatars
+  // bucket the dashboard 'avatar' upload uses (already in SIGNABLE_BUCKETS), so
+  // display stays wired via /api/v1/media/sign. Same class of bug as the
+  // 'activity_form' gap noted above.
+  profile_photo: process.env.BUCKET_AVATARS || 'kinematic-avatars',
   planogram: process.env.BUCKET_PLANOGRAMS || 'form-responses',
   // Per-SKU reference pack shots for planogram shelf-recognition. Must live in
   // a PUBLIC bucket — see PUBLIC_TYPES below.

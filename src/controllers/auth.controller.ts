@@ -241,7 +241,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
   console.log(`[DEBUG] Fetching profile for user ID: ${session.user.id}`);
   const { data: userProfile, error: profileError } = await supabaseAdmin
     .from('users')
-    .select('id, org_id, client_id, name, email, role, is_active, is_read_only, must_change_password, org_role_id')
+    .select('id, org_id, client_id, name, email, role, is_active, is_read_only, must_change_password, org_role_id, organisations!org_id(name)')
     .eq('id', session.user.id)
     .single();
 
@@ -353,6 +353,10 @@ export const login = asyncHandler<Request>(async (req, res) => {
     session_id: issuedSessionId,
     user: {
       ...userProfile,
+      // Flat org name so clients (esp. iOS Profile) can show the organisation's
+      // NAME instead of falling back to the org_id UUID. `organisations` is the
+      // embedded join above; expose it as a simple string.
+      org_name: (userProfile as { organisations?: { name?: string } | null }).organisations?.name ?? null,
       permissions,
       assigned_city_names: assignedCityNames,
       enabled_modules: entitlements.enabled_modules,
@@ -576,6 +580,10 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     // set correctly server-side.
     org_role_name: orgRole?.name ?? null,
     org_role_data_scope: orgRole?.data_scope ?? null,
+    // Flat org name for clients (esp. iOS Profile) so they show the org's NAME
+    // rather than the org_id UUID. Sourced from the organisations!org_id join
+    // in the select above.
+    org_name: (data as { organisations?: { name?: string } | null })?.organisations?.name ?? null,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
     location_ping_interval_seconds: locationPingIntervalSeconds,
