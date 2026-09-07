@@ -15,7 +15,7 @@ import { audit } from '../../utils/audit';
  * draws from — and returns to — the same distributor balance.
  */
 
-const REASONS = ['receipt', 'sale', 'return', 'damage', 'adjustment', 'van_load', 'van_return'] as const;
+const REASONS = ['receipt', 'sale', 'return', 'damage', 'adjustment', 'van_load', 'van_return', 'grn', 'consume'] as const;
 export type StockReason = (typeof REASONS)[number];
 
 /**
@@ -25,7 +25,7 @@ export type StockReason = (typeof REASONS)[number];
 export async function applyStockDelta(opts: {
   orgId: string; clientId: string | null; distributorId: string; skuId: string;
   delta: number; reason: StockReason; refType?: string | null; refId?: string | null;
-  note?: string | null; createdBy?: string | null;
+  note?: string | null; createdBy?: string | null; batchId?: string | null;
 }): Promise<number> {
   const { orgId, clientId, distributorId, skuId, delta } = opts;
   const { data: row } = await supabaseAdmin.from('distribution_distributor_stock')
@@ -44,6 +44,7 @@ export async function applyStockDelta(opts: {
     org_id: orgId, client_id: clientId, distributor_id: distributorId, sku_id: skuId,
     delta, reason: opts.reason, ref_type: opts.refType ?? null, ref_id: opts.refId ?? null,
     balance_after: next, note: opts.note ?? null, created_by: opts.createdBy ?? null,
+    batch_id: opts.batchId ?? null,
   });
   return next;
 }

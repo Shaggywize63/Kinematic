@@ -97,6 +97,7 @@ import distLedgerRoutes        from './routes/distribution/ledger.routes';
 import distSchemesRoutes       from './routes/distribution/schemes.routes';
 import distPromotionsRoutes    from './routes/distribution/promotions.routes';
 import distStockRoutes         from './routes/distribution/stock.routes';
+import { batchesRouter as distBatchesRoutes, receivingRouter as distReceivingRoutes } from './routes/distribution/batches.routes';
 import distVanRoutes           from './routes/distribution/van.routes';
 import distDamageRoutes        from './routes/distribution/damage.routes';
 import distClaimsRoutes        from './routes/distribution/claims.routes';
@@ -622,6 +623,8 @@ app.use(`${V1}/distribution/ledger`,         requireAuth, requireModule('distrib
 app.use(`${V1}/distribution/schemes`,        requireAuth, requireModule('distribution_schemes'),      distSchemesRoutes);
 app.use(`${V1}/distribution/promotions`,     requireAuth, requireModule('distribution_promotions'),   distPromotionsRoutes);
 app.use(`${V1}/distribution/stock`,          requireAuth, requireModule('distribution_stock'),        distStockRoutes);
+app.use(`${V1}/distribution/receiving`,      requireAuth, requireModule('distribution_receiving'),    distReceivingRoutes);
+app.use(`${V1}/distribution/batches`,        requireAuth, requireModule('distribution_batches'),      distBatchesRoutes);
 app.use(`${V1}/distribution/van-loads`,      requireAuth, requireModule('distribution_van'),          distVanRoutes);
 app.use(`${V1}/distribution/damage`,         requireAuth, requireModule('distribution_damage'),       distDamageRoutes);
 app.use(`${V1}/distribution/claims`,         requireAuth, requireModule('distribution_claims'),       distClaimsRoutes);
