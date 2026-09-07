@@ -6,6 +6,7 @@ import { asyncHandler, ok, created, badRequest, notFound, conflict, isDemo } fro
 import { audit } from '../../utils/audit';
 import { generateIRN, EInvoicePayload } from '../../services/einvoice';
 import { getDemoInvoice } from '../../utils/demoDistribution';
+import { runDispatchConsumeHook, ScmConsumeHookResult } from '../../services/distribution/scmConsume.service';
 
 const issueSchema = z.object({
   order_id: z.string().uuid(),
@@ -212,8 +213,30 @@ export const issue = asyncHandler(async (req: AuthRequest, res: Response) => {
 
   await audit(req, 'invoice.issue', 'invoices', invoice.id, null, invoice);
 
+  // ── SCM Phase-2 consume hook — INTEGRATION POINT ────────────────────────────
+  // An invoice is where a sale is CONFIRMED (order → invoiced); Phase-1 recon
+  // found this path touches NO stock. When the org's `scm_dispatch_consume_mode`
+  // is 'advisory' we compute a FEFO/FIFO plan for every batch-tracked line
+  // WITHOUT mutating stock; 'enforce' commits it via consumeStock. Default 'off'
+  // makes the hook a COMPLETE no-op (returns null → the response below is
+  // byte-for-byte unchanged). Wrapped in try/catch (belt-and-suspenders on top of
+  // the hook's own guard) so a consume computation can NEVER fail invoice issue.
+  let scmConsume: ScmConsumeHookResult | null = null;
+  try {
+    scmConsume = await runDispatchConsumeHook({
+      orgId: user.org_id,
+      clientId: user.client_id ?? null,
+      distributorId: order.distributor_id,
+      lines: (order.order_items || []).map((it: any) => ({ sku_id: it.sku_id, qty: Number(it.qty) })),
+      reason: 'sale',
+      refType: 'invoice',
+      refId: invoice.id,
+      createdBy: user.id,
+    });
+  } catch { /* best-effort; the hook already guards itself */ }
+
   const { data: full } = await supabaseAdmin.from('invoices').select('*, invoice_items(*)').eq('id', invoice.id).single();
-  created(res, full, 'Invoice issued');
+  created(res, scmConsume ? { ...(full as any), scm_consume: scmConsume } : full, 'Invoice issued');
 });
 
 // ── Cancel invoice (admin only — credit-note ledger reversal) ───────────────

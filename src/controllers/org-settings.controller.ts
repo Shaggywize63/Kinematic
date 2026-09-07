@@ -2,6 +2,13 @@ import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, AppError, sendSuccess } from '../utils';
+import {
+  SCM_DISPATCH_CONSUME_MODES,
+  SCM_DISPATCH_CONSUME_DEFAULT,
+  SCM_DISPATCH_CONSUME_KEY,
+  parseScmDispatchConsumeMode,
+  ScmDispatchConsumeMode,
+} from '../services/distribution/scmConsume.service';
 
 /**
  * Admin-facing org settings controller.
@@ -278,5 +285,91 @@ export const setCrmReminderThresholds = asyncHandler<AuthRequest>(async (req, re
     thresholds: proposed,
     updated_at: now,
     note: 'New thresholds take effect on the next crm-send-reminders run (daily 09:30 IST).',
+  });
+});
+
+// ============================================================
+// Supply-Chain — dispatch/invoice consume mode (SCM Phase 2)
+// ============================================================
+// Governs the dispatch/invoice batch-consume hook. 'off' (default) keeps the
+// hook a no-op; 'advisory' computes a FEFO/FIFO plan WITHOUT mutating stock;
+// 'enforce' draws stock down for real. Semantics + resolver live in
+// services/distribution/scmConsume.service.ts.
+
+/**
+ * GET /api/v1/org-settings/scm-dispatch-consume-mode
+ *
+ * Returns the caller org's consume mode. Missing row → 'off'.
+ */
+export const getScmDispatchConsumeMode = asyncHandler<AuthRequest>(async (req, res) => {
+  const { org_id } = req.user!;
+  const { data, error } = await supabaseAdmin
+    .from('org_settings')
+    .select('value, updated_at')
+    .eq('org_id', org_id)
+    .eq('key', SCM_DISPATCH_CONSUME_KEY)
+    .maybeSingle();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  sendSuccess(res, {
+    scm_dispatch_consume_mode: parseScmDispatchConsumeMode((data as any)?.value),
+    updated_at: (data as any)?.updated_at ?? null,
+    allowed_values: SCM_DISPATCH_CONSUME_MODES,
+    default: SCM_DISPATCH_CONSUME_DEFAULT,
+  });
+});
+
+/**
+ * PATCH /api/v1/org-settings/scm-dispatch-consume-mode
+ *
+ * Body: { value: 'off' | 'advisory' | 'enforce' }
+ *
+ * SELECT-then-UPDATE-or-INSERT (mirrors setLocationPingInterval). 'enforce' is
+ * the ONLY value that lets the dispatch/invoice hook mutate stock, so it must be
+ * chosen here explicitly and deliberately by an admin.
+ */
+export const setScmDispatchConsumeMode = asyncHandler<AuthRequest>(async (req, res) => {
+  const { org_id, id: user_id } = req.user!;
+  const requested = String(req.body?.value ?? '').toLowerCase().trim();
+
+  if (!(SCM_DISPATCH_CONSUME_MODES as string[]).includes(requested)) {
+    throw new AppError(
+      400,
+      `Mode must be one of: ${SCM_DISPATCH_CONSUME_MODES.join(', ')}`,
+      'INVALID_VALUE',
+    );
+  }
+
+  const { data: existing, error: selErr } = await supabaseAdmin
+    .from('org_settings')
+    .select('id')
+    .eq('org_id', org_id)
+    .eq('key', SCM_DISPATCH_CONSUME_KEY)
+    .maybeSingle();
+  if (selErr) throw new AppError(500, selErr.message, 'DB_ERROR');
+
+  const now = new Date().toISOString();
+  if (existing?.id) {
+    const { error: updErr } = await supabaseAdmin
+      .from('org_settings')
+      .update({ value: requested, updated_by: user_id, updated_at: now })
+      .eq('id', existing.id);
+    if (updErr) throw new AppError(500, updErr.message, 'DB_ERROR');
+  } else {
+    const { error: insErr } = await supabaseAdmin
+      .from('org_settings')
+      .insert({ org_id, key: SCM_DISPATCH_CONSUME_KEY, value: requested, updated_by: user_id });
+    if (insErr) throw new AppError(500, insErr.message, 'DB_ERROR');
+  }
+
+  sendSuccess(res, {
+    scm_dispatch_consume_mode: requested as ScmDispatchConsumeMode,
+    updated_at: now,
+    note:
+      requested === 'enforce'
+        ? 'ENFORCE: dispatch/invoice will now DRAW DOWN batch stock for batch-tracked SKUs.'
+        : requested === 'advisory'
+          ? 'ADVISORY: dispatch/invoice will compute a FEFO/FIFO plan WITHOUT mutating stock.'
+          : 'OFF: the dispatch/invoice consume hook is a no-op.',
   });
 });
