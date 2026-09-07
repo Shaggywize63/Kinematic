@@ -1,13 +1,14 @@
 name: Deploy backend to AWS (Mumbai)
 
-# Builds the backend Docker image and pushes it to Amazon ECR in ap-south-1.
+# Builds the backend Docker image, pushes it to Amazon ECR in ap-south-1, then
+# rolls the ECS service so the new image goes live.
 # Auth is keyless via GitHub OIDC assuming the kinematic-github-deploy role —
 # there are NO long-lived AWS keys in GitHub secrets.
 #
-# The ECS deploy step is intentionally left commented out until the ECS
-# cluster + service + task definition exist (migration checklist Order 32).
-# Until then this workflow just publishes the image so the service can be
-# created from it.
+# The ECS task definition (kinematic-backend) pins the image tag to `:latest`,
+# which this workflow re-pushes on every run. Because the tag is stable, a
+# force-new-deployment is all that's needed to pull the freshly-built image —
+# no taskdef re-render required. Fargate re-pulls `:latest` on task launch.
 
 on:
   workflow_dispatch:
@@ -47,16 +48,31 @@ jobs:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           IMAGE="$REGISTRY/${ECR_REPOSITORY}"
-          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          # Always build + push the immutable per-commit tag so any branch
+          # push validates the image build. Only main moves the `:latest`
+          # tag the running task definition pins to — a feature-branch WIP
+          # push must never clobber what production pulls.
+          docker build -t "$IMAGE:${{ github.sha }}" .
           docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
           echo "Pushed $IMAGE:${{ github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+            echo "Pushed $IMAGE:latest"
+          fi
 
-      # --- Enable after migration checklist Order 32 (ECS cluster/service) ---
-      # - name: Deploy to ECS
-      #   uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-      #   with:
-      #     task-definition: taskdef.json      # rendered with the new image tag
-      #     service: kinematic-backend
-      #     cluster: kinematic
-      #     wait-for-service-stability: true
+      - name: Deploy to ECS (roll the service onto the new :latest image)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          aws ecs update-service \
+            --cluster kinematic \
+            --service kinematic-backend \
+            --force-new-deployment \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          echo "Waiting for the ECS service to reach a stable state…"
+          aws ecs wait services-stable \
+            --cluster kinematic \
+            --services kinematic-backend \
+            --region "$AWS_REGION"
+          echo "kinematic-backend deployment stable."
