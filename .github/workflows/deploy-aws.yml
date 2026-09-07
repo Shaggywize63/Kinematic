@@ -48,12 +48,21 @@ jobs:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           IMAGE="$REGISTRY/${ECR_REPOSITORY}"
-          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          # Always build + push the immutable per-commit tag so any branch
+          # push validates the image build. Only main moves the `:latest`
+          # tag the running task definition pins to — a feature-branch WIP
+          # push must never clobber what production pulls.
+          docker build -t "$IMAGE:${{ github.sha }}" .
           docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
           echo "Pushed $IMAGE:${{ github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+            echo "Pushed $IMAGE:latest"
+          fi
 
       - name: Deploy to ECS (roll the service onto the new :latest image)
+        if: github.ref == 'refs/heads/main'
         run: |
           aws ecs update-service \
             --cluster kinematic \
