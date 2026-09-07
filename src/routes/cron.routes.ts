@@ -18,6 +18,7 @@ import { rescoreLead } from '../services/crm/leads.service';
 import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
 import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { runDailyBriefings } from '../services/crm/ai/dailyBriefing.service';
+import { dispatchActivityReminders } from '../services/crm/activityReminders.service';
 import { runScheduledTasks, runProactiveNudges } from '../services/crm/ai/kiniScheduler.service';
 import { runRetentionPurge } from '../services/crm/retention.service';
 import {
@@ -194,12 +195,36 @@ router.post('/dispatch-report-digests', requireEdgeSecret, async (_req, res) => 
  * actionable today (once per rep per day, deduped via crm_daily_briefing_log).
  * Also runs as a once-a-morning in-process tick (see server.ts).
  */
-router.post('/dispatch-daily-briefings', requireEdgeSecret, async (_req, res) => {
+router.post('/dispatch-daily-briefings', requireEdgeSecret, async (req, res) => {
   try {
-    const result = await runDailyBriefings(100);
+    // Both tenants want a morning briefing, so drive with { all_projects: true }
+    // from the 9 AM IST schedule; a { project } body restricts it to one tenant.
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
+    const result = await runForRequestedProjects(body, () => runDailyBriefings(100));
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] dispatch-daily-briefings crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/dispatch-activity-reminders
+ *
+ * Generates per-user reminder notifications for scheduled CRM activities
+ * (call / meeting / task) that have just come due, then leaves delivery to the
+ * dispatch-pushes cron (which already fans unsent rows out to FCM/APNs and the
+ * in-app bells). Idempotent via crm_activities.reminded_at — each activity
+ * reminds exactly once. Schedule every few minutes. Body: { all_projects?,
+ * project? } — both tenants schedule it, so drive with { all_projects: true }.
+ */
+router.post('/dispatch-activity-reminders', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
+    const result = await runForRequestedProjects(body, () => dispatchActivityReminders({ limit: 200 }));
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] dispatch-activity-reminders crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });

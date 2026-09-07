@@ -164,7 +164,9 @@ export async function runDailyBriefings(limit = 100): Promise<{ checked: number;
         title: 'Your day, prioritized',
         body: briefing,
         type: 'daily_briefing',
-        data: { type: 'daily_briefing' },
+        // kind: 'crm_home' → a tap opens the lead-management Home (mission
+        // control) on web / iOS / Android; the type stays 'daily_briefing'.
+        data: { type: 'daily_briefing', kind: 'crm_home' },
       });
       sent++;
     } catch (err: any) {
