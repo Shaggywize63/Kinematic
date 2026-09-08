@@ -43,23 +43,37 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push image
+      - name: Set up QEMU (arm64 emulation for the cross-build)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image (multi-arch amd64+arm64)
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           IMAGE="$REGISTRY/${ECR_REPOSITORY}"
+          # Build a single manifest list carrying both linux/amd64 and
+          # linux/arm64 so the ECS task can run on Graviton/ARM64 (cheaper)
+          # while amd64 stays available in the same tag for instant rollback.
           # Always build + push the immutable per-commit tag so any branch
-          # push validates the image build. Only main moves the `:latest`
+          # push validates BOTH arch builds. Only main moves the `:latest`
           # tag the running task definition pins to — a feature-branch WIP
           # push must never clobber what production pulls.
-          docker build -t "$IMAGE:${{ github.sha }}" .
-          docker push "$IMAGE:${{ github.sha }}"
-          echo "Pushed $IMAGE:${{ github.sha }}"
+          # --provenance=false keeps the manifest list to the two platform
+          # images so Fargate image resolution stays unambiguous.
+          TAGS=(-t "$IMAGE:${{ github.sha }}")
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
-            docker push "$IMAGE:latest"
-            echo "Pushed $IMAGE:latest"
+            TAGS+=(-t "$IMAGE:latest")
           fi
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=false \
+            "${TAGS[@]}" \
+            --push .
+          echo "Pushed multi-arch $IMAGE:${{ github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then echo "Moved $IMAGE:latest"; fi
 
       - name: Deploy to ECS (roll the service onto the new :latest image)
         if: github.ref == 'refs/heads/main'
