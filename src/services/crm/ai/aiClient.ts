@@ -193,7 +193,8 @@ async function streamAnthropicTurn(params: {
     const detail = (body as { error?: { message?: string } })?.error?.message || '';
     console.warn(`[chatWithTools.stream] upstream ${res.status}: ${detail.slice(0, 300).replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]')}`);
     const opaque =
-      res.status === 401 ? 'AI authentication failed'
+      /usage limit/i.test(detail) ? 'KINI has reached its monthly AI usage limit. Access resets at the start of next month.'
+      : res.status === 401 ? 'AI authentication failed'
       : res.status === 429 ? 'AI service rate-limited — retry shortly'
       : res.status >= 500 ? 'AI service temporarily unavailable'
       : 'AI request failed';
@@ -318,7 +319,14 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
   // Per-org key override (Conversation Analysis + KINI billing isolation);
   // falls back to the shared functional key when the org has none configured.
   const apiKey = (await getOrgAnthropicKey(input.org_id)) || await AIService.getFunctionalKey();
-  const model = input.model || 'claude-sonnet-5';
+  // KINI chat model. Configurable via KINI_CHAT_MODEL; defaults to the cheapest
+  // capable tier (Haiku 4.5) to cut Anthropic spend. If the functional key is
+  // NOT provisioned for it, the per-turn 404 self-heal below swaps to a model
+  // the key can actually serve — so a missing Haiku grant degrades to sonnet
+  // rather than hard-erroring (which is what surfaced as the generic
+  // "I hit an error processing that — try again?").
+  let model = input.model || process.env.KINI_CHAT_MODEL || 'claude-haiku-4-5';
+  let modelHealed = false;
   const max_tokens = input.max_tokens ?? 1500;
   const max_turns = input.max_turns ?? 5;
 
@@ -337,14 +345,17 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
     usage.output += Number(u.output_tokens ?? 0) || 0;
   };
 
-  for (let turn = 0; turn < max_turns; turn++) {
-    let data: TurnData;
+  // One request/response turn against Anthropic using the CURRENT `model`.
+  // Streaming vs buffered is chosen by whether the caller wants token events;
+  // both funnel through here so the model self-heal below covers both paths.
+  const runTurn = async (): Promise<TurnData> => {
     if (input.onEvent) {
-      // Streaming path — same request, `stream: true`. Tokens are emitted as
-      // they arrive; the assembled TurnData below is identical to the buffered
-      // shape so the tool loop is shared and the returned reply is complete.
+      // Streaming path — `stream: true`. Tokens are emitted as they arrive; the
+      // assembled TurnData is identical to the buffered shape so the tool loop
+      // is shared and the returned reply is complete. On a non-2xx (e.g. a 404
+      // model-not-found) streamAnthropicTurn throws BEFORE any token is emitted.
       const onEvent = input.onEvent;
-      data = await streamAnthropicTurn({
+      return streamAnthropicTurn({
         apiKey,
         model,
         max_tokens,
@@ -353,32 +364,60 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
         messages,
         onToken: (text) => onEvent({ kind: 'token', text }),
       });
-    } else {
-      // Buffered path — UNCHANGED. Use the AIService deadline+opaque-error
-      // wrapper so a slow upstream can't pin a worker, and a 401 from Anthropic
-      // can't leak the key fragment back to the user.
-      const res = await AIService.anthropicFetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({ model, max_tokens, system: input.system, tools: input.tools, messages }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        // Log the upstream detail server-side, return an opaque code.
-        const detail = (body as { error?: { message?: string } })?.error?.message || '';
-        console.warn(`[chatWithTools] upstream ${res.status}: ${detail.slice(0, 300).replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]')}`);
-        const opaque =
-          res.status === 401 ? 'AI authentication failed'
-          : res.status === 429 ? 'AI service rate-limited — retry shortly'
-          : res.status >= 500 ? 'AI service temporarily unavailable'
-          : 'AI request failed';
-        throw new AppError(res.status, opaque, 'AI_ERROR');
+    }
+    // Buffered path — deadline+opaque-error wrapper so a slow upstream can't pin
+    // a worker, and a 401 from Anthropic can't leak the key fragment back.
+    const res = await AIService.anthropicFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({ model, max_tokens, system: input.system, tools: input.tools, messages }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      // Log the upstream detail server-side, return an opaque code.
+      const detail = (body as { error?: { message?: string } })?.error?.message || '';
+      console.warn(`[chatWithTools] upstream ${res.status}: ${detail.slice(0, 300).replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]')}`);
+      const opaque =
+        /usage limit/i.test(detail) ? 'KINI has reached its monthly AI usage limit. Access resets at the start of next month.'
+        : res.status === 401 ? 'AI authentication failed'
+        : res.status === 429 ? 'AI service rate-limited — retry shortly'
+        : res.status >= 500 ? 'AI service temporarily unavailable'
+        : 'AI request failed';
+      throw new AppError(res.status, opaque, 'AI_ERROR');
+    }
+    return await res.json() as TurnData;
+  };
+
+  for (let turn = 0; turn < max_turns; turn++) {
+    let data: TurnData;
+    try {
+      data = await runTurn();
+    } catch (e) {
+      // Self-heal a model-not-found. Unlike callKiniAI, chatWithTools had NO
+      // fallback, so a key not provisioned for `model` (e.g. the old hard-coded
+      // claude-sonnet-4-6, or a Haiku id the key lacks) hard-errored EVERY turn
+      // and surfaced to the user as "I hit an error processing that — try
+      // again?". Retry once with a model the key can actually serve (prefers
+      // sonnet, then whatever the key exposes). Fires only on a 404, so a
+      // working model is never affected.
+      const status = e instanceof AppError ? e.statusCode : undefined;
+      if (status === 404 && !modelHealed) {
+        modelHealed = true;
+        const alt = (await AIService.pickServableModel().catch(() => null)) || 'claude-sonnet-5';
+        if (alt && alt !== model) {
+          console.warn(`[chatWithTools] model "${model}" not servable by this key; retrying with "${alt}"`);
+          model = alt;
+          data = await runTurn();
+        } else {
+          throw e;
+        }
+      } else {
+        throw e;
       }
-      data = await res.json() as TurnData;
     }
     addUsage(data.usage);
 

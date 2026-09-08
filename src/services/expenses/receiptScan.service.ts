@@ -66,7 +66,7 @@ function cat(v: unknown): ReceiptCategory | null {
 
 export async function scanReceipt(imageBase64: string, mediaType: ReceiptMediaType = 'image/jpeg'): Promise<ReceiptFields> {
   const apiKey = await AIService.getFunctionalKey();
-  const model = process.env.RECEIPT_SCAN_MODEL || process.env.CARD_SCAN_MODEL || 'claude-sonnet-4-6';
+  const model = process.env.RECEIPT_SCAN_MODEL || process.env.CARD_SCAN_MODEL || 'claude-haiku-4-5';
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

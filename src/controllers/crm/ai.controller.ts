@@ -32,7 +32,7 @@ export const draftReply = asyncHandler(async (req: AuthRequest, res: Response) =
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-haiku-4-5',
       max_tokens: 800,
       system: 'You are a professional sales rep. Reply ONLY with JSON: {"subject":"string","body_text":"string","body_html":"string"}',
       messages: [{
@@ -60,7 +60,7 @@ export const nextBestAction = asyncHandler(async (req: AuthRequest, res: Respons
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-sonnet-5',
+      model: 'claude-haiku-4-5',
       max_tokens: 300,
       system: 'You are a sales coach. Reply ONLY with JSON: {"action":"string","priority":"high"|"medium"|"low","reason":"string","suggested_when":"string"}',
       messages: [{
@@ -88,7 +88,7 @@ export const winProbability = asyncHandler(async (req: AuthRequest, res: Respons
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-sonnet-5',
+      model: 'claude-haiku-4-5',
       max_tokens: 200,
       system: 'You are a sales analyst. Reply ONLY with JSON: {"probability":number,"reasoning":"string"}. probability is 0-100.',
       messages: [{
@@ -117,7 +117,7 @@ export const summarizeAccount = asyncHandler(async (req: AuthRequest, res: Respo
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-sonnet-5',
+      model: 'claude-haiku-4-5',
       max_tokens: 400,
       system: 'You are a CRM analyst. Reply ONLY with JSON: {"summary":"string","highlights":["string"]}',
       messages: [{
@@ -140,7 +140,7 @@ export const summarizeDeal = asyncHandler(async (req: AuthRequest, res: Response
 
   try {
     const aiText = await AIService.callKiniAI({
-      model: 'claude-sonnet-5',
+      model: 'claude-haiku-4-5',
       max_tokens: 300,
       system: 'Reply ONLY with JSON: {"summary":"string","highlights":["string"]}',
       messages: [{
@@ -190,7 +190,8 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
   try {
     const result = await chatWithTools({
       org_id,
-      model: 'claude-sonnet-4-6',
+      // Model is chosen inside chatWithTools (env KINI_CHAT_MODEL, default
+      // Haiku 4.5) with a 404 self-heal, so it is not pinned here.
       max_tokens: 1500,
       max_turns: 6,
       system: systemPrompt,
