@@ -22,7 +22,7 @@ import { getConversationPersona, getOrgAnthropicKey } from './orgAiContext';
 export interface Actor { id: string; org_id: string; client_id?: string | null; role?: string | null }
 
 const BUCKET = process.env.SUPABASE_CONVERSATION_BUCKET || 'conversation-audio';
-const MODEL = process.env.CONVERSATION_INTEL_MODEL || 'claude-sonnet-5';
+const MODEL = process.env.CONVERSATION_INTEL_MODEL || 'claude-haiku-4-5';
 const PLAYBACK_TTL = 60 * 60; // 1h signed URL for playback / Sarvam ingest
 
 const ADMIN_ROLES = ['admin', 'super_admin', 'main_admin', 'org_admin', 'sub_admin', 'client'];

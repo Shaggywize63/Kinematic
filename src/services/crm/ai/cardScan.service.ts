@@ -49,7 +49,7 @@ function str(v: unknown): string | null {
 
 export async function scanCard(imageBase64: string, mediaType: CardMediaType = 'image/jpeg'): Promise<CardFields> {
   const apiKey = await AIService.getFunctionalKey();
-  const model = process.env.CARD_SCAN_MODEL || 'claude-sonnet-4-6';
+  const model = process.env.CARD_SCAN_MODEL || 'claude-haiku-4-5';
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

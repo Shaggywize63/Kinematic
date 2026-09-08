@@ -113,7 +113,7 @@ export async function interpretSmartFilter(query: string): Promise<SmartFilterRe
       system: SYSTEM,
       messages: [{ role: 'user', content: q.slice(0, 500) }],
     });
-  const primaryModel = process.env.CRM_NBA_MODEL || PINNED_MODEL;
+  const primaryModel = process.env.CRM_NBA_MODEL || 'claude-haiku-4-5';
   let text: string;
   try {
     text = await runModel(primaryModel);

@@ -83,7 +83,7 @@ async function aiExtract(from: string, subject: string, text: string): Promise<E
     const raw = await aiComplete({
       // The prod functional key isn't provisioned for Claude Haiku 4.5 (it
       // 404s), but works for claude-sonnet-5 — so that's the fallback.
-      model: process.env.CRM_EMAIL_PARSE_MODEL || 'claude-sonnet-5',
+      model: process.env.CRM_EMAIL_PARSE_MODEL || 'claude-haiku-4-5',
       max_tokens: 400,
       system: EXTRACT_SYSTEM,
       messages: [{ role: 'user', content }],

@@ -190,7 +190,7 @@ export class AIService {
    */
   static async callKiniAI(payload: { system?: string; messages: any[]; model?: string; max_tokens?: number; apiKey?: string }) {
     const apiKey = payload.apiKey || await this.getFunctionalKey();
-    const requested = payload.model || 'claude-sonnet-5';
+    const requested = payload.model || 'claude-haiku-4-5';
 
     const doCall = (model: string) =>
       this.anthropicFetch('https://api.anthropic.com/v1/messages', {
@@ -250,7 +250,7 @@ export class AIService {
     resolvedModel: string | null;
     messagesTest: { ok: boolean; status: number; errorType: string | null; message: string | null };
   }> {
-    const requestedModel = model || process.env.CRM_NBA_MODEL || 'claude-sonnet-5';
+    const requestedModel = model || process.env.CRM_NBA_MODEL || 'claude-haiku-4-5';
     const redact = (s: string) => s.replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]').slice(0, 300);
 
     // Which credential path is in play (for "is the key even configured?").

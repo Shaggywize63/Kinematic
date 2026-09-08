@@ -39,7 +39,7 @@ const AI_FIELD_TYPE_SET = new Set<string>(AI_FIELD_TYPES);
 // Primary model for form design. Overridable so ops can downgrade without a
 // code change; falls back to the repo-wide default if the primary errors
 // (e.g. an org key without Opus access) so the feature degrades gracefully.
-const BUILDER_MODEL = process.env.KINI_FORM_BUILDER_MODEL || 'claude-opus-4-8';
+const BUILDER_MODEL = process.env.KINI_FORM_BUILDER_MODEL || 'claude-haiku-4-5';
 const FALLBACK_MODEL = 'claude-sonnet-5';
 
 const ENTITY_LABELS: Record<string, string> = {

@@ -242,7 +242,8 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
   try {
     const result = await chatWithTools({
       org_id,
-      model: 'claude-sonnet-4-6',
+      // Model is chosen inside chatWithTools (env KINI_CHAT_MODEL, default
+      // Haiku 4.5) with a 404 self-heal, so it is not pinned here.
       max_tokens: 1500,
       max_turns: 8,
       system: systemPrompt,
@@ -543,7 +544,8 @@ export const chatStream = asyncHandler(async (req: AuthRequest, res: Response) =
   try {
     const result = await chatWithTools({
       org_id,
-      model: 'claude-sonnet-4-6',
+      // Model is chosen inside chatWithTools (env KINI_CHAT_MODEL, default
+      // Haiku 4.5) with a 404 self-heal, so it is not pinned here.
       max_tokens: 1500,
       max_turns: 8,
       system: systemPrompt,
