@@ -696,7 +696,7 @@ export async function deleteLead(org_id: string, id: string) {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 }
 
-export async function rescoreLead(org_id: string, id: string) {
+export async function rescoreLead(org_id: string, id: string, opts: { skipLlmRerank?: boolean } = {}) {
   const lead = await getLead(org_id, id);
   // v2 path — pulls real engagement signals from crm_activities +
   // crm_lead_updates so a hot lead with recent WhatsApp / call traffic
@@ -717,9 +717,14 @@ export async function rescoreLead(org_id: string, id: string) {
     lead_id: id, org_id, score: result.score, grade: result.grade,
     model: result.breakdown.model || 'heuristic_v2', breakdown: result.breakdown,
   });
-  // Async LLM rerank runs in-process (was the crm-rescore-lead edge
-  // function); it updates score + breakdown in place when it finishes.
-  scoring.rerankLeadAsync(org_id, id).catch(() => {});
+  // Async LLM rerank — one Anthropic call per lead (was the crm-rescore-lead
+  // edge function, now in-process). SKIPPED on the daily bulk sweep
+  // (rescore-all-leads): that path only needs the cheap heuristic refresh, and
+  // firing the paid rerank for every non-terminal lead each morning was the
+  // 02:00 UTC / 7:30 AM IST spend spike on the shared Anthropic key. The rerank
+  // stays on for on-demand single-lead events (create / profile update /
+  // manual rescore), which call rescoreLead with no opts.
+  if (!opts.skipLlmRerank) scoring.rerankLeadAsync(org_id, id).catch(() => {});
   return { score: result.score, breakdown: result.breakdown, grade: result.grade };
 }
 
