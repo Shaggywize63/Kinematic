@@ -73,7 +73,7 @@ jobs:
             "${TAGS[@]}" \
             --push .
           echo "Pushed multi-arch $IMAGE:${{ github.sha }}"
-          [ "${{ github.ref }}" = "refs/heads/main" ] && echo "Moved $IMAGE:latest"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then echo "Moved $IMAGE:latest"; fi
 
       - name: Deploy to ECS (roll the service onto the new :latest image)
         if: github.ref == 'refs/heads/main'
