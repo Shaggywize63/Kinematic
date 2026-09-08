@@ -51,6 +51,7 @@ import * as summarizeSvc from '../services/crm/ai/summarize.service';
 import * as updateSuggestSvc from '../services/crm/ai/updateSuggest.service';
 import * as dailyBriefingSvc from '../services/crm/ai/dailyBriefing.service';
 import * as cardScanSvc from '../services/crm/ai/cardScan.service';
+import * as extractLeadSvc from '../services/crm/ai/extractLead.service';
 import * as smartFilterSvc from '../services/crm/ai/smartFilter.service';
 import * as convIntel from '../services/crm/ai/conversationIntel.service';
 import * as proposals from '../services/crm/proposals.service';
@@ -5206,6 +5207,19 @@ ai.post('/scan-card', wrap(async (req, res) => {
     media_type: z.enum(['image/jpeg', 'image/png', 'image/webp']).default('image/jpeg'),
   }), req.body);
   const out = await cardScanSvc.scanCard(body.image_base64, body.media_type);
+  res.json({ success: true, data: out });
+}));
+// Voice/text → lead fields. The apps capture a spoken description of a
+// prospect, transcribe it on-device, and POST the transcript; we return
+// structured lead fields to pre-fill Create Lead. Single-shot Haiku helper
+// (no KINI chat-quota spend); custom fields are extracted per the tenant's
+// active lead field defs. Auth is enforced by the parent /api/v1/crm mount.
+ai.post('/extract-lead', wrap(async (req, res) => {
+  const body = parse(z.object({
+    transcript: z.string().min(1).max(4000),
+    is_b2c: z.boolean().default(true),
+  }), req.body);
+  const out = await extractLeadSvc.extractLead(body.transcript, body.is_b2c, orgId(req), clientId(req));
   res.json({ success: true, data: out });
 }));
 ai.post('/draft-email-template', wrap(async (req, res) => {
