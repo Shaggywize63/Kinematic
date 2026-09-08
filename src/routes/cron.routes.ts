@@ -117,11 +117,14 @@ async function runRescoreAll(opts: { org_id?: string; batchSize: number; maxBatc
     if (error) { logger.error(`[cron] rescore-all query failed: ${error.message}`); break; }
     if (!rows || rows.length === 0) break;
 
-    // Sequential per batch — keeps Anthropic 429 risk low even though
-    // rescoreLead itself only fires the LLM rerank as fire-and-forget.
+    // Sequential per batch. The daily bulk sweep refreshes the cheap heuristic
+    // score for every lead but SKIPS the per-lead LLM rerank (skipLlmRerank):
+    // reranking the whole non-terminal lead set every morning was a needless
+    // Anthropic spend spike at 02:00 UTC / 7:30 AM IST. The paid rerank still
+    // runs for on-demand single-lead events.
     for (const row of rows) {
       try {
-        await rescoreLead(row.org_id, row.id);
+        await rescoreLead(row.org_id, row.id, { skipLlmRerank: true });
         processed += 1;
       } catch (e: any) {
         failed += 1;
