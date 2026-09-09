@@ -641,6 +641,10 @@ async function copyTable(table: string, transform?: (row: any) => void): Promise
     const row: any = { ...r };
     delete row.created_at; delete row.updated_at;
     row.id = nid; row.org_id = PASA_ORG_ID;
+    // Never carry SRS's client scope: client-scoped config (org_roles, products,
+    // custom fields, activity subjects, …) is filtered by the viewer's client_id,
+    // so a copied row stamped with SRS's id is invisible in PASA's Settings.
+    if (row.client_id === SRS_CLIENT_ID) row.client_id = PASA_CLIENT_ID;
     rows.push(row);
   }
   if (transform) for (const row of rows) transform(row);
@@ -670,6 +674,7 @@ async function copyDesignations(): Promise<Map<string, string>> {
     row.org_id = PASA_ORG_ID;
     row.parent_id = r.parent_id ? (idMap.get(r.parent_id) || null) : null;
     row.assigned_cities = capCities; // re-scope from SRS territory to PASA's
+    row.client_id = PASA_CLIENT_ID;  // client-scope to PASA (else hidden in Settings hierarchy)
     byName.set(r.name, row.id);
     return row;
   });
@@ -681,7 +686,7 @@ async function copyDesignations(): Promise<Map<string, string>> {
     const aso = (src as any[]).find(r => r.name === 'Area Sales Officer');
     const nid = randomUUID();
     const row: any = {
-      id: nid, org_id: PASA_ORG_ID, name: NEW_DESIGNATION,
+      id: nid, org_id: PASA_ORG_ID, client_id: PASA_CLIENT_ID, name: NEW_DESIGNATION,
       parent_id: aso ? idMap.get(aso.id) : null,
       data_scope: 'own', position: (aso?.position ?? 0) + 1, color: aso?.color ?? '#6366f1',
       permissions: aso?.permissions ?? [], permissions_write: aso?.permissions_write ?? [],
@@ -754,8 +759,8 @@ async function commit() {
   const pipeMap = await copyTable('crm_pipelines');
   await copyTable('crm_deal_stages', (row) => { if (row.pipeline_id && pipeMap.get(row.pipeline_id)) row.pipeline_id = pipeMap.get(row.pipeline_id); });
   await copyTable('crm_lead_sources');
-  await copyTable('crm_custom_field_defs', (row) => { if (row.client_id === SRS_CLIENT_ID) row.client_id = PASA_CLIENT_ID; });
-  await copyTable('crm_activity_subjects', (row) => { if (row.client_id === SRS_CLIENT_ID) row.client_id = PASA_CLIENT_ID; });
+  await copyTable('crm_custom_field_defs'); // client_id SRS→PASA handled universally in copyTable
+  await copyTable('crm_activity_subjects');
   // crm_settings (SRS had none → default blank row)
   const hasSettings = (await db.from('crm_settings').select('org_id').eq('org_id', PASA_ORG_ID).maybeSingle()).data;
   if (!hasSettings) { log('   · crm_settings: create default row'); if (!dry) await db.from('crm_settings').insert({ org_id: PASA_ORG_ID, business_type: 'both', config: {} }); }
