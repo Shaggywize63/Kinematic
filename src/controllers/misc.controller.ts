@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
+import { clientHasFlag } from '../lib/clientFlags';
 import { clearEmailProjectCache } from '../lib/projects';
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
 import { AuthRequest } from '../types';
@@ -1001,6 +1002,8 @@ export const resolveSOS = asyncHandler<AuthRequest>(async (req, res) => {
 // battery-drain complaints; their reps use one-shot lead-create geo
 // capture instead. New tenants can be added here without a schema
 // change; longer-term move this to clients.settings.disable_live_tracking.
+// Hardcoded fallback (Tata) OR the data-driven clients.settings flag
+// `disable_live_tracking` — new tenants (e.g. PASA) opt in via data.
 const LIVE_TRACKING_DISABLED_CLIENT_IDS = new Set<string>([
   'a1f67468-526e-4734-be3a-2cb132cc2804', // Tata Tiscon
 ]);
@@ -1014,7 +1017,7 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   // we don't persist the row. 204 (no content) so the client stops
   // retrying. App-side gating in iOS + Android stops the pings at the
   // source.
-  if (user.client_id && LIVE_TRACKING_DISABLED_CLIENT_IDS.has(user.client_id)) {
+  if (user.client_id && (LIVE_TRACKING_DISABLED_CLIENT_IDS.has(user.client_id) || await clientHasFlag(user.client_id, 'disable_live_tracking'))) {
     res.status(204).end();
     return;
   }

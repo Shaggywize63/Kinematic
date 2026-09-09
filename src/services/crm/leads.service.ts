@@ -2,6 +2,7 @@
  * Lead service: CRUD, dedup, scoring orchestration, conversion.
  */
 import { supabaseAdmin } from '../../lib/supabase';
+import { clientHasFlag } from '../../lib/clientFlags';
 import { AppError, sanitisePostgrestSearch } from '../../utils';
 import * as scoring from './ai/leadScoring.service';
 import * as dedup from './dedup.service';
@@ -960,11 +961,16 @@ export async function convertLead(org_id: string, id: string, opts: {
     // other tenant's convert behaviour changes.
     // BMW is the second steel-dealer tenant (TMT dealer, same product-basket
     // deal workflow as SRS/Tata), so it gets the identical amount derivation.
+    // Hardcoded fallback (SRS/BMW) OR the data-driven clients.settings flag
+    // `steel_dealer_deal_amount` — a new tenant (e.g. PASA) opts in via data,
+    // no code change; SRS/BMW stay byte-for-byte unchanged.
     const STEEL_DEALER_CLIENT_IDS = new Set([
       'a1f67468-526e-4734-be3a-2cb132cc2804', // SRS / Tata steel dealer
       '2ee5e03a-3a56-41c9-aaa0-16468920f871', // BMW (TMT dealer)
     ]);
-    if (leadClientId && STEEL_DEALER_CLIENT_IDS.has(leadClientId) && (amount == null || amount === 0)) {
+    const isSteelDealer = !!leadClientId
+      && (STEEL_DEALER_CLIENT_IDS.has(leadClientId) || await clientHasFlag(leadClientId, 'steel_dealer_deal_amount'));
+    if (isSteelDealer && (amount == null || amount === 0)) {
       const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const cf = (lead as { custom_fields?: Record<string, unknown> | null }).custom_fields ?? {};
       const rawLines = (cf as Record<string, unknown>).product_lines;
