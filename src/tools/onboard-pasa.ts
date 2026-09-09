@@ -796,26 +796,28 @@ async function commit() {
 
   // 8. Users.
   log(`8. users (${PASA_USERS.length})`);
-  let created = 0, skipped = 0, assigns = 0;
+  let created = 0, existing = 0, assigns = 0;
   for (const u of PASA_USERS) {
     const orgRole = desigId(u.designation);
     // scope: explicit districts, or (state-level BM) the whole state's districts.
     const scopeCities = u.stateLevel ? citiesForState(u.state) : u.cities;
     log(`   - ${u.name} · ${u.designation} · ${orgRole ? '' : '[NO DESIG] '}scope=[${scopeCities.join(', ') || (u.pendingLocation ? 'PENDING' : '—')}]`);
     if (dry) { created++; assigns += scopeCities.length; continue; }
-    // idempotency: already a PASA user with this email?
-    const dup = (await db.from('users').select('id').eq('org_id', PASA_ORG_ID).eq('email', u.email).maybeSingle()).data;
-    if (dup) { skipped++; continue; }
-    const uid = await ensureLogin(u.email, TEMP_PASSWORD, u.name);
+    // idempotent: reuse the login if this PASA user already exists, else create it.
+    const dup = (await db.from('users').select('id').eq('org_id', PASA_ORG_ID).eq('email', u.email).maybeSingle()).data as any;
+    let uid: string;
+    if (dup) { uid = dup.id; existing++; } else { uid = await ensureLogin(u.email, TEMP_PASSWORD, u.name); created++; }
     await ensureUserRow({
       id: uid, org_id: PASA_ORG_ID, client_id: PASA_CLIENT_ID, name: u.name, email: u.email,
       mobile: u.mobile, role: 'sub_admin', org_role_id: orgRole, city: u.cities[0] || null, is_active: true,
     });
-    const rows = scopeCities.map(c => ({ user_id: uid, city_id: cityId(c), org_id: PASA_ORG_ID })).filter(r => r.city_id);
+    // City scope (user_city_assignments = user_id + city_id; no org_id column).
+    // Replace so re-runs converge and a previously-failed user is repaired.
+    const rows = scopeCities.map(c => ({ user_id: uid, city_id: cityId(c) })).filter(r => r.city_id);
+    await db.from('user_city_assignments').delete().eq('user_id', uid);
     if (rows.length) { await insertChunked('user_city_assignments', rows); assigns += rows.length; }
-    created++;
   }
-  log(`   → users created=${created} skipped=${skipped} city_assignments=${assigns}`);
+  log(`   → users new=${created} existing=${existing} city_assignments=${assigns}`);
 
   // 9. Client modules (mirror SRS).
   log(`9. client_modules (${srsModules.length} from SRS)`);
