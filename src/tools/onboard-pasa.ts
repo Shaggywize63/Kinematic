@@ -744,6 +744,8 @@ async function commit() {
     const { error } = await db.from('clients').insert({
       id: PASA_CLIENT_ID, org_id: PASA_ORG_ID, owner_org_id: ownerOrg,
       name: PASA_ORG_NAME, contact_person: 'PASA Admin', email: ADMIN_EMAIL, is_active: true,
+      // Data-driven steel-dealer behaviours (match SRS) — no hardcoded client_id in code.
+      settings: { steel_dealer_deal_amount: true, disable_live_tracking: true },
     });
     if (error) throw new Error(`client: ${error.message}`);
   }
