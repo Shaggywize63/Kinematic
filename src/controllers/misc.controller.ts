@@ -1003,6 +1003,7 @@ export const resolveSOS = asyncHandler<AuthRequest>(async (req, res) => {
 // change; longer-term move this to clients.settings.disable_live_tracking.
 const LIVE_TRACKING_DISABLED_CLIENT_IDS = new Set<string>([
   'a1f67468-526e-4734-be3a-2cb132cc2804', // Tata Tiscon
+  '1fcda02a-8af6-4019-bef9-2a9dfacae4a3', // PASA (Tata Tiscon distributor house) — matches SRS
 ]);
 
 export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {

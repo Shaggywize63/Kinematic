@@ -963,6 +963,7 @@ export async function convertLead(org_id: string, id: string, opts: {
     const STEEL_DEALER_CLIENT_IDS = new Set([
       'a1f67468-526e-4734-be3a-2cb132cc2804', // SRS / Tata steel dealer
       '2ee5e03a-3a56-41c9-aaa0-16468920f871', // BMW (TMT dealer)
+      '1fcda02a-8af6-4019-bef9-2a9dfacae4a3', // PASA (Tata Tiscon distributor house)
     ]);
     if (leadClientId && STEEL_DEALER_CLIENT_IDS.has(leadClientId) && (amount == null || amount === 0)) {
       const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
