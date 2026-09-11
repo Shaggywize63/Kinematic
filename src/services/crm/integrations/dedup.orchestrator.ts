@@ -27,7 +27,80 @@
 import { supabaseAdmin } from '../../../lib/supabase';
 import { hashPhone, hashEmail, findByHashes } from '../dedup.service';
 import { createLead } from '../leads.service';
+import { sendEmail } from '../emails.service';
 import type { Lead } from '../../../types/crm.types';
+
+// Roles that stand in for the owner when a Google-Ads lead lands unassigned.
+const GOOGLE_ADS_FALLBACK_ADMIN_ROLES = ['admin', 'super_admin', 'sub_admin', 'city_manager', 'main_admin'];
+
+function leadName(lead: any): string {
+  const n = `${lead?.first_name ?? ''} ${lead?.last_name ?? ''}`.trim();
+  return n || lead?.company || lead?.email || lead?.phone || 'New lead';
+}
+
+/**
+ * A lead just landed from Google Ads. Notify the person who owns it — in-app
+ * AND by email — so paid leads get worked fast. Best-effort: never throws, so
+ * a notification hiccup can't fail the ingestion. Fires only for google_ads.
+ */
+async function notifyGoogleAdsLead(org_id: string, lead: any): Promise<void> {
+  try {
+    // Resolve recipients: the owner if assigned, else the org's admins.
+    let recipients: { id: string; name?: string | null; email?: string | null }[] = [];
+    if (lead?.owner_id) {
+      const { data: owner } = await supabaseAdmin
+        .from('users').select('id, name, email').eq('id', lead.owner_id).maybeSingle();
+      if (owner) recipients = [owner as any];
+    }
+    if (recipients.length === 0) {
+      const { data: admins } = await supabaseAdmin
+        .from('users').select('id, name, email, role')
+        .eq('org_id', org_id).eq('is_active', true).limit(50);
+      recipients = (admins ?? []).filter((u: any) =>
+        GOOGLE_ADS_FALLBACK_ADMIN_ROLES.includes((u.role ?? '').toLowerCase()),
+      ) as any;
+    }
+    if (recipients.length === 0) return;
+
+    const name = leadName(lead);
+    const campaign = (lead?.utm_campaign ? ` · campaign ${lead.utm_campaign}` : '');
+    const title = 'New Google Ads lead';
+    const body = `${name} came in from Google Ads${campaign}. Follow up while it's hot.`;
+
+    // In-app notification for every recipient.
+    await supabaseAdmin.from('notifications').insert(
+      recipients.map((r) => ({
+        org_id, user_id: r.id,
+        title, body,
+        type: 'general',
+        data: { kind: 'lead_from_google_ads', lead_id: lead.id, source: 'google_ads' },
+        is_read: false, sent_at: null,
+      })),
+    );
+
+    // Email the owner (or each admin fallback) — transactional internal alert.
+    const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#0A0E1A">
+      <p style="margin:0 0 12px"><strong>New Google Ads lead</strong></p>
+      <p style="margin:0 0 12px">${name} just came in from Google Ads${campaign}.</p>
+      <table style="border-collapse:collapse;font-size:13px">
+        ${lead?.phone ? `<tr><td style="padding:2px 12px 2px 0;color:#64748B">Phone</td><td>${lead.phone}</td></tr>` : ''}
+        ${lead?.email ? `<tr><td style="padding:2px 12px 2px 0;color:#64748B">Email</td><td>${lead.email}</td></tr>` : ''}
+        ${lead?.city ? `<tr><td style="padding:2px 12px 2px 0;color:#64748B">City</td><td>${lead.city}</td></tr>` : ''}
+        ${lead?.company ? `<tr><td style="padding:2px 12px 2px 0;color:#64748B">Company</td><td>${lead.company}</td></tr>` : ''}
+      </table>
+      <p style="margin:12px 0 0;color:#64748B">Follow up while it's hot.</p>
+    </div>`;
+    await Promise.all(recipients
+      .filter((r) => r.email)
+      .map((r) => sendEmail({
+        org_id, user_id: r.id, to: r.email!,
+        subject: `New Google Ads lead: ${name}`,
+        body_html: html,
+        lead_id: lead.id,
+      }).catch(() => {})),
+    );
+  } catch { /* best-effort — never break ingestion */ }
+}
 
 export interface NormalizedLead {
   first_name?: string | null;
@@ -215,6 +288,13 @@ export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOr
     external_id:    normalized.external_id ?? null,
     raw_payload_id: raw_event_id ?? null,
   });
+
+  // Paid Google Ads leads get an owner alert (in-app + email) so they're worked
+  // fast. Best-effort; carry the resolved owner + campaign onto the lead object
+  // for the message. Fires only for google_ads so other sources are unchanged.
+  if (normalized.utm_source === 'google_ads') {
+    await notifyGoogleAdsLead(org_id, { ...lead, utm_campaign: normalized.utm_campaign ?? (lead as any).utm_campaign });
+  }
 
   return { lead_id: lead.id, was_new: true };
 }
