@@ -1010,7 +1010,7 @@ const LIVE_TRACKING_DISABLED_CLIENT_IDS = new Set<string>([
 
 export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version,
-          is_mock, location_accuracy_m } = req.body;
+          is_mock, location_accuracy_m, location_precise } = req.body;
   const user = req.user!;
 
   // Defence-in-depth kill switch — even if a stale build keeps pinging,
@@ -1044,7 +1044,13 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
         device_model: device_model || undefined,
         device_brand: device_brand || undefined,
         os_version: os_version || undefined,
-        last_location_updated_at: now
+        last_location_updated_at: now,
+        // A real fix arrived, so location is on. The "off since" timestamp
+        // (location_status_updated_at) is set by the location-status endpoint
+        // on an off-transition and isn't shown while status is 'on', so we
+        // don't touch it here — keeping the heartbeat a single write.
+        location_status: 'on',
+        ...(location_precise !== undefined && { location_precise: !!location_precise })
       })
       .eq('id', user.id),
 
