@@ -414,6 +414,46 @@ export const getOutletFrequency = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /route-plans/outlet-frequency — set an outlet's visit cadence + priority
+ * (org-wide, one row per store). This is what feeds the route optimizer's
+ * priority weighting: outlets that are OVERDUE against their `frequency`, or set
+ * to priority='high', are sequenced first. Upsert-by-(org,store) done as a
+ * read-then-write so it doesn't depend on a DB unique constraint.
+ */
+export const upsertOutletFrequency = asyncHandler(async (req, res) => {
+  const org = orgId(req);
+  const b = req.body || {};
+  if (!isUUID(b.store_id)) return badRequest(res, 'store_id (uuid) required');
+  const FREQS = ['daily', 'weekly', 'fortnightly', 'biweekly', 'monthly', 'quarterly'];
+  const PRIOS = ['high', 'medium', 'low'];
+  if (b.frequency != null && !FREQS.includes(String(b.frequency).toLowerCase())) return badRequest(res, `frequency must be one of ${FREQS.join(', ')}`);
+  if (b.priority != null && !PRIOS.includes(String(b.priority).toLowerCase())) return badRequest(res, `priority must be one of ${PRIOS.join(', ')}`);
+
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (b.frequency != null) patch.frequency = String(b.frequency).toLowerCase();
+  if (b.priority != null) patch.priority = String(b.priority).toLowerCase();
+  if (b.preferred_day != null) patch.preferred_day = Number(b.preferred_day);
+  if (b.target_value != null) patch.target_value = Number(b.target_value);
+  if (b.is_active != null) patch.is_active = b.is_active !== false;
+
+  const { data: existing } = await supabase
+    .from('outlet_visit_frequency')
+    .select('id').eq('org_id', org).eq('store_id', b.store_id).maybeSingle();
+
+  if (existing?.id) {
+    const { data, error } = await supabase.from('outlet_visit_frequency').update(patch).eq('id', existing.id).select().single();
+    if (error) return badRequest(res, error.message);
+    return ok(res, data);
+  }
+  const { data, error } = await supabase
+    .from('outlet_visit_frequency')
+    .insert({ org_id: org, store_id: b.store_id, is_active: true, ...patch })
+    .select().single();
+  if (error) return badRequest(res, error.message);
+  return created(res, data);
+});
+
+/**
  * GET /route-plans/deviations — off-route visits for the org (module
  * route_deviation). A visit is off-route when the check-in landed further from
  * the planned outlet than its geofence (checkin_distance_m > geofence_radius_m).
