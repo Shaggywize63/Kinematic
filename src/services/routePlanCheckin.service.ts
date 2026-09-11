@@ -31,14 +31,14 @@ export async function mirrorCheckinToRoutePlan(params: {
     const lng = Number(params.lng);
     if (!userId || !storeId || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
-    // The rep's route plan for today (IST). One plan per rep per day; take the
-    // most recent if a tenant ever has more.
+    // The rep's route plan for today (IST). One plan per rep per day; limit(1)
+    // keeps maybeSingle() safe if a tenant ever has more (no ORDER BY, so we
+    // don't depend on a particular column existing on route_plans).
     const { data: plan } = await supabaseAdmin
       .from('route_plans')
       .select('id')
       .eq('user_id', userId)
       .eq('plan_date', dbToday())
-      .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
     if (!plan?.id) return;
