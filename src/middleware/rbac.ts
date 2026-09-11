@@ -35,6 +35,35 @@ export function requireModule(moduleName: string) {
   };
 }
 
+/**
+ * Lenient package-level gate that passes when the caller owns ANY of the
+ * named modules. Same coarse semantics as requireModule (entitlement SKU +
+ * legacy per-user permissions; super_admin/demo bypass) — NOT the stricter
+ * method-aware role-permission enforcement of requireAnyModuleAccess. Use it
+ * when one endpoint legitimately backs more than one feature: e.g. the
+ * live-locations feed powers both the Analytics dashboards (`analytics`) and
+ * the standalone Live Trailing page (`live_tracking`), and a client entitled
+ * to only one of those must still be able to load it.
+ */
+export function requireAnyModule(moduleNames: string[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) return unauthorized(res);
+    if (isDemo(req.user)) return next();
+
+    const { role, permissions, enabled_modules } = req.user;
+    if (role === 'super_admin') return next();
+
+    const entitlements = enabled_modules || [];
+    // Entitlement gate: the client must own at least one of the SKUs.
+    if (entitlements.length > 0 && !moduleNames.some((m) => entitlements.includes(m))) {
+      return forbidden(res, `None of the required modules are enabled for your account: ${moduleNames.join(', ')}`);
+    }
+    if (permissions && moduleNames.some((m) => permissions.includes(m))) return next();
+    if (moduleNames.some((m) => entitlements.includes(m))) return next();
+    return forbidden(res, `Access denied: You do not have permission to access ${moduleNames.join(' or ')}.`);
+  };
+}
+
 // Methods that only read data — everything else is treated as a write and
 // gated against the role's permissions_write set.
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
