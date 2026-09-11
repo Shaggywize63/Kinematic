@@ -413,6 +413,111 @@ export const getOutletFrequency = asyncHandler(async (req, res) => {
   return ok(res, data || []);
 });
 
+/**
+ * POST /route-plans/outlet-frequency — set an outlet's visit cadence + priority
+ * (org-wide, one row per store). This is what feeds the route optimizer's
+ * priority weighting: outlets that are OVERDUE against their `frequency`, or set
+ * to priority='high', are sequenced first. Upsert-by-(org,store) done as a
+ * read-then-write so it doesn't depend on a DB unique constraint.
+ */
+export const upsertOutletFrequency = asyncHandler(async (req, res) => {
+  const org = orgId(req);
+  const b = req.body || {};
+  if (!isUUID(b.store_id)) return badRequest(res, 'store_id (uuid) required');
+  const FREQS = ['daily', 'weekly', 'fortnightly', 'biweekly', 'monthly', 'quarterly'];
+  const PRIOS = ['high', 'medium', 'low'];
+  if (b.frequency != null && !FREQS.includes(String(b.frequency).toLowerCase())) return badRequest(res, `frequency must be one of ${FREQS.join(', ')}`);
+  if (b.priority != null && !PRIOS.includes(String(b.priority).toLowerCase())) return badRequest(res, `priority must be one of ${PRIOS.join(', ')}`);
+
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (b.frequency != null) patch.frequency = String(b.frequency).toLowerCase();
+  if (b.priority != null) patch.priority = String(b.priority).toLowerCase();
+  if (b.preferred_day != null) patch.preferred_day = Number(b.preferred_day);
+  if (b.target_value != null) patch.target_value = Number(b.target_value);
+  if (b.is_active != null) patch.is_active = b.is_active !== false;
+
+  const { data: existing } = await supabase
+    .from('outlet_visit_frequency')
+    .select('id').eq('org_id', org).eq('store_id', b.store_id).maybeSingle();
+
+  if (existing?.id) {
+    const { data, error } = await supabase.from('outlet_visit_frequency').update(patch).eq('id', existing.id).select().single();
+    if (error) return badRequest(res, error.message);
+    return ok(res, data);
+  }
+  const { data, error } = await supabase
+    .from('outlet_visit_frequency')
+    .insert({ org_id: org, store_id: b.store_id, is_active: true, ...patch })
+    .select().single();
+  if (error) return badRequest(res, error.message);
+  return created(res, data);
+});
+
+/**
+ * GET /route-plans/deviations — off-route visits for the org (module
+ * route_deviation). A visit is off-route when the check-in landed further from
+ * the planned outlet than its geofence (checkin_distance_m > geofence_radius_m).
+ * PostgREST can't compare two columns, so we fetch checked-in outlets and filter
+ * in JS. Optional ?date=YYYY-MM-DD narrows to one plan date. Powers the web
+ * "Route Deviations" view; mirrors the alert scan's definition exactly.
+ */
+export const getRouteDeviations = asyncHandler(async (req, res) => {
+  const org = orgId(req);
+  const date = req.query.date as string | undefined;
+  let q = supabase
+    .from('route_plan_outlets')
+    .select('id, visit_order, status, checkin_at, checkin_lat, checkin_lng, checkin_distance_m, geofence_radius_m, deviation_alerted_at, stores(name, lat, lng), route_plans!inner(user_id, org_id, plan_date, territory_label)')
+    .eq('route_plans.org_id', org)
+    .not('checkin_at', 'is', null)
+    .not('checkin_distance_m', 'is', null)
+    .order('checkin_at', { ascending: false })
+    .limit(500);
+  if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) q = q.eq('route_plans.plan_date', date);
+
+  const { data, error } = await q;
+  if (error) return badRequest(res, error.message);
+  const rows = (data || []) as any[];
+
+  // Batch-resolve rep names.
+  const repIds = Array.from(new Set(rows
+    .map((o) => (Array.isArray(o.route_plans) ? o.route_plans[0] : o.route_plans)?.user_id)
+    .filter(Boolean)));
+  const nameById = new Map<string, string>();
+  if (repIds.length) {
+    const { data: us } = await supabase.from('users').select('id, name').in('id', repIds);
+    (us || []).forEach((u: any) => nameById.set(u.id, u.name));
+  }
+
+  const deviations = rows
+    .map((o) => {
+      const rp = Array.isArray(o.route_plans) ? o.route_plans[0] : o.route_plans;
+      const store = Array.isArray(o.stores) ? o.stores[0] : o.stores;
+      const geofence = Number(o.geofence_radius_m) || 100;
+      const dist = Number(o.checkin_distance_m) || 0;
+      return { o, rp, store, geofence, dist };
+    })
+    .filter((x) => x.dist > x.geofence)
+    .map((x) => ({
+      outlet_id: x.o.id,
+      rep_id: x.rp?.user_id ?? null,
+      rep_name: nameById.get(x.rp?.user_id) || 'Rep',
+      plan_date: x.rp?.plan_date ?? null,
+      territory_label: x.rp?.territory_label ?? null,
+      store_name: x.store?.name ?? null,
+      store_lat: x.store?.lat ?? null,
+      store_lng: x.store?.lng ?? null,
+      checkin_at: x.o.checkin_at,
+      checkin_lat: x.o.checkin_lat,
+      checkin_lng: x.o.checkin_lng,
+      distance_m: Math.round(x.dist),
+      geofence_radius_m: x.geofence,
+      status: x.o.status,
+      alerted_at: x.o.deviation_alerted_at,
+    }));
+
+  return ok(res, deviations);
+});
+
 function demoEsgPayload() {
   const today = new Date();
   const days: { day: string; co2_kg: number }[] = [];

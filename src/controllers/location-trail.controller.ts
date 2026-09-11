@@ -23,7 +23,12 @@ const DEFAULT_TYPES = ['HEARTBEAT', 'CHECK_IN', 'CHECK_OUT', 'FORM_SUBMIT'];
 
 export const getUserLocationTrail = asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
   const targetUserId = req.params.id;
-  const date = (req.query.date as string | undefined) || new Date().toISOString().slice(0, 10);
+  // Field force is India-based (IST = UTC+05:30, no DST). Default "today" and the
+  // day window below are both computed in IST so a normal daytime shift isn't
+  // split across two UTC days (00:00–05:30 IST falls in the previous UTC day).
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const istToday = new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  const date = (req.query.date as string | undefined) || istToday;
   const typesParam = (req.query.types as string | undefined) ?? '';
   const types = typesParam.trim()
     ? typesParam.split(',').map((t) => t.trim().toUpperCase()).filter(Boolean)
@@ -34,8 +39,8 @@ export const getUserLocationTrail = asyncHandler<AuthRequest>(async (req: AuthRe
     throw new AppError(400, 'date must be YYYY-MM-DD', 'VALIDATION_ERROR');
   }
 
-  const start = `${date}T00:00:00.000Z`;
-  const end   = `${date}T23:59:59.999Z`;
+  const start = `${date}T00:00:00.000+05:30`;
+  const end   = `${date}T23:59:59.999+05:30`;
 
   const { data, error } = await supabaseAdmin
     .from('work_activity')

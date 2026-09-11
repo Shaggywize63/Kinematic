@@ -17,6 +17,8 @@ import {
   optimizeAndApplyMyPlan,
   suggestMyRoute,
   autoPlanForUser,
+  getRouteDeviations,
+  upsertOutletFrequency,
 } from '../controllers/route-plan.controller';
 
 const router = Router();
@@ -28,6 +30,12 @@ router.get('/summary',           requireSupervisorOrAbove, getRoutePlanSummary);
 router.get('/esg-summary',       requireSupervisorOrAbove, getEsgSummary);
 router.get('/imports',           requireSupervisorOrAbove, getImports);
 router.get('/outlet-frequency',  requireSupervisorOrAbove, getOutletFrequency);
+// Set an outlet's visit cadence + priority (feeds the optimizer's priority
+// weighting). Gated on route_optimization since that's the feature it drives.
+router.post('/outlet-frequency', requireSupervisorOrAbove, requireModule('route_optimization'), upsertOutletFrequency);
+// Off-route visits (checked in outside the planned outlet's geofence) — powers
+// the web Route Deviations view. Gated on the route_deviation module.
+router.get('/deviations',        requireSupervisorOrAbove, requireModule('route_deviation'), getRouteDeviations);
 router.post('/',                 requireSupervisorOrAbove, createRoutePlan);
 router.post('/optimize',         requireSupervisorOrAbove, optimizeRoutePlan);
 // Supervisor auto-plan: optimize a target FE's stored plan from their location.
