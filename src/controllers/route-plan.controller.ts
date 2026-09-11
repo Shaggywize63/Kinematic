@@ -6,6 +6,7 @@ import { isDemo, getMockRoutePlans, getMockMyRoutePlan } from '../utils/demoData
 import { resolveFactor, normalizeVehicleType, VEHICLE_TYPES, DEFAULT_VEHICLE_TYPE } from '../services/carbon.service';
 import { optimizeRoute, OutletPoint } from '../services/route-optimizer.service';
 import { buildRouteSuggestion, SuggestedOutlet } from '../services/route-suggestion.service';
+import { haversineDistance } from '../lib/haversine';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
@@ -390,6 +391,28 @@ export const updateOutletVisit = asyncHandler(async (req, res) => {
   const { outletId } = req.params;
   const { status, checkin_lat, checkin_lng, photo_url, visit_notes, checkin_at, checkout_at } = req.body;
   const updates: any = { status, checkin_lat, checkin_lng, photo_url, visit_notes, checkin_at, checkout_at };
+
+  // When the mobile app sends check-in coordinates, record how far the rep was
+  // from the planned outlet as checkin_distance_m. The route_deviation feature
+  // reads this column (dist > geofence_radius_m ⇒ off-route); without it every
+  // visit is invisible to the deviation scan/report, and it was never being
+  // computed on the check-in path. Best-effort: only when we have both the
+  // rep's coordinates and the outlet's stored location; a check-in without
+  // coordinates (e.g. a checkout-only PATCH) leaves any existing value alone.
+  const ciLat = Number(checkin_lat), ciLng = Number(checkin_lng);
+  if (checkin_lat != null && checkin_lng != null && Number.isFinite(ciLat) && Number.isFinite(ciLng)) {
+    const { data: row } = await supabase
+      .from('route_plan_outlets')
+      .select('stores(lat, lng)')
+      .eq('id', outletId)
+      .maybeSingle();
+    const store: any = Array.isArray((row as any)?.stores) ? (row as any)?.stores[0] : (row as any)?.stores;
+    const sLat = Number(store?.lat), sLng = Number(store?.lng);
+    if (Number.isFinite(sLat) && Number.isFinite(sLng)) {
+      updates.checkin_distance_m = Math.round(haversineDistance(ciLat, ciLng, sLat, sLng));
+    }
+  }
+
   const { data, error } = await supabase.from('route_plan_outlets').update(updates).eq('id', outletId).select().single();
   if (error) return badRequest(res, error.message);
   return ok(res, data);
