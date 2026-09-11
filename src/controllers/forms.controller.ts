@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
+import { clientHasFlag } from '../lib/clientFlags';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSearchRange, sendSuccess, buildPaginatedResult, isUUID, sanitisePostgrestSearch } from '../utils';
 import { getPagination } from '../utils/pagination';
@@ -121,7 +122,19 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     template_id, activity_id, outlet_id, outlet_name, latitude, longitude, 
     check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address, responses 
   } = req.body;
-  const durationMinutes = (check_in_at && check_out_at) 
+  // Optional geo-gate: tenants that require every submission to be geo-stamped
+  // set the client flag `require_location_for_forms`. Default OFF, so existing
+  // tenants keep submitting exactly as before. When ON and no fix is attached,
+  // reject with the same machine-readable code the apps use to prompt the rep
+  // to turn location on. (The mobile apps prompt for location before submit
+  // regardless; this is the server-side enforcement for the strict tenants.)
+  if ((user as { client_id?: string | null }).client_id
+      && (latitude == null || longitude == null)
+      && await clientHasFlag((user as { client_id?: string | null }).client_id!, 'require_location_for_forms')) {
+    return badRequest(res, 'Turn on location to submit this form.', { code: 'LOCATION_REQUIRED' });
+  }
+
+  const durationMinutes = (check_in_at && check_out_at)
     ? Math.round((new Date(check_out_at).getTime() - new Date(check_in_at).getTime()) / 60000)
     : null;
 

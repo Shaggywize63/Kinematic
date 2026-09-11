@@ -49,7 +49,10 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   // Enforce DD--MM--YYYY parsing
   const attendanceDate = parseAppDate(passedDate || today);
 
-  if (latitude == null || longitude == null) return badRequest(res, 'Latitude and longitude are required');
+  // Check-in is geo-stamped by design: a check-in with no fix can't be trusted
+  // or geofenced, so we reject it with a machine-readable code the apps use to
+  // prompt "Turn on location to check in" and deep-link to Settings.
+  if (latitude == null || longitude == null) return badRequest(res, 'Turn on location to check in.', { code: 'LOCATION_REQUIRED' });
 
   // Idempotency + zone fetch run in parallel — neither depends on the other.
   // Saves ~150-300ms vs. sequential awaits on a typical Supabase round-trip.

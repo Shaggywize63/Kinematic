@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth, requireRole } from '../middleware/auth';
 import * as misc from '../controllers/misc.controller';
 import { getUserLocationTrail } from '../controllers/location-trail.controller';
+import { updateLocationStatus } from '../controllers/location-status.controller';
 
 const router = Router();
 
@@ -9,6 +10,9 @@ router.get('/',      requireAuth, requireRole('supervisor','city_manager','sub_a
 router.get('/:id',   requireAuth, requireRole('supervisor','city_manager','sub_admin', 'admin','super_admin', 'main_admin', 'client'), misc.getUserById);
 router.post('/',     requireAuth, requireRole('sub_admin', 'admin','city_manager','super_admin','hr', 'main_admin', 'client'), misc.createUser);
 router.patch('/status', requireAuth, misc.updateUserStatus);
+// Device location permission / services state — the "no fix, here's why" report
+// so the dashboard can tell "location off" from "app closed". Any authed rep.
+router.patch('/location-status', requireAuth, updateLocationStatus);
 router.patch('/:id', requireAuth, requireRole('sub_admin', 'admin','city_manager','super_admin', 'main_admin', 'client'), misc.updateUser);
 
 // FE location trail — day's HEARTBEAT pings for the breadcrumb polyline on
