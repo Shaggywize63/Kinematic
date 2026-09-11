@@ -5,6 +5,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { isDemo, getMockRoutePlans, getMockMyRoutePlan } from '../utils/demoData';
 import { resolveFactor, normalizeVehicleType, VEHICLE_TYPES, DEFAULT_VEHICLE_TYPE } from '../services/carbon.service';
 import { optimizeRoute, OutletPoint } from '../services/route-optimizer.service';
+import { buildRouteSuggestion, SuggestedOutlet } from '../services/route-suggestion.service';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
@@ -298,51 +299,91 @@ export const optimizeRoutePlan = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Persist a plan's optimized order. Renumbers the given outlets AFTER the
+ * highest visit_order among the plan's OTHER outlets (the ones not in this set
+ * — e.g. already-visited stops in a "re-optimize the rest of my day" call), so
+ * remaining stops sequence after completed ones and never collide. Full-plan
+ * optimizations (every geocoded outlet included) simply renumber 1..n.
+ */
+async function persistPlanOrder(planId: string, ordered: SuggestedOutlet[], optimizedKm: number): Promise<void> {
+  if (!ordered.length) return;
+  const orderedIds = new Set(ordered.map((o) => o.outlet_id));
+  const { data: all } = await supabase.from('route_plan_outlets').select('id, visit_order').eq('route_plan_id', planId);
+  const keptMax = (all || [])
+    .filter((r: any) => !orderedIds.has(String(r.id)))
+    .reduce((m: number, r: any) => Math.max(m, Number(r.visit_order) || 0), 0);
+  await Promise.all(ordered.map((o, i) =>
+    supabase.from('route_plan_outlets').update({ visit_order: keptMax + i + 1 }).eq('id', o.outlet_id),
+  ));
+  await supabase.from('route_plans').update({ optimized: true, total_distance_km: optimizedKm }).eq('id', planId);
+}
+
+/**
+ * GET /route-plan/suggest/me — compute-only smart suggestion for the CALLER's
+ * day: optimal visit order from their current location (device GPS via
+ * ?start_lat/?start_lng, else their last known server fix), priority-weighted
+ * (overdue / high-priority outlets first), optionally dropping already-visited
+ * stops (?remaining_only, default true) and folding in nearby open leads
+ * (?nearby, default on). Does NOT persist — the app shows it as a suggestion
+ * the rep accepts (which then calls /optimize/apply).
+ */
+export const suggestMyRoute = asyncHandler(async (req, res) => {
+  const uid = userId(req);
+  const istDate = parseAppDate((req.query.date as string) || dbToday());
+  const remainingOnly = String(req.query.remaining_only ?? 'true') !== 'false';
+  const sLat = Number(req.query.start_lat);
+  const sLng = Number(req.query.start_lng);
+  const start = (req.query.start_lat != null && req.query.start_lng != null && !isNaN(sLat) && !isNaN(sLng))
+    ? { lat: sLat, lng: sLng } : undefined;
+  const suggestion = await buildRouteSuggestion({
+    orgId: orgId(req), planUserId: uid, date: istDate, start,
+    remainingOnly, includeNearbyLeads: String(req.query.nearby ?? 'true') !== 'false',
+  });
+  return ok(res, suggestion);
+});
+
+/**
  * POST /route-plan/optimize/apply — optimize the caller's OWN plan(s) for a date
- * and PERSIST the new visit order. Unlike /optimize (which just computes on the
- * outlets in the request body), this fetches the rep's stored plan, reorders
- * route_plan_outlets.visit_order by the nearest-neighbour + 2-opt result, and
- * stamps route_plans.optimized + total_distance_km. Gated by the
- * route_optimization module. Returns per-plan km saved.
+ * and PERSIST the new visit order. Starts from the rep's current location (body
+ * `start`, else their last known fix), priority-weighted, and stamps
+ * route_plans.optimized + total_distance_km. Gated by the route_optimization
+ * module. `remaining_only:true` re-optimizes only the not-yet-visited stops.
  */
 export const optimizeAndApplyMyPlan = asyncHandler(async (req, res) => {
   const uid = userId(req);
   const istDate = parseAppDate((req.body?.date as string) || dbToday());
-  const start = req.body?.start && typeof req.body.start.lat === 'number' && typeof req.body.start.lng === 'number'
-    ? { lat: Number(req.body.start.lat), lng: Number(req.body.start.lng) } : undefined;
+  const bodyStart = req.body?.start;
+  const start = bodyStart && typeof bodyStart.lat === 'number' && typeof bodyStart.lng === 'number'
+    ? { lat: Number(bodyStart.lat), lng: Number(bodyStart.lng) } : undefined;
+  const remainingOnly = req.body?.remaining_only === true;
 
-  const { data: plans, error } = await supabase
-    .from('route_plans')
-    .select('id, vehicle_type, route_plan_outlets(id, store_id, visit_order, stores(lat, lng))')
-    .eq('user_id', uid)
-    .eq('plan_date', istDate);
-  if (error) return badRequest(res, error.message);
-  if (!plans?.length) return badRequest(res, 'No route plan for this date');
+  const suggestion = await buildRouteSuggestion({
+    orgId: orgId(req), planUserId: uid, date: istDate, start, remainingOnly, includeNearbyLeads: false,
+  });
+  if (!suggestion.plans.length) return badRequest(res, 'No route plan for this date');
+  for (const p of suggestion.plans) await persistPlanOrder(p.plan_id, p.ordered, p.optimized_km);
+  return ok(res, { date: istDate, start_source: suggestion.start_source, plans: suggestion.plans, total_saved_km: suggestion.total_saved_km });
+});
 
-  const results: any[] = [];
-  for (const plan of plans as any[]) {
-    const outlets: OutletPoint[] = (plan.route_plan_outlets || [])
-      .map((o: any) => {
-        const s = Array.isArray(o.stores) ? o.stores[0] : o.stores;
-        return s && typeof s.lat === 'number' && typeof s.lng === 'number'
-          ? { id: String(o.id), lat: Number(s.lat), lng: Number(s.lng) } : null;
-      })
-      .filter(Boolean) as OutletPoint[];
-    if (outlets.length < 2) { results.push({ plan_id: plan.id, skipped: 'fewer than 2 geocoded outlets' }); continue; }
+/**
+ * POST /route-plans/auto-plan — supervisor auto-plans an FE's day: optimizes
+ * that rep's stored plan from their location, priority-weighted, and persists.
+ * Same-org guarded. Body: { user_id, date?, remaining_only? }.
+ */
+export const autoPlanForUser = asyncHandler(async (req, res) => {
+  const targetUserId = req.body?.user_id;
+  if (!isUUID(targetUserId)) return badRequest(res, 'user_id (uuid) required');
+  const istDate = parseAppDate((req.body?.date as string) || dbToday());
+  const { data: target } = await supabase.from('users').select('id, org_id').eq('id', targetUserId).maybeSingle();
+  if (!target || target.org_id !== orgId(req)) return notFound(res, 'User not found in your organisation');
+  const remainingOnly = req.body?.remaining_only === true;
 
-    const result = await optimizeRoute(orgId(req), plan.vehicle_type || DEFAULT_VEHICLE_TYPE, start, outlets);
-    // Persist the new visit_order (1-based, in optimized sequence).
-    await Promise.all(result.ordered.map((outletId, i) =>
-      supabase.from('route_plan_outlets').update({ visit_order: i + 1 }).eq('id', outletId),
-    ));
-    await supabase.from('route_plans')
-      .update({ optimized: true, total_distance_km: result.optimized_km })
-      .eq('id', plan.id);
-    results.push({ plan_id: plan.id, ...result });
-  }
-
-  const savedKm = round2(results.reduce((s, r) => s + (r.saved_km || 0), 0));
-  return ok(res, { date: istDate, plans: results, total_saved_km: savedKm });
+  const suggestion = await buildRouteSuggestion({
+    orgId: orgId(req), planUserId: targetUserId, date: istDate, remainingOnly, includeNearbyLeads: false,
+  });
+  if (!suggestion.plans.length) return badRequest(res, 'No route plan for this FE on this date');
+  for (const p of suggestion.plans) await persistPlanOrder(p.plan_id, p.ordered, p.optimized_km);
+  return ok(res, { user_id: targetUserId, date: istDate, start_source: suggestion.start_source, plans: suggestion.plans, total_saved_km: suggestion.total_saved_km });
 });
 
 export const updateOutletVisit = asyncHandler(async (req, res) => {
