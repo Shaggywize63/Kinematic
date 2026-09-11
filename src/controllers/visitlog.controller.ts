@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, isUUID, scopeOwnOrg } from '../utils';
 import { DEMO_ORG_ID, isDemo, getMockVisitLogs } from '../utils/demoData';
+import { mirrorCheckinToRoutePlan } from '../services/routePlanCheckin.service';
 
 const visitSchema = z.object({
   visitor_role: z.string().optional(),
@@ -84,6 +85,17 @@ export const logVisit = asyncHandler<AuthRequest>(async (req, res) => {
     .single();
 
   if (insertError) return badRequest(res, insertError.message);
+
+  // Mirror this check-in onto the rep's matching planned route outlet so the
+  // route_deviation feature has data — visit_logs alone never reaches the
+  // route_plan_outlets row the deviation scan/view read. Best-effort; never
+  // blocks or fails the visit.
+  await mirrorCheckinToRoutePlan({
+    userId: user.id,
+    storeId: body.data.visit_outlet_id,
+    lat: body.data.latitude,
+    lng: body.data.longitude,
+  });
 
   const { data: fullRecord } = await supabaseAdmin
     .from('visit_logs')
