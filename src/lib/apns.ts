@@ -51,16 +51,33 @@ let cachedJwt: string | null = null;
 let cachedAt = 0;
 const JWT_TTL_MS = 50 * 60 * 1000;
 
+/**
+ * Normalize whatever form the .p8 key was stored in into a PKCS#8 PEM string.
+ * Handles, in order:
+ *   1. A real PEM (already contains "BEGIN") — used as-is (escaped \n unescaped).
+ *   2. base64 of the full PEM (decodes to a string containing "BEGIN").
+ *   3. The BARE base64 key body with no armor/newlines — the form a .p8 lands
+ *      in when only the base64 between the BEGIN/END lines is pasted into a
+ *      one-line env var / secret. We re-wrap it in PKCS#8 PEM armor.
+ * Without (3), a bare body was base64-decoded to raw DER and handed to
+ * importPKCS8 as a garbage string → every iOS push failed at JWT signing.
+ */
+function toPem(raw: string): string {
+  const v = raw.trim().replace(/\\n/g, '\n');
+  if (v.includes('BEGIN')) return v;
+  try {
+    const decoded = Buffer.from(v, 'base64').toString('utf8');
+    if (decoded.includes('BEGIN')) return decoded;
+  } catch { /* not base64-of-PEM; fall through to armor the bare body */ }
+  const body = v.replace(/\s+/g, '').match(/.{1,64}/g)?.join('\n') ?? v;
+  return `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\n`;
+}
+
 async function providerToken(): Promise<string> {
   const now = Date.now();
   if (cachedJwt && now - cachedAt < JWT_TTL_MS) return cachedJwt;
 
-  // The .p8 is already PKCS#8 PEM ("-----BEGIN PRIVATE KEY-----"). Accept a
-  // base64-wrapped copy too so it can live on one env-var line.
-  const pem = KEY_P8.includes('BEGIN')
-    ? KEY_P8
-    : Buffer.from(KEY_P8, 'base64').toString('utf8');
-  const key = await importPKCS8(pem, 'ES256');
+  const key = await importPKCS8(toPem(KEY_P8), 'ES256');
 
   const jwt = await new SignJWT({})
     .setProtectedHeader({ alg: 'ES256', kid: KEY_ID })
