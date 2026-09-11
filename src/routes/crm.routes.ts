@@ -16,6 +16,7 @@ import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
 import { chunk } from '../lib/chunk';
+import { isSteelDealerClient } from '../lib/steelDealer';
 
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
@@ -1735,9 +1736,10 @@ const deals = express.Router();
 deals.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
   const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
-  const [{ rows, total, page, limit }, totals] = await Promise.all([
+  const [{ rows, total, page, limit }, totals, isSteel] = await Promise.all([
     dealsSvc.listDealsWithCount(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
     dealsSvc.dealsTotals(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
+    isSteelDealerClient(scope.id),
   ]);
   // Decorate with owner + linked-lead name/phone + dealer name so the
   // deals list (web + mobile) can render "Dealer: Ravi Kumar · Lead:
@@ -1747,7 +1749,11 @@ deals.get('/', wrap(async (req, res) => {
     success: true,
     data: stamped,
     // Value + volume summed across the whole filtered set (all pages).
-    totals: { value: totals.total_value, volume_kg: totals.total_volume_kg },
+    // Volume (kg/MT) is a steel-dealer concept (weight-priced deals — SRS/Tata,
+    // BMW, PASA); it is meaningless for other tenants like the parent Kinematic
+    // org, so we don't surface a total for them (the client sums to 0 → the
+    // "Total volume" tile stays hidden). Steel-dealer detection is list-or-flag.
+    totals: { value: totals.total_value, volume_kg: isSteel ? totals.total_volume_kg : 0 },
     pagination: {
       total, page, limit,
       totalPages: Math.max(1, Math.ceil(total / limit)),
