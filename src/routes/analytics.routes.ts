@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { requireModule } from '../middleware/rbac';
+import { requireModule, requireAnyModule } from '../middleware/rbac';
 import {
   getSummary, getActivityFeed, getHourly,
   getContactHeatmap, getWeeklyContacts,
@@ -38,7 +38,12 @@ router.get('/activity-feed',    cache(15), checkAnalytics, getActivityFeed);
 router.get('/hourly',           cache(60), checkAnalytics, getHourly);
 router.get('/contact-heatmap',  cache(60), checkAnalytics, getContactHeatmap);
 router.get('/weekly-contacts',  cache(60), checkAnalytics, getWeeklyContacts);
-router.get('/live-locations',   cache(15), checkAnalytics, getLiveLocations);
+// Live locations back the Live Trailing page (`live_tracking` module) as well
+// as the Analytics dashboards (`analytics`). The nav gates Live Trailing on
+// `live_tracking`, so a client entitled to Live Trailing but not the broader
+// Analytics SKU must still load this feed — gate on EITHER module, else the
+// page 403s with "Failed to load live locations: Unauthorized".
+router.get('/live-locations',   cache(15), requireAnyModule(['live_tracking', 'analytics']), getLiveLocations);
 router.get('/attendance-today', cache(15), checkAnalytics, getAttendanceToday);
 router.get('/outlet-coverage',  cache(60), checkAnalytics, getOutletCoverage);
 router.get('/city-performance', cache(60), checkAnalytics, getCityPerformance);
