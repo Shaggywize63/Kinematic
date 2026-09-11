@@ -475,7 +475,7 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   
   let execQuery = supabaseAdmin
     .from('users')
-    .select('id, name, employee_id, role, battery_percentage, device_model, device_brand, os_version, last_latitude, last_longitude, last_location_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
+    .select('id, name, employee_id, role, battery_percentage, device_model, device_brand, os_version, last_latitude, last_longitude, last_location_updated_at, location_status, location_precise, location_status_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id)
     .not('role', 'in', `(${restrictedRoles.join(',')})`);
   
@@ -558,6 +558,12 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
       total_hours: enrichWithHours(rec)?.total_hours || null,
       is_regularised: rec?.is_regularised || false,
       last_location_updated_at: fe.last_location_updated_at || null,
+      // Device location state so the map can tell "off" from "app closed" and
+      // render the last fix as a clearly-stale point. Null on tenants/builds
+      // that don't report it yet (treated as unknown by the dashboard).
+      location_status: fe.location_status ?? null,
+      location_precise: fe.location_precise ?? null,
+      location_status_updated_at: fe.location_status_updated_at || null,
       // GPS-integrity signals from the latest heartbeat (null when the app
       // build doesn't send them / no ping in 24h).
       is_mock: integrityByUser.get(fe.id)?.is_mock ?? null,
