@@ -6,6 +6,14 @@ import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSe
 import { getPagination } from '../utils/pagination';
 import { DEMO_ORG_ID, isDemo, getMockFormTemplates, getMockSubmissions, getMockSubmissionDetails } from '../utils/demoData';
 import { logger } from '../lib/logger';
+import { mirrorCheckinToRoutePlan } from '../services/routePlanCheckin.service';
+
+/** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
+function parseGps(s: unknown): { lat: number; lng: number } | null {
+  if (typeof s !== 'string') return null;
+  const [a, b] = s.split(',').map((p) => Number(p.trim()));
+  return Number.isFinite(a) && Number.isFinite(b) ? { lat: a, lng: b } : null;
+}
 
 export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
@@ -179,6 +187,19 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
 
   const { error: respErr } = await supabaseAdmin.from('form_responses').insert(respRows);
   if (respErr) return badRequest(res, respErr.message);
+
+  // Mirror this check-in onto the rep's matching planned route outlet so the
+  // route_deviation feature has data — a form submission lands in
+  // form_submissions, never in the route_plan_outlets row the deviation
+  // scan/view read. Coords come from latitude/longitude, else the mobile
+  // check_in_gps "lat,lng" string. Best-effort; never fails the submission.
+  const ci = (latitude != null && longitude != null)
+    ? { lat: Number(latitude), lng: Number(longitude) }
+    : (parseGps(check_in_gps) ?? parseGps(gps));
+  if (outlet_id && ci) {
+    await mirrorCheckinToRoutePlan({ userId: user.id, storeId: outlet_id, lat: ci.lat, lng: ci.lng });
+  }
+
   return created(res, sub, 'Submission successful');
 });
 
