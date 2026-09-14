@@ -58,7 +58,7 @@ channels the recipient has a token for, plus the bell.
 | 11 | **Activity reminder** — scheduled activity now due | `crm_task_overdue` (+ related) | Assignee / owner | scan — `dispatch-activity-reminders` |
 | 12 | Stagnant-lead / escalation / deal-closing / deal-overdue nudges | `crm_lead_stagnant`, `crm_lead_escalation`, `crm_deal_closing_soon`, `crm_deal_overdue` | Owner | cron reminders |
 | 13 | **Automation** "send notification" action | `automation` | Configured recipient | inline — automation engine **(fixed: was writing `metadata`, silently undelivered)** |
-| 14 | **Daily AI briefing** (KINI morning brief) | `crm_home` | Each rep w/ something actionable | scheduled — `dispatch-daily-briefings` |
+| 14 | **Daily home summary** @ 09:00 IST — new leads today, open/at-risk leads, activities due/overdue; a tap opens lead-management **Home** | `crm_home` | Every active rep with leads **or** activity | scheduled — daily-briefing tick / `dispatch-daily-briefings` |
 | 15 | **KINI scheduled reminder** (user-set from chat) | `nudge_kind:reminder` | The user | scheduled — `kini-scheduled` |
 | 16 | **KINI proactive**: cold deals / no check-in today | `nudge_kind:cold_deals`, `no_checkin` | Owner / rep | scheduled — `kini-proactive` |
 | 17 | **Team / DM message** | (messaging) | Thread members | inline — messaging service |
@@ -103,6 +103,7 @@ cron wiring:
 
    | Scheduler | Default cadence | Toggle | Interval / hour env |
    |-----------|-----------------|--------|---------------------|
+   | Daily home summary | daily @ 03:30 UTC (09:00 IST) | `CRM_DAILY_BRIEFING_ENABLED` | `CRM_DAILY_BRIEFING_HOUR_UTC` / `CRM_DAILY_BRIEFING_MINUTE_UTC` |
    | Activity reminders | every 5 min | `CRM_ACTIVITY_REMINDER_ENABLED` | `CRM_ACTIVITY_REMINDER_INTERVAL_SEC` |
    | Route-deviation scan | every 30 min | `FF_DEVIATION_SCAN_ENABLED` | `FF_DEVIATION_SCAN_INTERVAL_SEC` |
    | Missed-visit scan | daily @ 16:00 UTC (21:30 IST) | `ALERT_SCANS_ENABLED` | `MISSED_VISIT_SCAN_HOUR_UTC` |
