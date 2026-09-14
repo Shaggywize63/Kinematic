@@ -77,7 +77,7 @@ export async function runMissedVisitScan(
   // Every outlet on a past-dated plan in the window, with its plan + store.
   const { data, error } = await supabaseAdmin
     .from('route_plan_outlets')
-    .select('id, checkin_at, route_plan_id, stores(name), route_plans!inner(id, user_id, org_id, client_id, plan_date, territory_label)')
+    .select('id, checkin_at, route_plan_id, route_plans!inner(id, user_id, org_id, client_id, plan_date, territory_label)')
     .gte('route_plans.plan_date', sinceStr)
     .lt('route_plans.plan_date', todayStr)
     .limit(20000);
@@ -164,12 +164,16 @@ export async function runStockExpiryScan(
   // we filter per-SKU below using expiry_alert_days.
   const horizonStr = new Date(today.getTime() + 180 * DAY_MS).toISOString().slice(0, 10);
 
+  // NOTE: distribution_stock_batches has NO foreign key to skus, so a PostgREST
+  // `skus(...)` embed would error and silently no-op the whole scan. Fetch the
+  // batches flat, then resolve SKU names/thresholds in a second query (the same
+  // pattern replenishment.service uses) so this never depends on a FK.
   const { data, error } = await supabaseAdmin
     .from('distribution_stock_batches')
-    .select('id, org_id, client_id, distributor_id, sku_id, batch_no, expiry_date, qty_remaining, skus(name, sku_code, expiry_alert_days)')
+    .select('id, org_id, client_id, distributor_id, sku_id, batch_no, expiry_date, qty_remaining')
     .gt('qty_remaining', 0)
     .not('expiry_date', 'is', null)
-    .gte('expiry_date', todayStr)      // not already expired (handled as its own message below)
+    .gte('expiry_date', todayStr)      // not already expired
     .lte('expiry_date', horizonStr)
     .limit(20000);
   if (error) {
@@ -179,6 +183,17 @@ export async function runStockExpiryScan(
   const rows = (data as any[]) || [];
   if (!rows.length) return { batches: 0, alerted: 0 };
 
+  // Resolve SKU name / code / alert-window in one batched query.
+  const skuIds = Array.from(new Set(rows.map((b) => b.sku_id).filter(Boolean)));
+  const skuById = new Map<string, { name?: string; sku_code?: string; expiry_alert_days?: number }>();
+  if (skuIds.length) {
+    const { data: skus } = await supabaseAdmin
+      .from('skus')
+      .select('id, name, sku_code, expiry_alert_days')
+      .in('id', skuIds);
+    for (const s of (skus as any[]) || []) skuById.set(s.id, s);
+  }
+
   const alreadyAlerted = await recentlyNotifiedIds('stock_expiry', 'batch_id', dedupHours);
   // Cache manager lists + distributor names per org to avoid N round-trips.
   const managersByOrg = new Map<string, string[]>();
@@ -187,8 +202,8 @@ export async function runStockExpiryScan(
 
   for (const b of rows) {
     if (alreadyAlerted.has(String(b.id))) continue;
-    const sku = Array.isArray(b.skus) ? b.skus[0] : b.skus;
-    const alertDays = Number(sku?.expiry_alert_days) > 0 ? Number(sku.expiry_alert_days) : defaultAlertDays;
+    const sku = skuById.get(b.sku_id);
+    const alertDays = Number(sku?.expiry_alert_days) > 0 ? Number(sku!.expiry_alert_days) : defaultAlertDays;
     const daysLeft = Math.ceil((new Date(b.expiry_date).getTime() - today.getTime()) / DAY_MS);
     if (daysLeft > alertDays) continue;         // still outside this SKU's window
 
