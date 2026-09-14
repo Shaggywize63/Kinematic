@@ -9,6 +9,7 @@ import { processDueBroadcastsAllProjects } from './services/crm/broadcast.servic
 import { processDueEmailCampaignsAllProjects } from './services/crm/emailCampaign.service';
 import { runAutoReplenishmentAllProjects } from './services/distribution/replenishment.service';
 import { dispatchActivityReminders } from './services/crm/activityReminders.service';
+import { dispatchPendingPushes } from './services/notifications.service';
 import { runRouteDeviationScan } from './services/routeDeviation.service';
 import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './services/alertScans.service';
 import { knownProjectKeys, runWithProject } from './lib/projects';
@@ -160,6 +161,22 @@ async function forEachProject<T>(label: string, fn: () => Promise<T>): Promise<v
       logger.warn(`[${label}] project ${key} failed: ${e?.message ?? e}`);
     }
   }
+}
+
+// Push dispatch. Every-minute fan-out of unsent notifications rows → FCM/APNs,
+// ACROSS ALL tenant projects. This is the loop that actually delivers pushes;
+// the EventBridge → `dispatch-pushes` schedule only ever ran the DEFAULT (Tata)
+// project, so Kinematic notifications showed in the in-app bell but never
+// reached the phone. Idempotent on sent_at, so overlapping with the EventBridge
+// call at most processes a row once. Toggle with CRM_PUSH_DISPATCH_ENABLED=false;
+// tune with CRM_PUSH_DISPATCH_INTERVAL_SEC (default 60s).
+if (String(process.env.CRM_PUSH_DISPATCH_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(30, Number(process.env.CRM_PUSH_DISPATCH_INTERVAL_SEC ?? 60)) * 1000;
+  setInterval(() => {
+    forEachProject('push-dispatch', () => dispatchPendingPushes({ limit: 200 }))
+      .catch((e) => logger.warn(`[push-dispatch] tick failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[push-dispatch] scheduler enabled (every ${everyMs / 1000}s, all projects)`);
 }
 
 // Activity reminders. Frequent tick that turns scheduled CRM activities (call /

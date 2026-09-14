@@ -61,14 +61,20 @@ function requireEdgeSecret(req: Request, res: Response, next: NextFunction) {
 /**
  * POST /api/v1/cron/dispatch-pushes
  *
- * Fan-out for unsent rows in public.notifications. Pulls up to 200
- * rows per call; pg_cron schedules this every minute (see migration
- * crm_reminder_push_dispatch). Idempotent on sent_at, so concurrent
- * invocations cap at "same row twice" worst case — never spam.
+ * Fan-out for unsent rows in public.notifications → FCM/APNs. Scheduled every
+ * minute. Idempotent on sent_at, so concurrent invocations cap at "same row
+ * twice" worst case — never spam.
+ *
+ * MULTI-TENANT: notifications live in each project's own DB, so a bare call
+ * dispatches only the DEFAULT project (Tata in prod) — which is why Kinematic
+ * pushes silently never left the server (they showed only in the in-app bell).
+ * Drive both tenants with { all_projects: true } (or a single { project }).
+ * Body: { all_projects?, project? }.
  */
-router.post('/dispatch-pushes', requireEdgeSecret, async (_req, res) => {
+router.post('/dispatch-pushes', requireEdgeSecret, async (req, res) => {
   try {
-    const result = await dispatchPendingPushes({ limit: 200 });
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
+    const result = await runForRequestedProjects(body, () => dispatchPendingPushes({ limit: 200 }));
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] dispatch-pushes crashed: ${err?.message || err}`);

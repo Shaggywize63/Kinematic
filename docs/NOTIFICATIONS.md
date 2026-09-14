@@ -103,6 +103,7 @@ cron wiring:
 
    | Scheduler | Default cadence | Toggle | Interval / hour env |
    |-----------|-----------------|--------|---------------------|
+   | **Push dispatch** (delivers unsent rows → FCM/APNs, all tenants) | every 60 s | `CRM_PUSH_DISPATCH_ENABLED` | `CRM_PUSH_DISPATCH_INTERVAL_SEC` |
    | Daily home summary | daily @ 03:30 UTC (09:00 IST) | `CRM_DAILY_BRIEFING_ENABLED` | `CRM_DAILY_BRIEFING_HOUR_UTC` / `CRM_DAILY_BRIEFING_MINUTE_UTC` |
    | Activity reminders | every 5 min | `CRM_ACTIVITY_REMINDER_ENABLED` | `CRM_ACTIVITY_REMINDER_INTERVAL_SEC` |
    | Route-deviation scan | every 30 min | `FF_DEVIATION_SCAN_ENABLED` | `FF_DEVIATION_SCAN_INTERVAL_SEC` |
