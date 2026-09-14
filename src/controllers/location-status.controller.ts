@@ -23,6 +23,51 @@ import { supabaseAdmin } from '../lib/supabase';
 import { clientHasFlag } from '../lib/clientFlags';
 import { AuthRequest } from '../types';
 import { asyncHandler, AppError, sendSuccess } from '../utils';
+import { notifyUsers, resolveManagers } from '../services/notify';
+import { logger } from '../lib/logger';
+
+// The coarse statuses that mean "this rep can't be tracked right now" — a real
+// field-force problem a supervisor should hear about. 'on' and 'unknown' (not
+// yet asked) are NOT alerted.
+const PROBLEM_STATUSES = new Set(['denied', 'services_off', 'restricted']);
+
+const STATUS_LABEL: Record<string, string> = {
+  denied: 'turned location permission OFF',
+  services_off: 'turned Location Services OFF',
+  restricted: 'has location restricted on their device',
+};
+
+/**
+ * When a rep's location goes dark, tell their supervisor (and org managers as a
+ * fallback) — a live notification so a manager can follow up, instead of only a
+ * silent badge on the dashboard. Best-effort and fire-and-forget: it must never
+ * fail the status write. Deduped by the caller only firing on a real transition
+ * INTO a problem state (`changed === true`), so a rep who stays off doesn't
+ * re-alert on every heartbeat.
+ */
+async function notifyLocationOff(
+  orgId: string | null | undefined,
+  rep: { id: string; name?: string | null; supervisor_id?: string | null; client_id?: string | null },
+  status: string,
+): Promise<void> {
+  if (!orgId) return;
+  try {
+    const recipients = await resolveManagers(orgId, {
+      supervisorId: rep.supervisor_id ?? null,
+      clientId: rep.client_id ?? null,
+    });
+    const repName = rep.name || 'A field rep';
+    await notifyUsers(recipients, {
+      orgId,
+      kind: 'location_off',
+      title: 'Location tracking off',
+      body: `${repName} ${STATUS_LABEL[status] || 'is not sharing location'}.`,
+      data: { rep_id: rep.id, location_status: status },
+    }, { exclude: rep.id });
+  } catch (e: any) {
+    logger.warn(`[location-status] supervisor notify failed: ${e?.message || e}`);
+  }
+}
 
 // Client-reported permission, normalised across iOS + Android vocabularies.
 const bodySchema = z.object({
@@ -68,9 +113,11 @@ export const updateLocationStatus = asyncHandler<AuthRequest>(async (req: AuthRe
 
   // Read the current status so we only move location_status_updated_at on a
   // real transition — that timestamp is the "off since" the dashboard shows.
+  // Pull the rep's name/supervisor/org so we can alert managers on a transition
+  // without a second round-trip.
   const { data: current, error: readErr } = await supabaseAdmin
     .from('users')
-    .select('location_status')
+    .select('location_status, name, supervisor_id, org_id, client_id')
     .eq('id', user.id)
     .maybeSingle();
   if (readErr) throw new AppError(500, readErr.message, 'DB_ERROR');
@@ -83,6 +130,17 @@ export const updateLocationStatus = asyncHandler<AuthRequest>(async (req: AuthRe
 
   const { error } = await supabaseAdmin.from('users').update(update).eq('id', user.id);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  // On a real transition INTO a problem state, alert the rep's supervisor.
+  // Fire-and-forget so it never delays or fails the status write.
+  if (changed && PROBLEM_STATUSES.has(status)) {
+    notifyLocationOff(current?.org_id ?? user.org_id, {
+      id: user.id,
+      name: current?.name,
+      supervisor_id: current?.supervisor_id,
+      client_id: current?.client_id ?? user.client_id,
+    }, status).catch(() => {});
+  }
 
   sendSuccess(res, { location_status: status, changed }, 'Location status updated');
 });

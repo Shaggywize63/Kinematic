@@ -8,6 +8,10 @@ import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
 import { processDueBroadcastsAllProjects } from './services/crm/broadcast.service';
 import { processDueEmailCampaignsAllProjects } from './services/crm/emailCampaign.service';
 import { runAutoReplenishmentAllProjects } from './services/distribution/replenishment.service';
+import { dispatchActivityReminders } from './services/crm/activityReminders.service';
+import { runRouteDeviationScan } from './services/routeDeviation.service';
+import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './services/alertScans.service';
+import { knownProjectKeys, runWithProject } from './lib/projects';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -132,6 +136,80 @@ if (String(process.env.DIST_AUTO_REPLENISHMENT_ENABLED ?? 'true').toLowerCase() 
       .catch((e) => logger.warn(`[auto-replenishment] run failed: ${e?.message ?? e}`));
   }, 3600 * 1000).unref();
   logger.info(`[auto-replenishment] scheduler enabled (fires at ${hour}:00 UTC)`);
+}
+
+// Run a per-tenant job across every known Supabase project (Tata, Kinematic,
+// and any runtime client projects). Best-effort per project — one tenant's
+// failure never fails the others. Mirrors the cron endpoints' all_projects path
+// so the in-process tick and a manual pg_cron call behave identically.
+async function forEachProject<T>(label: string, fn: () => Promise<T>): Promise<void> {
+  for (const key of knownProjectKeys()) {
+    try {
+      await runWithProject(key, fn);
+    } catch (e: any) {
+      logger.warn(`[${label}] project ${key} failed: ${e?.message ?? e}`);
+    }
+  }
+}
+
+// Activity reminders. Frequent tick that turns scheduled CRM activities (call /
+// meeting / task) that have just come due into notification rows; delivery is
+// left to the dispatch-pushes cron. Idempotent via crm_activities.reminded_at,
+// so overlapping ticks never double-remind. Runs across all tenants. Toggle with
+// CRM_ACTIVITY_REMINDER_ENABLED=false; tune with CRM_ACTIVITY_REMINDER_INTERVAL_SEC
+// (default 300s).
+if (String(process.env.CRM_ACTIVITY_REMINDER_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(60, Number(process.env.CRM_ACTIVITY_REMINDER_INTERVAL_SEC ?? 300)) * 1000;
+  setInterval(() => {
+    forEachProject('activity-reminders', () => dispatchActivityReminders({ limit: 200 }))
+      .catch((e) => logger.warn(`[activity-reminders] tick failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[activity-reminders] scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Field-force route-deviation scan. Periodic tick that alerts supervisors about
+// off-route check-ins for clients granted the route_deviation module. Idempotent
+// (deviation_alerted_at dedup) and a no-op when no client carries the module.
+// Toggle with FF_DEVIATION_SCAN_ENABLED=false; tune with
+// FF_DEVIATION_SCAN_INTERVAL_SEC (default 1800s).
+if (String(process.env.FF_DEVIATION_SCAN_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(300, Number(process.env.FF_DEVIATION_SCAN_INTERVAL_SEC ?? 1800)) * 1000;
+  setInterval(() => {
+    forEachProject('route-deviation', () => runRouteDeviationScan({ lookbackHours: 24 }))
+      .catch((e) => logger.warn(`[route-deviation] tick failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[route-deviation] scan scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Daily Field-Force + Supply-Chain alert scans. One hourly tick fires each scan
+// once a day at its configured UTC hour (all idempotent + self-gating, so a
+// missed or doubled hour never double-notifies):
+//   - missed-visit  → end of the IST working day (default 16:00 UTC ≈ 21:30 IST)
+//   - stock-expiry  → morning (default 04:00 UTC ≈ 09:30 IST)
+//   - low-stock     → morning (default 04:00 UTC ≈ 09:30 IST)
+// Toggle the whole block with ALERT_SCANS_ENABLED=false; set each hour with
+// MISSED_VISIT_SCAN_HOUR_UTC / STOCK_EXPIRY_SCAN_HOUR_UTC / LOW_STOCK_SCAN_HOUR_UTC.
+if (String(process.env.ALERT_SCANS_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const hourOf = (v: unknown, dflt: number) => Math.min(23, Math.max(0, Number(v ?? dflt)));
+  const missedHour = hourOf(process.env.MISSED_VISIT_SCAN_HOUR_UTC, 16);
+  const expiryHour = hourOf(process.env.STOCK_EXPIRY_SCAN_HOUR_UTC, 4);
+  const lowStockHour = hourOf(process.env.LOW_STOCK_SCAN_HOUR_UTC, 4);
+  setInterval(() => {
+    const h = new Date().getUTCHours();
+    if (h === missedHour) {
+      forEachProject('missed-visit', () => runMissedVisitScan({ lookbackDays: 1 }))
+        .catch((e) => logger.warn(`[missed-visit] tick failed: ${e?.message ?? e}`));
+    }
+    if (h === expiryHour) {
+      forEachProject('stock-expiry', () => runStockExpiryScan({ defaultAlertDays: 30 }))
+        .catch((e) => logger.warn(`[stock-expiry] tick failed: ${e?.message ?? e}`));
+    }
+    if (h === lowStockHour) {
+      forEachProject('low-stock', () => runLowStockScan())
+        .catch((e) => logger.warn(`[low-stock] tick failed: ${e?.message ?? e}`));
+    }
+  }, 3600 * 1000).unref();
+  logger.info(`[alert-scans] daily scanners enabled (missed-visit@${missedHour}:00, stock-expiry@${expiryHour}:00, low-stock@${lowStockHour}:00 UTC)`);
 }
 
 // Graceful shutdown

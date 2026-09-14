@@ -6,6 +6,7 @@ import { AppError, sanitisePostgrestSearch } from '../../utils';
 import { validateAndStampCustomFields } from './customFields.service';
 import type { Deal } from '../../types/crm.types';
 import * as automations from './automations.service';
+import { notify } from '../notify';
 
 export async function listDeals(
   org_id: string,
@@ -239,6 +240,13 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     org_id, user_id, entity: 'deal', entity_id: data.id,
     data: { deal: data, client_id: (data as { client_id?: string | null }).client_id ?? null },
   }).catch(() => {});
+  // Notify the deal owner when it was assigned to someone other than the creator.
+  if (data.owner_id && data.owner_id !== user_id) {
+    notify({ orgId: org_id, userId: data.owner_id, kind: 'deal_assigned',
+      title: 'New deal assigned to you',
+      body: `${data.name} was assigned to you.`,
+      data: { deal_id: data.id } });
+  }
   return data as Deal;
 }
 
@@ -326,6 +334,27 @@ export async function updateDeal(org_id: string, id: string, payload: Partial<De
       from_amount: before.amount, to_amount: data.amount,
       changed_by: user_id ?? null, time_in_previous_stage_seconds: tip,
     });
+  }
+
+  // Notify the deal owner on a stage move / win / loss so follow-up isn't
+  // missed. winDeal()/loseDeal() route through here, so this covers all three.
+  if (before.stage_id !== data.stage_id && data.owner_id) {
+    try {
+      const { data: st } = await supabaseAdmin.from('crm_deal_stages')
+        .select('name, stage_type').eq('id', data.stage_id).maybeSingle();
+      const stype = String((st as { stage_type?: string } | null)?.stage_type ?? '').toLowerCase();
+      const sname = (st as { name?: string } | null)?.name ?? 'a new stage';
+      if (stype === 'won') {
+        notify({ orgId: org_id, userId: data.owner_id, kind: 'deal_won',
+          title: 'Deal won', body: `${data.name} was marked won.`, data: { deal_id: id } });
+      } else if (stype === 'lost') {
+        notify({ orgId: org_id, userId: data.owner_id, kind: 'deal_lost',
+          title: 'Deal lost', body: `${data.name} was marked lost.`, data: { deal_id: id } });
+      } else if (data.owner_id !== user_id) {
+        notify({ orgId: org_id, userId: data.owner_id, kind: 'deal_stage_changed',
+          title: 'Deal stage updated', body: `${data.name} moved to ${sname}.`, data: { deal_id: id } });
+      }
+    } catch { /* best-effort */ }
   }
 
   // Closed-quantity edits — record one history entry per PATCH so the
