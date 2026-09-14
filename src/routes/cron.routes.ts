@@ -204,7 +204,7 @@ router.post('/dispatch-daily-briefings', requireEdgeSecret, async (req, res) => 
     // Both tenants want a morning briefing, so drive with { all_projects: true }
     // from the 9 AM IST schedule; a { project } body restricts it to one tenant.
     const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
-    const result = await runForRequestedProjects(body, () => runDailyBriefings(100));
+    const result = await runForRequestedProjects(body, () => runDailyBriefings(500));
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] dispatch-daily-briefings crashed: ${err?.message || err}`);

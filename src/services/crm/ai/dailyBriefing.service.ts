@@ -22,6 +22,7 @@ export interface RepContext {
   overdue: number;
   overdue_subjects: string[];
   open_leads: number;
+  new_today: number;
   at_risk: Array<{ name: string; score: number; days_idle: number }>;
 }
 
@@ -57,6 +58,7 @@ export async function gatherRepContext(org_id: string, user_id: string, client_i
   if (client_id) lq = lq.eq('client_id', client_id);
   const leads = ((await lq.limit(500)).data ?? []) as Array<any>;
   const nowMs = Date.now();
+  const new_today = leads.filter((l) => (l.created_at ?? '') >= start).length;
   const at_risk = leads
     .filter((l) => Number(l.score ?? 0) >= 60)
     .map((l) => ({
@@ -74,6 +76,7 @@ export async function gatherRepContext(org_id: string, user_id: string, client_i
     overdue: overdueActs.length,
     overdue_subjects: overdueActs.slice(0, 5).map((a) => a.subject || 'Untitled').filter(Boolean),
     open_leads: leads.length,
+    new_today,
     at_risk,
   };
 }
@@ -82,19 +85,21 @@ const SYSTEM = [
   'You are KINI, a CRM copilot writing a sales rep\'s short morning briefing.',
   'You are given a JSON snapshot of the rep\'s day. Write 2-3 short sentences (≤ 45 words total),',
   'specific and motivating, telling the rep what to focus on FIRST. Lead with the single highest-',
-  'priority action. Use the concrete numbers, and name the top at-risk lead if there is one.',
+  'priority action. Use the concrete numbers — new leads today (new_today), open leads, activities',
+  'due today and overdue — and name the top at-risk lead if there is one.',
   'Start with at most "Good morning." — no longer greeting. Plain text only: no markdown, no lists.',
 ].join('\n');
 
 function templateBriefing(ctx: RepContext): string {
   const parts: string[] = [];
+  if (ctx.new_today) parts.push(`${ctx.new_today} new lead${ctx.new_today === 1 ? '' : 's'} today`);
   if (ctx.today) parts.push(`${ctx.today} activit${ctx.today === 1 ? 'y' : 'ies'} due today`);
   if (ctx.overdue) parts.push(`${ctx.overdue} overdue`);
   if (ctx.at_risk.length) parts.push(`${ctx.at_risk.length} hot lead${ctx.at_risk.length === 1 ? '' : 's'} going cold`);
-  if (!parts.length) return `Good morning. You're all caught up — ${ctx.open_leads} open leads. Pick one to push forward today.`;
+  if (!parts.length) return `Good morning. You're all caught up — ${ctx.open_leads} open lead${ctx.open_leads === 1 ? '' : 's'}. Pick one to push forward today.`;
   const top = ctx.at_risk[0];
   const focus = top ? ` Start with ${top.name} (score ${top.score}, idle ${top.days_idle}d).` : '';
-  return `Good morning. ${parts.join(', ')}.${focus}`;
+  return `Good morning. ${ctx.open_leads} open lead${ctx.open_leads === 1 ? '' : 's'} — ${parts.join(', ')}.${focus}`;
 }
 
 export async function generateBriefing(org_id: string, user_id: string, client_id: string | null): Promise<{ briefing: string; context: RepContext }> {
@@ -116,32 +121,52 @@ export async function generateBriefing(org_id: string, user_id: string, client_i
 }
 
 /**
- * Cron / in-process entry — for every rep with something actionable by end of
- * today, claim a once-per-day slot and push a briefing. Capped per run.
+ * Cron / in-process entry — send every active CRM rep their morning home
+ * summary (a tap opens lead-management Home), claiming a once-per-day slot per
+ * rep. The audience is anyone with leads OR activity to summarise:
+ *   - people with a pending activity due by end of today, AND
+ *   - owners of at least one open lead
+ * so a rep working only leads (no dated activity) still gets their lead summary.
+ * Capped per run.
  */
-export async function runDailyBriefings(limit = 100): Promise<{ checked: number; sent: number }> {
+export async function runDailyBriefings(limit = 500): Promise<{ checked: number; sent: number }> {
   const { end } = dayBounds();
   const briefingDate = new Date().toISOString().slice(0, 10);
 
-  // Candidate reps = people with a pending activity due by end of today.
+  const ids = new Set<string>();
+
+  // 1) People with a pending activity due by end of today.
   const { data: actRows } = await supabaseAdmin
     .from('crm_activities')
     .select('assigned_to, owner_id')
     .is('completed_at', null)
     .not('due_at', 'is', null)
     .lte('due_at', end)
-    .limit(5000);
-  const ids = new Set<string>();
+    .limit(10000);
   for (const r of (actRows ?? []) as Array<{ assigned_to: string | null; owner_id: string | null }>) {
     if (r.assigned_to) ids.add(r.assigned_to);
     if (r.owner_id) ids.add(r.owner_id);
   }
+
+  // 2) Owners of open leads — so a lead-only rep still gets their daily summary.
+  const { data: leadRows } = await supabaseAdmin
+    .from('crm_leads')
+    .select('owner_id')
+    .not('owner_id', 'is', null)
+    .not('status', 'in', '(won,lost,converted,disqualified,unqualified)')
+    .limit(20000);
+  for (const r of (leadRows ?? []) as Array<{ owner_id: string | null }>) {
+    if (r.owner_id) ids.add(r.owner_id);
+  }
+
   const candidates = Array.from(ids).filter((id) => UUID_RE.test(id)).slice(0, limit);
   if (!candidates.length) return { checked: 0, sent: 0 };
 
+  // Only brief ACTIVE users (skip deactivated reps who'd otherwise get pushes).
   const { data: users } = await supabaseAdmin
     .from('users')
     .select('id, org_id, client_id')
+    .eq('is_active', true)
     .in('id', candidates);
   const userMap = new Map((users ?? []).map((u: any) => [u.id, u]));
 

@@ -73,20 +73,30 @@ if (String(process.env.CRM_REPORT_DIGEST_SCHEDULER_ENABLED ?? 'true').toLowerCas
   logger.info(`[report-digests] scheduler enabled (every ${everyMs / 1000}s)`);
 }
 
-// Daily AI briefing. Hourly tick that only fires at the configured UTC hour
-// (default 03:00 UTC ≈ 08:30 IST); the crm_daily_briefing_log dedup makes a
-// rep's briefing once-per-day regardless of how many ticks hit that hour or
-// how many instances run. Toggle with CRM_DAILY_BRIEFING_ENABLED=false; set the
-// send hour with CRM_DAILY_BRIEFING_HOUR_UTC (0-23, default 3).
+// Daily home-summary briefing. Each rep's 9:00 AM (IST) "here's your leads +
+// activity" push, whose tap opens lead-management Home (data.kind='crm_home').
+// Fires at a configurable UTC hour:MINUTE — default 03:30 UTC = 09:00 IST. An
+// hourly tick can't hit a :30 target, so we tick every 15 min and fire once in
+// the window at/after the target (consecutive 15-min ticks land exactly one
+// inside any 15-min window); the crm_daily_briefing_log dedup makes each rep's
+// briefing once-per-day regardless of ticks, restarts, or multiple instances.
+// Fans out across ALL tenant projects (Kinematic + Tata). Toggle with
+// CRM_DAILY_BRIEFING_ENABLED=false; set the time with CRM_DAILY_BRIEFING_HOUR_UTC
+// (0-23, default 3) and CRM_DAILY_BRIEFING_MINUTE_UTC (0-59, default 30).
 if (String(process.env.CRM_DAILY_BRIEFING_ENABLED ?? 'true').toLowerCase() !== 'false') {
-  const briefingHour = Math.min(23, Math.max(0, Number(process.env.CRM_DAILY_BRIEFING_HOUR_UTC ?? 3)));
+  const targetH = Math.min(23, Math.max(0, Number(process.env.CRM_DAILY_BRIEFING_HOUR_UTC ?? 3)));
+  const targetM = Math.min(59, Math.max(0, Number(process.env.CRM_DAILY_BRIEFING_MINUTE_UTC ?? 30)));
+  const TICK_MIN = 15;
+  const hhmm = `${String(targetH).padStart(2, '0')}:${String(targetM).padStart(2, '0')}`;
   setInterval(() => {
-    if (new Date().getUTCHours() !== briefingHour) return;
-    runDailyBriefings(100)
-      .then((r) => { if (r.sent) logger.info(`[daily-briefing] pushed ${r.sent}/${r.checked} briefings`); })
+    const now = new Date();
+    const cur = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const target = targetH * 60 + targetM;
+    if (cur < target || cur >= target + TICK_MIN) return;  // only the window at/after the target
+    forEachProject('daily-briefing', () => runDailyBriefings(500))
       .catch((e) => logger.warn(`[daily-briefing] run failed: ${e?.message ?? e}`));
-  }, 3600 * 1000).unref();
-  logger.info(`[daily-briefing] scheduler enabled (fires at ${briefingHour}:00 UTC)`);
+  }, TICK_MIN * 60 * 1000).unref();
+  logger.info(`[daily-briefing] scheduler enabled (fires ~${hhmm} UTC ≈ 09:00 IST, all projects)`);
 }
 
 // WhatsApp broadcast pacing. Short in-process tick that advances every in-flight
