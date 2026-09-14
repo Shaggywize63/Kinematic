@@ -35,6 +35,7 @@ import {
 } from '../services/crm/portedCronJobs.service';
 import { runCarryForward } from '../services/leave.service';
 import { runRouteDeviationScan } from '../services/routeDeviation.service';
+import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from '../services/alertScans.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -496,6 +497,68 @@ router.post('/route-deviation-scan', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: { project, ...result } });
   } catch (err: any) {
     logger.error(`[cron] route-deviation-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/missed-visit-scan
+ *
+ * Field Force: alerts reps + their supervisors about planned outlets that were
+ * never checked into on a past-dated route plan. Idempotent (deduped per plan
+ * via the notifications ledger). Self-gating — a tenant with no route plans is a
+ * no-op. Run once after end-of-day. Body: { lookback_days?, all_projects?,
+ * project? } — both tenants schedule it, so drive with { all_projects: true }.
+ */
+router.post('/missed-visit-scan', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { lookback_days?: number; all_projects?: boolean; project?: string };
+    const lookbackDays = Number.isFinite(body.lookback_days) ? Number(body.lookback_days) : 1;
+    const out = await runForRequestedProjects(body, () => runMissedVisitScan({ lookbackDays }));
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] missed-visit-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/stock-expiry-scan
+ *
+ * Supply Chain: alerts managers about open distributor batches nearing expiry
+ * (within the SKU's expiry_alert_days, else the default). Idempotent (deduped
+ * per batch, weekly cadence). Self-gating — no batches is a no-op. Run daily.
+ * Body: { default_alert_days?, all_projects?, project? } — drive both tenants
+ * with { all_projects: true }.
+ */
+router.post('/stock-expiry-scan', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { default_alert_days?: number; all_projects?: boolean; project?: string };
+    const defaultAlertDays = Number.isFinite(body.default_alert_days) ? Number(body.default_alert_days) : 30;
+    const out = await runForRequestedProjects(body, () => runStockExpiryScan({ defaultAlertDays }));
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] stock-expiry-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/low-stock-scan
+ *
+ * Supply Chain: per-org digest of SKUs running low against projected demand
+ * (reuses the replenishment velocity engine). One notification per org per run
+ * (deduped daily) to managers. Self-gating — an org with no sell-out history is
+ * a no-op. Run daily. Body: { all_projects?, project? } — drive both tenants
+ * with { all_projects: true }.
+ */
+router.post('/low-stock-scan', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
+    const out = await runForRequestedProjects(body, () => runLowStockScan());
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] low-stock-scan crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });

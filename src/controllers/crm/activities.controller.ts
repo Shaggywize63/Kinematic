@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound } from '../../utils';
 import * as automations from '../../services/crm/automations.service';
+import { notify } from '../../services/notify';
 
 // ── Activities (call, email, meeting, task, note, sms, whatsapp) ──
 
@@ -94,6 +95,14 @@ export const createActivity = asyncHandler(async (req: AuthRequest, res: Respons
       .eq('id', payload.lead_id).eq('org_id', org_id);
   }
   await fireActivityTrigger(org_id, userId, 'activity_created', data);
+  // Assigned to a teammate → tell them (the due-time reminder is separate).
+  if (data.assigned_to && data.assigned_to !== userId) {
+    const due = data.due_at ? ` (due ${new Date(data.due_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })})` : '';
+    notify({ orgId: org_id, userId: data.assigned_to, kind: 'activity_assigned',
+      title: `New ${data.type || 'task'} assigned`,
+      body: `${data.subject}${due}`,
+      data: { activity_id: data.id, lead_id: data.lead_id, deal_id: data.deal_id } });
+  }
   return created(res, data, 'Activity logged');
 });
 

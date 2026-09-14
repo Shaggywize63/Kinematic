@@ -345,8 +345,22 @@ async function sendNotificationAction(cfg: Record<string, unknown>, ctx: Automat
       user_id: recipient_id,
       title,
       body,
-      type: 'automation',
-      metadata: { entity: ctx.entity, entity_id: ctx.entity_id },
+      // Keep 'general' so the insert never hits an unknown notification_type
+      // enum value (which fails SILENTLY on any tenant DB that lacks it — the
+      // reason automation notifications weren't being delivered). We categorise
+      // via data.kind, exactly like src/services/notify.ts.
+      type: 'general',
+      // The dispatcher (dispatch-pushes) and the mobile clients read `data`,
+      // NOT `metadata` — writing metadata meant these deep-links were dropped
+      // and the row never carried a routing kind.
+      data: {
+        kind: 'automation',
+        entity: ctx.entity,
+        entity_id: ctx.entity_id,
+        [`${ctx.entity}_id`]: ctx.entity_id,
+      },
+      is_read: false,
+      sent_at: null,
     });
   } catch (_err) {
     /* swallowed — see comment above */

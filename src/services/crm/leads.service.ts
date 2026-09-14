@@ -2,6 +2,7 @@
  * Lead service: CRUD, dedup, scoring orchestration, conversion.
  */
 import { supabaseAdmin } from '../../lib/supabase';
+import { notify } from '../notify';
 import { isSteelDealerClient } from '../../lib/steelDealer';
 import { AppError, sanitisePostgrestSearch } from '../../utils';
 import * as scoring from './ai/leadScoring.service';
@@ -253,6 +254,14 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
   // Field-rep lead → notify the approving manager. Best-effort; never fails create.
   if (approvalStatus === 'pending') {
     notifyLeadApprover(org_id, user_id ?? null, creatorSupervisorId, data).catch(() => {});
+  } else if (data.owner_id && data.owner_id !== (user_id ?? null)) {
+    // A new lead landed with an owner who isn't the creator → tell the owner.
+    // (Approval-pending leads are deferred until approved; Google-Ads inbound
+    // leads take the dedup-orchestrator path, so this is the manual/assigned case.)
+    notify({ orgId: org_id, userId: data.owner_id, kind: 'lead_assigned',
+      title: 'New lead assigned to you',
+      body: `${leadDisplayName(data)} was added and assigned to you.`,
+      data: { lead_id: data.id } });
   }
 
   return data as Lead;
@@ -680,6 +689,13 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
       org_id, user_id, entity: 'lead', entity_id: id,
       data: { lead: data, old_owner_id: before.owner_id, new_owner_id: data.owner_id, client_id: data.client_id },
     }).catch(() => {});
+    // Tell the new owner the lead is now theirs (unless they reassigned it to themselves).
+    if (data.owner_id && data.owner_id !== (user_id ?? null)) {
+      notify({ orgId: org_id, userId: data.owner_id, kind: 'lead_assigned',
+        title: 'Lead assigned to you',
+        body: `${leadDisplayName(data)} was assigned to you.`,
+        data: { lead_id: id } });
+    }
   }
 
   const profileChanged = ['title','company','industry','country','source_id'].some(k =>
