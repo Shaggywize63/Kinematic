@@ -447,8 +447,12 @@ export const upsertOutletFrequency = asyncHandler(async (req, res) => {
   const org = orgId(req);
   const b = req.body || {};
   if (!isUUID(b.store_id)) return badRequest(res, 'store_id (uuid) required');
-  const FREQS = ['daily', 'weekly', 'fortnightly', 'biweekly', 'monthly', 'quarterly'];
-  const PRIOS = ['high', 'medium', 'low'];
+  // Must match the DB CHECK constraints on outlet_visit_frequency
+  // (frequency: daily|weekly|bi_weekly|monthly, priority: high|normal|low) —
+  // the old lists allowed values (medium/fortnightly/biweekly/quarterly) the DB
+  // rejects, so saving an outlet priority 400'd with a check-constraint error.
+  const FREQS = ['daily', 'weekly', 'bi_weekly', 'monthly'];
+  const PRIOS = ['high', 'normal', 'low'];
   if (b.frequency != null && !FREQS.includes(String(b.frequency).toLowerCase())) return badRequest(res, `frequency must be one of ${FREQS.join(', ')}`);
   if (b.priority != null && !PRIOS.includes(String(b.priority).toLowerCase())) return badRequest(res, `priority must be one of ${PRIOS.join(', ')}`);
 
