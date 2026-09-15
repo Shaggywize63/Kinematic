@@ -17,6 +17,7 @@ import {
   optimizeAndApplyMyPlan,
   suggestMyRoute,
   autoPlanForUser,
+  autoGenerateRoutePlan,
   getRouteDeviations,
   upsertOutletFrequency,
 } from '../controllers/route-plan.controller';
@@ -40,6 +41,9 @@ router.post('/',                 requireSupervisorOrAbove, createRoutePlan);
 router.post('/optimize',         requireSupervisorOrAbove, optimizeRoutePlan);
 // Supervisor auto-plan: optimize a target FE's stored plan from their location.
 router.post('/auto-plan',        requireSupervisorOrAbove, requireModule('route_optimization'), autoPlanForUser);
+// Supervisor auto-GENERATE: design a brand-new plan for an FE from outlet
+// cadence + priority (Outlet Priorities), then assign it. dry_run previews.
+router.post('/auto-generate',    requireSupervisorOrAbove, requireModule('route_optimization'), autoGenerateRoutePlan);
 router.post('/bulk-import',      requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client'), bulkImportRoutePlans);
 router.patch('/:id',             requireSupervisorOrAbove, updateRoutePlan);
 router.delete('/:id',            requireRole('admin', 'super_admin', 'main_admin', 'client'), deleteRoutePlan);

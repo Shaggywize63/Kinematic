@@ -6,6 +6,7 @@ import { isDemo, getMockRoutePlans, getMockMyRoutePlan } from '../utils/demoData
 import { resolveFactor, normalizeVehicleType, VEHICLE_TYPES, DEFAULT_VEHICLE_TYPE } from '../services/carbon.service';
 import { optimizeRoute, OutletPoint } from '../services/route-optimizer.service';
 import { buildRouteSuggestion, SuggestedOutlet } from '../services/route-suggestion.service';
+import { buildAutoPlanDraft } from '../services/route-autoplan.service';
 import { haversineDistance } from '../lib/haversine';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
@@ -387,6 +388,80 @@ export const autoPlanForUser = asyncHandler(async (req, res) => {
   return ok(res, { user_id: targetUserId, date: istDate, start_source: suggestion.start_source, plans: suggestion.plans, total_saved_km: suggestion.total_saved_km });
 });
 
+/**
+ * POST /route-plans/auto-generate — design a NEW route plan for an FE from the
+ * outlet cadence + priority maintained in Outlet Priorities. Unlike /auto-plan
+ * (which re-orders an EXISTING plan), this decides which outlets belong on the
+ * day at all: overdue-against-cadence or high-priority outlets, minus outlets
+ * already planned that date, sequenced shortest-path from the FE's location.
+ *
+ * Body: { user_id, plan_date?, max_outlets?, vehicle_type?, activity_id?,
+ *         dry_run?, replace? }
+ * dry_run:true returns the draft (stops + km + reasons) without writing — the
+ * web preview. Without it the plan is created and assigned to the FE;
+ * replace:true first removes the FE's existing plan(s) for that date.
+ */
+export const autoGenerateRoutePlan = asyncHandler(async (req, res) => {
+  const org = orgId(req);
+  const by = userId(req);
+  const targetUserId = req.body?.user_id;
+  if (!isUUID(targetUserId)) return badRequest(res, 'user_id (uuid) required');
+  const { data: target } = await supabase.from('users').select('id, org_id').eq('id', targetUserId).maybeSingle();
+  if (!target || target.org_id !== org) return notFound(res, 'User not found in your organisation');
+
+  const planDate = parseAppDate((req.body?.plan_date as string) || dbToday());
+  const draft = await buildAutoPlanDraft({
+    orgId: org, userId: targetUserId, planDate,
+    maxOutlets: req.body?.max_outlets, vehicleType: req.body?.vehicle_type,
+  });
+  if (req.body?.dry_run === true) return ok(res, draft);
+
+  if (!draft.stops.length) {
+    return badRequest(res, 'No outlets are due for this date — set visit cadence / priority in Outlet Priorities first');
+  }
+  const replace = req.body?.replace === true;
+  if (draft.existing_plan_ids.length && !replace) {
+    return badRequest(res, 'This FE already has a route plan for this date — pass replace: true to overwrite it');
+  }
+
+  // Resolve an activity for the plan: explicit → the FE's mapped activity →
+  // the org's first activity → null (route_plans.activity_id is nullable).
+  let activityId: string | null = isUUID(req.body?.activity_id) ? req.body.activity_id : null;
+  if (!activityId) {
+    const { data: mapped } = await supabase.from('activity_users').select('activity_id').eq('org_id', org).eq('user_id', targetUserId).limit(1);
+    activityId = mapped?.[0]?.activity_id ?? null;
+  }
+  if (!activityId) {
+    const { data: acts } = await supabase.from('activities').select('id').eq('org_id', org).limit(1);
+    activityId = acts?.[0]?.id ?? null;
+  }
+
+  if (replace && draft.existing_plan_ids.length) {
+    await supabase.from('route_plans').delete().eq('org_id', org).eq('user_id', targetUserId).eq('plan_date', planDate);
+  }
+
+  const factor = await resolveFactor(org, draft.vehicle_type);
+  const { data: plan, error } = await supabase.from('route_plans').insert({
+    org_id: org, user_id: targetUserId, plan_date: planDate, activity_id: activityId,
+    created_by: by, total_outlets: draft.stops.length, status: 'pending',
+    vehicle_type: draft.vehicle_type, emission_factor_kg_per_km: factor,
+    optimized: true, total_distance_km: draft.total_km,
+    notes: 'Auto-generated from outlet cadence & priority',
+  }).select().single();
+  if (error || !plan) return badRequest(res, error?.message || 'Failed to create plan');
+
+  const rows = draft.stops.map((s) => ({
+    route_plan_id: plan.id, store_id: s.store_id, org_id: org, visit_order: s.visit_order,
+    target_type: 'general', is_geofenced: true, geofence_radius_m: 100,
+  }));
+  const { error: oErr } = await supabase.from('route_plan_outlets').insert(rows);
+  if (oErr) {
+    await supabase.from('route_plans').delete().eq('id', plan.id);   // don't leave an empty shell plan
+    return badRequest(res, oErr.message);
+  }
+  return created(res, { plan_id: plan.id, replaced: replace ? draft.existing_plan_ids.length : 0, ...draft });
+});
+
 export const updateOutletVisit = asyncHandler(async (req, res) => {
   const { outletId } = req.params;
   const { status, checkin_lat, checkin_lng, photo_url, visit_notes, checkin_at, checkout_at } = req.body;
@@ -447,8 +522,12 @@ export const upsertOutletFrequency = asyncHandler(async (req, res) => {
   const org = orgId(req);
   const b = req.body || {};
   if (!isUUID(b.store_id)) return badRequest(res, 'store_id (uuid) required');
-  const FREQS = ['daily', 'weekly', 'fortnightly', 'biweekly', 'monthly', 'quarterly'];
-  const PRIOS = ['high', 'medium', 'low'];
+  // Must match the DB CHECK constraints on outlet_visit_frequency
+  // (frequency: daily|weekly|bi_weekly|monthly, priority: high|normal|low) —
+  // the old lists allowed values (medium/fortnightly/biweekly/quarterly) the DB
+  // rejects, so saving an outlet priority 400'd with a check-constraint error.
+  const FREQS = ['daily', 'weekly', 'bi_weekly', 'monthly'];
+  const PRIOS = ['high', 'normal', 'low'];
   if (b.frequency != null && !FREQS.includes(String(b.frequency).toLowerCase())) return badRequest(res, `frequency must be one of ${FREQS.join(', ')}`);
   if (b.priority != null && !PRIOS.includes(String(b.priority).toLowerCase())) return badRequest(res, `priority must be one of ${PRIOS.join(', ')}`);
 
