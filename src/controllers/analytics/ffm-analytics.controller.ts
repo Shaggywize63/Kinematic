@@ -38,6 +38,28 @@ async function getFEs(orgId: string): Promise<Array<{ id: string; name: string }
   return (data || []).map((u: any) => ({ id: u.id, name: u.name || 'FE' }));
 }
 
+/** Map of rep user_id → set of outlet_ids where the rep booked a non-cancelled
+ *  order since `since`. route_plan_outlets has NO per-visit order column, so
+ *  "productive" (a visit that produced an order) is derived from the orders
+ *  ledger — the same source topPerformers uses (orders.salesman_id / .outlet_id,
+ *  which maps to route_plan_outlets.store_id). */
+async function outletsWithOrdersByRep(orgId: string, since: string): Promise<Map<string, Set<string>>> {
+  const m = new Map<string, Set<string>>();
+  const { data } = await supabaseAdmin
+    .from('orders')
+    .select('salesman_id, outlet_id')
+    .eq('org_id', orgId)
+    .neq('status', 'cancelled')
+    .gte('placed_at', since);
+  for (const o of (data || []) as any[]) {
+    if (!o.salesman_id || !o.outlet_id) continue;
+    let s = m.get(o.salesman_id);
+    if (!s) { s = new Set<string>(); m.set(o.salesman_id, s); }
+    s.add(o.outlet_id);
+  }
+  return m;
+}
+
 /** ISO week label like "2026-W31" for a date. */
 function isoWeek(d: Date): string {
   const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
@@ -148,17 +170,19 @@ export const productiveCalls = asyncHandler<AuthRequest>(async (req, res) => {
   const fes = await getFEs(user.org_id);
   const { data: plans } = await supabaseAdmin
     .from('route_plans')
-    .select('user_id, route_plan_outlets(status, order_amount)')
+    .select('user_id, route_plan_outlets(store_id, status)')
     .eq('org_id', user.org_id)
     .gte('plan_date', dayAgo(14));
 
+  const ordersByRep = await outletsWithOrdersByRep(user.org_id, dayAgo(14));
   const agg = new Map<string, { visits: number; productive: number }>();
   for (const p of (plans || []) as any[]) {
     const cur = agg.get(p.user_id) || { visits: 0, productive: 0 };
+    const repOrders = ordersByRep.get(p.user_id);
     for (const o of p.route_plan_outlets || []) {
       if (!VISITED.has(o.status)) continue;
       cur.visits += 1;
-      if ((o.order_amount || 0) > 0) cur.productive += 1;
+      if (o.store_id && repOrders?.has(o.store_id)) cur.productive += 1;
     }
     agg.set(p.user_id, cur);
   }
@@ -299,7 +323,7 @@ export const visitDuration = asyncHandler<AuthRequest>(async (req, res) => {
   if (isDemo(user)) return ok(res, []);
   const { data: plans } = await supabaseAdmin
     .from('route_plans')
-    .select('route_plan_outlets(actual_duration_min, status)')
+    .select('route_plan_outlets(planned_duration_min, status)')
     .eq('org_id', user.org_id)
     .gte('plan_date', dayAgo(14));
 
@@ -313,7 +337,7 @@ export const visitDuration = asyncHandler<AuthRequest>(async (req, res) => {
   const counts = buckets.map(() => 0);
   for (const p of (plans || []) as any[]) {
     for (const o of p.route_plan_outlets || []) {
-      const m = o.actual_duration_min;
+      const m = o.planned_duration_min;
       if (m == null || !VISITED.has(o.status)) continue;
       const i = buckets.findIndex((b) => b.test(Number(m)));
       if (i >= 0) counts[i] += 1;
@@ -556,19 +580,21 @@ export const uniqueOutlets = asyncHandler<AuthRequest>(async (req, res) => {
   const fes = await getFEs(user.org_id);
   const { data: plans } = await supabaseAdmin
     .from('route_plans')
-    .select('user_id, route_plan_outlets(store_id, status, order_amount)')
+    .select('user_id, route_plan_outlets(store_id, status)')
     .eq('org_id', user.org_id)
     .gte('plan_date', monthStart());
 
+  const ordersByRep = await outletsWithOrdersByRep(user.org_id, monthStart());
   const unique = new Map<string, Set<string>>();
   const productive = new Map<string, Set<string>>();
   for (const p of (plans || []) as any[]) {
     const u = unique.get(p.user_id) || new Set<string>();
     const pr = productive.get(p.user_id) || new Set<string>();
+    const repOrders = ordersByRep.get(p.user_id);
     for (const o of p.route_plan_outlets || []) {
       if (!o.store_id || !VISITED.has(o.status)) continue;
       u.add(o.store_id);
-      if ((o.order_amount || 0) > 0) pr.add(o.store_id);
+      if (repOrders?.has(o.store_id)) pr.add(o.store_id);
     }
     unique.set(p.user_id, u);
     productive.set(p.user_id, pr);
