@@ -2,7 +2,8 @@
  * Lead service: CRUD, dedup, scoring orchestration, conversion.
  */
 import { supabaseAdmin } from '../../lib/supabase';
-import { notify } from '../notify';
+import { notify, notifyUsers, resolveManagers } from '../notify';
+import { currentProjectKey, DEFAULT_PROJECT } from '../../lib/projects';
 import { isSteelDealerClient } from '../../lib/steelDealer';
 import { AppError, sanitisePostgrestSearch } from '../../utils';
 import * as scoring from './ai/leadScoring.service';
@@ -262,6 +263,26 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
       title: 'New lead assigned to you',
       body: `${leadDisplayName(data)} was added and assigned to you.`,
       data: { lead_id: data.id } });
+  }
+
+  // Team visibility: also alert the tenant's managers/admins that a new lead
+  // landed, so a rep-created or unassigned inbound lead is never missed by the
+  // people watching the pipeline (the "I'm not getting notified of new leads"
+  // gap — the owner branch above stays silent when the creator IS the owner).
+  // Best-effort, non-blocking. Kept OFF for the Tata `default` project so its
+  // (high-volume) production behavior is byte-for-byte unchanged per CLAUDE.md;
+  // only non-default tenants (Kinematic + any client project) opt in.
+  if (approvalStatus !== 'pending' && currentProjectKey() !== DEFAULT_PROJECT) {
+    resolveManagers(org_id, { clientId: (data as any).client_id ?? null })
+      .then((mgrs) => notifyUsers(
+        mgrs.filter((id) => id !== data.owner_id),
+        { orgId: org_id, kind: 'new_lead',
+          title: 'New lead added',
+          body: `${leadDisplayName(data)} was added.`,
+          data: { lead_id: data.id } },
+        { exclude: user_id ?? null },
+      ))
+      .catch(() => {});
   }
 
   return data as Lead;
