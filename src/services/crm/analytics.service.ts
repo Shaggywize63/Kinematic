@@ -1378,6 +1378,81 @@ export async function widgetSummary(
   };
 }
 
+export interface WidgetLeadSummary {
+  /** Leads still in status='new' (unworked backlog) visible to the caller. */
+  new_count: number;
+  /** Open pipeline: status in new/working/nurturing/qualified. */
+  open_count: number;
+  /** Activities owned by / assigned to the caller, due today, not completed. */
+  followups_due_today: number;
+  /** Newest few leads for the "latest leads" widget row. */
+  recent: Array<{ id: string; name: string; status: string | null; created_at: string }>;
+  refreshed_at: string;
+}
+
+// Statuses that count as an "open" lead — mirrors listLeadsWithCount and the
+// mobile lead-create defaults so the widget's open count matches the app.
+const OPEN_LEAD_STATUSES = ['new', 'working', 'nurturing', 'qualified'];
+
+// Home-screen "Leads" widget payload (iOS/Android). One small round-trip:
+// new/unworked count, my open count, follow-ups due today, and the latest
+// few leads. Scoped IDENTICALLY to the leads list (withClient + applyLeadScope)
+// so the numbers match exactly what the rep sees in-app.
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export async function widgetLeadSummary(
+  org_id: string,
+  client_id: string | null = null,
+  scope?: AnalyticsScope,
+): Promise<WidgetLeadSummary> {
+  const now = new Date();
+  const todayStart = new Date(now); todayStart.setUTCHours(0, 0, 0, 0);
+  const todayEnd = new Date(todayStart); todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
+
+  const scopedLeads = (sel: string, opts?: { count: 'exact'; head: true }) =>
+    applyLeadScope(withClient(
+      supabaseAdmin.from('crm_leads').select(sel, opts as any).eq('org_id', org_id).is('deleted_at', null),
+      client_id), scope);
+
+  const [newRes, openRes, recentRes] = await Promise.all([
+    scopedLeads('id', { count: 'exact', head: true }).eq('status', 'new'),
+    scopedLeads('id', { count: 'exact', head: true }).in('status', OPEN_LEAD_STATUSES),
+    scopedLeads('id, first_name, last_name, company, status, created_at')
+      .order('created_at', { ascending: false }).limit(5),
+  ]);
+
+  // Follow-ups due today: the caller's own activities (owner_id OR assigned_to
+  // = self — crm_activities tracks the person on either column), due in today's
+  // window and not yet completed. Owner=self is the isolation, so no client
+  // filter (which could drop the rep's own null-client activities).
+  let followups_due_today = 0;
+  if (scope?.selfOwnerId) {
+    const r = await supabaseAdmin.from('crm_activities')
+      .select('id', { count: 'exact', head: true })
+      .eq('org_id', org_id).is('deleted_at', null)
+      .is('completed_at', null)
+      .gte('due_at', todayStart.toISOString())
+      .lt('due_at', todayEnd.toISOString())
+      .or(`owner_id.eq.${scope.selfOwnerId},assigned_to.eq.${scope.selfOwnerId}`);
+    followups_due_today = r.count ?? 0;
+  }
+
+  const recent = ((recentRes.data ?? []) as any[]).map((l) => ({
+    id: l.id as string,
+    name: [l.first_name, l.last_name].filter(Boolean).join(' ').trim() || (l.company as string) || 'Lead',
+    status: (l.status as string | null) ?? null,
+    created_at: l.created_at as string,
+  }));
+
+  return {
+    new_count: newRes.count ?? 0,
+    open_count: openRes.count ?? 0,
+    followups_due_today,
+    recent,
+    refreshed_at: now.toISOString(),
+  };
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
 export async function salesCycle(org_id: string, range?: DateRange, client_id: string | null = null, scope?: AnalyticsScope) {
   let q = supabaseAdmin.from('crm_deals')
     .select('created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
