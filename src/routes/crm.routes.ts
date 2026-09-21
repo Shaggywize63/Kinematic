@@ -5065,6 +5065,17 @@ analytics.get('/intel/feed', wrap(async (req, res) => res.json(
     () => analyticsExt.intelFeed(orgId(req), clientId(req), dateRange(req), (req.query.city as string) || null, Number(req.query.limit ?? 50))))));
 router.use('/analytics', rbac.requireModuleAccess('crm_lead_analytics'), analytics);
 
+// ── Home-screen widgets (mobile) ──────────────────────────────────────────
+// Small, single-round-trip payloads for the iOS/Android "Leads" home-screen
+// widget. Gated on crm_leads read (any rep has it) rather than the heavier
+// crm_lead_analytics module, so the widget works for frontline sellers too.
+const widgets = express.Router();
+widgets.get('/lead-summary', rbac.requireModuleAccess('crm_leads'), wrap(async (req, res) => {
+  const scope = await analyticsScope(req as AuthRequest);
+  res.json(await analyticsSvc.widgetLeadSummary(orgId(req), clientId(req), scope));
+}));
+router.use('/widgets', widgets);
+
 // ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
 const layouts = express.Router();
 layouts.get('/:page', wrap(async (req, res) => {
