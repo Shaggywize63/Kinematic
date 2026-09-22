@@ -192,9 +192,13 @@ async function streamAnthropicTurn(params: {
     const body = await res.json().catch(() => ({}));
     const detail = (body as { error?: { message?: string } })?.error?.message || '';
     console.warn(`[chatWithTools.stream] upstream ${res.status}: ${detail.slice(0, 300).replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]')}`);
+    const lc = detail.toLowerCase();
     const opaque =
       /usage limit/i.test(detail) ? 'KINI has reached its monthly AI usage limit. Access resets at the start of next month.'
-      : res.status === 401 ? 'AI authentication failed'
+      : /credit balance|billing|insufficient|payment/.test(lc) ? "KINI's AI is unavailable — the Anthropic workspace's credits/billing need attention."
+      : res.status === 401 ? 'AI authentication failed — the Anthropic API key is missing or invalid.'
+      : res.status === 403 ? 'AI authorization failed — this API key cannot access the requested model.'
+      : res.status === 404 ? 'AI model unavailable — the configured model is not available to this API key.'
       : res.status === 429 ? 'AI service rate-limited — retry shortly'
       : res.status >= 500 ? 'AI service temporarily unavailable'
       : 'AI request failed';
@@ -381,9 +385,13 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
       // Log the upstream detail server-side, return an opaque code.
       const detail = (body as { error?: { message?: string } })?.error?.message || '';
       console.warn(`[chatWithTools] upstream ${res.status}: ${detail.slice(0, 300).replace(/sk-[a-zA-Z0-9-]+/g, 'sk-[REDACTED]')}`);
+      const lc = detail.toLowerCase();
       const opaque =
         /usage limit/i.test(detail) ? 'KINI has reached its monthly AI usage limit. Access resets at the start of next month.'
-        : res.status === 401 ? 'AI authentication failed'
+        : /credit balance|billing|insufficient|payment/.test(lc) ? "KINI's AI is unavailable — the Anthropic workspace's credits/billing need attention."
+        : res.status === 401 ? 'AI authentication failed — the Anthropic API key is missing or invalid.'
+        : res.status === 403 ? 'AI authorization failed — this API key cannot access the requested model.'
+        : res.status === 404 ? 'AI model unavailable — the configured model is not available to this API key.'
         : res.status === 429 ? 'AI service rate-limited — retry shortly'
         : res.status >= 500 ? 'AI service temporarily unavailable'
         : 'AI request failed';
@@ -405,7 +413,9 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
       // sonnet, then whatever the key exposes). Fires only on a 404, so a
       // working model is never affected.
       const status = e instanceof AppError ? e.statusCode : undefined;
-      if (status === 404 && !modelHealed) {
+      // 404 = unknown model; 403 = key not entitled to this model. Both are
+      // "this key can't serve `model`" — swap to a model it can and retry once.
+      if ((status === 404 || status === 403) && !modelHealed) {
         modelHealed = true;
         const alt = (await AIService.pickServableModel().catch(() => null)) || 'claude-sonnet-5';
         if (alt && alt !== model) {
