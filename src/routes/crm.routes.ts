@@ -1402,7 +1402,10 @@ leads.patch('/:id', wrap(async (req, res) => {
   res.json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse });
 }));
 leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(req), req.params.id); res.status(204).end(); }));
-leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
+leads.post('/:id/score', wrap(async (req, res) => {
+  const out = await leadsSvc.rescoreLead(orgId(req), req.params.id);
+  res.json(leadsSvc.toLeadScoreResponse(req.params.id, out));
+}));
 // Star / un-star a lead as "important". Stored in custom_fields.__important
 // (no schema migration); body { important: boolean } (defaults to true).
 leads.post('/:id/important', wrap(async (req, res) => {
@@ -5179,7 +5182,7 @@ ai.post('/score-lead/:id', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const out = await leadsSvc.rescoreLead(orgId(req), req.params.id);
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
-  res.json(out);
+  res.json(leadsSvc.toLeadScoreResponse(req.params.id, out));
 }));
 ai.post('/draft-reply', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
