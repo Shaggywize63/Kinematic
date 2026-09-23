@@ -945,6 +945,19 @@ export async function markLeadAsWon(
   return data;
 }
 
+// Public / free email providers. A contact's personal inbox domain (gmail,
+// yahoo, …) is shared by unrelated companies, so it must NEVER become an
+// account's unique domain — otherwise the second lead with a gmail address
+// collides on the ux_crm_accounts_org_domain unique index and lead→deal
+// conversion fails. For these we store no account domain.
+const FREE_EMAIL_DOMAINS = new Set<string>([
+  'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.in', 'yahoo.in', 'ymail.com',
+  'rocketmail.com', 'hotmail.com', 'hotmail.co.uk', 'outlook.com', 'live.com', 'msn.com',
+  'icloud.com', 'me.com', 'mac.com', 'aol.com', 'protonmail.com', 'proton.me',
+  'rediffmail.com', 'rediff.com', 'zoho.com', 'zohomail.com', 'gmx.com', 'mail.com',
+  'yandex.com', 'ymail.in',
+]);
+
 export async function convertLead(org_id: string, id: string, opts: {
   create_deal?: boolean; deal_name?: string; deal_amount?: number;
   deal_volume_kg?: number; deal_product_id?: string;
@@ -983,19 +996,51 @@ export async function convertLead(org_id: string, id: string, opts: {
 
   let account_id: string | null = null;
   if (lead.company) {
-    const domain = lead.email?.split('@')[1] || null;
-    const { data: existingAccount } = await supabaseAdmin.from('crm_accounts').select('id')
-      .eq('org_id', org_id).eq('name', lead.company).is('deleted_at', null).maybeSingle();
-    if (existingAccount?.id) {
-      account_id = existingAccount.id;
+    // Only a corporate email domain identifies an account. Personal/free
+    // providers (gmail, yahoo, …) are shared by unrelated companies, so we
+    // store no domain for them — otherwise the account insert collides on the
+    // ux_crm_accounts_org_domain unique index (the reported convert error).
+    const rawDomain = lead.email?.split('@')[1]?.trim().toLowerCase() || null;
+    const domain = rawDomain && !FREE_EMAIL_DOMAINS.has(rawDomain) ? rawDomain : null;
+
+    // Reuse an existing account: first by name, then by corporate domain when
+    // we have one (so two leads at the same company converge on one account
+    // and never trip the unique domain index).
+    let existingId: string | null = null;
+    {
+      const { data } = await supabaseAdmin.from('crm_accounts').select('id')
+        .eq('org_id', org_id).eq('name', lead.company).is('deleted_at', null).maybeSingle();
+      existingId = data?.id ?? null;
+    }
+    if (!existingId && domain) {
+      const { data } = await supabaseAdmin.from('crm_accounts').select('id')
+        .eq('org_id', org_id).eq('domain', domain).is('deleted_at', null).maybeSingle();
+      existingId = data?.id ?? null;
+    }
+    if (existingId) {
+      account_id = existingId;
     } else {
       const { data: acc, error: accErr } = await supabaseAdmin.from('crm_accounts').insert({
         org_id, client_id: leadClientId,
         name: lead.company, domain, industry: lead.industry, owner_id: lead.owner_id,
         created_by: user_id ?? null,
       }).select('id').single();
-      if (accErr) throw new AppError(500, accErr.message, 'DB_ERROR');
-      account_id = acc.id;
+      if (accErr) {
+        // A concurrent convert, or an account already holds this corporate
+        // domain under a different name: recover by reusing it rather than
+        // surfacing a raw unique-constraint error to the app.
+        if ((accErr as { code?: string }).code === '23505' && domain) {
+          const { data: dup } = await supabaseAdmin.from('crm_accounts').select('id')
+            .eq('org_id', org_id).eq('domain', domain).order('deleted_at', { ascending: true, nullsFirst: true })
+            .limit(1).maybeSingle();
+          if (dup?.id) account_id = dup.id;
+          else throw new AppError(500, accErr.message, 'DB_ERROR');
+        } else {
+          throw new AppError(500, accErr.message, 'DB_ERROR');
+        }
+      } else {
+        account_id = acc.id;
+      }
     }
   }
 
