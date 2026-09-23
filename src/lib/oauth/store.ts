@@ -175,12 +175,18 @@ export async function consumeAuthCode(args: {
     .select('id, client_id, user_id, project_key, org_id, redirect_uri, scopes, code_challenge, code_challenge_method, expires_at, consumed_at')
     .eq('code_hash', sha256(args.code))
     .maybeSingle();
-  if (error || !data) return null;
-  if (data.consumed_at) return null;
-  if (new Date(data.expires_at).getTime() < Date.now()) return null;
-  if (data.client_id !== args.clientId) return null;
-  if (data.redirect_uri !== args.redirectUri) return null;
-  if (!verifyPkce(args.codeVerifier, data.code_challenge, data.code_challenge_method)) return null;
+  // Log the SPECIFIC reason an exchange is rejected. Codes are single-use and
+  // short-lived; we log the public client_id and redirect URIs (never the code,
+  // verifier or any secret) so a looping connector is diagnosable from the logs.
+  if (error || !data) {
+    logger.warn(`[OAuth] token exchange rejected: code not found (client=${args.clientId}${error ? `, dbErr="${error.message}"` : ''})`);
+    return null;
+  }
+  if (data.consumed_at) { logger.warn(`[OAuth] token exchange rejected: code already consumed (client=${args.clientId})`); return null; }
+  if (new Date(data.expires_at).getTime() < Date.now()) { logger.warn(`[OAuth] token exchange rejected: code expired (client=${args.clientId})`); return null; }
+  if (data.client_id !== args.clientId) { logger.warn(`[OAuth] token exchange rejected: client mismatch (code_client=${data.client_id} presented=${args.clientId})`); return null; }
+  if (data.redirect_uri !== args.redirectUri) { logger.warn(`[OAuth] token exchange rejected: redirect_uri mismatch (stored="${data.redirect_uri}" presented="${args.redirectUri}")`); return null; }
+  if (!verifyPkce(args.codeVerifier, data.code_challenge, data.code_challenge_method)) { logger.warn(`[OAuth] token exchange rejected: PKCE verify failed (client=${args.clientId} method=${data.code_challenge_method})`); return null; }
 
   // Mark consumed; guard against a concurrent double-exchange by requiring the
   // row to still be unconsumed at update time.
@@ -191,7 +197,7 @@ export async function consumeAuthCode(args: {
     .is('consumed_at', null)
     .select('id')
     .maybeSingle();
-  if (updErr || !upd) return null;   // lost the race → treat as invalid
+  if (updErr || !upd) { logger.warn(`[OAuth] token exchange rejected: consume race lost (client=${args.clientId}${updErr ? `, dbErr="${updErr.message}"` : ''})`); return null; }
 
   return {
     user_id: data.user_id,

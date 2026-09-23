@@ -33,6 +33,18 @@ function publicBase(req: Request): string {
   return env || `${req.protocol}://${req.get('host')}`;
 }
 
+// Bound the upstream auth call. If a tenant project's auth endpoint is
+// unreachable, signInWithPassword hangs (no built-in timeout), leaving the user
+// on an endless spinner after "Allow access". A deadline turns that into the
+// graceful "Sign-in failed. Please try again." path instead.
+const SIGN_IN_TIMEOUT_MS = Number(process.env.OAUTH_SIGNIN_TIMEOUT_MS) || 8000;
+function withTimeout<T>(p: PromiseLike<T>, ms: number): Promise<T> {
+  return Promise.race([
+    Promise.resolve(p),
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('auth request timed out')), ms)),
+  ]);
+}
+
 const ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function esc(s: unknown): string {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
@@ -296,7 +308,10 @@ export const authorizeSubmit = asyncHandler<Request>(async (req, res) => {
     const authClient = createSupabaseClient(cfg.url, cfg.anonKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     });
-    const { data, error } = await authClient.auth.signInWithPassword({ email, password });
+    const { data, error } = await withTimeout(
+      authClient.auth.signInWithPassword({ email, password }),
+      SIGN_IN_TIMEOUT_MS,
+    );
     if (error || !data?.user) {
       logger.warn(`[OAuth] authorize sign-in rejected: email="${email}" project="${project}" pwLen=${password.length} err="${error?.message || 'no user'}" status=${(error as { status?: number })?.status ?? ''}`);
       return sendHtml(res, 200, consentPage({ base, clientName: client.name, params, scopes, error: 'Invalid email or password.' }));
@@ -354,9 +369,13 @@ export const token = asyncHandler<Request>(async (req, res) => {
   const b = (req.body || {}) as Record<string, unknown>;
   const grantType = String(b.grant_type || '');
   const { clientId, clientSecret } = clientCredentials(req);
+  logger.info(`[OAuth] token request grant=${grantType || '(none)'} client=${clientId || '(none)'}`);
 
   const client = await getClient(clientId);
-  if (!client) return tokenError(res, 401, 'invalid_client');
+  if (!client) {
+    logger.warn(`[OAuth] token: unknown/inactive client=${clientId || '(none)'}`);
+    return tokenError(res, 401, 'invalid_client');
+  }
 
   // Client authentication.
   //   authorization_code — the PKCE code_verifier ↔ code_challenge binding
@@ -375,14 +394,19 @@ export const token = asyncHandler<Request>(async (req, res) => {
     const code = String(b.code || '');
     const redirectUri = String(b.redirect_uri || '');
     const codeVerifier = String(b.code_verifier || '');
-    if (!code || !redirectUri || !codeVerifier) return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
+    if (!code || !redirectUri || !codeVerifier) {
+      logger.warn(`[OAuth] token: missing params (client=${clientId} code=${!!code} redirect_uri=${!!redirectUri} code_verifier=${!!codeVerifier})`);
+      return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
+    }
 
+    // consumeAuthCode logs the specific reason on any rejection.
     const grant = await consumeAuthCode({ code, clientId, redirectUri, codeVerifier });
     if (!grant) return tokenError(res, 400, 'invalid_grant');
 
     const tokens = await issueTokens({
       clientId, userId: grant.user_id, projectKey: grant.project_key, orgId: grant.org_id, scopes: grant.scopes,
     });
+    logger.info(`[OAuth] token issued (authorization_code) user=${grant.user_id} project=${grant.project_key} client=${clientId}`);
     res.setHeader('Cache-Control', 'no-store');
     return res.json(tokens);
   }

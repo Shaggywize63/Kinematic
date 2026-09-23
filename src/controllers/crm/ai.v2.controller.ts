@@ -378,8 +378,14 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       });
     }
     logger.error(`[kini.v2.chat] error: ${ee?.message || ee}`);
+    // Surface the SPECIFIC, already-sanitized upstream reason (usage limit /
+    // billing / auth / model / rate-limit) instead of the opaque generic, so a
+    // broken chat is diagnosable from the app itself. These AI_ERROR messages
+    // carry no secrets (they're the redacted layer).
     return ok(res, {
-      text: 'I hit an error processing that — try again?',
+      text: ee?.code === 'AI_ERROR' && typeof ee?.message === 'string'
+        ? ee.message
+        : 'I hit an error processing that — try again?',
       cards: [],
       tool_calls: [],
       thread_id,
@@ -684,7 +690,11 @@ export const chatStream = asyncHandler(async (req: AuthRequest, res: Response) =
       return res.end();
     }
     logger.error(`[kini.v2.chatStream] error: ${ee?.message || ee}`);
-    sse('error', { message: 'I hit an error processing that — try again?' });
+    sse('error', {
+      message: ee?.code === 'AI_ERROR' && typeof ee?.message === 'string'
+        ? ee.message
+        : 'I hit an error processing that — try again?',
+    });
     return res.end();
   }
  } catch (e: unknown) {

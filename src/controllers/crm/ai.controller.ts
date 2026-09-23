@@ -220,6 +220,14 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
       return ok(res, { text: 'AI features require ANTHROPIC_API_KEY to be set on the server.', cards: [], tool_calls: [] });
     }
     console.error('[kini.chat] error:', e?.message || e);
-    return ok(res, { text: 'I hit an error processing that — try again?', cards: [], tool_calls: [] });
+    // Surface the specific, sanitized upstream reason (usage limit / billing /
+    // auth / model) instead of the opaque generic so the failure is diagnosable.
+    return ok(res, {
+      text: e?.code === 'AI_ERROR' && typeof e?.message === 'string'
+        ? e.message
+        : 'I hit an error processing that — try again?',
+      cards: [],
+      tool_calls: [],
+    });
   }
 });
