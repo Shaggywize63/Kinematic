@@ -98,6 +98,11 @@ export interface Lead {
   company?: string | null;
   title?: string | null;
   source_id?: string | null;
+  /** Computed on the leads list: true when the lead's source is backed by a
+   *  lead-source integration (Google Ads, web form, Meta, …) — i.e. it arrived
+   *  automatically from an inbound channel rather than being added by hand.
+   *  Not a persisted column. */
+  is_inbound?: boolean;
   status: LeadStatus;
   owner_id?: string | null;
   score: number;
