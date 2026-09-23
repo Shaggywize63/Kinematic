@@ -1,51 +1,90 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
-import { asyncHandler, ok, badRequest } from '../../utils';
+import { asyncHandler, ok, badRequest, clientId } from '../../utils';
+
+// crm_settings has a NATURAL KEY of (org_id, client_id): an org can hold several
+// rows — one org-level row (client_id null) plus one per client. A bare
+// `.single()` on org_id alone therefore 406s ("multiple rows") for any org that
+// has more than one row, which is exactly what silently broke field_overrides /
+// hidden-field loading after the multi-project migration. Resolve the row the
+// request is scoped to (X-Client-Id → req.user.client_id), preferring the
+// client-specific row and falling back to the org-level (client_id null) row.
+type SettingsRow = { id?: string; org_id?: string; client_id?: string | null; business_type?: string; config?: Record<string, unknown> };
+
+async function fetchSettingsRow(org_id: string, client_id: string | null): Promise<SettingsRow | null> {
+  let q = supabaseAdmin.from('crm_settings').select('*').eq('org_id', org_id);
+  q = client_id ? q.eq('client_id', client_id) : q.is('client_id', null);
+  const { data } = await q.order('created_at', { ascending: true }).limit(1).maybeSingle();
+  return (data as SettingsRow | null) ?? null;
+}
+
+/** The effective settings row for this request: client-specific first, else org-level. */
+async function resolveSettingsRow(org_id: string, client_id: string | null): Promise<SettingsRow | null> {
+  const scoped = client_id ? await fetchSettingsRow(org_id, client_id) : null;
+  return scoped ?? await fetchSettingsRow(org_id, null);
+}
 
 export const getSettings = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
-  let { data, error } = await supabaseAdmin
+  const client_id = clientId(req);
+
+  const row = await resolveSettingsRow(org_id, client_id);
+  if (row) return ok(res, row);
+
+  // Nothing yet — create the org-level base row (client_id null) so subsequent
+  // reads/writes have something to hang off. Guarded against a race: if a
+  // concurrent request created it, re-read instead of surfacing the conflict.
+  const { data: created, error: ce } = await supabaseAdmin
     .from('crm_settings')
-    .select('*')
-    .eq('org_id', org_id)
+    .insert({ org_id, client_id: null, business_type: 'both', config: {} })
+    .select()
     .single();
-  if (error && error.code === 'PGRST116') {
-    // Auto-create default settings row
-    const { data: created, error: ce } = await supabaseAdmin
-      .from('crm_settings')
-      .insert({ org_id, business_type: 'both', config: {} })
-      .select()
-      .single();
-    if (ce) return badRequest(res, ce.message);
-    return ok(res, created);
+  if (ce) {
+    const retry = await fetchSettingsRow(org_id, null);
+    if (retry) return ok(res, retry);
+    return badRequest(res, ce.message);
   }
-  if (error) return badRequest(res, error.message);
-  return ok(res, data);
+  return ok(res, created);
 });
 
 export const updateSettings = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { org_id } = req.user!;
+  const client_id = clientId(req);
   const { business_type, config } = req.body;
 
-  // Upsert — create row if missing, then merge config
-  const { data: existing } = await supabaseAdmin
-    .from('crm_settings')
-    .select('config')
-    .eq('org_id', org_id)
-    .single();
-
-  const mergedConfig = config
-    ? { ...(existing?.config || {}), ...config }
+  // Write to the row this request is scoped to (client-specific if a client is
+  // selected, else the org-level row). Explicit update-by-id or insert — NOT a
+  // blind upsert — because (org_id, null) is not reliably a conflict target
+  // (NULLs compare distinct), so an upsert would keep inserting duplicate
+  // org-level rows and re-create the very multi-row mess this fix resolves.
+  const existing = await fetchSettingsRow(org_id, client_id);
+  const mergedConfig = config !== undefined
+    ? { ...((existing?.config as Record<string, unknown>) || {}), ...config }
     : undefined;
 
-  const updates: Record<string, unknown> = {};
-  if (business_type !== undefined) updates.business_type = business_type;
-  if (mergedConfig !== undefined) updates.config = mergedConfig;
+  if (existing?.id) {
+    const patch: Record<string, unknown> = {};
+    if (business_type !== undefined) patch.business_type = business_type;
+    if (mergedConfig !== undefined) patch.config = mergedConfig;
+    const { data, error } = await supabaseAdmin
+      .from('crm_settings')
+      .update(patch)
+      .eq('id', existing.id)
+      .select()
+      .single();
+    if (error) return badRequest(res, error.message);
+    return ok(res, data);
+  }
 
   const { data, error } = await supabaseAdmin
     .from('crm_settings')
-    .upsert({ org_id, ...updates })
+    .insert({
+      org_id,
+      client_id: client_id ?? null,
+      business_type: business_type ?? 'both',
+      config: mergedConfig ?? {},
+    })
     .select()
     .single();
   if (error) return badRequest(res, error.message);
