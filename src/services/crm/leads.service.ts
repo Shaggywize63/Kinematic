@@ -652,6 +652,39 @@ export async function listStuckLeads(
   return (data ?? []) as Lead[];
 }
 
+/**
+ * Toggle a lead's "important" star. Stored as a reserved key in the existing
+ * custom_fields jsonb (`__important`) rather than a new column, so it needs no
+ * schema migration. The key can't collide with an admin-defined custom field
+ * (those must match /^[a-z].../ — a leading underscore is impossible), and we
+ * write it with a raw read-modify-write so the custom-field validator (which
+ * would strip an unknown key) is bypassed. Org-scoped; visibility-scoped by
+ * client. Returns the new state.
+ */
+export async function setLeadImportant(
+  org_id: string,
+  id: string,
+  important: boolean,
+  client_id: string | null = null,
+): Promise<{ id: string; important: boolean }> {
+  let sel = supabaseAdmin.from('crm_leads')
+    .select('id, custom_fields')
+    .eq('id', id).eq('org_id', org_id).is('deleted_at', null);
+  if (client_id) sel = sel.or(`client_id.is.null,client_id.eq.${client_id}`);
+  const { data: row, error: selErr } = await sel.maybeSingle();
+  if (selErr) throw new AppError(500, selErr.message, 'DB_ERROR');
+  if (!row) throw new AppError(404, 'Lead not found', 'NOT_FOUND');
+
+  const cf = { ...(((row as { custom_fields?: Record<string, unknown> }).custom_fields) || {}) };
+  if (important) cf.__important = true; else delete cf.__important;
+
+  const { error: updErr } = await supabaseAdmin.from('crm_leads')
+    .update({ custom_fields: cf })
+    .eq('id', id).eq('org_id', org_id);
+  if (updErr) throw new AppError(500, updErr.message, 'DB_ERROR');
+  return { id, important };
+}
+
 export async function getLead(org_id: string, id: string) {
   const { data, error } = await supabaseAdmin.from('crm_leads').select('*')
     .eq('org_id', org_id).eq('id', id).is('deleted_at', null).single();

@@ -1403,6 +1403,13 @@ leads.patch('/:id', wrap(async (req, res) => {
 }));
 leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(req), req.params.id); res.status(204).end(); }));
 leads.post('/:id/score', wrap(async (req, res) => res.json(await leadsSvc.rescoreLead(orgId(req), req.params.id))));
+// Star / un-star a lead as "important". Stored in custom_fields.__important
+// (no schema migration); body { important: boolean } (defaults to true).
+leads.post('/:id/important', wrap(async (req, res) => {
+  const raw = (req.body ?? {}) as { important?: unknown };
+  const important = raw.important === undefined ? true : (raw.important === true || String(raw.important) === 'true');
+  res.json(await leadsSvc.setLeadImportant(orgId(req), req.params.id, important, clientId(req)));
+}));
 leads.post('/:id/convert', wrap(async (req, res) =>
   res.json(await leadsSvc.convertLead(orgId(req), req.params.id, parse(v.leadConvertSchema, req.body), userId(req)))));
 // Reopen / unconvert — flips back to 'working' and clears terminal fields.
