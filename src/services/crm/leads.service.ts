@@ -586,6 +586,22 @@ export async function listLeadsWithCount(
   // backend event that bumps latest_update_at) bubbles the row to the top.
   const sortKey = filters.sort ? String(filters.sort) : '';
   const ascending = String(filters.order ?? '').toLowerCase() === 'asc';
+  // Sink low-value terminal leads (unqualified, lost) to the very bottom of the
+  // listing so they don't crowd the active pipeline, while everything else
+  // keeps its chosen / default order. Relies on the generated column
+  // crm_leads.status_rank (0 = active, 1 = unqualified/lost — see migration
+  // lead_status_rank.sql). Gated per-project via env LEADS_STATUS_RANK_PROJECTS
+  // (comma-separated project keys) and OFF by default, so:
+  //   • Tata's `default` order is never changed unless explicitly opted in
+  //     (CLAUDE.md golden rule), and
+  //   • the query never ORDER BYs a column on a DB that hasn't run the
+  //     migration yet — a project is opted in only after its DB has the column.
+  // Skipped when the caller explicitly sorts by status (that sort is the point).
+  const rankProjects = new Set(
+    (process.env.LEADS_STATUS_RANK_PROJECTS ?? '')
+      .split(',').map((s) => s.trim()).filter(Boolean),
+  );
+  const sinkTerminal = sortKey !== 'status' && rankProjects.has(currentProjectKey());
   // Whitelist sortable columns → real DB columns. Name maps to first_name
   // with last_name as the tie-breaker so "by name" reads alphabetically.
   const SORT_COLUMNS: Record<string, string> = {
@@ -599,6 +615,7 @@ export async function listLeadsWithCount(
     status: 'status',
   };
   if (sortKey && SORT_COLUMNS[sortKey]) {
+    if (sinkTerminal) q = q.order('status_rank', { ascending: true, nullsFirst: false });
     q = q.order(SORT_COLUMNS[sortKey], { ascending, nullsFirst: false });
     if (sortKey === 'name') q = q.order('last_name', { ascending, nullsFirst: false });
     q = q.range((page - 1) * limit, page * limit - 1);
@@ -608,6 +625,7 @@ export async function listLeadsWithCount(
   // top. Falls back to updated_at then score so leads with no updates
   // yet still get a sensible order. Existing `sort=score` callers stay
   // honoured via the explicit filter handling above.
+  if (sinkTerminal) q = q.order('status_rank', { ascending: true, nullsFirst: false });
   q = q.order('latest_update_at', { ascending: false, nullsFirst: false })
        .order('updated_at', { ascending: false })
        .order('score', { ascending: false })
