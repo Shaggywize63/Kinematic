@@ -282,6 +282,13 @@ function projectSearchOrder(): string[] {
 const emailProjectCache = new Map<string, { project: string; at: number }>();
 const EMAIL_PROJECT_TTL_MS = 5 * 60_000;
 
+// Per-project probe deadline. An unreachable / mis-pointed project URL makes
+// supabase-js hang on a fetch that never resolves (postgrest-js has no default
+// request timeout), which would stall every caller of this resolver — notably
+// the OAuth /authorize POST, whose spinner then never returns. Aborting the
+// probe turns "unreachable" into the intended skip below.
+const PROJECT_PROBE_TIMEOUT_MS = Number(process.env.PROJECT_PROBE_TIMEOUT_MS) || 4000;
+
 /** Forget a cached routing (call after creating/moving/deleting a user). */
 export function clearEmailProjectCache(email?: string | null): void {
   if (email) emailProjectCache.delete(email.trim().toLowerCase());
@@ -308,9 +315,14 @@ export async function resolveProjectForEmailAsync(email?: string | null): Promis
   // 2. Data-driven: which project's users table holds this email?
   let firstInactive: string | null = null;
   for (const key of projectSearchOrder()) {
+    // Bound each probe so an unreachable project is skipped (as intended) instead
+    // of hanging the whole resolver. Abort actually cancels the in-flight fetch.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PROJECT_PROBE_TIMEOUT_MS);
     try {
       const { data } = await adminClientFor(key)
-        .from('users').select('is_active').eq('email', e).limit(1).maybeSingle();
+        .from('users').select('is_active').eq('email', e).limit(1)
+        .abortSignal(ctrl.signal).maybeSingle();
       if (data) {
         if ((data as { is_active?: boolean }).is_active !== false) {
           emailProjectCache.set(e, { project: key, at: Date.now() });
@@ -318,7 +330,8 @@ export async function resolveProjectForEmailAsync(email?: string | null): Promis
         }
         if (!firstInactive) firstInactive = key;
       }
-    } catch { /* project unreachable — skip it */ }
+    } catch { /* project unreachable / timed out — skip it */ }
+    finally { clearTimeout(timer); }
   }
   if (firstInactive) {
     emailProjectCache.set(e, { project: firstInactive, at: Date.now() });
