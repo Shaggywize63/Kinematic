@@ -382,6 +382,37 @@ export async function listLeads(
   return rows;
 }
 
+// Inbound = a lead whose source is backed by a lead-source integration
+// (Google Ads, web form, Meta, generic webhook, …). We derive the set of
+// integration-backed source ids for the org and tag / filter leads by it.
+// Short TTL cache — integrations are configured rarely, and this runs on every
+// leads-list call, so a per-org snapshot keeps it to ~one query a minute.
+const inboundSourceCache = new Map<string, { ids: string[]; at: number }>();
+const INBOUND_SOURCE_TTL_MS = 60_000;
+
+/** Distinct crm_lead_sources ids that have a lead-source integration, for org. */
+export async function inboundSourceIdsForOrg(org_id: string): Promise<string[]> {
+  const cached = inboundSourceCache.get(org_id);
+  if (cached && Date.now() - cached.at < INBOUND_SOURCE_TTL_MS) return cached.ids;
+  const { data } = await supabaseAdmin
+    .from('crm_lead_source_integrations')
+    .select('source_id')
+    .eq('org_id', org_id);
+  const ids = Array.from(new Set(
+    (data ?? [])
+      .map((r) => (r as { source_id?: string | null }).source_id)
+      .filter((v): v is string => typeof v === 'string' && v.length > 0),
+  ));
+  inboundSourceCache.set(org_id, { ids, at: Date.now() });
+  return ids;
+}
+
+/** Forget the cached inbound-source set for an org (call after an integration is added/removed). */
+export function clearInboundSourceCache(org_id?: string): void {
+  if (org_id) inboundSourceCache.delete(org_id);
+  else inboundSourceCache.clear();
+}
+
 /**
  * Same filter set as listLeads but returns both the page of rows AND the
  * total row count (matching the full filter, not the page). Used by the
@@ -397,6 +428,9 @@ export async function listLeadsWithCount(
 ): Promise<{ rows: Lead[]; total: number; page: number; limit: number }> {
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
+
+  // Integration-backed source ids for this org, to tag/filter inbound leads.
+  const inboundSet = new Set(await inboundSourceIdsForOrg(org_id));
 
   let q = supabaseAdmin.from('crm_leads').select('*', { count: 'exact' })
     .eq('org_id', org_id).is('deleted_at', null);
@@ -476,6 +510,13 @@ export async function listLeadsWithCount(
   if (filters.lifecycle_stage) q = q.eq('lifecycle_stage', String(filters.lifecycle_stage));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
+  // Inbound-only view: leads whose source is an integration (Google Ads, web
+  // form, Meta, …). Powers the "N from Google Ads / web forms" counter chip and
+  // its click-to-filter. No integrations configured → nothing is inbound.
+  if (String(filters.inbound ?? '') === 'true') {
+    if (inboundSet.size === 0) return { rows: [], total: 0, page, limit };
+    q = q.in('source_id', Array.from(inboundSet));
+  }
   if (filters.score_gte) q = q.gte('score', Number(filters.score_gte));
   if (filters.utm_source)   q = q.eq('utm_source',   String(filters.utm_source));
   if (filters.utm_campaign) q = q.eq('utm_campaign', String(filters.utm_campaign));
@@ -574,7 +615,12 @@ export async function listLeadsWithCount(
   }
   const { data, error, count } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return { rows: (data ?? []) as Lead[], total: count ?? 0, page, limit };
+  // Tag each row so the list can badge inbound leads without a second lookup.
+  const rows = (data ?? []).map((r) => {
+    const sid = (r as { source_id?: string | null }).source_id;
+    return { ...(r as Lead), is_inbound: !!sid && inboundSet.has(sid) };
+  });
+  return { rows, total: count ?? 0, page, limit };
 }
 
 /**
