@@ -369,9 +369,13 @@ export const token = asyncHandler<Request>(async (req, res) => {
   const b = (req.body || {}) as Record<string, unknown>;
   const grantType = String(b.grant_type || '');
   const { clientId, clientSecret } = clientCredentials(req);
+  logger.info(`[OAuth] token request grant=${grantType || '(none)'} client=${clientId || '(none)'}`);
 
   const client = await getClient(clientId);
-  if (!client) return tokenError(res, 401, 'invalid_client');
+  if (!client) {
+    logger.warn(`[OAuth] token: unknown/inactive client=${clientId || '(none)'}`);
+    return tokenError(res, 401, 'invalid_client');
+  }
 
   // Client authentication.
   //   authorization_code — the PKCE code_verifier ↔ code_challenge binding
@@ -390,14 +394,19 @@ export const token = asyncHandler<Request>(async (req, res) => {
     const code = String(b.code || '');
     const redirectUri = String(b.redirect_uri || '');
     const codeVerifier = String(b.code_verifier || '');
-    if (!code || !redirectUri || !codeVerifier) return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
+    if (!code || !redirectUri || !codeVerifier) {
+      logger.warn(`[OAuth] token: missing params (client=${clientId} code=${!!code} redirect_uri=${!!redirectUri} code_verifier=${!!codeVerifier})`);
+      return tokenError(res, 400, 'invalid_request', 'Missing code, redirect_uri or code_verifier');
+    }
 
+    // consumeAuthCode logs the specific reason on any rejection.
     const grant = await consumeAuthCode({ code, clientId, redirectUri, codeVerifier });
     if (!grant) return tokenError(res, 400, 'invalid_grant');
 
     const tokens = await issueTokens({
       clientId, userId: grant.user_id, projectKey: grant.project_key, orgId: grant.org_id, scopes: grant.scopes,
     });
+    logger.info(`[OAuth] token issued (authorization_code) user=${grant.user_id} project=${grant.project_key} client=${clientId}`);
     res.setHeader('Cache-Control', 'no-store');
     return res.json(tokens);
   }
