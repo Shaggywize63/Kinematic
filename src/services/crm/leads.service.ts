@@ -958,6 +958,58 @@ const FREE_EMAIL_DOMAINS = new Set<string>([
   'yandex.com', 'ymail.in',
 ]);
 
+// Map the unified-score result to the LeadScore shape the apps decode. iOS AND
+// Android both expect `lead_id`, `score`, `band`, and `breakdown` as an ARRAY of
+// factor objects; the raw rescore result exposes `breakdown` as an object with
+// no `lead_id`, which made the iOS Codable throw "keyNotFound: lead_id" (and
+// left Android's breakdown list null). This returns a superset object so the
+// iOS, Android and web LeadScore models each find the keys they read.
+const SCORE_META_KEYS = new Set([
+  'total', 'base', 'llm_adjustment', 'llm_reasons', 'llm_reason', 'llm_confidence',
+  'model', 'version', 'grade', 'score',
+]);
+function gradeToBand(grade?: string | null): string {
+  switch (String(grade || '').toUpperCase()) {
+    case 'A': return 'hot';
+    case 'B': case 'C': return 'warm';
+    case 'D': return 'cold';
+    default: return 'warm';
+  }
+}
+export function toLeadScoreResponse(
+  lead_id: string,
+  out: { score: number; grade?: string | null; breakdown?: unknown },
+) {
+  const b = (out.breakdown && typeof out.breakdown === 'object'
+    ? out.breakdown : {}) as Record<string, unknown>;
+  const factors = Object.entries(b)
+    .filter(([k, v]) => typeof v === 'number' && !SCORE_META_KEYS.has(k))
+    .sort((a, c) => (c[1] as number) - (a[1] as number))
+    .map(([factor, points]) => ({
+      factor,
+      points: points as number,        // iOS ScoreBreakdown.points
+      weight: points as number,        // Android/web weight
+      contribution: points as number,  // Android/web contribution
+      rationale: null as string | null,    // iOS optional
+      description: null as string | null,  // Android optional
+    }));
+  const reasoning = typeof b.llm_reason === 'string' ? (b.llm_reason as string)
+    : typeof b.llm_reasons === 'string' ? (b.llm_reasons as string) : null;
+  const now = new Date().toISOString();
+  return {
+    lead_id,
+    score: out.score,
+    grade: out.grade ?? null,
+    band: gradeToBand(out.grade),
+    breakdown: factors, // iOS + Android read `breakdown` (array)
+    factors,            // web LeadScore reads `factors`
+    reasoning,
+    computed_at: now,   // iOS
+    generated_at: now,  // web
+    updated_at: now,    // Android
+  };
+}
+
 export async function convertLead(org_id: string, id: string, opts: {
   create_deal?: boolean; deal_name?: string; deal_amount?: number;
   deal_volume_kg?: number; deal_product_id?: string;
