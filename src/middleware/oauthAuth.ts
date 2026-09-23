@@ -28,21 +28,22 @@ export function requireOAuth(...requiredScopes: OAuthScope[]) {
   return async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const auth = req.headers.authorization;
-      if (!auth?.startsWith('Bearer ')) return unauthorized(res, 'Missing bearer token');
+      if (!auth?.startsWith('Bearer ')) { logger.warn('[OAuth] bearer rejected: missing/!Bearer Authorization header'); return unauthorized(res, 'Missing bearer token'); }
       const token = auth.slice(7).trim();
 
       const grant = await validateAccessToken(token);
-      if (!grant) return unauthorized(res, 'Invalid or expired token');
-      if (!isKnownProject(grant.project_key)) return unauthorized(res, 'Invalid token');
+      if (!grant) { logger.warn('[OAuth] bearer rejected: token not found / expired / revoked'); return unauthorized(res, 'Invalid or expired token'); }
+      if (!isKnownProject(grant.project_key)) { logger.warn(`[OAuth] bearer rejected: unknown project "${grant.project_key}"`); return unauthorized(res, 'Invalid token'); }
 
       if (requiredScopes.length && !requiredScopes.every((s) => grant.scopes.includes(s))) {
+        logger.warn(`[OAuth] bearer rejected: insufficient scope (has=[${grant.scopes.join(',')}] needs=[${requiredScopes.join(',')}])`);
         return forbidden(res, `insufficient_scope: requires ${requiredScopes.join(', ')}`);
       }
 
       // Hydrate the user IN the token's project context (buildUserContext uses
       // the ALS-bound supabaseAdmin, so it must run inside runWithProject).
       const user = await runWithProject(grant.project_key, () => buildUserContext(grant.user_id));
-      if (!user) return unauthorized(res, 'Account not found or inactive');
+      if (!user) { logger.warn(`[OAuth] bearer rejected: account not found/inactive (user=${grant.user_id} project=${grant.project_key})`); return unauthorized(res, 'Account not found or inactive'); }
 
       // AI-assistant entitlement (paid add-on): even with a valid token, the
       // user's org must be enabled for the connector. Defense-in-depth for
