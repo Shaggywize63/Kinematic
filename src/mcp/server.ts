@@ -14,6 +14,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 // different number/effects types that don't unify with the SDK's expected shape.
 import { z } from 'zod/v3';
 import { AuthRequest } from '../types';
+import { logger } from '../lib/logger';
 import { clientScopedList, get, update, create } from '../services/crm/crud.service';
 import {
   McpCtx, mcpCtxFromReq, textResult, errorResult, denyIfNotAllowed, ownerScopeOpts, audit,
@@ -221,11 +222,23 @@ export function buildMcpServer(req: AuthRequest): McpServer {
  * supabaseAdmin call in the tools targets the right tenant.
  */
 export async function mcpHandler(req: AuthRequest, res: Response): Promise<void> {
-  const server = buildMcpServer(req);
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-  res.on('close', () => { void transport.close(); void server.close(); });
-  await server.connect(transport);
-  await transport.handleRequest(req, res, req.body);
+  // Diagnostic: the token validated and we're inside the handler. Log the
+  // JSON-RPC method and the final HTTP status the Streamable-HTTP transport
+  // writes, so a handshake that the transport rejects (e.g. 406 on a missing
+  // Accept header) is visible instead of silent.
+  const rpcMethod = (req.body as { method?: unknown })?.method;
+  logger.info(`[mcp] handler start: method=${typeof rpcMethod === 'string' ? rpcMethod : '(none)'}`);
+  res.on('finish', () => logger.info(`[mcp] handler done: method=${typeof rpcMethod === 'string' ? rpcMethod : '(none)'} status=${res.statusCode}`));
+  try {
+    const server = buildMcpServer(req);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on('close', () => { void transport.close(); void server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (e: any) {
+    logger.error(`[mcp] handler threw: ${e?.message || e}`);
+    if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
+  }
 }
 
 /**

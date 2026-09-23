@@ -506,6 +506,11 @@ app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-
 app.post('/mcp',
   express.json(),
   (req, res, next) => {
+    // Diagnostic: record that /mcp was reached and the transport-relevant shape
+    // (JSON-RPC method, whether a bearer arrived, and the Accept/Content-Type the
+    // client sent — the MCP Streamable-HTTP transport is picky about Accept).
+    const b = (req.body || {}) as { method?: unknown; id?: unknown };
+    logger.info(`[mcp] POST reached: method=${typeof b.method === 'string' ? b.method : '(none)'} id=${b.id ?? '-'} hasAuth=${!!req.headers.authorization} accept="${req.headers.accept || ''}" content-type="${req.headers['content-type'] || ''}"`);
     res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${mcpPublicBase(req)}/.well-known/oauth-protected-resource"`);
     next();
   },
