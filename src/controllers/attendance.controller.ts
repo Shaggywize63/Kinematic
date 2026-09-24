@@ -452,8 +452,14 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const rangeTo   = t || to;
 
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-  const isGlobal = ( (isSagar || isSuper) && (!req.query.client_id || !isUUID(req.query.client_id as string)) );
+  const role = (user.role || '').toLowerCase();
+  // A CLIENT-BOUND user (client_id pinned in the JWT, e.g. ByteBack's sub_admin
+  // admin/manager) is NEVER cross-org. Previously isSuper = role.includes('admin')
+  // matched 'sub_admin', so such a caller was treated as global and saw every
+  // org's attendance — other tenants'/seeded rows leaked in as "mock" data.
+  const isClientBound = isUUID((user as any).client_id);
+  const isSuper = !isClientBound && (role === 'super_admin' || role === 'admin' || role === 'main_admin' || role === 'master_admin');
+  const isGlobal = !isClientBound && (isSagar || isSuper) && (!req.query.client_id || !isUUID(req.query.client_id as string));
 
   let query = supabaseAdmin
     .from('attendance')

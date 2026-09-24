@@ -5,7 +5,7 @@ import {
   getSummary, getActivityFeed, getHourly,
   getContactHeatmap, getWeeklyContacts,
   getLiveLocations, getAttendanceToday,
-  getOutletCoverage, getCityPerformance,
+  getOutletCoverage, getCityPerformance, getUserPerformance,
   getTffTrends, getDashboardInit, getMobileHome,
   getMobileBroadcasts, getMobileLearning
 } from '../controllers/analytics.controller';
@@ -47,6 +47,7 @@ router.get('/live-locations',   cache(15), requireAnyModule(['live_tracking', 'a
 router.get('/attendance-today', cache(15), checkAnalytics, getAttendanceToday);
 router.get('/outlet-coverage',  cache(60), checkAnalytics, getOutletCoverage);
 router.get('/city-performance', cache(60), checkAnalytics, getCityPerformance);
+router.get('/user-performance', cache(60), checkAnalytics, getUserPerformance);
 
 // Mobile Compatibility (iOS prefixes these with /analytics)
 router.get('/broadcasts',        getMobileBroadcasts);
