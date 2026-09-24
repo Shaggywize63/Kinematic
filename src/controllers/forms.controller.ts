@@ -44,10 +44,23 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
     return badRequest(res, error.message);
   }
 
+  // Resolve human-readable activity names so clients can group forms by activity
+  // (the ByteBack ad-hoc "New" flow shows an activity picker first, then that
+  // activity's forms). Look up only the activity ids present on the results.
+  const activityIds = Array.from(new Set((data || []).map((f: any) => f.activity_id).filter(Boolean))) as string[];
+  const activityNameById = new Map<string, string>();
+  if (activityIds.length) {
+    const { data: acts } = await supabaseAdmin.from('activities').select('id, name').in('id', activityIds);
+    for (const a of (acts || []) as Array<{ id: string; name: string | null }>) {
+      if (a.name) activityNameById.set(a.id, a.name);
+    }
+  }
+
   // Map to the format expected by the Android App (Models.kt)
   const mappedData = (data || []).map(form => ({
     id: form.id,
     activity_id: form.activity_id || "",
+    activity_name: form.activity_id ? (activityNameById.get(form.activity_id) || null) : null,
     name: form.title, // App expects 'name', DB has 'title'
     description: form.description,
     requires_photo: form.requires_photo || false,
