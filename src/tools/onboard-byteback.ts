@@ -60,6 +60,7 @@ const SEAT_LIMIT = 4;
 // so omitting it disables them too. All are off-by-default anyway.
 const EXCLUDE_MODULES = new Set([
   'route_plan', 'route_optimization', 'route_deviation', 'beat_productivity', 'orders',
+  'planograms',
 ]);
 // Always ensure these field-force modules are granted if present in the catalog.
 const REQUIRE_MODULES = ['attendance', 'activities', 'form_builder'];
