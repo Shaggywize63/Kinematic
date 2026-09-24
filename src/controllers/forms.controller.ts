@@ -257,19 +257,27 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
+  const role = (user.role || '').toLowerCase();
+  // A CLIENT-BOUND user (client_id pinned in the JWT, e.g. ByteBack's sub_admins)
+  // is NEVER cross-org — it is scoped to its own org. Previously isSuper was
+  // `role.includes('admin')`, which matched 'sub_admin', so a client admin was
+  // treated as global and saw EVERY org's submissions: other tenants' / demo
+  // rows leaked into a single tenant's Work Activities as "mock" entries. Grant
+  // the cross-org (global) view only to the platform tier (super_admin / the
+  // platform owner), and never when the caller is client-bound.
+  const isClientBound = isUUID((user as any).client_id);
+  const isSuper = !isClientBound && (role === 'super_admin' || role === 'admin' || role === 'main_admin' || role === 'master_admin');
 
-  // Rule: If Sagar/SuperAdmin, DEFAULT to Global unless a specific client
-  // UUID is selected. `isGlobal` here means "no org-level scope" (super
-  // admins can see everything across orgs); `pickedClientId` is the
-  // (optional) per-client sub-tenant filter that applies regardless of
-  // role. Previously these were collapsed into a single `effectiveOrgId`
-  // and filtered on `form_submissions.org_id` — which broke for any
-  // caller selecting a specific client UUID because that UUID is NOT
-  // the row's org_id (org_id is the parent organisation; client_id is
-  // the sub-tenant). Net result: empty results in Work Activities.
-  const isGlobal = isGlobalVal || isSagar || isSuper || (!client_id || !isUUID(client_id as string));
-  const pickedClientId = (client_id && isUUID(client_id as string) && !isGlobalVal) ? (client_id as string) : null;
+  // Rule: only the platform tier sees across orgs, and only when it hasn't
+  // picked a specific client UUID. Everyone else (org admins, client-bound
+  // sub_admins) is scoped to their own org. `pickedClientId` is the optional
+  // per-client sub-tenant narrow that applies regardless of role. (org_id is
+  // the parent organisation; client_id is the sub-tenant, so a picked client
+  // UUID is matched on client_id, not org_id.)
+  const isGlobal = !isClientBound && (isGlobalVal || isSagar || isSuper);
+  const pickedClientId = isClientBound
+    ? ((user as any).client_id as string)
+    : ((client_id && isUUID(client_id as string) && !isGlobalVal) ? (client_id as string) : null);
 
   const istDateFrom = parseAppDate(date_from as string);
   const istDateTo = date_to ? parseAppDate(date_to as string) : istDateFrom;
