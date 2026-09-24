@@ -40,12 +40,15 @@ const TEMP_PASSWORD = 'ByteBack@2026';
 // which is in ACTIVE_CAP_BYPASS_DOMAINS (misc.controller), so this account is
 // EXEMPT from the seat cap — it never consumes a ByteBack seat and can always
 // sign in to manage users. Real password, no forced rotation.
-const MASTER = { name: 'ByteBack Admin', email: 'byteback@kinematicapp.com', password: 'Manvik@1221', mobile: '' };
-const MANAGER = { name: 'ByteBack Manager', email: 'manager@byteback.example', mobile: '' };
+// Distinct placeholder mobiles — the users table has a unique (org_id, mobile)
+// constraint, so every account needs its own value (an empty string collides).
+// Replace with real numbers later via User Management.
+const MASTER = { name: 'ByteBack Admin', email: 'byteback@kinematicapp.com', password: 'Manvik@1221', mobile: '9000000000' };
+const MANAGER = { name: 'ByteBack Manager', email: 'manager@byteback.example', mobile: '9000000001' };
 const FIELD_USERS = [
-  { name: 'ByteBack User 1', email: 'user1@byteback.example', mobile: '' },
-  { name: 'ByteBack User 2', email: 'user2@byteback.example', mobile: '' },
-  { name: 'ByteBack User 3', email: 'user3@byteback.example', mobile: '' },
+  { name: 'ByteBack User 1', email: 'user1@byteback.example', mobile: '9000000002' },
+  { name: 'ByteBack User 2', email: 'user2@byteback.example', mobile: '9000000003' },
+  { name: 'ByteBack User 3', email: 'user3@byteback.example', mobile: '9000000004' },
 ];
 // Paid seats for ByteBack: 1 manager + 3 field users. Enforced by
 // assertActiveUserCap (org_settings key limits.max_active_users). The master
