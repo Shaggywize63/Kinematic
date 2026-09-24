@@ -462,7 +462,7 @@ async function assertActiveUserCap(orgId: string | null | undefined, email?: str
   const counted = (activeUsers || []).filter(
     u => u.id !== excludeUserId && !ACTIVE_CAP_BYPASS_DOMAINS.has(emailDomainOf(u.email)));
   if (counted.length >= limit) {
-    throw new AppError(400, `This organisation allows a maximum of ${limit} active users. Deactivate a user before adding another.`, 'USER_LIMIT_REACHED');
+    throw new AppError(400, `You've reached your plan limit of ${limit} user${limit === 1 ? '' : 's'}. Please contact the Kinematic team to upgrade your plan (or deactivate a user before adding another).`, 'USER_LIMIT_REACHED');
   }
 }
 

@@ -4,8 +4,12 @@
  * What ByteBack gets:
  *   - Its own org + a `clients` row owned by the Kinematic parent org, so it
  *     shows up in Client Management for Kinematic.
- *   - 1 manager (designation data_scope='team') + 4 field executives
- *     (data_scope='own'), placeholder emails, NOT city-scoped.
+ *   - A master admin login on the cap-exempt kinematicapp.com domain (for the
+ *     Kinematic team), PLUS the paid seats: 1 manager (data_scope='team') + 3
+ *     field executives (data_scope='own'), placeholder emails, NOT city-scoped.
+ *   - A seat cap of 4 (limits.max_active_users) enforced by assertActiveUserCap:
+ *     the master is exempt, so a 5th byteback.example user is blocked with the
+ *     "contact the Kinematic team to upgrade" prompt in the dashboard.
  *   - Field-force module grants EXCEPT route_plan, route_optimization
  *     (outlet priorities ride on this), route_deviation, beat_productivity.
  *   - No CRM package and no KINI (kini_agentic_v2 left unset / off by default),
@@ -32,13 +36,25 @@ const ORG_SLUG = 'byteback';
 
 // Placeholder credentials — replace the emails later via User Management.
 const TEMP_PASSWORD = 'ByteBack@2026';
-const MANAGER = { name: 'ByteBack Manager', email: 'manager@byteback.example', mobile: '' };
+// Master admin login supplied by the Kinematic team. It's on kinematicapp.com,
+// which is in ACTIVE_CAP_BYPASS_DOMAINS (misc.controller), so this account is
+// EXEMPT from the seat cap — it never consumes a ByteBack seat and can always
+// sign in to manage users. Real password, no forced rotation.
+// Distinct placeholder mobiles — the users table has a unique (org_id, mobile)
+// constraint, so every account needs its own value (an empty string collides).
+// Replace with real numbers later via User Management.
+const MASTER = { name: 'ByteBack Admin', email: 'byteback@kinematicapp.com', password: 'Manvik@1221', mobile: '9000000000' };
+const MANAGER = { name: 'ByteBack Manager', email: 'manager@byteback.example', mobile: '9000000001' };
 const FIELD_USERS = [
-  { name: 'ByteBack User 1', email: 'user1@byteback.example', mobile: '' },
-  { name: 'ByteBack User 2', email: 'user2@byteback.example', mobile: '' },
-  { name: 'ByteBack User 3', email: 'user3@byteback.example', mobile: '' },
-  { name: 'ByteBack User 4', email: 'user4@byteback.example', mobile: '' },
+  { name: 'ByteBack User 1', email: 'user1@byteback.example', mobile: '9000000002' },
+  { name: 'ByteBack User 2', email: 'user2@byteback.example', mobile: '9000000003' },
+  { name: 'ByteBack User 3', email: 'user3@byteback.example', mobile: '9000000004' },
 ];
+// Paid seats for ByteBack: 1 manager + 3 field users. Enforced by
+// assertActiveUserCap (org_settings key limits.max_active_users). The master
+// account is exempt (kinematicapp.com), so it doesn't count. Adding a 5th
+// byteback.example user is blocked with the upgrade prompt.
+const SEAT_LIMIT = 4;
 
 // Modules ByteBack must NOT get. Outlet priorities ride on route_optimization,
 // so omitting it disables them too. All are off-by-default anyway.
@@ -169,21 +185,27 @@ async function main() {
   const managerDesig = await ensureDesignation('Manager', 'team', 0, grantIds);
   const feDesig = await ensureDesignation('Field Executive', 'own', 1, grantIds);
 
-  // 4. Users — 1 manager + 4 field executives. role tier 'sub_admin' mirrors the
-  //    proven field-force config (PASA); data isolation comes from data_scope.
-  log('4. users (1 manager + 4 field executives)');
-  const mkUser = async (u: { name: string; email: string; mobile: string }, orgRole: string) => {
-    log(`   - ${u.name} <${u.email}> role_desig=${orgRole === managerDesig ? 'Manager' : 'Field Executive'}`);
+  // 4. Users — master admin (cap-exempt) + 1 manager + 3 field executives. role
+  //    tier 'sub_admin' mirrors the proven field-force config (PASA); data
+  //    isolation comes from data_scope.
+  log('4. users (master admin + 1 manager + 3 field executives)');
+  const mkUser = async (
+    u: { name: string; email: string; mobile: string; password?: string },
+    orgRole: string,
+    mustChange = true,
+  ) => {
+    log(`   - ${u.name} <${u.email}> role_desig=${orgRole === managerDesig ? 'Manager' : 'Field Executive'}${u.password ? ' (master, cap-exempt)' : ''}`);
     if (dry) return;
     const dup = (await db.from('users').select('id').eq('org_id', BYTEBACK_ORG_ID).eq('email', u.email).maybeSingle()).data as any;
-    const uid = dup?.id || await ensureLogin(u.email, TEMP_PASSWORD, u.name);
+    const uid = dup?.id || await ensureLogin(u.email, u.password || TEMP_PASSWORD, u.name);
     const { error } = await db.from('users').upsert({
       id: uid, org_id: BYTEBACK_ORG_ID, client_id: BYTEBACK_CLIENT_ID, name: u.name,
       email: u.email, mobile: u.mobile, role: 'sub_admin', org_role_id: orgRole,
-      city: null, is_active: true, must_change_password: true,
+      city: null, is_active: true, must_change_password: mustChange,
     }, { onConflict: 'id' });
     if (error) throw new Error(`users ${u.email}: ${error.message}`);
   };
+  await mkUser(MASTER, managerDesig, false);   // master admin — cap-exempt, real password, no forced rotation
   await mkUser(MANAGER, managerDesig);
   for (const u of FIELD_USERS) await mkUser(u, feDesig);
 
@@ -196,9 +218,23 @@ async function main() {
     if (error) throw new Error(`client_modules: ${error.message}`);
   }
 
+  // 6. Seat cap — org_settings key limits.max_active_users, read by
+  //    assertActiveUserCap on user create/activate. Mirrors client.controller's
+  //    writeUserCap (delete-then-insert) since org_settings is unique per
+  //    (org_id, key). The master (kinematicapp.com) is exempt, so this caps the
+  //    byteback.example seats at SEAT_LIMIT; a further add shows the upgrade prompt.
+  log(`6. seat cap (limits.max_active_users = ${SEAT_LIMIT})`);
+  if (!dry) {
+    await db.from('org_settings').delete().eq('org_id', BYTEBACK_ORG_ID).eq('key', 'limits.max_active_users');
+    const { error } = await db.from('org_settings').insert({ org_id: BYTEBACK_ORG_ID, key: 'limits.max_active_users', value: SEAT_LIMIT });
+    if (error) throw new Error(`org_settings cap: ${error.message}`);
+  }
+
   log(`\n=== ${dry ? 'DRY-RUN complete (nothing written)' : 'COMMIT complete'} ===`);
   log(`ByteBack org=${BYTEBACK_ORG_ID} client=${BYTEBACK_CLIENT_ID}`);
+  log(`Master (cap-exempt): ${MASTER.email} · password: ${MASTER.password}`);
   log(`Manager: ${MANAGER.email} · Field users: ${FIELD_USERS.map((u) => u.email).join(', ')} · temp password: ${TEMP_PASSWORD}`);
+  log(`Seat cap: ${SEAT_LIMIT} (1 manager + 3 users; master exempt). 5th byteback.example user → upgrade prompt.`);
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error('[onboard-byteback] FAILED:', e?.message || e); process.exit(1); });
