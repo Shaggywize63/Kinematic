@@ -1190,6 +1190,64 @@ export const getCityPerformance = asyncHandler(async (req: AuthRequest, res: Res
   return ok(res, { from, to, cities: result });
 });
 
+/* ── GET /api/v1/analytics/user-performance ─────────────── */
+/* Per field-executive KPIs for a date range: check-ins, form submissions and
+ * active days. Powers the ByteBack dashboard's User-wise performance table
+ * (route-less, outlet-less tenants where city/outlet breakdowns are meaningless).
+ * Scoped to the caller's org + client. Field execs are matched by the newer
+ * org-role designation (data_scope='own') OR the legacy role, so tenants whose
+ * reps are role='sub_admin' (ByteBack) are included, not just role='executive'. */
+export const getUserPerformance = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, { from: '', to: '', users: [] });
+  const from = (req.query.from as string) || isoDate(toIST(new Date()));
+  const to   = (req.query.to   as string) || isoDate(toIST(new Date()));
+
+  let usersQ = supabaseAdmin.from('users')
+    .select('id, name, employee_id, role, is_active, org_role:org_roles!org_role_id(data_scope)')
+    .eq('org_id', user.org_id).eq('is_active', true);
+  if (isUUID(user.client_id)) usersQ = usersQ.eq('client_id', user.client_id);
+  const { data: allUsers } = await usersQ;
+  const fes = (allUsers || []).filter((u: any) =>
+    u.role === 'executive' || u.role === 'field_executive' || u.org_role?.data_scope === 'own'
+  );
+  const feIds = new Set(fes.map((u: any) => u.id));
+
+  let attQ = supabaseAdmin.from('attendance').select('user_id, date, total_hours')
+    .eq('org_id', user.org_id).gte('date', from).lte('date', to);
+  if (isUUID(user.client_id)) attQ = attQ.eq('client_id', user.client_id);
+  const { data: att } = await attQ;
+
+  let subQ = supabaseAdmin.from('form_submissions').select('user_id, submitted_at')
+    .eq('org_id', user.org_id).gte('submitted_at', `${from}T00:00:00+05:30`).lte('submitted_at', `${to}T23:59:59+05:30`);
+  if (isUUID(user.client_id)) subQ = subQ.eq('client_id', user.client_id);
+  const { data: subs } = await subQ;
+
+  type Agg = { checkins: number; activeDays: Set<string>; hours: number; submissions: number };
+  const byUser = new Map<string, Agg>();
+  const ensure = (id: string) => {
+    if (!byUser.has(id)) byUser.set(id, { checkins: 0, activeDays: new Set(), hours: 0, submissions: 0 });
+    return byUser.get(id)!;
+  };
+  (att || []).forEach((a: any) => {
+    if (a.user_id && feIds.has(a.user_id)) { const g = ensure(a.user_id); g.checkins++; if (a.date) g.activeDays.add(a.date); g.hours += a.total_hours || 0; }
+  });
+  (subs || []).forEach((s: any) => {
+    if (s.user_id && feIds.has(s.user_id)) { ensure(s.user_id).submissions++; }
+  });
+
+  const users = fes.map((u: any) => {
+    const g = byUser.get(u.id);
+    return {
+      user_id: u.id, name: u.name, employee_id: u.employee_id || null,
+      checkins: g?.checkins || 0, submissions: g?.submissions || 0,
+      active_days: g?.activeDays.size || 0, total_hours: +((g?.hours) || 0).toFixed(1),
+    };
+  }).sort((a: any, b: any) => (b.submissions - a.submissions) || (b.checkins - a.checkins));
+
+  return ok(res, { from, to, users });
+});
+
 export const getMobileBroadcasts = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockBroadcasts());

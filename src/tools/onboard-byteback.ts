@@ -63,7 +63,7 @@ const EXCLUDE_MODULES = new Set([
   'planograms',
 ]);
 // Always ensure these field-force modules are granted if present in the catalog.
-const REQUIRE_MODULES = ['attendance', 'activities', 'form_builder'];
+const REQUIRE_MODULES = ['attendance', 'activities', 'form_builder', 'analytics'];
 
 const MODE: 'inspect' | 'dry-run' | 'commit' =
   process.argv.includes('--commit') ? 'commit'
@@ -125,9 +125,22 @@ async function ensureLogin(email: string, password: string, name: string): Promi
 }
 
 async function ensureDesignation(name: string, dataScope: 'own' | 'team' | 'all', position: number, grantIds: string[]): Promise<string> {
-  const existing = (await db.from('org_roles').select('id')
+  const existing = (await db.from('org_roles').select('id, permissions, permissions_write')
     .eq('org_id', BYTEBACK_ORG_ID).eq('name', name).is('deleted_at', null).maybeSingle()).data as any;
-  if (existing?.id) return existing.id;
+  if (existing?.id) {
+    // Keep an existing designation's module grants in SYNC (idempotent union) so
+    // re-runs pick up newly-added REQUIRE_MODULES (e.g. analytics). The dashboard's
+    // hasModule() gate needs the module listed in org_roles.permissions or the nav
+    // item stays hidden even when the client_module entitlement is granted.
+    const merged = Array.from(new Set([...(existing.permissions || []), ...grantIds]));
+    const mergedW = Array.from(new Set([...(existing.permissions_write || []), ...grantIds]));
+    if (!dry) {
+      const { error } = await db.from('org_roles')
+        .update({ permissions: merged, permissions_write: mergedW }).eq('id', existing.id);
+      if (error) throw new Error(`org_roles update ${name}: ${error.message}`);
+    }
+    return existing.id;
+  }
   const id = randomUUID();
   if (!dry) {
     const { error } = await db.from('org_roles').insert({
