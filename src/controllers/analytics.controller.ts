@@ -475,7 +475,7 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   
   let execQuery = supabaseAdmin
     .from('users')
-    .select('id, name, employee_id, role, battery_percentage, device_model, device_brand, os_version, last_latitude, last_longitude, last_location_updated_at, location_status, location_precise, location_status_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
+    .select('id, name, employee_id, role, org_role_id, org_role:org_roles!org_role_id(data_scope), battery_percentage, device_model, device_brand, os_version, last_latitude, last_longitude, last_location_updated_at, location_status, location_precise, location_status_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id)
     .not('role', 'in', `(${restrictedRoles.join(',')})`);
   
@@ -492,9 +492,25 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   
   if (isUUID(zone_id)) execQuery = execQuery.eq('zone_id', zone_id);
   if (isUUID(fe_id) || isUUID(user_id)) execQuery = execQuery.eq('id', fe_id || user_id);
-  const { data: execs, error: execErr } = await execQuery;
+  const { data: execsRaw, error: execErr } = await execQuery;
 
   if (execErr) return badRequest(res, execErr.message);
+
+  // Live Trailing tracks FIELD reps (and their supervisors), never the
+  // manager/admin tier. Preset admin roles ('admin','super_admin') are already
+  // excluded above, but hierarchy-RBAC tenants (e.g. ByteBack) put managers on
+  // the generic 'sub_admin' preset and separate them from field reps only by
+  // their org_role data_scope ('team'/'all' = manager/admin, 'own' = field rep).
+  // Drop admin-tier presets whose designation is team/org-wide so a manager
+  // never shows as a dot on the field map; field reps ('own', or no designation)
+  // and supervisors (preset 'supervisor') are kept.
+  const ADMIN_TIER = new Set(['sub_admin', 'admin', 'main_admin', 'super_admin', 'client']);
+  const execs = (execsRaw || []).filter((u: any) => {
+    const rel = Array.isArray(u.org_role) ? u.org_role[0] : u.org_role;
+    const scope = rel?.data_scope;
+    const isManagerTier = ADMIN_TIER.has(String(u.role || '').toLowerCase()) && (scope === 'team' || scope === 'all');
+    return !isManagerTier;
+  });
 
   let attQuery = supabaseAdmin
     .from('attendance')
