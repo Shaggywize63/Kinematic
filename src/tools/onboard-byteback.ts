@@ -183,7 +183,15 @@ async function main() {
 
   // 3. Designations: Manager (team) + Field Executive (own)
   log('3. designations (Manager=team, Field Executive=own)');
-  const managerDesig = await ensureDesignation('Manager', 'team', 0, grantIds);
+  // The Manager (and the master admin, who rides on this designation) also gets
+  // the `users` (user-management) capability so the ByteBack manager can add &
+  // manage the team's seats from the dashboard. `users` is a UNIVERSAL module
+  // (always entitled, so it's not in grantIds), but the dashboard's hasModule()
+  // gate ALSO requires the role's permission list to include a module once that
+  // list is non-empty — so 'users' must be named here explicitly or the Users
+  // nav item stays hidden for this org.
+  const managerGrantIds = [...grantIds, 'users'];
+  const managerDesig = await ensureDesignation('Manager', 'team', 0, managerGrantIds);
   const feDesig = await ensureDesignation('Field Executive', 'own', 1, grantIds);
 
   // 4. Users — master admin (cap-exempt) + 1 manager + 3 field executives. role
