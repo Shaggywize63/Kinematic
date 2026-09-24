@@ -210,7 +210,11 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
   // show a real designation (Business Manager, Consumer Champion, etc.)
   // instead of leaking internal preset roles. Stamped on each row as
   // `org_role_name` below.
-  let query = supabaseAdmin.from('users').select('*, org_role:org_roles!org_role_id(name)', { count: 'exact' })
+  // `data_scope` is joined alongside the designation name so consumers (e.g. the
+  // dashboard Users directory) can tell a FIELD rep (data_scope 'own') from a
+  // manager/admin ('team'/'all') even in hierarchy-RBAC tenants where everyone
+  // shares the generic 'sub_admin' preset role.
+  let query = supabaseAdmin.from('users').select('*, org_role:org_roles!org_role_id(name, data_scope)', { count: 'exact' })
     // Hide soft-deleted users (deleteUser sets deleted_at) from the directory.
     .is('deleted_at', null);
 
