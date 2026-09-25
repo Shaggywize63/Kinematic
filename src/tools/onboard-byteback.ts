@@ -62,8 +62,11 @@ const EXCLUDE_MODULES = new Set([
   'route_plan', 'route_optimization', 'route_deviation', 'beat_productivity', 'orders',
   'planograms',
 ]);
-// Always ensure these field-force modules are granted if present in the catalog.
-const REQUIRE_MODULES = ['attendance', 'activities', 'form_builder', 'analytics'];
+// Always ensure these modules are granted if present in the catalog. Note
+// `field_expenses` lives in the `people` package (not `field_force`), so it is
+// NOT picked up by the package rule above and must be required explicitly —
+// this is what surfaces Expenses in the app menu and the dashboard for ByteBack.
+const REQUIRE_MODULES = ['attendance', 'activities', 'form_builder', 'analytics', 'field_expenses'];
 
 const MODE: 'inspect' | 'dry-run' | 'commit' =
   process.argv.includes('--commit') ? 'commit'

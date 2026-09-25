@@ -108,6 +108,11 @@ router.get('/claims/:id', asyncHandler<AuthRequest>(async (req, res) => {
 router.post('/claims', asyncHandler<AuthRequest>(async (req, res) => {
   res.json({ success: true, data: await expenses.createClaim(actor(req), parse(createSchema, req.body)) });
 }));
+// Edit a claim's title/lines while it is still editable (draft or submitted —
+// i.e. before approval). Blocked once the claim is decided.
+router.patch('/claims/:id', asyncHandler<AuthRequest>(async (req, res) => {
+  res.json({ success: true, data: await expenses.updateClaim(actor(req), req.params.id, parse(createSchema, req.body)) });
+}));
 router.post('/claims/:id/submit', asyncHandler<AuthRequest>(async (req, res) => {
   res.json({ success: true, data: await expenses.submitClaim(actor(req), req.params.id) });
 }));

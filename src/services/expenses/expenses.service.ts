@@ -21,6 +21,7 @@ import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
 import { AIService } from '../ai.service';
 import { mileageFromTrail } from './mileage.service';
+import { notifyUsers } from '../notify';
 
 export interface Actor { id: string; org_id: string; role?: string | null; client_id?: string | null; }
 
@@ -128,8 +129,48 @@ async function supervisorOf(user_id: string): Promise<string | null> {
 async function notify(org_id: string, user_id: string | null, title: string, body: string, data: Record<string, string>) {
   if (!user_id) return;
   try {
-    await supabaseAdmin.from('notifications').insert({ org_id, user_id, title, body, type: 'expense', data });
+    // The `notification_type` enum has no 'expense' value; inserting it fails
+    // (silently, under PostgREST) — which historically dropped EVERY expense
+    // notification (submit / approve / reject / reimburse). Use the guaranteed
+    // 'general' type and carry the semantic kind in data.kind, the same
+    // convention the mobile clients deep-link on (see services/notify.ts).
+    const kind = data.type || 'expense';
+    await supabaseAdmin.from('notifications').insert({
+      org_id, user_id, title, body,
+      type: 'general',
+      data: { kind, ...data },
+      is_read: false,
+      sent_at: null,
+    });
   } catch (e: any) { logger.warn(`[expenses] notify failed: ${e?.message || e}`); }
+}
+
+/**
+ * Recipients for a "new claim to review" alert: the org's real approvers —
+ * anyone with a team/all data-scope RBAC role, plus legacy admin/manager roles.
+ * Deliberately data_scope-aware: ByteBack (and other flat field-force tenants)
+ * give field execs the legacy `sub_admin` role, distinguished from managers only
+ * by `org_roles.data_scope = 'own'`, so a role-only match would spam every rep.
+ * Best-effort; excludes the claimant.
+ */
+const APPROVER_LEGACY_ROLES = ['admin', 'super_admin', 'main_admin', 'org_admin', 'client', 'manager', 'city_manager', 'supervisor', 'hr'];
+async function resolveExpenseApprovers(org_id: string, client_id: string | null, excludeUserId?: string | null): Promise<string[]> {
+  const out = new Set<string>();
+  try {
+    let q = supabaseAdmin
+      .from('users')
+      .select('id, role, client_id, org_role:org_roles!org_role_id(data_scope)')
+      .eq('org_id', org_id).eq('is_active', true).limit(300);
+    if (client_id) q = q.or(`client_id.eq.${client_id},client_id.is.null`);
+    const { data } = await q;
+    for (const u of ((data as any[]) ?? [])) {
+      const scope = (u.org_role?.data_scope ?? '').toLowerCase();
+      const role = (u.role ?? '').toLowerCase();
+      const isApprover = scope === 'team' || scope === 'all' || APPROVER_LEGACY_ROLES.includes(role);
+      if (isApprover && u.id !== excludeUserId) out.add(u.id);
+    }
+  } catch (e: any) { logger.warn(`[expenses] resolveExpenseApprovers failed: ${e?.message || e}`); }
+  return [...out];
 }
 
 async function stampNames(rows: any[]): Promise<any[]> {
@@ -229,6 +270,71 @@ export async function createClaim(actor: Actor, body: { title?: string | null; i
     if (itErr) throw new AppError(500, itErr.message, 'DB');
   }
   return getClaim(actor, c.id);
+}
+
+/**
+ * Edit a claim's title + line items while it is still editable — i.e. BEFORE
+ * approval. Allowed to the owner on a `draft` or `submitted` claim; once the
+ * claim is approved / rejected / reimbursed / cancelled it can no longer be
+ * changed (the caller/UI hides the edit affordance too). On a still-`submitted`
+ * claim the totals, anomaly flags and approver brief are recomputed so the
+ * pending approver always sees current numbers.
+ */
+export async function updateClaim(actor: Actor, id: string, body: { title?: string | null; items?: ClaimItemInput[] }) {
+  const { data: claim } = await supabaseAdmin.from('expense_claims').select('*')
+    .eq('org_id', actor.org_id).eq('id', id).maybeSingle();
+  if (!claim) throw new AppError(404, 'Claim not found', 'NOT_FOUND');
+  const c = claim as any;
+  if (c.user_id !== actor.id) throw new AppError(403, 'Not your claim', 'FORBIDDEN');
+  if (!['draft', 'submitted'].includes(c.status)) {
+    throw new AppError(400, 'This claim has already been decided and can no longer be edited', 'BAD_STATE');
+  }
+
+  const items = (body.items ?? []).filter((i) => i && ITEM_CATEGORIES.includes(i.category as string));
+  if (!items.length) throw new AppError(400, 'Add at least one line', 'EMPTY');
+  const total = round2(items.reduce((s, i) => s + Number(i.amount || 0), 0));
+  const claimedKm = round2(items.filter((i) => i.category === 'mileage').reduce((s, i) => s + Number(i.distance_km || 0), 0));
+
+  // Replace the line items wholesale (simplest correct semantics for an edit).
+  await supabaseAdmin.from('expense_claim_items').delete().eq('claim_id', id);
+  const rows = items.map((i) => ({
+    claim_id: id, org_id: actor.org_id, category: i.category,
+    item_date: i.item_date ?? null, description: i.description ?? null,
+    amount: Number(i.amount || 0), distance_km: i.distance_km ?? null,
+    from_location: i.from_location ?? null, to_location: i.to_location ?? null,
+    merchant: i.merchant ?? null, receipt_url: i.receipt_url ?? null,
+    ai_extracted: i.ai_extracted ?? null,
+  }));
+  const { error: itErr } = await supabaseAdmin.from('expense_claim_items').insert(rows);
+  if (itErr) throw new AppError(500, itErr.message, 'DB');
+
+  const now = new Date().toISOString();
+  const update: any = {
+    title: body.title !== undefined ? body.title : c.title,
+    total_amount: total,
+    distance_km: claimedKm || null,
+    updated_at: now,
+  };
+
+  // A submitted claim is awaiting an approver — re-run the anomaly pass + brief
+  // so what they see reflects the edit.
+  if (c.status === 'submitted') {
+    const policy = await getPolicy(actor.org_id, actor.client_id ?? null);
+    const { data: freshItems } = await supabaseAdmin.from('expense_claim_items').select('*').eq('claim_id', id);
+    const its = (freshItems as any[]) || [];
+    const gpsKm: number | null = c.gps_derived_km == null ? null : Number(c.gps_derived_km);
+    const { flags, flaggedItemIds } = detectAnomalies(its, policy, claimedKm, gpsKm);
+    for (const it of its) {
+      const reason = flaggedItemIds[it.id];
+      await supabaseAdmin.from('expense_claim_items').update({ flagged: !!reason, flag_reason: reason ?? null }).eq('id', it.id);
+    }
+    update.ai_flags = flags;
+    update.ai_summary = await buildSummary({ ...c, total_amount: total, distance_km: claimedKm || null, gps_derived_km: gpsKm }, its, flags);
+  }
+
+  const { error } = await supabaseAdmin.from('expense_claims').update(update).eq('id', id);
+  if (error) throw new AppError(500, error.message, 'DB');
+  return getClaim(actor, id);
 }
 
 export async function cancelClaim(actor: Actor, id: string) {
@@ -389,14 +495,36 @@ export async function submitClaim(actor: Actor, id: string) {
     claim_id: id, org_id: actor.org_id, level: 1, approver_id, status: 'pending',
   });
 
-  if (!approver_id) {
-    logger.warn(`[expenses] claim ${id} submitted but claimant ${actor.id} has no supervisor — needs admin action.`);
-  } else {
-    const { data: me } = await supabaseAdmin.from('users').select('name').eq('id', actor.id).maybeSingle();
+  const { data: me } = await supabaseAdmin.from('users').select('name').eq('id', actor.id).maybeSingle();
+  const claimantName = (me as any)?.name || 'A team member';
+
+  // 1) The direct supervisor in the reporting line, when one is set.
+  if (approver_id) {
     await notify(actor.org_id, approver_id, 'Expense claim to review',
-      `${(me as any)?.name || 'A team member'} submitted ${policy.currency} ${total.toFixed(0)} — ${summary}`,
+      `${claimantName} submitted ${policy.currency} ${total.toFixed(0)} — ${summary}`,
       { type: 'expense_submitted', claim_id: id });
+  } else {
+    logger.warn(`[expenses] claim ${id} submitted but claimant ${actor.id} has no supervisor — admins/managers notified instead.`);
   }
+
+  // 2) The org's admins/managers (HR/Admin). This guarantees a claim is never
+  //    missed when the claimant has no supervisor set (e.g. ByteBack's flat
+  //    field-force teams), and keeps admins in the loop generally. Excludes the
+  //    supervisor already notified above and the claimant.
+  try {
+    const approvers = await resolveExpenseApprovers(actor.org_id, actor.client_id ?? null, actor.id);
+    await notifyUsers(
+      approvers.filter((aId) => aId !== approver_id),
+      {
+        orgId: actor.org_id,
+        kind: 'expense_submitted',
+        title: 'Expense claim to review',
+        body: `${claimantName} submitted ${policy.currency} ${total.toFixed(0)} for approval.`,
+        data: { claim_id: id },
+      },
+    );
+  } catch (e: any) { logger.warn(`[expenses] approver fan-out failed: ${e?.message || e}`); }
+
   return getClaim(actor, id);
 }
 

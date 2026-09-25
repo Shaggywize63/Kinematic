@@ -172,9 +172,16 @@ export const login = asyncHandler<Request>(async (req, res) => {
     }
     const { data: userLookup } = await supabaseAdmin
       .from('users')
-      .select('email, mobile')
+      .select('email, mobile, is_active, deleted_at')
+      // Ignore soft-deleted rows and prefer the active one. A leftover
+      // soft-deleted duplicate (e.g. a user deactivated then re-created)
+      // otherwise makes .single() throw, masking a valid login as
+      // "No account found for this mobile number".
       .or(`mobile.eq.${mobile},mobile.eq.+91${mobile},mobile.eq.0${mobile}`)
-      .single();
+      .is('deleted_at', null)
+      .order('is_active', { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
     if (!userLookup) {
       return res.status(401).json({ success: false, error: 'No account found for this mobile number. Contact your admin.' });
