@@ -21,7 +21,9 @@ const router = Router();
 
 function actor(req: AuthRequest): expenses.Actor {
   const u = req.user as any;
-  return { id: u.id, org_id: u.org_id, role: u.role, client_id: u.client_id ?? null };
+  // org_role_data_scope ('own' for field execs) lets the service deny approval
+  // to reps who share the sub_admin role on flat field-force tenants (ByteBack).
+  return { id: u.id, org_id: u.org_id, role: u.role, client_id: u.client_id ?? null, data_scope: u.org_role_data_scope ?? null };
 }
 function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   const r = schema.safeParse(body);
@@ -107,6 +109,11 @@ router.get('/claims/:id', asyncHandler<AuthRequest>(async (req, res) => {
 }));
 router.post('/claims', asyncHandler<AuthRequest>(async (req, res) => {
   res.json({ success: true, data: await expenses.createClaim(actor(req), parse(createSchema, req.body)) });
+}));
+// Edit a claim's title/lines while it is still editable (draft or submitted —
+// i.e. before approval). Blocked once the claim is decided.
+router.patch('/claims/:id', asyncHandler<AuthRequest>(async (req, res) => {
+  res.json({ success: true, data: await expenses.updateClaim(actor(req), req.params.id, parse(createSchema, req.body)) });
 }));
 router.post('/claims/:id/submit', asyncHandler<AuthRequest>(async (req, res) => {
   res.json({ success: true, data: await expenses.submitClaim(actor(req), req.params.id) });

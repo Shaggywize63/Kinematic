@@ -44,7 +44,7 @@ const TEMP_PASSWORD = 'ByteBack@2026';
 // constraint, so every account needs its own value (an empty string collides).
 // Replace with real numbers later via User Management.
 const MASTER = { name: 'ByteBack Admin', email: 'byteback@kinematicapp.com', password: 'Manvik@1221', mobile: '9000000000' };
-const MANAGER = { name: 'ByteBack Manager', email: 'manager@byteback.example', mobile: '9000000001' };
+const MANAGER = { name: 'ByteBack Manager', email: 'hr@byteback.co.in', mobile: '9000000001' };
 const FIELD_USERS = [
   { name: 'ByteBack User 1', email: 'user1@byteback.example', mobile: '9000000002' },
   { name: 'ByteBack User 2', email: 'user2@byteback.example', mobile: '9000000003' },
@@ -62,8 +62,11 @@ const EXCLUDE_MODULES = new Set([
   'route_plan', 'route_optimization', 'route_deviation', 'beat_productivity', 'orders',
   'planograms',
 ]);
-// Always ensure these field-force modules are granted if present in the catalog.
-const REQUIRE_MODULES = ['attendance', 'activities', 'form_builder', 'analytics'];
+// Always ensure these modules are granted if present in the catalog. Note
+// `field_expenses` lives in the `people` package (not `field_force`), so it is
+// NOT picked up by the package rule above and must be required explicitly —
+// this is what surfaces Expenses in the app menu and the dashboard for ByteBack.
+const REQUIRE_MODULES = ['attendance', 'activities', 'form_builder', 'analytics', 'field_expenses'];
 
 const MODE: 'inspect' | 'dry-run' | 'commit' =
   process.argv.includes('--commit') ? 'commit'

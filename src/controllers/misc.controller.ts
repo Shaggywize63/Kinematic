@@ -662,11 +662,19 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
   // never be configured.
   const allowed = ['name', 'mobile', 'zone_id', 'supervisor_id', 'is_active', 'employee_id', 'city', 'email', 'avatar_url', 'role', 'client_id', 'org_role_id', 'base_lat', 'base_lng', 'geofence_radius_m']
   const updates: any = {}
-  for (const key of allowed) { 
+  for (const key of allowed) {
     if (req.body[key] !== undefined && req.body[key] !== '') {
-      updates[key] = req.body[key] 
+      updates[key] = req.body[key]
     }
   }
+
+  // Reactivation must also lift a prior soft-delete. The DELETE path stamps
+  // `deleted_at` (+ is_active:false); flipping is_active back on without clearing
+  // deleted_at leaves the user hidden from the admin directory (which filters
+  // soft-deleted rows), so admins re-create them — spawning duplicate rows that
+  // then break the mobile-number login lookup. Clearing it here keeps a
+  // reactivated user whole.
+  if (updates.is_active === true) updates.deleted_at = null
 
   // 1. Mobile Format Validation
   if (updates.mobile && !/^\d{10}$/.test(updates.mobile)) {
@@ -742,6 +750,27 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
       // If we are here, it means app_password was updated but no profile fields changed
       const { data: userData } = await supabaseAdmin.from('users').select('*').eq('id', req.params.id).single()
       data = [userData];
+    }
+
+    // Mirror an email change (or a reactivation) into Supabase Auth. Only the
+    // password was ever synced to GoTrue here; editing a user's email — or
+    // adding one to a mobile-only account — left users.email and
+    // auth.users.email diverged, so the next mobile login resolves the (new)
+    // users.email and GoTrue rejects it as "Invalid credentials". Re-mirroring
+    // fixes new edits and, because it also runs on reactivation, repairs an
+    // already-broken user the moment an admin toggles them back on. Best-effort:
+    // the profile write already succeeded, so a sync failure is logged, not thrown.
+    const syncedEmail = (data?.[0] as any)?.email as string | undefined
+    if (syncedEmail && (updates.email !== undefined || updates.is_active === true)) {
+      try {
+        const { error: authEmailErr } = await supabaseAdmin.auth.admin.updateUserById(
+          req.params.id,
+          { email: syncedEmail, email_confirm: true },
+        )
+        if (authEmailErr) logger.warn(`[updateUser] GoTrue email sync failed for ${req.params.id}: ${authEmailErr.message}`)
+      } catch (e: any) {
+        logger.warn(`[updateUser] GoTrue email sync crashed for ${req.params.id}: ${e?.message || e}`)
+      }
     }
 
     const targetUserId = req.params.id
