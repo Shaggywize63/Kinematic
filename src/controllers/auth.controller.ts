@@ -91,6 +91,25 @@ async function getCrmBusinessType(orgId: string | null | undefined, clientId: st
   return v === 'b2b' || v === 'b2c' || v === 'both' ? v : 'both';
 }
 
+// Per-client app-UI customization set from Client Management: which side-menu
+// items, bottom tabs and CRM-More destinations are shown/hidden in the mobile
+// apps. Stored on clients.settings.app_ui and surfaced here (and on login) so
+// the apps drive their nav from it — falling back to their built-in default
+// gate for any id not present, so absent config = today's behavior.
+async function getClientAppUiConfig(clientId: string | null | undefined): Promise<Record<string, unknown>> {
+  if (!clientId) return {};
+  try {
+    const { data } = await supabaseAdmin
+      .from('clients')
+      .select('settings')
+      .eq('id', clientId)
+      .maybeSingle();
+    const settings = (data as any)?.settings;
+    const cfg = settings && typeof settings === 'object' ? (settings as any).app_ui : null;
+    return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : {};
+  } catch { return {}; }
+}
+
 /**
  * Build a human-readable device label for the kicked-device toast.
  * Examples:
@@ -352,6 +371,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds(userProfile.org_id);
   const businessType = await getCrmBusinessType(userProfile.org_id, userProfile.client_id);
+  const appUiConfig = await getClientAppUiConfig(userProfile.client_id);
 
   return ok(res, {
     access_token: session.session.access_token,
@@ -370,6 +390,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
       enabled_packages: entitlements.enabled_packages,
       location_ping_interval_seconds: locationPingIntervalSeconds,
       business_type: businessType,
+      app_ui_config: appUiConfig,
       active_session_id: issuedSessionId,
     },
   });
@@ -573,6 +594,7 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds((data as any)?.org_id);
   const businessType = await getCrmBusinessType((data as any)?.org_id, (data as any)?.client_id);
+  const appUiConfig = await getClientAppUiConfig((data as any)?.client_id);
 
   const result = {
     ...data,
@@ -595,6 +617,10 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     enabled_packages: entitlements.enabled_packages,
     location_ping_interval_seconds: locationPingIntervalSeconds,
     business_type: businessType,
+    // Per-client app-UI customization (menu / bottom-tab / CRM-More visibility)
+    // set from Client Management. The apps apply each id as an override on top
+    // of their built-in default gate; {} means "use defaults everywhere".
+    app_ui_config: appUiConfig,
     // Surface the user's city scope so the dashboard can render a city
     // picker. `assigned_city_names` is the user-level cap (resolved from
     // user_city_assignments → cities.name in auth middleware). Empty
