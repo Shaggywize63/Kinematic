@@ -21,7 +21,9 @@ const router = Router();
 
 function actor(req: AuthRequest): expenses.Actor {
   const u = req.user as any;
-  return { id: u.id, org_id: u.org_id, role: u.role, client_id: u.client_id ?? null };
+  // org_role_data_scope ('own' for field execs) lets the service deny approval
+  // to reps who share the sub_admin role on flat field-force tenants (ByteBack).
+  return { id: u.id, org_id: u.org_id, role: u.role, client_id: u.client_id ?? null, data_scope: u.org_role_data_scope ?? null };
 }
 function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   const r = schema.safeParse(body);
