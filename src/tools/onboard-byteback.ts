@@ -44,7 +44,7 @@ const TEMP_PASSWORD = 'ByteBack@2026';
 // constraint, so every account needs its own value (an empty string collides).
 // Replace with real numbers later via User Management.
 const MASTER = { name: 'ByteBack Admin', email: 'byteback@kinematicapp.com', password: 'Manvik@1221', mobile: '9000000000' };
-const MANAGER = { name: 'ByteBack Manager', email: 'manager@byteback.example', mobile: '9000000001' };
+const MANAGER = { name: 'ByteBack Manager', email: 'hr@byteback.co.in', mobile: '9000000001' };
 const FIELD_USERS = [
   { name: 'ByteBack User 1', email: 'user1@byteback.example', mobile: '9000000002' },
   { name: 'ByteBack User 2', email: 'user2@byteback.example', mobile: '9000000003' },
