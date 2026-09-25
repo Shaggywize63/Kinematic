@@ -4,6 +4,7 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
+import { clearClientFlagCache } from '../lib/clientFlags';
 import { currentProjectKey, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor, clearEmailProjectCache } from '../lib/projects';
 import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
@@ -563,7 +564,7 @@ async function syncCeilingToLinkedProject(opts: {
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users } = req.body;
+  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users, app_ui } = req.body;
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
@@ -680,6 +681,41 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     }
   }
 
+  // 6. Per-client APP-UI customization (which side-menu items / bottom tabs /
+  //    CRM-More destinations are shown in the mobile apps). Merge into
+  //    clients.settings.app_ui — the same per-client store the apps read on
+  //    /auth/me — only when the field was sent. Kept SEPARATE from client_modules:
+  //    that table is the licensing ceiling; this is UI visibility, so an admin can
+  //    hide an entitled item without revoking the entitlement.
+  let appUiOut: any = ((client as { settings?: any }).settings || {})?.app_ui ?? null;
+  if (app_ui !== undefined && app_ui !== null && typeof app_ui === 'object' && !Array.isArray(app_ui)) {
+    const curSettings = ((client as { settings?: any }).settings && typeof (client as any).settings === 'object' && !Array.isArray((client as any).settings))
+      ? (client as any).settings : {};
+    const mergedSettings = { ...curSettings, app_ui };
+    const { error: sErr } = await supabaseAdmin.from('clients')
+      .update({ settings: mergedSettings }).eq('id', id).eq(ownerColumn(), user.org_id);
+    if (sErr) logger.warn(`[Clients] app_ui settings write failed for ${id}: ${sErr.message}`);
+    else { appUiOut = app_ui; clearClientFlagCache(id); }
+
+    // Mirror to the linked data project (same idea as the module-ceiling sync)
+    // so a client whose /auth/me is served from another project sees it too.
+    const dataProject = (client as { data_project_key?: string }).data_project_key;
+    const dataClientId = (client as { data_client_id?: string }).data_client_id;
+    if (dataProject && isKnownProject(dataProject) && dataProject !== currentProjectKey()
+        && dataClientId && isUUID(dataClientId)) {
+      try {
+        const remote = adminClientFor(dataProject);
+        const { data: tc } = await remote.from('clients').select('settings').eq('id', dataClientId).maybeSingle();
+        const cur = ((tc as any)?.settings && typeof (tc as any).settings === 'object' && !Array.isArray((tc as any).settings)) ? (tc as any).settings : {};
+        await remote.from('clients').update({ settings: { ...cur, app_ui } }).eq('id', dataClientId);
+        clearClientFlagCache(dataClientId);
+        logger.info(`[Clients] synced app_ui ${id} -> ${dataProject}/${dataClientId}`);
+      } catch (e: any) {
+        logger.error(`[Clients] app_ui cross-project mirror failed for ${id} -> ${dataProject}/${dataClientId}: ${e?.message || e}`);
+      }
+    }
+  }
+
   // Per-org active-user cap (optional; only when the field was sent).
   let capOut: number | null = (client as { max_active_users?: number | null }).max_active_users ?? null;
   if (max_active_users !== undefined) {
@@ -688,7 +724,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     catch (e: any) { logger.warn(`[Clients] user-cap write failed for ${id}: ${e?.message || e}`); }
   }
 
-  ok(res, { ...client, modules: modules || [], max_active_users: capOut });
+  ok(res, { ...client, modules: modules || [], max_active_users: capOut, app_ui: appUiOut });
 });
 
 /**
