@@ -477,8 +477,12 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
     .from('users')
     .select('id, name, employee_id, role, org_role_id, org_role:org_roles!org_role_id(data_scope), battery_percentage, device_model, device_brand, os_version, last_latitude, last_longitude, last_location_updated_at, location_status, location_precise, location_status_updated_at, zone_id, zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', user.org_id)
+    // Deactivated / soft-deleted reps must never appear on the live map — a
+    // stale last-known fix would otherwise keep an ex-employee as a dot.
+    .eq('is_active', true)
+    .is('deleted_at', null)
     .not('role', 'in', `(${restrictedRoles.join(',')})`);
-  
+
   // Super Admin can see everyone; others are restricted by their own client_id
   if (isUUID(user.client_id) && user.role !== 'super_admin') {
     execQuery = execQuery.or(`client_id.eq.${user.client_id},client_id.is.null`);
