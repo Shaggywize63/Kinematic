@@ -7,6 +7,9 @@ import { resolveFactor, normalizeVehicleType, VEHICLE_TYPES, DEFAULT_VEHICLE_TYP
 import { optimizeRoute, OutletPoint } from '../services/route-optimizer.service';
 import { buildRouteSuggestion, SuggestedOutlet } from '../services/route-suggestion.service';
 import { buildAutoPlanDraft } from '../services/route-autoplan.service';
+import {
+  buildTeamAutoPlan, AUTOPLAN_METHODS, isAutoPlanMethod, AutoPlanMethod,
+} from '../services/route-team-autoplan.service';
 import { haversineDistance } from '../lib/haversine';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
@@ -460,6 +463,192 @@ export const autoGenerateRoutePlan = asyncHandler(async (req, res) => {
     return badRequest(res, oErr.message);
   }
   return created(res, { plan_id: plan.id, replaced: replace ? draft.existing_plan_ids.length : 0, ...draft });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Automated Route Plans — org-level auto-assignment policy + team engine.
+// The manager picks a METHOD (org_settings 'route_autoplan.policy'); the engine
+// (route-team-autoplan.service) distributes due outlets across all FEs and the
+// controller persists one plan per FE. 'manual' turns auto-assignment off.
+// ───────────────────────────────────────────────────────────────────────────
+
+const AUTOPLAN_POLICY_KEY = 'route_autoplan.policy';
+const AUTOPLAN_NOTE_PREFIX = 'Auto-assigned';
+
+interface AutoPlanPolicy {
+  method: AutoPlanMethod;
+  params: { max_outlets_per_fe: number; vehicle_type: string; max_radius_km: number };
+  schedule: { enabled: boolean; time: string };
+}
+
+/** Coerce arbitrary input (saved value or request body) into a valid policy. */
+function normalizeAutoPlanPolicy(input: any): AutoPlanPolicy {
+  const method: AutoPlanMethod = isAutoPlanMethod(input?.method) ? input.method : 'cadence_priority';
+  const p = input?.params || {};
+  const cap = parseInt(String(p.max_outlets_per_fe ?? ''), 10);
+  const radius = Number(p.max_radius_km);
+  const sch = input?.schedule || {};
+  return {
+    method,
+    params: {
+      max_outlets_per_fe: Math.min(Math.max(Number.isFinite(cap) ? cap : 15, 1), 50),
+      vehicle_type: normalizeVehicleType(p.vehicle_type || DEFAULT_VEHICLE_TYPE),
+      max_radius_km: Math.min(Math.max(Number.isFinite(radius) ? radius : 25, 1), 500),
+    },
+    schedule: {
+      enabled: sch.enabled === true,
+      time: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(sch.time)) ? String(sch.time) : '06:00',
+    },
+  };
+}
+
+async function readAutoPlanPolicy(org: string): Promise<{ policy: AutoPlanPolicy; updated_at: string | null }> {
+  const { data } = await supabase
+    .from('org_settings').select('value, updated_at')
+    .eq('org_id', org).eq('key', AUTOPLAN_POLICY_KEY).maybeSingle();
+  return { policy: normalizeAutoPlanPolicy((data as any)?.value ?? {}), updated_at: (data as any)?.updated_at ?? null };
+}
+
+/** GET /route-plans/autoplan/methods — the method catalog for the config UI. */
+export const listAutoPlanMethods = asyncHandler(async (_req, res) =>
+  ok(res, { methods: AUTOPLAN_METHODS, vehicle_types: VEHICLE_TYPES }));
+
+/** GET /route-plans/autoplan/policy — the org's current auto-assignment policy. */
+export const getAutoPlanPolicy = asyncHandler(async (req, res) => {
+  const { policy, updated_at } = await readAutoPlanPolicy(orgId(req));
+  return ok(res, { ...policy, updated_at, methods: AUTOPLAN_METHODS, vehicle_types: VEHICLE_TYPES });
+});
+
+/**
+ * PUT /route-plans/autoplan/policy — set the org's auto-assignment method +
+ * params (editable any time). SELECT-then-UPDATE/INSERT on org_settings, matching
+ * the location-ping-interval convention (no dependency on a named unique index).
+ */
+export const setAutoPlanPolicy = asyncHandler(async (req, res) => {
+  const org = orgId(req);
+  const by = userId(req);
+  if (req.body?.method != null && !isAutoPlanMethod(req.body.method)) {
+    return badRequest(res, `method must be one of ${AUTOPLAN_METHODS.map((m) => m.id).join(', ')}`);
+  }
+  const policy = normalizeAutoPlanPolicy(req.body);
+  const now = new Date().toISOString();
+  const value = { ...policy, updated_by: by, updated_at: now };
+
+  const { data: existing, error: selErr } = await supabase
+    .from('org_settings').select('id').eq('org_id', org).eq('key', AUTOPLAN_POLICY_KEY).maybeSingle();
+  if (selErr) return badRequest(res, selErr.message);
+
+  if (existing?.id) {
+    const { error } = await supabase.from('org_settings').update({ value, updated_at: now, updated_by: by }).eq('id', existing.id);
+    if (error) return badRequest(res, error.message);
+  } else {
+    const { error } = await supabase.from('org_settings').insert({ org_id: org, key: AUTOPLAN_POLICY_KEY, value, updated_by: by });
+    if (error) return badRequest(res, error.message);
+  }
+  return ok(res, { ...value, methods: AUTOPLAN_METHODS });
+});
+
+/** Merge request overrides over the saved policy → the effective params. */
+async function resolveAutoPlanParams(req: Request): Promise<AutoPlanPolicy> {
+  const { policy } = await readAutoPlanPolicy(orgId(req));
+  const b = req.body || {};
+  return normalizeAutoPlanPolicy({
+    method: b.method ?? policy.method,
+    params: { ...policy.params, ...(b.params || {}) },
+    schedule: policy.schedule,
+  });
+}
+
+/**
+ * POST /route-plans/autoplan/preview — dry-run the team auto-assignment for a
+ * date with the given (or saved) method + params. Writes nothing; the dashboard
+ * shows the per-FE breakdown before the manager commits.
+ */
+export const previewTeamAutoPlan = asyncHandler(async (req, res) => {
+  const org = orgId(req);
+  const eff = await resolveAutoPlanParams(req);
+  const planDate = parseAppDate((req.body?.plan_date as string) || dbToday());
+  const result = await buildTeamAutoPlan({
+    orgId: org, planDate, method: eff.method,
+    maxOutletsPerFe: eff.params.max_outlets_per_fe,
+    vehicleType: eff.params.vehicle_type,
+    maxRadiusKm: eff.params.max_radius_km,
+  });
+  return ok(res, result);
+});
+
+/**
+ * POST /route-plans/autoplan/run — generate AND assign plans across all FEs for
+ * a date using the chosen method. Idempotent: re-running removes THIS org+date's
+ * prior auto-assigned plans (notes prefixed 'Auto-assigned') and recreates them,
+ * leaving any manually-created plans untouched. 'manual' is rejected.
+ */
+export const runTeamAutoPlan = asyncHandler(async (req, res) => {
+  const org = orgId(req);
+  const by = userId(req);
+  const eff = await resolveAutoPlanParams(req);
+  if (eff.method === 'manual') {
+    return badRequest(res, 'The active method is "Manual only" — pick an automatic method to auto-assign, or add plans by hand.');
+  }
+  const planDate = parseAppDate((req.body?.plan_date as string) || dbToday());
+
+  const result = await buildTeamAutoPlan({
+    orgId: org, planDate, method: eff.method,
+    maxOutletsPerFe: eff.params.max_outlets_per_fe,
+    vehicleType: eff.params.vehicle_type,
+    maxRadiusKm: eff.params.max_radius_km,
+  });
+  const drafts = result.fes.filter((f) => f.stops.length);
+  if (!drafts.length) {
+    return badRequest(res, 'No outlets are due for this date — set visit cadence / priority in Outlet Priorities first, or check that field executives have coordinates.');
+  }
+
+  // Idempotent replace: drop only THIS org+date's prior auto-assigned plans.
+  const feIds = drafts.map((d) => d.user_id);
+  const { data: priorAuto } = await supabase
+    .from('route_plans').select('id')
+    .eq('org_id', org).eq('plan_date', planDate).in('user_id', feIds)
+    .ilike('notes', `${AUTOPLAN_NOTE_PREFIX}%`);
+  const priorIds = (priorAuto || []).map((p: any) => p.id);
+  if (priorIds.length) await supabase.from('route_plans').delete().in('id', priorIds);
+
+  const methodLabel = AUTOPLAN_METHODS.find((m) => m.id === eff.method)?.label || eff.method;
+  const factor = await resolveFactor(org, result.vehicle_type);
+  const createdPlans: Array<{ user_id: string; plan_id: string; outlets: number; total_km: number }> = [];
+
+  for (const d of drafts) {
+    // Resolve an activity: the FE's mapped activity → the org's first activity → null.
+    let activityId: string | null = null;
+    const { data: mapped } = await supabase.from('activity_users').select('activity_id').eq('org_id', org).eq('user_id', d.user_id).limit(1);
+    activityId = mapped?.[0]?.activity_id ?? null;
+    if (!activityId) {
+      const { data: acts } = await supabase.from('activities').select('id').eq('org_id', org).limit(1);
+      activityId = acts?.[0]?.id ?? null;
+    }
+
+    const { data: plan, error } = await supabase.from('route_plans').insert({
+      org_id: org, user_id: d.user_id, plan_date: planDate, activity_id: activityId,
+      created_by: by, total_outlets: d.stops.length, status: 'pending',
+      vehicle_type: result.vehicle_type, emission_factor_kg_per_km: factor,
+      optimized: true, total_distance_km: d.total_km,
+      notes: `${AUTOPLAN_NOTE_PREFIX} · ${methodLabel}`,
+    }).select().single();
+    if (error || !plan) continue;
+
+    const rows = d.stops.map((s) => ({
+      route_plan_id: plan.id, store_id: s.store_id, org_id: org, visit_order: s.visit_order,
+      target_type: 'general', is_geofenced: true, geofence_radius_m: 100,
+    }));
+    const { error: oErr } = await supabase.from('route_plan_outlets').insert(rows);
+    if (oErr) { await supabase.from('route_plans').delete().eq('id', plan.id); continue; }
+    createdPlans.push({ user_id: d.user_id, plan_id: plan.id, outlets: d.stops.length, total_km: d.total_km });
+  }
+
+  return created(res, {
+    method: eff.method, plan_date: planDate, vehicle_type: result.vehicle_type,
+    replaced: priorIds.length, plans_created: createdPlans.length, plans: createdPlans,
+    summary: result.summary, fes: result.fes,
+  });
 });
 
 export const updateOutletVisit = asyncHandler(async (req, res) => {

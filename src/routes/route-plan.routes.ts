@@ -20,6 +20,11 @@ import {
   autoGenerateRoutePlan,
   getRouteDeviations,
   upsertOutletFrequency,
+  listAutoPlanMethods,
+  getAutoPlanPolicy,
+  setAutoPlanPolicy,
+  previewTeamAutoPlan,
+  runTeamAutoPlan,
 } from '../controllers/route-plan.controller';
 
 const router = Router();
@@ -44,6 +49,15 @@ router.post('/auto-plan',        requireSupervisorOrAbove, requireModule('route_
 // Supervisor auto-GENERATE: design a brand-new plan for an FE from outlet
 // cadence + priority (Outlet Priorities), then assign it. dry_run previews.
 router.post('/auto-generate',    requireSupervisorOrAbove, requireModule('route_optimization'), autoGenerateRoutePlan);
+
+// ── Automated Route Plans (team-wide auto-assignment) ──────────────────────
+// Manager picks a method (policy), previews the per-FE assignment, then runs it
+// to auto-assign plans across every FE. All gated on route_optimization.
+router.get('/autoplan/methods',  requireSupervisorOrAbove, listAutoPlanMethods);
+router.get('/autoplan/policy',   requireSupervisorOrAbove, getAutoPlanPolicy);
+router.put('/autoplan/policy',   requireSupervisorOrAbove, requireModule('route_optimization'), setAutoPlanPolicy);
+router.post('/autoplan/preview', requireSupervisorOrAbove, requireModule('route_optimization'), previewTeamAutoPlan);
+router.post('/autoplan/run',     requireSupervisorOrAbove, requireModule('route_optimization'), runTeamAutoPlan);
 router.post('/bulk-import',      requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client'), bulkImportRoutePlans);
 router.patch('/:id',             requireSupervisorOrAbove, updateRoutePlan);
 router.delete('/:id',            requireRole('admin', 'super_admin', 'main_admin', 'client'), deleteRoutePlan);
