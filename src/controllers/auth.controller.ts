@@ -294,12 +294,20 @@ export const login = asyncHandler<Request>(async (req, res) => {
   // (e.g. a scoped "Lead Viewer") would otherwise log in with an EMPTY set and
   // get bounced to the field-force overview instead of its CRM home.
   let permissions = permsData?.map(p => p.module_id) || [];
+  // Also surface the org-role's data_scope + name on login (mirrors /auth/me),
+  // so the dashboard's stored profile can tell managers (data_scope
+  // 'team'/'all') from field reps ('own') without a separate /auth/me refresh —
+  // the Activities admin gates edit/delete on this.
+  let orgRoleDataScope: string | null = null;
+  let orgRoleName: string | null = null;
   if (userProfile.org_role_id) {
     const { data: roleRow } = await supabaseAdmin
-      .from('org_roles').select('permissions').eq('id', userProfile.org_role_id).single();
+      .from('org_roles').select('permissions, data_scope, name').eq('id', userProfile.org_role_id).single();
     if (Array.isArray(roleRow?.permissions)) {
       permissions = (roleRow!.permissions as string[]).filter(Boolean);
     }
+    orgRoleDataScope = (roleRow as { data_scope?: string | null } | null)?.data_scope ?? null;
+    orgRoleName = (roleRow as { name?: string | null } | null)?.name ?? null;
   }
   console.log(`[DEBUG] Login successful for ${email}. Permissions: ${permissions.length}`);
 
@@ -391,6 +399,8 @@ export const login = asyncHandler<Request>(async (req, res) => {
       location_ping_interval_seconds: locationPingIntervalSeconds,
       business_type: businessType,
       app_ui_config: appUiConfig,
+      org_role_data_scope: orgRoleDataScope,
+      org_role_name: orgRoleName,
       active_session_id: issuedSessionId,
     },
   });
