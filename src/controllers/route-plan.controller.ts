@@ -8,7 +8,7 @@ import { optimizeRoute, OutletPoint } from '../services/route-optimizer.service'
 import { buildRouteSuggestion, SuggestedOutlet } from '../services/route-suggestion.service';
 import { buildAutoPlanDraft } from '../services/route-autoplan.service';
 import {
-  buildTeamAutoPlan, AUTOPLAN_METHODS, isAutoPlanMethod, AutoPlanMethod,
+  buildTeamAutoPlan, loadFieldExecs, AUTOPLAN_METHODS, isAutoPlanMethod, AutoPlanMethod,
 } from '../services/route-team-autoplan.service';
 import { haversineDistance } from '../lib/haversine';
 
@@ -649,6 +649,69 @@ export const runTeamAutoPlan = asyncHandler(async (req, res) => {
     replaced: priorIds.length, plans_created: createdPlans.length, plans: createdPlans,
     summary: result.summary, fes: result.fes,
   });
+});
+
+/**
+ * GET /route-plans/autoplan/field-execs — each field executive's location
+ * readiness for auto-planning: whether they have a live fix, a manager-set base,
+ * and/or a last captured fix, plus which one the planner would use (start_source).
+ * Lets the manager see who has no coordinates and fix it before assigning.
+ */
+export const listFieldExecLocations = asyncHandler(async (req, res) => {
+  const execs = await loadFieldExecs(orgId(req));
+  return ok(res, execs.map((e) => ({
+    user_id: e.user_id,
+    name: e.name,
+    start_source: e.start_source,
+    has_location: e.start_source !== 'none',
+    has_live: e.has_live,
+    base: e.base,
+    last_capture: e.last_capture,
+    cities: e.cities,
+  })));
+});
+
+/**
+ * PUT /route-plans/autoplan/fe-location — manually set a field executive's base
+ * coordinates (users.base_lat/base_lng), the planner's fallback start when they
+ * have no live fix. Body: { user_id, lat, lng } to set explicit coordinates, or
+ * { user_id, use_last_capture: true } to copy their last captured ping into base.
+ */
+export const setFieldExecBase = asyncHandler(async (req, res) => {
+  const org = orgId(req);
+  const targetUserId = req.body?.user_id;
+  if (!isUUID(targetUserId)) return badRequest(res, 'user_id (uuid) required');
+  const { data: target } = await supabase.from('users').select('id, org_id').eq('id', targetUserId).maybeSingle();
+  if (!target || target.org_id !== org) return notFound(res, 'User not found in your organisation');
+
+  let lat: number;
+  let lng: number;
+  if (req.body?.use_last_capture === true) {
+    const { data } = await supabase
+      .from('work_activity')
+      .select('lat, lng, activity_type, captured_at')
+      .eq('org_id', org).eq('user_id', targetUserId)
+      .in('activity_type', ['HEARTBEAT', 'CHECK_IN', 'CHECK_OUT', 'FORM_SUBMIT'])
+      .order('captured_at', { ascending: false }).limit(50);
+    const hit = (data || []).find((r: any) => {
+      const la = Number(r.lat), ln = Number(r.lng);
+      return Number.isFinite(la) && Number.isFinite(ln) && !(la === 0 && ln === 0);
+    });
+    if (!hit) return badRequest(res, 'No captured location found for this field executive yet — enter coordinates manually.');
+    lat = Number(hit.lat); lng = Number(hit.lng);
+  } else {
+    lat = Number(req.body?.lat); lng = Number(req.body?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      return badRequest(res, 'lat/lng must be valid coordinates (lat ±90, lng ±180), or pass use_last_capture: true');
+    }
+  }
+
+  const { data: updated, error } = await supabase
+    .from('users').update({ base_lat: lat, base_lng: lng })
+    .eq('id', targetUserId).eq('org_id', org)
+    .select('id, name, base_lat, base_lng').single();
+  if (error) return badRequest(res, error.message);
+  return ok(res, updated);
 });
 
 export const updateOutletVisit = asyncHandler(async (req, res) => {

@@ -152,8 +152,18 @@ export interface FieldExec {
   user_id: string;
   name: string;
   start: GeoPoint | null;
-  start_source: 'live_location' | 'zone_meeting' | 'none';
+  /**
+   * Where `start` came from. Field executives have no coordinates until they
+   * first check in, so the chain falls back: live GPS → a manager-set base
+   * (users.base_lat/base_lng) → the last CAPTURED fix from the work_activity
+   * ping log (survives checkout, unlike users.last_latitude which is nulled) →
+   * the FE's zone meeting point → none (sequencing then starts at first outlet).
+   */
+  start_source: 'live_location' | 'base_location' | 'last_capture' | 'zone_meeting' | 'none';
   cities: string[]; // lower-cased cities this FE covers (own city + zone city)
+  has_live: boolean;
+  base: GeoPoint | null;
+  last_capture: { lat: number; lng: number; at: string } | null;
 }
 
 export interface FeDraftStop {
@@ -302,46 +312,85 @@ async function alreadyPlannedStores(orgId: string, planDate: string): Promise<Se
   return set;
 }
 
-async function loadFieldExecs(orgId: string): Promise<FieldExec[]> {
+export async function loadFieldExecs(orgId: string): Promise<FieldExec[]> {
   const { data } = await supabase
     .from('users')
-    .select('id, name, role, city, last_latitude, last_longitude, org_role:org_roles!org_role_id(data_scope), zones:zones!zone_id(name, city, meeting_lat, meeting_lng)')
+    .select('id, name, role, city, last_latitude, last_longitude, base_lat, base_lng, org_role:org_roles!org_role_id(data_scope), zones:zones!zone_id(name, city, meeting_lat, meeting_lng)')
     .eq('org_id', orgId)
     .eq('is_active', true)
     .is('deleted_at', null)
     .not('role', 'in', '(admin,super_admin)');
 
-  const execs: FieldExec[] = [];
+  interface Tmp { exec: FieldExec; live: GeoPoint | null; zone: GeoPoint | null }
+  const tmps: Tmp[] = [];
   for (const u of (data || []) as any[]) {
     const rel = Array.isArray(u.org_role) ? u.org_role[0] : u.org_role;
     const scope = rel?.data_scope;
     const isManagerTier = ADMIN_TIER.has(String(u.role || '').toLowerCase()) && (scope === 'team' || scope === 'all');
     if (isManagerTier) continue; // never assign to the manager/admin tier
 
-    const zone = Array.isArray(u.zones) ? u.zones[0] : u.zones;
-    let start: GeoPoint | null = null;
-    let startSource: FieldExec['start_source'] = 'none';
-    if (typeof u.last_latitude === 'number' && typeof u.last_longitude === 'number') {
-      start = { lat: u.last_latitude, lng: u.last_longitude };
-      startSource = 'live_location';
-    } else if (zone && typeof zone.meeting_lat === 'number' && typeof zone.meeting_lng === 'number') {
-      start = { lat: zone.meeting_lat, lng: zone.meeting_lng };
-      startSource = 'zone_meeting';
-    }
+    const zoneRow = Array.isArray(u.zones) ? u.zones[0] : u.zones;
+    const live: GeoPoint | null = (typeof u.last_latitude === 'number' && typeof u.last_longitude === 'number')
+      ? { lat: u.last_latitude, lng: u.last_longitude } : null;
+    const base: GeoPoint | null = (typeof u.base_lat === 'number' && typeof u.base_lng === 'number')
+      ? { lat: u.base_lat, lng: u.base_lng } : null;
+    const zone: GeoPoint | null = (zoneRow && typeof zoneRow.meeting_lat === 'number' && typeof zoneRow.meeting_lng === 'number')
+      ? { lat: zoneRow.meeting_lat, lng: zoneRow.meeting_lng } : null;
 
     const cities = new Set<string>();
     if (u.city) cities.add(String(u.city).trim().toLowerCase());
-    if (zone?.city) cities.add(String(zone.city).trim().toLowerCase());
+    if (zoneRow?.city) cities.add(String(zoneRow.city).trim().toLowerCase());
 
-    execs.push({
-      user_id: u.id,
-      name: u.name || 'Field executive',
-      start,
-      start_source: startSource,
-      cities: Array.from(cities),
+    tmps.push({
+      exec: {
+        user_id: u.id, name: u.name || 'Field executive',
+        start: null, start_source: 'none', cities: Array.from(cities),
+        has_live: !!live, base, last_capture: null,
+      },
+      live, zone,
     });
   }
-  return execs;
+
+  // Attach each FE's last CAPTURED fix from the work_activity ping log (used for
+  // the start fallback AND surfaced so the UI can offer "use last known").
+  const capById = await fetchLastCaptures(orgId, tmps.map((t) => t.exec.user_id));
+  for (const t of tmps) {
+    t.exec.last_capture = capById.get(t.exec.user_id) ?? null;
+    // start chain: live GPS → manager-set base → last captured fix → zone meeting.
+    if (t.live) { t.exec.start = t.live; t.exec.start_source = 'live_location'; }
+    else if (t.exec.base) { t.exec.start = t.exec.base; t.exec.start_source = 'base_location'; }
+    else if (t.exec.last_capture) { t.exec.start = { lat: t.exec.last_capture.lat, lng: t.exec.last_capture.lng }; t.exec.start_source = 'last_capture'; }
+    else if (t.zone) { t.exec.start = t.zone; t.exec.start_source = 'zone_meeting'; }
+  }
+  return tmps.map((t) => t.exec);
+}
+
+/**
+ * Latest non-(0,0) fix per user from the work_activity ping log. Append-only, so
+ * it survives checkout (which nulls users.last_latitude) — this is the durable
+ * "last captured during last ping / checkout" location.
+ */
+async function fetchLastCaptures(
+  orgId: string,
+  userIds: string[],
+): Promise<Map<string, { lat: number; lng: number; at: string }>> {
+  const out = new Map<string, { lat: number; lng: number; at: string }>();
+  if (!userIds.length) return out;
+  const { data } = await supabase
+    .from('work_activity')
+    .select('user_id, lat, lng, captured_at, activity_type')
+    .eq('org_id', orgId)
+    .in('user_id', userIds)
+    .in('activity_type', ['HEARTBEAT', 'CHECK_IN', 'CHECK_OUT', 'FORM_SUBMIT'])
+    .order('captured_at', { ascending: false })
+    .limit(3000);
+  for (const r of (data || []) as any[]) {
+    if (out.has(r.user_id)) continue; // desc order ⇒ first seen is the latest
+    const lat = Number(r.lat), lng = Number(r.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) continue;
+    out.set(r.user_id, { lat, lng, at: r.captured_at });
+  }
+  return out;
 }
 
 // ── cap enforcement (shared) ─────────────────────────────────────────────
