@@ -7,6 +7,7 @@ import { getPagination } from '../utils/pagination';
 import { DEMO_ORG_ID, isDemo, getMockFormTemplates, getMockSubmissions, getMockSubmissionDetails } from '../utils/demoData';
 import { logger } from '../lib/logger';
 import { mirrorCheckinToRoutePlan } from '../services/routePlanCheckin.service';
+import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
 function parseGps(s: unknown): { lat: number; lng: number } | null {
@@ -287,6 +288,11 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const utcStart = rangeFrom.start;
   const utcEnd = rangeTo.end;
 
+  // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
+  // submissions from field reps in their supervisor subtree. null = no
+  // restriction (every other tenant, the master, and data_scope='all').
+  const scopeIds = await fieldForceScopeIds(req);
+
   logger.info(`[WorkActivities] Window: ${utcStart} to ${utcEnd} | isGlobal: ${isGlobal} | FilterUser: ${uId}`);
 
   logger.info(`[Forms] IST=${istDateFrom}-${istDateTo}, UTC Range=${utcStart} to ${utcEnd}`);
@@ -317,6 +323,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   q1 = q1.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
 
   // --- ABSOLUTE FILTER ENFORCEMENT LAYER ---
+  if (scopeIds) q1 = q1.in('user_id', scopeIds);
   if (uId) q1 = q1.eq('user_id', uId);
   // Filter by City/Zone through the joined 'users' alias
   if (cId) q1 = q1.eq('users.city_id', cId);
@@ -350,6 +357,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   q2 = q2.gte('submitted_at', utcStart).lte('submitted_at', utcEnd);
 
   // --- ABSOLUTE FILTER ENFORCEMENT LAYER (BUILDER) ---
+  if (scopeIds) q2 = q2.in('user_id', scopeIds);
   if (uId) q2 = q2.eq('user_id', uId);
   if (cId) q2 = q2.eq('users.city_id', cId);
   if (zId) q2 = q2.eq('users.zone_id', zId);

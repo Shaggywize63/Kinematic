@@ -11,6 +11,8 @@ import {
   buildTeamAutoPlan, loadFieldExecs, AUTOPLAN_METHODS, isAutoPlanMethod, AutoPlanMethod,
 } from '../services/route-team-autoplan.service';
 import { haversineDistance } from '../lib/haversine';
+import { fieldForceScopeIds } from '../services/supervisor-scope.service';
+import { AuthRequest } from '../types';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
@@ -35,6 +37,12 @@ export const getRoutePlans = asyncHandler(async (req, res) => {
   let q = supabase.from('v_route_plan_daily').select('*');
   if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
   q = q.eq('plan_date', istDate);
+
+  // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
+  // the route plans of field reps in their supervisor subtree. null = no
+  // restriction (every other tenant, the master, and data_scope='all').
+  const scopeIds = await fieldForceScopeIds(req as unknown as AuthRequest);
+  if (scopeIds) q = q.in('user_id', scopeIds);
 
   const { data: plans, error } = await q.order('fe_name', { ascending: true });
   if (error) return badRequest(res, error.message);
@@ -568,11 +576,13 @@ export const previewTeamAutoPlan = asyncHandler(async (req, res) => {
   const org = orgId(req);
   const eff = await resolveAutoPlanParams(req);
   const planDate = parseAppDate((req.body?.plan_date as string) || dbToday());
+  const restrictToUserIds = await fieldForceScopeIds(req as unknown as AuthRequest);
   const result = await buildTeamAutoPlan({
     orgId: org, planDate, method: eff.method,
     maxOutletsPerFe: eff.params.max_outlets_per_fe,
     vehicleType: eff.params.vehicle_type,
     maxRadiusKm: eff.params.max_radius_km,
+    restrictToUserIds,
   });
   return ok(res, result);
 });
@@ -591,12 +601,14 @@ export const runTeamAutoPlan = asyncHandler(async (req, res) => {
     return badRequest(res, 'The active method is "Manual only" — pick an automatic method to auto-assign, or add plans by hand.');
   }
   const planDate = parseAppDate((req.body?.plan_date as string) || dbToday());
+  const restrictToUserIds = await fieldForceScopeIds(req as unknown as AuthRequest);
 
   const result = await buildTeamAutoPlan({
     orgId: org, planDate, method: eff.method,
     maxOutletsPerFe: eff.params.max_outlets_per_fe,
     vehicleType: eff.params.vehicle_type,
     maxRadiusKm: eff.params.max_radius_km,
+    restrictToUserIds,
   });
   const drafts = result.fes.filter((f) => f.stops.length);
   if (!drafts.length) {
@@ -658,7 +670,8 @@ export const runTeamAutoPlan = asyncHandler(async (req, res) => {
  * Lets the manager see who has no coordinates and fix it before assigning.
  */
 export const listFieldExecLocations = asyncHandler(async (req, res) => {
-  const execs = await loadFieldExecs(orgId(req));
+  const restrictToUserIds = await fieldForceScopeIds(req as unknown as AuthRequest);
+  const execs = await loadFieldExecs(orgId(req), restrictToUserIds);
   return ok(res, execs.map((e) => ({
     user_id: e.user_id,
     name: e.name,
@@ -683,6 +696,13 @@ export const setFieldExecBase = asyncHandler(async (req, res) => {
   if (!isUUID(targetUserId)) return badRequest(res, 'user_id (uuid) required');
   const { data: target } = await supabase.from('users').select('id, org_id').eq('id', targetUserId).maybeSingle();
   if (!target || target.org_id !== org) return notFound(res, 'User not found in your organisation');
+
+  // Supervisor-hierarchy scoping (opt-in per client): a scoped manager may only
+  // set a base for field reps in their own subtree. null = no restriction.
+  const baseScopeIds = await fieldForceScopeIds(req as unknown as AuthRequest);
+  if (baseScopeIds && !baseScopeIds.includes(targetUserId)) {
+    return notFound(res, 'User not found in your team');
+  }
 
   let lat: number;
   let lng: number;

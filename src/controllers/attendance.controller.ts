@@ -7,6 +7,7 @@ import { isWithinGeofence } from '../lib/haversine';
 import { DEMO_ORG_ID, isDemo, getMockAttendanceToday, getMockAttendanceHistory } from '../utils/demoData';
 import { getPagination, buildPaginatedResult } from '../utils/pagination';
 import { logger } from '../lib/logger';
+import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -476,6 +477,12 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
     // Always scope to the caller's own org; narrow to a client only within that org.
     query = scopeOwnOrg(query, user.org_id, (client_id && isUUID(client_id)) ? client_id : undefined);
   }
+
+  // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
+  // attendance for the field reps in their supervisor subtree. null = no
+  // restriction (every other tenant, the master, and data_scope='all').
+  const scopeIds = await fieldForceScopeIds(req);
+  if (scopeIds) query = query.in('user_id', scopeIds);
 
   // Additional Property Filters
   if (isUUID(zone_id)) query = query.eq('zone_id', zone_id);

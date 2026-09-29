@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, scopeOwnOrg, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
+import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome, getMockBroadcasts, getMockLearningMaterials } from '../utils/demoData';
 
 /* ─────────────────────────────────────────────────────────────
@@ -509,12 +510,21 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
   // never shows as a dot on the field map; field reps ('own', or no designation)
   // and supervisors (preset 'supervisor') are kept.
   const ADMIN_TIER = new Set(['sub_admin', 'admin', 'main_admin', 'super_admin', 'client']);
-  const execs = (execsRaw || []).filter((u: any) => {
+  let execs = (execsRaw || []).filter((u: any) => {
     const rel = Array.isArray(u.org_role) ? u.org_role[0] : u.org_role;
     const scope = rel?.data_scope;
     const isManagerTier = ADMIN_TIER.has(String(u.role || '').toLowerCase()) && (scope === 'team' || scope === 'all');
     return !isManagerTier;
   });
+
+  // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
+  // the field reps in their supervisor subtree. null = no restriction (every
+  // other tenant, the master, and data_scope='all').
+  const scopeIds = await fieldForceScopeIds(req as AuthRequest);
+  if (scopeIds) {
+    const allow = new Set(scopeIds);
+    execs = execs.filter((u: any) => allow.has(u.id));
+  }
 
   let attQuery = supabaseAdmin
     .from('attendance')
@@ -1212,9 +1222,16 @@ export const getUserPerformance = asyncHandler(async (req: AuthRequest, res: Res
     .eq('org_id', user.org_id).eq('is_active', true);
   if (isUUID(user.client_id)) usersQ = usersQ.eq('client_id', user.client_id);
   const { data: allUsers } = await usersQ;
-  const fes = (allUsers || []).filter((u: any) =>
+  let fes = (allUsers || []).filter((u: any) =>
     u.role === 'executive' || u.role === 'field_executive' || u.org_role?.data_scope === 'own'
   );
+  // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
+  // the field reps in their supervisor subtree. null = no restriction.
+  const scopeIds = await fieldForceScopeIds(req);
+  if (scopeIds) {
+    const allow = new Set(scopeIds);
+    fes = fes.filter((u: any) => allow.has(u.id));
+  }
   const feIds = new Set(fes.map((u: any) => u.id));
 
   let attQ = supabaseAdmin.from('attendance').select('user_id, date, total_hours')
