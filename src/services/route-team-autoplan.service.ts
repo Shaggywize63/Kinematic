@@ -212,6 +212,9 @@ export interface TeamAutoPlanOptions {
   maxOutletsPerFe?: number;
   vehicleType?: string;
   maxRadiusKm?: number;
+  // Supervisor-hierarchy scoping: restrict the eligible field-exec set to these
+  // user ids (a scoped manager's subtree). null/undefined = the whole org.
+  restrictToUserIds?: string[] | null;
 }
 
 // ── data loaders ──────────────────────────────────────────────────────────
@@ -312,7 +315,7 @@ async function alreadyPlannedStores(orgId: string, planDate: string): Promise<Se
   return set;
 }
 
-export async function loadFieldExecs(orgId: string): Promise<FieldExec[]> {
+export async function loadFieldExecs(orgId: string, restrictToUserIds?: string[] | null): Promise<FieldExec[]> {
   const { data } = await supabase
     .from('users')
     .select('id, name, role, city, last_latitude, last_longitude, base_lat, base_lng, org_role:org_roles!org_role_id(data_scope), zones:zones!zone_id(name, city, meeting_lat, meeting_lng)')
@@ -321,9 +324,15 @@ export async function loadFieldExecs(orgId: string): Promise<FieldExec[]> {
     .is('deleted_at', null)
     .not('role', 'in', '(admin,super_admin)');
 
+  // Supervisor-hierarchy scoping (opt-in per client): when set, only these user
+  // ids are eligible field execs — a scoped manager plans for / sees only the
+  // reps in their subtree. null/undefined = no restriction (legacy behaviour).
+  const allow = restrictToUserIds ? new Set(restrictToUserIds) : null;
+
   interface Tmp { exec: FieldExec; live: GeoPoint | null; zone: GeoPoint | null }
   const tmps: Tmp[] = [];
   for (const u of (data || []) as any[]) {
+    if (allow && !allow.has(u.id)) continue; // outside the caller's subtree
     const rel = Array.isArray(u.org_role) ? u.org_role[0] : u.org_role;
     const scope = rel?.data_scope;
     const isManagerTier = ADMIN_TIER.has(String(u.role || '').toLowerCase()) && (scope === 'team' || scope === 'all');
@@ -603,7 +612,7 @@ export async function buildTeamAutoPlan(opts: TeamAutoPlanOptions): Promise<Team
 
   const [{ pool, considered, skippedNoGeo, skippedPlanned }, fes] = await Promise.all([
     loadDuePool(orgId, planDate),
-    loadFieldExecs(orgId),
+    loadFieldExecs(orgId, opts.restrictToUserIds),
   ]);
 
   const emptyResult = (): TeamAutoPlanResult => ({
