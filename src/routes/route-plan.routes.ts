@@ -25,6 +25,8 @@ import {
   setAutoPlanPolicy,
   previewTeamAutoPlan,
   runTeamAutoPlan,
+  listFieldExecLocations,
+  setFieldExecBase,
 } from '../controllers/route-plan.controller';
 
 const router = Router();
@@ -58,6 +60,9 @@ router.get('/autoplan/policy',   requireSupervisorOrAbove, getAutoPlanPolicy);
 router.put('/autoplan/policy',   requireSupervisorOrAbove, requireModule('route_optimization'), setAutoPlanPolicy);
 router.post('/autoplan/preview', requireSupervisorOrAbove, requireModule('route_optimization'), previewTeamAutoPlan);
 router.post('/autoplan/run',     requireSupervisorOrAbove, requireModule('route_optimization'), runTeamAutoPlan);
+// FE location readiness + manual base coordinates (for reps with no live fix yet).
+router.get('/autoplan/field-execs', requireSupervisorOrAbove, listFieldExecLocations);
+router.put('/autoplan/fe-location', requireSupervisorOrAbove, requireModule('route_optimization'), setFieldExecBase);
 router.post('/bulk-import',      requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client'), bulkImportRoutePlans);
 router.patch('/:id',             requireSupervisorOrAbove, updateRoutePlan);
 router.delete('/:id',            requireRole('admin', 'super_admin', 'main_admin', 'client'), deleteRoutePlan);
