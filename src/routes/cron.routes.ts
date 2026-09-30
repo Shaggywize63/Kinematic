@@ -14,7 +14,7 @@
  */
 import { Router, Request, Response, NextFunction } from 'express';
 import { dispatchPendingPushes } from '../services/notifications.service';
-import { rescoreLead } from '../services/crm/leads.service';
+import { runRescoreAllLeads, isRescoreAllRunning } from '../services/crm/leads.service';
 import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
 import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { runDailyBriefings } from '../services/crm/ai/dailyBriefing.service';
@@ -101,65 +101,22 @@ router.post('/dispatch-pushes', requireEdgeSecret, async (req, res) => {
  * several minutes for large tenants. Idempotent: re-running just
  * overwrites with the same heuristic result.
  */
-// Guards against overlapping full-rescore runs (the loop can take minutes).
-let rescoreAllRunning = false;
-
-async function runRescoreAll(opts: { org_id?: string; batchSize: number; maxBatches: number }): Promise<void> {
-  let processed = 0;
-  let failed = 0;
-  let lastId: string | null = null;
-  for (let i = 0; i < opts.maxBatches; i++) {
-    let q = supabaseAdmin.from('crm_leads')
-      .select('id, org_id')
-      .is('deleted_at', null)
-      .neq('status', 'converted')
-      .neq('status', 'unqualified')
-      .neq('status', 'lost')
-      .order('id', { ascending: true })
-      .limit(opts.batchSize);
-    if (opts.org_id) q = q.eq('org_id', opts.org_id);
-    if (lastId) q = q.gt('id', lastId);
-
-    const { data: rows, error } = await q;
-    if (error) { logger.error(`[cron] rescore-all query failed: ${error.message}`); break; }
-    if (!rows || rows.length === 0) break;
-
-    // Sequential per batch. The daily bulk sweep refreshes the cheap heuristic
-    // score for every lead but SKIPS the per-lead LLM rerank (skipLlmRerank):
-    // reranking the whole non-terminal lead set every morning was a needless
-    // Anthropic spend spike at 02:00 UTC / 7:30 AM IST. The paid rerank still
-    // runs for on-demand single-lead events.
-    for (const row of rows) {
-      try {
-        await rescoreLead(row.org_id, row.id, { skipLlmRerank: true });
-        processed += 1;
-      } catch (e: any) {
-        failed += 1;
-        logger.warn(`[cron] rescore failed for ${row.id}: ${e?.message || e}`);
-      }
-    }
-    lastId = rows[rows.length - 1].id;
-    if (rows.length < opts.batchSize) break;
-  }
-  logger.info(`[cron] rescore-all complete: processed=${processed} failed=${failed}`);
-}
-
 // The full rescore can run for several minutes (per-lead heuristic + engagement
 // fetch). Run it DETACHED and return 202 immediately, so the request isn't
 // bounded by the gateway timeout (a synchronous loop 502s after ~1 min and
-// only ever covers the first slice of leads).
+// only ever covers the first slice of leads). The loop + concurrency guard live
+// in leads.service (runRescoreAllLeads / isRescoreAllRunning), shared with the
+// authenticated "Update all scores" button (POST /api/v1/crm/leads/rescore-all).
 router.post('/rescore-all-leads-now', requireEdgeSecret, async (req, res) => {
   const body = (req.body ?? {}) as { org_id?: string; batch?: number; max_batches?: number };
   const batchSize = Math.min(500, Math.max(10, Number(body.batch) || 100));
   const maxBatches = Math.min(500, Math.max(1, Number(body.max_batches) || 50));
 
-  if (rescoreAllRunning) {
+  if (isRescoreAllRunning()) {
     return res.status(409).json({ success: false, error: 'A rescore is already running', code: 'RESCORE_IN_PROGRESS' });
   }
-  rescoreAllRunning = true;
-  runRescoreAll({ org_id: body.org_id, batchSize, maxBatches })
-    .catch((e: any) => logger.error(`[cron] rescore-all crashed: ${e?.message || e}`))
-    .finally(() => { rescoreAllRunning = false; });
+  runRescoreAllLeads({ org_id: body.org_id, batchSize, maxBatches, skipLlmRerank: true })
+    .catch((e: any) => logger.error(`[cron] rescore-all crashed: ${e?.message || e}`));
 
   res.status(202).json({ success: true, data: { started: true, batch: batchSize, max_batches: maxBatches } });
 });

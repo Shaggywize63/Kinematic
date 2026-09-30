@@ -1446,6 +1446,36 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
 }));
+// Recompute the score for every non-terminal lead in scope — powers the
+// "Update all scores" button on the dashboard leads screen. Admin-tier only
+// (a full-tenant sweep is heavy). Runs DETACHED and returns 202 so the request
+// isn't bounded by the gateway timeout. Scopes to the caller's org and, when an
+// X-Client-Id is present, to that client. Uses the cheap heuristic refresh
+// (skips the per-lead LLM rerank) — same as the daily sweep — to avoid an
+// Anthropic spend spike on large tenants; a single lead still reranks on open.
+leads.post('/rescore-all', wrap(async (req, res) => {
+  const me = (req as AuthRequest).user;
+  const sysRole = (me?.role ?? '').toLowerCase();
+  const scope = me?.org_role_data_scope; // 'own' | 'team' | 'all' | undefined (undefined ≈ all)
+  // Admin-tier only, AND with org-wide visibility. ByteBack runs every user on
+  // the generic `sub_admin` preset and distinguishes rank by org-role
+  // data_scope, so a preset-role check alone would let a field exec ('own') or a
+  // team manager ('team') kick off a whole-tenant sweep. Require data_scope
+  // 'all' (or unset — real admins / super_admins carry no restricting org role).
+  const isAdminTier = ['super_admin', 'admin', 'sub_admin'].includes(sysRole);
+  if (!isAdminTier || scope === 'own' || scope === 'team') {
+    throw new AppError(403, 'Only admins can refresh all lead scores', 'FORBIDDEN');
+  }
+  if (leadsSvc.isRescoreAllRunning()) {
+    return res.status(409).json({ error: 'A score refresh is already running. Please wait for it to finish.', code: 'RESCORE_IN_PROGRESS' });
+  }
+  leadsSvc.runRescoreAllLeads({
+    org_id: orgId(req),
+    client_id: clientId(req),
+    skipLlmRerank: true,
+  }).catch(() => { /* per-lead + completion logging happens inside the service */ });
+  res.status(202).json({ started: true });
+}));
 // Bulk lat/long backfill for existing leads. Body: { rows: [{ id|email|phone,
 // latitude, longitude }] }. Matched to leads by id → email → phone, all
 // org-scoped. Powers the dashboard "upload coordinates" tool.
