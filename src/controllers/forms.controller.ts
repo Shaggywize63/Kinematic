@@ -301,11 +301,22 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const isFilteringUserContext = !!(uId && uId.length > 10) || !!(cId && cId.length > 10) || !!(zId && zId.length > 10);
   const userJoin = isFilteringUserContext ? '!inner' : '!left';
 
+  // The dashboard sends a city UUID as ?city_id=, but the users table stores the
+  // city as a NAME in users.city — there is NO users.city_id column. Embedding or
+  // filtering users.city_id made PostgREST 400 the whole query (42703), so Work
+  // Activities showed nothing. Resolve the id to a name and filter users.city by
+  // name, mirroring getLiveLocations.
+  let cityName: string | null = null;
+  if (cId) {
+    const { data: cityRow } = await supabaseAdmin.from('cities').select('name').eq('id', cId).maybeSingle();
+    cityName = (cityRow as { name?: string } | null)?.name ?? null;
+  }
+
   let select1 = `
     *,
     builder_forms:template_id(title),
     activities:activity_id(name),
-    users:user_id${userJoin}(name, employee_id, role, city_id, zone_id)
+    users:user_id${userJoin}(name, employee_id, role, city, zone_id)
   `;
   if (include_responses === 'true') {
      select1 += `, form_responses(*, builder_questions(*))`;
@@ -325,8 +336,8 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- ABSOLUTE FILTER ENFORCEMENT LAYER ---
   if (scopeIds) q1 = q1.in('user_id', scopeIds);
   if (uId) q1 = q1.eq('user_id', uId);
-  // Filter by City/Zone through the joined 'users' alias
-  if (cId) q1 = q1.eq('users.city_id', cId);
+  // Filter by City/Zone through the joined 'users' alias (users.city is a name).
+  if (cityName) q1 = q1.eq('users.city', cityName);
   if (zId) q1 = q1.eq('users.zone_id', zId);
   if (tId) q1 = q1.eq('template_id', tId);
   if (aId) q1 = q1.eq('activity_id', aId);
@@ -345,7 +356,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- QUERY 2: Builder ---
   let select2 = `
     *,
-    users:user_id${userJoin}(name, employee_id, city_id, zone_id),
+    users:user_id${userJoin}(name, employee_id, city, zone_id),
     builder_forms:form_id(title)
   `;
   // Builder forms usually store responses in JSON, skip extra join unless needed
@@ -359,7 +370,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // --- ABSOLUTE FILTER ENFORCEMENT LAYER (BUILDER) ---
   if (scopeIds) q2 = q2.in('user_id', scopeIds);
   if (uId) q2 = q2.eq('user_id', uId);
-  if (cId) q2 = q2.eq('users.city_id', cId);
+  if (cityName) q2 = q2.eq('users.city', cityName);
   if (zId) q2 = q2.eq('users.zone_id', zId);
   if (tId) q2 = q2.eq('form_id', tId);
   
