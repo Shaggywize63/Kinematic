@@ -34,7 +34,23 @@ const KNOWN_KEYS = new Set<string>([
   ...CITY_ALIASES, ...STATE_ALIASES, ...COUNTRY_ALIASES, ...INDUSTRY_ALIASES,
   'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
   'referrer', 'referrer_url', 'landing_page', 'page_url',
+  // Consent flags (DPDP opt-in) — captured as booleans, not custom fields.
+  'consent', 'opt_in', 'optin', 'communications_consent', 'comms_consent',
+  'whatsapp_consent', 'consent_whatsapp', 'wa_consent',
+  'marketing_consent', 'consent_marketing',
 ]);
+
+// Parse a boolean-ish consent flag. Returns undefined when absent so the
+// downstream lead write leaves the column untouched unless a value was sent.
+function boolField(body: Record<string, unknown>, ...keys: string[]): boolean | undefined {
+  for (const k of keys) {
+    const v = body[k];
+    if (v != null && String(v).trim() !== '') {
+      return ['true', '1', 'yes', 'y', 'on', 'checked'].includes(String(v).trim().toLowerCase());
+    }
+  }
+  return undefined;
+}
 
 function splitName(full: string): { first?: string; last?: string } {
   const parts = String(full).trim().split(/\s+/);
@@ -93,6 +109,12 @@ export const webFormProvider: IntegrationProvider = {
       if (v != null && typeof v !== 'object') custom_fields[k] = v;
     }
 
+    // Consent (DPDP opt-in). An explicit whatsapp/marketing flag wins; else a
+    // single generic `consent`/`opt_in` covers both channels.
+    const genConsent = boolField(body, 'consent', 'opt_in', 'optin', 'communications_consent', 'comms_consent');
+    const waConsent  = boolField(body, 'whatsapp_consent', 'consent_whatsapp', 'wa_consent');
+    const mkConsent  = boolField(body, 'marketing_consent', 'consent_marketing');
+
     return {
       first_name,
       last_name,
@@ -105,6 +127,8 @@ export const webFormProvider: IntegrationProvider = {
       city:    pick(...CITY_ALIASES),
       state:   pick(...STATE_ALIASES),
       notes:   pick(...NOTES_ALIASES),
+      whatsapp_consent:  waConsent !== undefined ? waConsent : genConsent,
+      marketing_consent: mkConsent !== undefined ? mkConsent : genConsent,
       utm_source:   pick('utm_source'),
       utm_medium:   pick('utm_medium'),
       utm_campaign: pick('utm_campaign'),

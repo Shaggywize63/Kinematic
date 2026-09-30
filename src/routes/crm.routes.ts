@@ -728,6 +728,32 @@ leads.post('/', wrap(async (req, res) => {
     }
   }
 
+  // Itemise WhatsApp / marketing opt-in in the ledger when the form captured
+  // them (the whatsapp_consent / marketing_consent columns are persisted by
+  // createLead; the ledger keeps the demonstrable, withdrawable record per
+  // DPDP §6, and the auto-WhatsApp reply can gate on it). Best-effort.
+  if (lead?.id) {
+    const method = consentInput?.method ?? 'in_app';
+    const source = consentInput?.source ?? 'lead_create';
+    const notice = consentInput?.notice_version ?? null;
+    const extraPurposes: Array<[unknown, string]> = [
+      [payload.whatsapp_consent, 'whatsapp'],
+      [payload.marketing_consent, 'marketing'],
+    ];
+    for (const [flag, purpose] of extraPurposes) {
+      if (flag === true) {
+        try {
+          await consentSvc.recordConsent(
+            { orgId: orgId(req), clientId: payload.client_id as string | null ?? null },
+            { subjectType: 'lead', subjectId: lead.id, purpose, consented: true, method, source, noticeVersion: notice, actorUserId: userId(req) ?? null },
+          );
+        } catch (e) {
+          console.warn(`[consent] recordConsent (${purpose}) on lead create failed: ${(e as Error).message}`);
+        }
+      }
+    }
+  }
+
   // Auto-log site visit: the previous version inserted a completed
   // site_visit activity behind the rep's back. The user asked us to
   // back that out — they want to land on the activity create screen
