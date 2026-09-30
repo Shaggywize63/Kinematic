@@ -118,9 +118,16 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
     return;
   }
 
+  // Exclude soft-deleted clients (settings.deleted_at is set). Hard delete is
+  // blocked by FK constraints from activities/leads/etc., so deletion is a
+  // soft-delete that flags the row; the list must hide flagged rows.
+  const liveClients = (data || []).filter(
+    (c) => !(c as { settings?: { deleted_at?: unknown } | null }).settings?.deleted_at
+  );
+
   // Fetch module entitlements for each client (excludes universal modules,
   // which are always-on via the v_client_enabled_modules view).
-  const clientIds = (data || []).map(c => c.id);
+  const clientIds = liveClients.map(c => c.id);
   const { data: accessData } = await supabaseAdmin
     .from('client_modules')
     .select('client_id, module_id, enabled, expires_at')
@@ -129,8 +136,8 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
 
   const now = Date.now();
   // Per-org active-user caps (from the org holding each client's users).
-  const caps = await readUserCaps((data || []) as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
-  const results = (data || []).map(client => ({
+  const caps = await readUserCaps(liveClients as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
+  const results = liveClients.map(client => ({
     ...client,
     max_active_users: caps[client.id] ?? null,
     modules: (accessData || [])
@@ -729,17 +736,42 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
 
 /**
  * DELETE /api/v1/clients/:id
- * Admin only: Delete a client (soft delete or hard delete based on preference)
- * For safety, we'll do hard delete here as per system design
+ * Admin only: Soft-delete a client. The row is flagged (settings.deleted_at)
+ * and deactivated rather than hard-deleted, because client_id foreign keys on
+ * leads/deals/activities/attendance/etc. have no ON DELETE CASCADE — a hard
+ * DELETE both fails on referencing rows and would wipe a tenant's data.
  */
 export const deleteClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+
+  // SOFT delete. A client owns leads, deals, activities, attendance, form
+  // submissions, users, route plans, etc. via client_id foreign keys that have
+  // no ON DELETE CASCADE, so a hard DELETE (a) fails on the first referencing
+  // row — e.g. activities_client_id_fkey — and (b) would irrecoverably wipe an
+  // entire tenant's data. Instead mark the client deleted in settings.deleted_at
+  // and deactivate it; getClients() filters these out so it disappears from the
+  // Client Management list, while all data is preserved and recoverable. A true
+  // purge is a separate, deliberate operation.
+  const { data: existing, error: readErr } = await supabaseAdmin
+    .from('clients')
+    .select('settings')
+    .eq('id', id)
+    .eq(ownerColumn(), user.org_id)
+    .maybeSingle();
+  if (readErr) { badRequest(res, readErr.message); return; }
+  if (!existing) { notFound(res, 'Client not found'); return; }
+
+  const settings = {
+    ...(((existing as { settings?: Record<string, unknown> }).settings) ?? {}),
+    deleted_at: new Date().toISOString(),
+    deleted_by: user.id,
+  };
   const { error } = await supabaseAdmin
     .from('clients')
-    .delete()
+    .update({ settings, is_active: false })
     .eq('id', id)
     .eq(ownerColumn(), user.org_id);
 
