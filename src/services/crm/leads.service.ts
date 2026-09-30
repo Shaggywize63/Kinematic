@@ -12,6 +12,7 @@ import * as assignment from './assignment.service';
 import * as automations from './automations.service';
 import { validateAndStampCustomFields } from './customFields.service';
 import { isMinor } from '../../lib/age';
+import { logger } from '../../lib/logger';
 import type { Lead, LeadStatus } from '../../types/crm.types';
 
 // Helper: erase the structural-type-narrowing TS does on Lead so we can
@@ -861,6 +862,79 @@ export async function rescoreLead(org_id: string, id: string, opts: { skipLlmRer
   // manual rescore), which call rescoreLead with no opts.
   if (!opts.skipLlmRerank) scoring.rerankLeadAsync(org_id, id).catch(() => {});
   return { score: result.score, breakdown: result.breakdown, grade: result.grade };
+}
+
+// ── Bulk rescore ────────────────────────────────────────────────────────────
+// Shared engine behind BOTH the daily cron sweep (/api/v1/cron/
+// rescore-all-leads-now) and the authenticated "Update all scores" button
+// (POST /api/v1/crm/leads/rescore-all). Recomputes the scoring-v2 heuristic for
+// every non-terminal lead in scope. The per-lead LLM rerank is SKIPPED by
+// default (skipLlmRerank) — reranking a whole tenant's lead set is a paid
+// Anthropic call per lead and only makes sense for on-demand single-lead events.
+//
+// One guard for both callers: a manual click can't collide with the 02:00 sweep
+// (or a second click), which would double the DB write load and race the
+// per-lead score_updated_at stamps.
+let rescoreAllRunning = false;
+export function isRescoreAllRunning(): boolean { return rescoreAllRunning; }
+
+export interface RescoreAllOptions {
+  org_id?: string;
+  client_id?: string | null;
+  batchSize?: number;
+  maxBatches?: number;
+  skipLlmRerank?: boolean;
+}
+
+/**
+ * Run a full non-terminal-lead rescore for the given scope. Long-running
+ * (per-lead heuristic + engagement fetch), so callers launch it DETACHED and
+ * return 202 — do not await this in a request handler. Idempotent: re-running
+ * just overwrites with the same heuristic result. Returns final counts.
+ */
+export async function runRescoreAllLeads(opts: RescoreAllOptions): Promise<{ processed: number; failed: number }> {
+  const batchSize = Math.min(500, Math.max(10, Number(opts.batchSize) || 100));
+  const maxBatches = Math.min(500, Math.max(1, Number(opts.maxBatches) || 50));
+  const skipLlmRerank = opts.skipLlmRerank !== false; // default true
+  let processed = 0;
+  let failed = 0;
+  let lastId: string | null = null;
+  rescoreAllRunning = true;
+  try {
+    for (let i = 0; i < maxBatches; i++) {
+      let q = supabaseAdmin.from('crm_leads')
+        .select('id, org_id')
+        .is('deleted_at', null)
+        .neq('status', 'converted')
+        .neq('status', 'unqualified')
+        .neq('status', 'lost')
+        .order('id', { ascending: true })
+        .limit(batchSize);
+      if (opts.org_id) q = q.eq('org_id', opts.org_id);
+      if (opts.client_id) q = q.eq('client_id', opts.client_id);
+      if (lastId) q = q.gt('id', lastId);
+
+      const { data: rows, error } = await q;
+      if (error) { logger.error(`[rescore-all] query failed: ${error.message}`); break; }
+      if (!rows || rows.length === 0) break;
+
+      for (const row of rows) {
+        try {
+          await rescoreLead(row.org_id, row.id, { skipLlmRerank });
+          processed += 1;
+        } catch (e: any) {
+          failed += 1;
+          logger.warn(`[rescore-all] rescore failed for ${row.id}: ${e?.message || e}`);
+        }
+      }
+      lastId = rows[rows.length - 1].id;
+      if (rows.length < batchSize) break;
+    }
+  } finally {
+    rescoreAllRunning = false;
+  }
+  logger.info(`[rescore-all] complete: org=${opts.org_id ?? 'ALL'} client=${opts.client_id ?? 'ALL'} processed=${processed} failed=${failed}`);
+  return { processed, failed };
 }
 
 /**
