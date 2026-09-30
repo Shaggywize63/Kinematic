@@ -546,6 +546,12 @@ app.use(V1, (req, res, next) => {
   // List-Unsubscribe handler — Gmail/Yahoo (RFC 8058) POST here with
   // no auth header; the 32-char token in ?t= is the auth.
   if (p === '/crm/unsubscribe') return next();
+  // Meta WhatsApp webhook — Meta calls GET (challenge verify) and POST
+  // (inbound messages / statuses) with NO Bearer header; the verify token
+  // and the X-Hub-Signature-256 HMAC are the auth. Must bypass this global
+  // gate so the public router (mounted below, before the /crm catch-all) can
+  // handle it — otherwise every Meta call 401s here.
+  if (p === '/crm/webhooks/whatsapp') return next();
   return requireAuth(req as any, res, next);
 }, demoExtensionsMiddleware);
 
