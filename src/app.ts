@@ -113,6 +113,7 @@ import distConsumerRegRoutes   from './routes/distribution/consumer-registration
 import distGstinRoutes         from './routes/distribution/gstin.routes';
 import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
+import whatsappWebhookPublicRoutes from './routes/crm/whatsapp-webhook-public.routes';
 import oauthRoutes             from './routes/oauth.routes';
 import { authorizationServerMetadata } from './controllers/oauth.controller';
 import { requireOAuth }         from './middleware/oauthAuth';
@@ -685,6 +686,12 @@ app.use(`${V1}/crm/emails/track`,             emailTrackingRoutes);
 // Same shape as the tracker: the 32-char token in `?t=` is the auth.
 // Must be mounted BEFORE the auth-gated /crm router below.
 app.use(`${V1}/crm/unsubscribe`,              emailUnsubscribeRoutes);
+
+// Public Meta WhatsApp webhook — Meta calls it with NO Authorization header, so
+// it MUST be mounted before the auth-gated /crm router below. It verifies the
+// challenge with the global verify token and resolves the tenant from the
+// payload's phone_number_id (see the router file).
+app.use(`${V1}/crm/webhooks/whatsapp`, whatsappWebhookPublicRoutes);
 
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
