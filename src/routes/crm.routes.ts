@@ -102,78 +102,12 @@ const router: Router = express.Router();
 // router-level requireAuth applied in app.ts was 401'ing every inbound
 // click. Mount happens before the auth-gated /crm prefix in app.ts.
 
-// Meta WhatsApp Business webhook verification (challenge handshake).
-router.get('/webhooks/whatsapp', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token && token === process.env.CRM_WHATSAPP_VERIFY_TOKEN) {
-    return res.status(200).send(String(challenge ?? ''));
-  }
-  res.sendStatus(403);
-});
-router.post('/webhooks/whatsapp', express.json({ limit: '2mb' }), async (req, res) => {
-  const sigHeader = req.headers['x-hub-signature-256'];
-  if (process.env.CRM_WHATSAPP_APP_SECRET && typeof sigHeader === 'string') {
-    const crypto = await import('crypto');
-    const raw = JSON.stringify(req.body);
-    const expected = 'sha256=' + crypto
-      .createHmac('sha256', process.env.CRM_WHATSAPP_APP_SECRET)
-      .update(raw).digest('hex');
-    // Constant-time compare — `expected !== sigHeader` leaks the
-    // correct signature byte-by-byte via timing. Buffer.from + length
-    // guard + timingSafeEqual gives a length-mismatch return without
-    // an early short-circuit.
-    const a = Buffer.from(expected, 'utf8');
-    const b = Buffer.from(sigHeader, 'utf8');
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.sendStatus(401);
-  }
-  // org_id only from the trusted X-Org-Id header — accepting it from
-  // request body let an attacker who can forge the HMAC (or fail open
-  // when the secret is unset) attribute leads to any tenant. Header is
-  // set by the upstream WA-bridge service that owns the integration row.
-  const orgId = (req.headers['x-org-id'] as string | undefined);
-  if (!orgId) {
-    return res.status(202).json({ ignored: 'no org context resolvable for stub provider' });
-  }
-  try {
-    const entries = req.body?.entry ?? [];
-    for (const entry of entries) {
-      for (const change of entry?.changes ?? []) {
-        const value = change?.value ?? {};
-        for (const m of value.messages ?? []) {
-          // Text, template quick-reply button (m.button), or interactive
-          // list/button reply — all collapse to a body + optional payload.
-          const bodyText = m.text?.body ?? m.button?.text ?? m.interactive?.button_reply?.title ?? m.interactive?.list_reply?.title;
-          const buttonPayload = m.button?.payload ?? m.interactive?.button_reply?.id ?? m.interactive?.list_reply?.id;
-          await whatsappSvc.recordInbound({
-            org_id: orgId,
-            from_phone: m.from,
-            to_phone: value.metadata?.display_phone_number,
-            body_text: bodyText,
-            button_payload: buttonPayload,
-            media_url: m.image?.id ?? m.document?.id ?? m.video?.id,
-            media_type: m.type,
-            provider_message_id: m.id,
-            in_reply_to: m.context?.id,
-          });
-        }
-        for (const s of value.statuses ?? []) {
-          await whatsappSvc.recordStatusUpdate({
-            org_id: orgId,
-            provider_message_id: s.id,
-            status: s.status as 'delivered' | 'read' | 'failed',
-            error: s.errors?.[0]?.title,
-            pricing: s.pricing ? { category: s.pricing.category, billable: s.pricing.billable } : undefined,
-          });
-        }
-      }
-    }
-  } catch {
-    /* never fail the webhook */
-  }
-  res.sendStatus(200);
-});
+// NOTE: the Meta WhatsApp webhook (GET verify + POST inbound/status) is served
+// by the PUBLIC router mounted at `/api/v1/crm/webhooks/whatsapp` in app.ts,
+// BEFORE this auth-gated `/crm` mount. Meta sends no Authorization header, so a
+// copy here (behind requireAuth) could never validate. It also needs to resolve
+// the tenant from the payload's phone_number_id — see
+// routes/crm/whatsapp-webhook-public.routes.ts.
 
 router.use(requireAuth, requireModule('crm'));
 
