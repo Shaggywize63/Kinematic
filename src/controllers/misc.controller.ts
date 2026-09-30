@@ -8,6 +8,7 @@ import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlerts, getMockUsers, getMockGrievances } from '../utils/demoData';
 import * as hierarchy from '../services/crm/hierarchy.service';
+import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -304,6 +305,25 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     if (visibleOwnerIds) {
       // Belt-and-suspenders: always keep the caller so a manager can self-assign.
       const ids = visibleOwnerIds.includes(user.id) ? visibleOwnerIds : [user.id, ...visibleOwnerIds];
+      query = query.in('id', ids);
+    }
+  }
+
+  // Filter-dropdown callers (Work Activities / Attendance executive pickers, etc.)
+  // pass ?scope=field_filter. Two effects, both scoped to these callers so the
+  // admin directories / HR pages / reports — which OMIT the param — keep their
+  // full, inactive-inclusive views:
+  //   1. Exclude deactivated users — a filter must never offer a deactivated rep
+  //      (their historical data still surfaces in reports via the data endpoints).
+  //   2. Restrict a supervisor-scoped manager to their own team via
+  //      fieldForceScopeIds (self + supervisor subtree). Returns null for admins,
+  //      staff domains, data_scope='all', and every non-opted-in tenant, so those
+  //      callers get no id restriction (see everyone).
+  if (String(req.query.scope) === 'field_filter') {
+    query = query.eq('is_active', true);
+    const ffIds = await fieldForceScopeIds(req);
+    if (ffIds) {
+      const ids = ffIds.includes(user.id) ? ffIds : [user.id, ...ffIds];
       query = query.in('id', ids);
     }
   }
