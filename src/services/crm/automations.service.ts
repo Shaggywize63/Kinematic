@@ -405,6 +405,18 @@ async function sendWhatsappAction(cfg: Record<string, unknown>, ctx: AutomationC
   const entity = entityRow(ctx);
   const to = (interpolate(String(cfg.to ?? ''), ctx.data) || (entity.phone as string) || '').trim();
   if (!to) return;
+  // Interpolate the template's variables from the action config, e.g.
+  // { template_variables: { customer_name: "{{lead.first_name}}" } }. Without
+  // this a template that declares a body parameter is sent with none, and Meta
+  // rejects it. Positional ("1","2") and named ("customer_name") both work.
+  let templateVariables: Record<string, string> | undefined;
+  const rawVars = cfg.template_variables;
+  if (rawVars && typeof rawVars === 'object' && !Array.isArray(rawVars)) {
+    templateVariables = {};
+    for (const [k, v] of Object.entries(rawVars as Record<string, unknown>)) {
+      templateVariables[k] = interpolate(String(v ?? ''), ctx.data);
+    }
+  }
   const { sendWhatsapp } = await import('./whatsapp.service');
   await sendWhatsapp({
     org_id: ctx.org_id,
@@ -412,6 +424,7 @@ async function sendWhatsappAction(cfg: Record<string, unknown>, ctx: AutomationC
     to,
     body_text: interpolate(String(cfg.body_text ?? cfg.body ?? ''), ctx.data) || undefined,
     template_id: (cfg.template_id as string) ?? null,
+    template_variables: templateVariables,
     lead_id: ctx.entity === 'lead' ? ctx.entity_id : null,
     deal_id: ctx.entity === 'deal' ? ctx.entity_id : null,
   });
