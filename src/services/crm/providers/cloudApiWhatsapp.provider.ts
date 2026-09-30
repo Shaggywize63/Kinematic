@@ -61,10 +61,19 @@ export function providerError(message: string, res: Response, code?: number): Pr
   return err;
 }
 
-/** Positional body variables ({{1}},{{2}}…) → a Cloud API BODY component. */
+/** Body variables → a Cloud API BODY component. Supports BOTH positional
+ *  ({{1}},{{2}}…) and the newer named ({{customer_name}}) template formats:
+ *  named parameters must carry `parameter_name`, positional must not. */
 export function templateComponents(vars?: Record<string, string>): Record<string, unknown> {
   if (!vars) return {};
-  const keys = Object.keys(vars).filter((k) => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b));
-  if (!keys.length) return {};
-  return { components: [{ type: 'body', parameters: keys.map((k) => ({ type: 'text', text: String(vars[k] ?? '') })) }] };
+  const allKeys = Object.keys(vars);
+  if (!allKeys.length) return {};
+  const numeric = allKeys.filter((k) => /^\d+$/.test(k));
+  if (numeric.length === allKeys.length) {
+    // Positional {{1}},{{2}}… template — order matters, no parameter_name.
+    const keys = numeric.sort((a, b) => Number(a) - Number(b));
+    return { components: [{ type: 'body', parameters: keys.map((k) => ({ type: 'text', text: String(vars[k] ?? '') })) }] };
+  }
+  // Named {{customer_name}} template — Cloud API requires parameter_name per param.
+  return { components: [{ type: 'body', parameters: allKeys.map((k) => ({ type: 'text', parameter_name: k, text: String(vars[k] ?? '') })) }] };
 }
