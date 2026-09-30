@@ -39,7 +39,12 @@ const KNOWN_KEYS = new Set<string>([
   ...CITY_KEYS, ...STATE_KEYS, ...COUNTRY_KEYS, ...INDUSTRY_KEYS,
   'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
   'referrer', 'referrer_url', 'landing_page', 'page_url',
+  'consent', 'opt_in', 'optin', 'communications_consent', 'comms_consent',
+  'whatsapp_consent', 'consent_whatsapp', 'wa_consent',
+  'marketing_consent', 'consent_marketing',
 ]);
+
+const CONSENT_TRUE = ['true', '1', 'yes', 'y', 'on', 'checked'];
 
 function splitName(full: string): { first?: string; last?: string } {
   const parts = String(full).trim().split(/\s+/);
@@ -114,6 +119,20 @@ export const genericWebhookProvider: IntegrationProvider = {
       if (v != null && typeof v !== 'object') custom_fields[k] = v;
     }
 
+    // Consent flags (DPDP opt-in) — field_map aware, boolean-ish. undefined when
+    // absent so the lead column is left untouched unless the bot/form sent one.
+    const boolField = (ourKey: string, fallbacks: string[]): boolean | undefined => {
+      const keys = [...(reverseMap[ourKey] ?? []), ...fallbacks];
+      for (const k of keys) {
+        const v = body[k];
+        if (v != null && String(v).trim() !== '') return CONSENT_TRUE.includes(String(v).trim().toLowerCase());
+      }
+      return undefined;
+    };
+    const genConsent = boolField('consent', ['consent', 'opt_in', 'optin', 'communications_consent', 'comms_consent']);
+    const waConsent  = boolField('whatsapp_consent', ['whatsapp_consent', 'consent_whatsapp', 'wa_consent']);
+    const mkConsent  = boolField('marketing_consent', ['marketing_consent', 'consent_marketing']);
+
     return {
       first_name,
       last_name,
@@ -126,6 +145,8 @@ export const genericWebhookProvider: IntegrationProvider = {
       city:    pick('city',    CITY_KEYS),
       state:   pick('state',   STATE_KEYS),
       notes:   pick('notes',   NOTES_KEYS),
+      whatsapp_consent:  waConsent !== undefined ? waConsent : genConsent,
+      marketing_consent: mkConsent !== undefined ? mkConsent : genConsent,
       utm_source:   pick('utm_source',   ['utm_source']),
       utm_medium:   pick('utm_medium',   ['utm_medium']),
       utm_campaign: pick('utm_campaign', ['utm_campaign']),

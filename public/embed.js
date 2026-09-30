@@ -173,6 +173,32 @@
       form.appendChild(field(k, { label: d.label, type: d.type, placeholder: d.placeholder, required: reqSet[k] }));
     });
 
+    // Consent opt-in (DPDP). Shown unless data-consent="off". Unchecked by
+    // default (affirmative opt-in). Ticking it sets whatsapp_consent +
+    // marketing_consent on the lead so the CRM may message the person (e.g.
+    // the WhatsApp auto-reply). Optional by default; data-consent-required
+    // ="true" blocks submit until ticked.
+    var consentOn = (root.getAttribute('data-consent') || 'on').toLowerCase() !== 'off';
+    var consentRequired = (root.getAttribute('data-consent-required') || 'false').toLowerCase() === 'true';
+    var privacyUrl = root.getAttribute('data-privacy-url') || 'https://www.kinematicapp.com/privacy';
+    var consentText = root.getAttribute('data-consent-text')
+      || 'I agree to be contacted about my enquiry, including on WhatsApp, per the';
+    var consentBox = null;
+    if (consentOn) {
+      consentBox = el('input', { type: 'checkbox', style: 'margin-top:3px;flex:0 0 auto;' });
+      var consentLabel = el('label', {
+        style: { display: 'flex', gap: '8px', alignItems: 'flex-start', margin: '2px 0 14px', fontSize: '12px', color: 'var(--km-muted)', cursor: 'pointer', lineHeight: '1.5' },
+      }, [
+        consentBox,
+        el('span', {}, [
+          consentText + ' ',
+          el('a', { href: privacyUrl, target: '_blank', rel: 'noopener noreferrer', style: 'color:var(--km-primary);text-decoration:underline;' }, ['Privacy Policy']),
+          consentRequired ? ' *' : '.',
+        ]),
+      ]);
+      form.appendChild(consentLabel);
+    }
+
     var btn = el('button', {
       type: 'submit',
       style: 'width:100%;background:var(--km-primary);color:#fff;border:none;padding:11px 16px;'
@@ -198,6 +224,14 @@
       }
       if (data.email && !validEmail(data.email)) return showError(form, 'Please enter a valid email address');
       if (data.phone && !validPhone(data.phone)) return showError(form, 'Mobile must be a 10-digit number');
+
+      // Consent — required check + attach the opt-in to the payload so the
+      // backend records it (whatsapp_consent / marketing_consent).
+      if (consentOn && consentBox) {
+        if (consentRequired && !consentBox.checked) return showError(form, 'Please accept the Privacy Policy to continue');
+        data.whatsapp_consent = consentBox.checked;
+        data.marketing_consent = consentBox.checked;
+      }
 
       data.referrer_url = window.location.href;
       btn.disabled = true; btn.textContent = 'Sending…';

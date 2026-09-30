@@ -26,6 +26,7 @@ import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound } from '../../utils';
 import { storeCredentials } from '../../services/crm/integrations/credentialsVault';
 import { findOrCreateLead, type NormalizedLead } from '../../services/crm/integrations/dedup.orchestrator';
+import * as consentSvc from '../../services/crm/consent.service';
 import { webFormProvider } from '../../services/crm/integrations/providers/webForm';
 import { genericWebhookProvider } from '../../services/crm/integrations/providers/genericWebhook';
 import { metaLeadAdsProvider } from '../../services/crm/integrations/providers/metaLeadAds';
@@ -412,6 +413,26 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
         raw_event_id: event_id,
       });
       if (r.was_new) created++; else merged++;
+      // Record affirmative WhatsApp / marketing opt-in in the DPDP consent
+      // ledger (who/when/how/purpose), so consent from the public form or the
+      // WhatsApp bot is demonstrable — best-effort, never fails ingestion.
+      try {
+        const method = providerId === 'web_form' ? 'web_form' : 'api';
+        const pairs: Array<[boolean | undefined, string]> = [
+          [n.whatsapp_consent, 'whatsapp'],
+          [n.marketing_consent, 'marketing'],
+        ];
+        for (const [flag, purpose] of pairs) {
+          if (flag === true) {
+            await consentSvc.recordConsent(
+              { orgId: integration.org_id, clientId: (integration as { client_id?: string | null }).client_id ?? null },
+              { subjectType: 'lead', subjectId: r.lead_id, purpose, consented: true, method, source: `integration:${providerId}`, actorUserId: null },
+            );
+          }
+        }
+      } catch (e) {
+        logger.warn({ integration_id, err: (e as Error).message }, 'inboundWebhook: consent ledger write failed');
+      }
       // For single-event payloads, attach lead_id to the event row.
       if (batch.length === 1) {
         await finishEvent(event_id, { lead_id: r.lead_id, was_dedup: !r.was_new });
