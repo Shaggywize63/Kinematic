@@ -30,9 +30,14 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
     q = q.or(`activity_id.eq.${activity_id},activity_id.is.null`);
   }
 
-  // Filter for active forms for mobile app/FE visibility
+  // Filter for live forms for mobile app / FE visibility. NOTE: builder_forms
+  // has NO `is_active` column — the lifecycle column is `status`
+  // (draft / published / archived). The app sends ?is_active=true to mean
+  // "only live forms", so map it to status. Querying the non-existent column
+  // 400'd ("column builder_forms.is_active does not exist") and silently hid
+  // EVERY published form from the app (iOS always sends is_active=true).
   if (is_active !== undefined) {
-    q = q.eq('is_active', is_active === 'true');
+    q = is_active === 'true' ? q.eq('status', 'published') : q.neq('status', 'published');
   }
 
   // Prioritize activity-specific forms over global ones, then by creation date
