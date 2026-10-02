@@ -4244,15 +4244,18 @@ settings.patch('/', wrap(async (req, res) => {
     config: mergedConfig,
   };
   if (body.business_type !== undefined) update.business_type = body.business_type;
+  const { invalidateLeadStatusCache } = await import('../services/crm/leadStatuses');
   if (existing?.id) {
     const { data } = await supabaseAdmin.from('crm_settings').update(update).eq('id', existing.id).select('*').single();
     const { invalidateIcpCache } = await import('../services/crm/ai/leadScoring.service');
     invalidateIcpCache(orgId(req), cid);
+    invalidateLeadStatusCache(orgId(req), cid);
     res.json(data);
   } else {
     const { data } = await supabaseAdmin.from('crm_settings').insert(update).select('*').single();
     const { invalidateIcpCache } = await import('../services/crm/ai/leadScoring.service');
     invalidateIcpCache(orgId(req), cid);
+    invalidateLeadStatusCache(orgId(req), cid);
     res.json(data);
   }
 }));

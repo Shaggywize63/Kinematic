@@ -56,6 +56,15 @@ export const consentWithdrawSchema = z.object({
 const gender = z.enum(['male','female','other','prefer_not_to_say']).optional().nullable();
 const loyaltyTier = z.enum(['bronze','silver','gold','platinum','vip']).optional().nullable();
 
+// Lead status is no longer a fixed enum: a client may define its own ordered
+// status set in crm_settings.config.lead_statuses. The schema only enforces a
+// safe lowercase slug here; the real per-client whitelist (and the built-in
+// fallback set for tenants that never configured custom statuses) is enforced
+// server-side in leads.service via assertValidLeadStatus(). See
+// src/services/crm/leadStatuses.ts.
+const leadStatusValue = z.string().trim().min(1).max(64)
+  .regex(/^[a-z][a-z0-9_]{0,63}$/, 'Invalid lead status');
+
 // HubSpot-style funnel position. Orthogonal to `status` — a lead can be
 // `status='working' lifecycle_stage='mql'` (in active outreach + marketing-
 // qualified) or `status='qualified' lifecycle_stage='sql'` (in active
@@ -142,7 +151,7 @@ const leadCreateBase = z.object({
   company: z.string().max(200).optional().nullable(),
   title: z.string().max(120).optional().nullable(),
   source_id: optionalUuid,
-  status: z.enum(['new','working','nurturing','qualified','unqualified']).optional(),
+  status: leadStatusValue.optional(),
   // Funnel position. Defaults to 'lead' server-side via the DB column default
   // so the client doesn't have to set it explicitly on most inbound paths.
   lifecycle_stage: lifecycleStage.optional(),
@@ -191,7 +200,7 @@ export const leadCreateSchema = leadCreateBase.refine(
 );
 
 export const leadUpdateSchema = leadCreateBase.partial().extend({
-  status: z.enum(['new','working','nurturing','qualified','unqualified','converted','lost']).optional(),
+  status: leadStatusValue.optional(),
   // Reason captured when a rep moves a lead into 'unqualified' or 'lost'.
   // Service auto-stamps disqualified_at on the first transition (so the
   // schema accepts it from clients but typical callers omit it).

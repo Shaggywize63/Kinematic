@@ -2,6 +2,10 @@
  * CRM module shared types.
  */
 
+// The built-in lifecycle statuses. A client may also define its own custom
+// status set (crm_settings.config.lead_statuses), so a persisted lead's
+// `status` is widened to `string` below — use this union only for the built-in
+// defaults / fallbacks, not as an exhaustive set.
 export type LeadStatus = 'new' | 'working' | 'nurturing' | 'qualified' | 'unqualified' | 'converted' | 'lost';
 export type StageType = 'open' | 'won' | 'lost';
 export type ActivityType = 'call' | 'meeting' | 'email' | 'note' | 'task' | 'sms';
@@ -103,7 +107,8 @@ export interface Lead {
    *  automatically from an inbound channel rather than being added by hand.
    *  Not a persisted column. */
   is_inbound?: boolean;
-  status: LeadStatus;
+  // Built-in lifecycle value OR a client-defined custom status key.
+  status: string;
   owner_id?: string | null;
   score: number;
   score_breakdown: ScoreBreakdown;
