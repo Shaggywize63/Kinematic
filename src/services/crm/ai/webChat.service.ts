@@ -49,6 +49,8 @@ export interface WebChatIngestInput {
   landing_page?: string | null;
   utm?: { source?: string | null; medium?: string | null; campaign?: string | null };
   user_agent?: string | null;
+  /** Conversation surface: 'website' (default) or 'whatsapp'. Stored in meta. */
+  channel?: string | null;
 }
 
 export interface WebChatIngestResult {
@@ -213,6 +215,10 @@ export async function ingestWebChat(input: WebChatIngestInput): Promise<WebChatI
     lead_id: leadId,
     lead_created_at: leadId && !prevRow?.lead_id ? nowIso : undefined,
     user_agent: (input.user_agent ?? '').slice(0, 400) || null,
+    // Surface label ('website' | 'whatsapp' | …) kept in the meta jsonb so the
+    // dashboard inbox can distinguish website chats from WhatsApp-bot ones
+    // without a schema change.
+    meta: { channel: (input.channel || '').trim().toLowerCase() || 'website' },
     last_seen_at: nowIso,
     updated_at: nowIso,
   };
@@ -243,6 +249,8 @@ export interface WebChatListRow {
   lead_id: string | null;
   last_seen_at: string;
   created_at: string;
+  /** 'website' | 'whatsapp' — read from meta.channel (defaults to 'website'). */
+  channel: string;
 }
 
 export async function listWebChats(
@@ -255,7 +263,7 @@ export async function listWebChats(
   let q = supabaseAdmin
     .from('crm_web_chat_sessions')
     .select(
-      'id, visitor_name, visitor_email, visitor_phone, visitor_company, interest, page_path, page_title, status, message_count, lead_id, last_seen_at, created_at',
+      'id, visitor_name, visitor_email, visitor_phone, visitor_company, interest, page_path, page_title, status, message_count, lead_id, last_seen_at, created_at, meta',
       { count: 'exact' },
     )
     .eq('org_id', orgId)
@@ -272,7 +280,13 @@ export async function listWebChats(
 
   const { data, error, count } = await q;
   if (error) throw new Error(error.message);
-  return { rows: (data as WebChatListRow[]) ?? [], total: count ?? 0 };
+  const rows: WebChatListRow[] = ((data as Record<string, unknown>[]) ?? []).map((r) => {
+    const meta = (r.meta as { channel?: unknown } | null) || null;
+    const channel = typeof meta?.channel === 'string' && meta.channel ? meta.channel : 'website';
+    const { meta: _omit, ...rest } = r;
+    return { ...(rest as unknown as WebChatListRow), channel };
+  });
+  return { rows, total: count ?? 0 };
 }
 
 export async function getWebChat(orgId: string, id: string) {
