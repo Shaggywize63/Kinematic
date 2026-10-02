@@ -1544,6 +1544,37 @@ router.get('/home', wrap(async (req, res) => {
   res.json({ success: true, data: payload });
 }));
 
+// ─── Report: Area-wise Leads (lead distribution by area/city) ────────────────
+// Groups the scoped lead set by the `area` custom field (fallback city) with
+// open / converted counts. Reuses the fully-scoped lead fetch (client + city +
+// hierarchy), so it respects the same visibility as every other lead report.
+// CSV + ?format=json (dashboard table).
+leads.get('/export-area-leads-report', wrap(async (req, res) => {
+  const rows = await fetchScopedReportLeads(req);
+  const OPEN = new Set(['new', 'working', 'nurturing', 'qualified']);
+  interface ARow { area: string; total: number; open: number; converted: number }
+  const byArea = new Map<string, ARow>();
+  for (const r of rows as any[]) {
+    const area = (String(r['custom__area'] ?? r.city ?? '').trim()) || '(Unspecified)';
+    const row = byArea.get(area) ?? { area, total: 0, open: 0, converted: 0 };
+    row.total++;
+    const st = String(r.status ?? '').toLowerCase();
+    if (st === 'converted') row.converted++;
+    else if (OPEN.has(st)) row.open++;
+    byArea.set(area, row);
+  }
+  const out = Array.from(byArea.values()).sort((a, b) => b.total - a.total || a.area.localeCompare(b.area));
+  const sum = (pick: (r: ARow) => number) => out.reduce((s, r) => s + pick(r), 0);
+  const gt: ARow = { area: 'Grand Total', total: sum((r) => r.total), open: sum((r) => r.open), converted: sum((r) => r.converted) };
+  const cols = [
+    { label: 'Area', get: (r: ARow) => r.area },
+    { label: 'Total Leads', get: (r: ARow) => r.total },
+    { label: 'Open', get: (r: ARow) => r.open },
+    { label: 'Converted', get: (r: ARow) => r.converted },
+  ];
+  sendReportCsv(req, res, 'area-leads-report', cols, [...out, gt]);
+}));
+
 router.use('/leads', rbac.requireModuleAccess('crm_leads'), leads);
 
 // ---------- MARKETING VISITS (ad-hoc GPS Start → End tied to a lead) --------
@@ -2949,6 +2980,94 @@ activities.get('/export-daywise-report', wrap(async (req, res) => {
   ];
   sendReportCsv(req, res, 'daywise-report', cols, [...rows, gt]);
 }));
+
+// ─── Report: Field Visits (ad-hoc Marketing Visits per field executive) ──────
+// A per-exec rollup of marketing visits (the GPS Start→End records stored as
+// crm_activities with metadata.kind='marketing_visit'). Client- + owner-scoped
+// and date-windowed exactly like the other activity reports, so a manager sees
+// their team and a rep sees their own. CSV + ?format=json (dashboard table).
+activities.get('/export-field-visits-report', wrap(async (req, res) => {
+  const org_id = orgId(req);
+  const scope = clientScope(req);
+  const ownerIds = await activityReportOwnerIds(req);
+  const ownerList = ownerIds === null ? null : ownerIds.filter((id) => UUID_RE.test(id));
+  const from = sanitiseDate(req.query.from);
+  const to = sanitiseDate(req.query.to);
+
+  // Scoped marketing-visit fetch (needs metadata/status, which the generic
+  // activity report fetch doesn't select).
+  const visits: any[] = [];
+  if (!(ownerList !== null && ownerList.length === 0)) {
+    const PAGE = 1000;
+    const MAX = 10000;
+    for (let offset = 0; visits.length < MAX; offset += PAGE) {
+      let q = supabaseAdmin.from('crm_activities')
+        .select('id, status, lead_id, owner_id, assigned_to, due_at, created_at, metadata')
+        .eq('org_id', org_id).is('deleted_at', null)
+        .filter('metadata->>kind', 'eq', 'marketing_visit');
+      if (scope.id) q = scope.strict ? q.eq('client_id', scope.id) : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+      if (ownerList !== null) {
+        const list = ownerList.join(',');
+        q = q.or(`owner_id.in.(${list}),assigned_to.in.(${list})`);
+      }
+      if (from || to) {
+        const lo = from ?? '0001-01-01';
+        const hi = to ?? '9999-12-31';
+        q = q.or([
+          `and(due_at.gte.${lo},due_at.lte.${hi})`,
+          `and(due_at.is.null,created_at.gte.${lo},created_at.lte.${hi})`,
+        ].join(','));
+      }
+      q = q.order('due_at', { ascending: false, nullsFirst: false }).order('id', { ascending: true }).range(offset, offset + PAGE - 1);
+      const { data, error } = await q;
+      if (error) break;
+      const chunk = (data ?? []) as any[];
+      visits.push(...chunk);
+      if (chunk.length < PAGE) break;
+    }
+  }
+
+  // Resolve owner display names and each visit's lead area (custom_fields.area
+  // → fallback city) for the "areas covered" column.
+  const owners = await userNameMap(visits.flatMap((v) => [v.assigned_to, v.owner_id]));
+  const leadIds = Array.from(new Set(visits.map((v) => v.lead_id).filter((id): id is string => !!id && UUID_RE.test(id))));
+  const areaByLead = new Map<string, string>();
+  for (let i = 0; i < leadIds.length; i += 500) {
+    const { data } = await supabaseAdmin.from('crm_leads').select('id, city, custom_fields').in('id', leadIds.slice(i, i + 500));
+    for (const l of (data ?? []) as any[]) {
+      const a = String((l.custom_fields && l.custom_fields.area) || l.city || '').trim();
+      if (a) areaByLead.set(l.id, a);
+    }
+  }
+
+  interface VRow { owner: string; total: number; inProgress: number; completed: number; areas: Set<string>; last: string }
+  const byOwner = new Map<string, VRow>();
+  for (const v of visits) {
+    const key = (v.assigned_to as string) || (v.owner_id as string) || 'unassigned';
+    const row = byOwner.get(key) ?? { owner: owners.get(key) || 'Unassigned', total: 0, inProgress: 0, completed: 0, areas: new Set<string>(), last: '' };
+    row.total++;
+    if (v.status === 'completed') row.completed++; else row.inProgress++;
+    const area = v.lead_id ? areaByLead.get(v.lead_id) : undefined;
+    if (area) row.areas.add(area);
+    const when = String(v.due_at || v.created_at || '');
+    if (when > row.last) row.last = when;
+    byOwner.set(key, row);
+  }
+  const rows = Array.from(byOwner.values()).sort((a, b) => b.total - a.total || a.owner.localeCompare(b.owner));
+  const sum = (pick: (r: VRow) => number) => rows.reduce((s, r) => s + pick(r), 0);
+  const gt: VRow = { owner: 'Grand Total', total: sum((r) => r.total), inProgress: sum((r) => r.inProgress), completed: sum((r) => r.completed), areas: new Set(), last: '' };
+
+  const cols = [
+    { label: 'Field Executive', get: (r: VRow) => r.owner },
+    { label: 'Total Visits', get: (r: VRow) => r.total },
+    { label: 'In Progress', get: (r: VRow) => r.inProgress },
+    { label: 'Completed', get: (r: VRow) => r.completed },
+    { label: 'Areas Covered', get: (r: VRow) => (r.owner === 'Grand Total' ? '' : r.areas.size) },
+    { label: 'Last Visit', get: (r: VRow) => csvDateOnly(r.last) },
+  ];
+  sendReportCsv(req, res, 'field-visits-report', cols, [...rows, gt]);
+}));
+
 activities.post('/', wrap(async (req, res) => {
   const parsed = normalizeActivityPayload(parse(v.activitySchemaBase, req.body));
   // An activity must be anchored to SOMETHING. A CRM entity (lead /
