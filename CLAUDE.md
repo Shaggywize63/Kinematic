@@ -52,3 +52,12 @@ A green typecheck does **not** mean a feature works. Most bugs have been
 
 ## Build / check
 - `npx tsc --noEmit`.
+
+## Deploy — AWS ECS (NOT Railway)
+Hosting moved to **AWS ECS/Fargate** (ap-south-1): the `.github/workflows/
+deploy-aws.yml` workflow builds the multi-arch Docker image, pushes it to ECR
+`kinematic-backend:latest`, and force-new-deployments the `kinematic-backend`
+ECS service in the `kinematic` cluster. It runs on **push to `main`** (so a
+merge auto-deploys; `**.md`-only changes are skipped by `paths-ignore`). The
+API is served at **https://api.kinematicapp.com** (`/health` returns 200).
+Railway is no longer used — there is no `railway.json`.
