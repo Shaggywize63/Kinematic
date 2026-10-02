@@ -1620,7 +1620,9 @@ marketingVisits.get('/', wrap(async (req, res) => {
     mine: String(req.query.mine ?? '') === 'true',
     status: (req.query.status as string | undefined) ?? null,
   });
-  res.json(rows);
+  // Stamp owner/assignee + linked-lead names so the dashboard list renders
+  // real identities (field executive, lead, phone) instead of raw UUIDs.
+  res.json(await enrichActivities(rows as Record<string, any>[]));
 }));
 router.use('/marketing-visits', rbac.requireModuleAccess('crm_activities'), marketingVisits);
 
