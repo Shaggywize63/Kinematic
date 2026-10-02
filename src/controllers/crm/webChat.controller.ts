@@ -84,6 +84,9 @@ export const publicIngest = asyncHandler<Request>(async (req, res) => {
     landing_page: str(b.landing_page),
     utm: { source: str(utm.source), medium: str(utm.medium), campaign: str(utm.campaign) },
     user_agent: str(req.headers['user-agent']),
+    // Which surface the conversation came from — 'website' (default) or
+    // 'whatsapp' (the KINI WhatsApp bot posts its transcripts here too).
+    channel: str(b.channel),
   };
 
   if (!input.session_key) {

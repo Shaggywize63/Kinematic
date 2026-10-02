@@ -11,6 +11,7 @@ import * as dedup from './dedup.service';
 import * as assignment from './assignment.service';
 import * as automations from './automations.service';
 import { validateAndStampCustomFields } from './customFields.service';
+import { assertValidLeadStatus, disqualifiedStatesFor } from './leadStatuses';
 import { isMinor } from '../../lib/age';
 import { logger } from '../../lib/logger';
 import type { Lead, LeadStatus } from '../../types/crm.types';
@@ -75,6 +76,11 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
   // it from client-scoped views and blocks lead→deal pipeline resolution.
   // No-op for multi-client orgs and when a client_id was already supplied.
   payload.client_id = await resolveSoleClientId(org_id, payload.client_id ?? null);
+
+  // Validate status against the client's configured set (or the built-in
+  // create whitelist when no custom statuses are configured). Zod only checks
+  // the slug shape; the real per-client whitelist lives here.
+  await assertValidLeadStatus(org_id, payload.client_id ?? null, payload.status as string | undefined, true);
 
   // Owner resolution: explicit owner_id wins, then assignment rules, then
   // the creator (user_id), then the org-wide default, then null. Passing
@@ -713,6 +719,11 @@ export async function getLead(org_id: string, id: string) {
 
 export async function updateLead(org_id: string, id: string, payload: Partial<Lead>, user_id?: string) {
   const before = await getLead(org_id, id);
+  const leadClientId = (before as { client_id?: string | null }).client_id ?? null;
+
+  // Validate the incoming status against the client's configured set (or the
+  // built-in set). No-op when the PATCH doesn't touch status.
+  await assertValidLeadStatus(org_id, leadClientId, payload.status as string | undefined, false);
 
   // Same coercion/validation pass as createLead. Skipped when the PATCH
   // doesn't touch custom_fields at all (no defs lookup needed). Merges
@@ -726,12 +737,14 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     );
   }
 
-  const DISQUALIFIED_STATES: LeadStatus[] = ['unqualified', 'lost'];
+  // Terminal/"disqualified" states — the client's own is_lost statuses when a
+  // custom set is configured, else the built-in unqualified/lost pair.
+  const DISQUALIFIED_STATES = await disqualifiedStatesFor(org_id, leadClientId);
   const nowIso = new Date().toISOString();
   const enteringDisqualified =
     payload.status !== undefined
-    && DISQUALIFIED_STATES.includes(payload.status as LeadStatus)
-    && !DISQUALIFIED_STATES.includes(before.status as LeadStatus);
+    && DISQUALIFIED_STATES.has(payload.status as string)
+    && !DISQUALIFIED_STATES.has(before.status as string);
 
   const update: Record<string, unknown> = {
     ...payload,
