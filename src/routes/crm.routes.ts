@@ -27,6 +27,7 @@ import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as leadsSvc from '../services/crm/leads.service';
+import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import * as dealsSvc from '../services/crm/deals.service';
@@ -1544,6 +1545,53 @@ router.get('/home', wrap(async (req, res) => {
 }));
 
 router.use('/leads', rbac.requireModuleAccess('crm_leads'), leads);
+
+// ---------- MARKETING VISITS (ad-hoc GPS Start → End tied to a lead) --------
+// A lead-centric field visit with a Start→End lifecycle and start/end GPS,
+// stored as a crm_activities row (metadata.kind='marketing_visit'). Generic
+// capability; the apps surface it per-client (Rajkamal). RBAC via the
+// activities module since the visit IS a CRM activity.
+const marketingVisits = express.Router();
+marketingVisits.post('/start', wrap(async (req, res) => {
+  const body = parse(v.marketingVisitStartSchema, req.body);
+  // Validate/normalise the inline new-lead object through the lead schema so a
+  // visit-created lead goes through the exact same rules as the lead form.
+  const leadPayload = body.lead ? parse(v.leadCreateSchema, body.lead) : null;
+  const out = await marketingVisitsSvc.startMarketingVisit({
+    org_id: orgId(req), user_id: userId(req), client_id: clientId(req),
+    lead_id: body.lead_id ?? null,
+    lead: leadPayload as Record<string, unknown> | null,
+    latitude: body.latitude ?? null, longitude: body.longitude ?? null,
+    purpose: body.purpose ?? null,
+  });
+  res.status(201).json(out);
+}));
+marketingVisits.post('/:id/end', wrap(async (req, res) => {
+  const body = parse(v.marketingVisitEndSchema, req.body);
+  const out = await marketingVisitsSvc.endMarketingVisit({
+    org_id: orgId(req), user_id: userId(req), client_id: clientId(req),
+    id: req.params.id,
+    latitude: body.latitude ?? null, longitude: body.longitude ?? null,
+    outcome: body.outcome ?? null, notes: body.notes ?? null,
+    next_status: body.next_status ?? null, next_followup_at: body.next_followup_at ?? null,
+  });
+  res.json(out);
+}));
+marketingVisits.get('/active', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  res.json(await marketingVisitsSvc.getActiveMarketingVisit(orgId(req), scope.id, userId(req) ?? null));
+}));
+marketingVisits.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const rows = await marketingVisitsSvc.listMarketingVisits({
+    org_id: orgId(req), client_id: scope.id, strictClient: scope.strict,
+    user_id: userId(req) ?? null,
+    mine: String(req.query.mine ?? '') === 'true',
+    status: (req.query.status as string | undefined) ?? null,
+  });
+  res.json(rows);
+}));
+router.use('/marketing-visits', rbac.requireModuleAccess('crm_activities'), marketingVisits);
 
 // ---------- CONVERSATION INTELLIGENCE (recording pipeline + dashboard) ------
 // Kick off processing after the client PUT the audio to the signed URL.

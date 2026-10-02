@@ -258,6 +258,31 @@ export const leadReopenSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
+// Marketing / ad-hoc field visit (GPS Start → End tied to a lead). Start
+// takes either an existing lead_id OR a `lead` object (validated separately
+// against leadCreateSchema at the route) to create a new lead on the spot.
+const latitude = z.coerce.number().min(-90).max(90).optional().nullable();
+const longitude = z.coerce.number().min(-180).max(180).optional().nullable();
+export const marketingVisitStartSchema = z.object({
+  lead_id: optionalUuid,
+  lead: z.record(z.unknown()).optional(),
+  latitude,
+  longitude,
+  purpose: z.string().max(64).optional().nullable(),
+}).refine((d) => Boolean(d.lead_id) || Boolean(d.lead), {
+  message: 'Provide lead_id or lead', path: ['lead_id'],
+});
+export const marketingVisitEndSchema = z.object({
+  latitude,
+  longitude,
+  outcome: z.string().max(500).optional().nullable(),
+  notes: z.string().max(2000).optional().nullable(),
+  // Reuse the config-driven status slug; the per-client whitelist is enforced
+  // in leads.service.updateLead.
+  next_status: leadStatusValue.optional(),
+  next_followup_at: isoDate,
+});
+
 // Bulk lat/long backfill for existing leads. Each row matches one lead by
 // id (preferred), then email, then phone. Used by the dashboard "upload
 // coordinates" tool to geotag old leads in one shot.
