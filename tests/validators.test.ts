@@ -38,9 +38,16 @@ describe('leadCreateSchema', () => {
     expect(leadCreateSchema.safeParse({ first_name: 'A', phone: '12345' }).success).toBe(false);
   });
 
-  it('rejects an invalid email and out-of-range status', () => {
+  it('rejects an invalid email and a malformed status slug', () => {
     expect(leadCreateSchema.safeParse({ first_name: 'A', email: 'nope' }).success).toBe(false);
-    expect(leadCreateSchema.safeParse({ first_name: 'A', status: 'converted' }).success).toBe(false); // create can't set converted
+    // Status is no longer a fixed enum at the schema boundary — a client may
+    // define its own status set. The schema only enforces a safe lowercase
+    // slug; the real per-client whitelist (incl. "create can't set converted"
+    // for default tenants) is enforced server-side in leads.service
+    // (assertValidLeadStatus), covered in tests/leadStatuses.test.ts.
+    expect(leadCreateSchema.safeParse({ first_name: 'A', status: 'Converted' }).success).toBe(false); // uppercase → bad slug
+    expect(leadCreateSchema.safeParse({ first_name: 'A', status: 'visit planned' }).success).toBe(false); // space → bad slug
+    expect(leadCreateSchema.safeParse({ first_name: 'A', status: 'visit_planned' }).success).toBe(true); // valid slug accepted at schema level
   });
 
   it('coerces numeric latitude/longitude and range-checks them', () => {
