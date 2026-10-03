@@ -538,12 +538,19 @@ export const logout = asyncHandler<AuthRequest>(async (req, res) => {
     const client = getUserClient(req.accessToken);
     await client.auth.signOut();
   }
-  // Clear FCM token + active session on logout. Clearing the session
-  // makes the next login from any device a "first login" — no kicked
-  // device, no DEVICE_REPLACED toast — which is the right UX when the
-  // user explicitly signed out themselves.
+  // Clear BOTH push tokens (FCM + APNs) + active session on logout.
+  // Clearing the session makes the next login from any device a "first
+  // login" — no kicked device, no DEVICE_REPLACED toast — which is the
+  // right UX when the user explicitly signed out themselves.
+  //
+  // Clearing apns_token here (not just fcm_token) is a tenant-isolation
+  // fix: an iOS device that logs out of user A and into user B must stop
+  // receiving A's pushes. Leaving apns_token behind left the physical
+  // device registered against the previous user, so that user's team
+  // pushes (e.g. new-lead alerts) kept landing on a device now signed in
+  // as someone in a different org — a cross-tenant push leak.
   if (req.user) {
-    await supabaseAdmin.from('users').update({ fcm_token: null }).eq('id', req.user.id);
+    await supabaseAdmin.from('users').update({ fcm_token: null, apns_token: null }).eq('id', req.user.id);
     try {
       await supabaseAdmin.rpc('clear_user_session', { p_user_id: req.user.id });
       invalidateAuthCache((u) => u?.id === req.user!.id);
