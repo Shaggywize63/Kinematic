@@ -59,6 +59,13 @@ export const updateFcmToken = asyncHandler(async (req: AuthRequest, res: Respons
           .update({ fcm_token: token })
           .eq('id', req.user!.id);
         if (fallbackErr) return badRequest(res, fallbackErr.message);
+        // Same eviction as the main path (see below): keep the device token
+        // on exactly one user row so pushes don't leak to a previous user.
+        await supabaseAdmin
+          .from('users')
+          .update({ fcm_token: null })
+          .eq('fcm_token', token)
+          .neq('id', req.user!.id);
         logger.warn('Push token saved without platform field — run migrations/add_apns_push_columns.sql to track ios vs android.');
         return ok(res, null, 'Push token updated (platform columns missing — token-only update)');
       }
@@ -67,6 +74,24 @@ export const updateFcmToken = asyncHandler(async (req: AuthRequest, res: Respons
     }
 
     return badRequest(res, richErr.message);
+  }
+
+  // Tenant-isolation guard: a physical device token is globally unique to
+  // that device, so it must belong to exactly ONE user row at a time. If
+  // this device was previously signed in as a different user (and logout
+  // never cleared the token — app deleted, offline logout, crash), that
+  // stale row would keep the token and the old user's team pushes would
+  // land on this device even across orgs. Evict the just-registered token
+  // from every OTHER user so the device only ever receives the current
+  // user's notifications.
+  const evictColumn = normalised === 'ios' ? 'apns_token' : 'fcm_token';
+  const { error: evictErr } = await supabaseAdmin
+    .from('users')
+    .update({ [evictColumn]: null })
+    .eq(evictColumn, token)
+    .neq('id', req.user!.id);
+  if (evictErr) {
+    logger.warn(`Push token eviction from other users failed (${evictColumn}): ${evictErr.message}`);
   }
 
   return ok(res, null, 'Push token updated');
