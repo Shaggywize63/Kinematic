@@ -31,6 +31,10 @@ type FieldDef = {
   required?: boolean | null;
   label?: string | null;
   org_role_ids?: string[] | null;
+  // 'both' (default) | 'b2c' | 'b2b' — which lead segment the field applies
+  // to. See validateAndStampCustomFields: a required field scoped to the
+  // other segment must not be enforced on this lead.
+  applies_to?: string | null;
 };
 
 const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
@@ -39,9 +43,13 @@ const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
  *  intentionally fetch the full set (universal + client-scoped) so a
  *  field defined as universal is validated for every client. */
 async function loadDefs(orgId: string, clientId: string | null, entity: string): Promise<FieldDef[]> {
+  // select('*') (not an explicit column list) so this stays resilient if a
+  // project's DB hasn't had the `applies_to` column added yet — the field is
+  // simply absent on the row and treated as 'both'. Only the Kinematic project
+  // uses per-segment custom fields; other tenants need no schema change.
   let q = supabaseAdmin
     .from('crm_custom_field_defs')
-    .select('field_key, field_type, options, formula, hidden, required, label, org_role_ids')
+    .select('*')
     .eq('org_id', orgId)
     .eq('entity_type', entity)
     .eq('is_active', true);
@@ -111,7 +119,10 @@ export async function validateAndStampCustomFields(
   // paths (the dashboard / mobile lead form). Inbound webhooks, CSV imports
   // and agentic flows leave it off so a partial lead is still captured
   // rather than 400'd — matching long-standing behaviour.
-  opts?: { enforceRequired?: boolean },
+  // `isB2c` (when known) scopes required-enforcement: a field defined only
+  // for the OTHER lead segment is not mandatory on this lead. Interactive
+  // lead-create passes it; other callers leave it undefined (enforce as-is).
+  opts?: { enforceRequired?: boolean; isB2c?: boolean },
 ): Promise<Record<string, unknown>> {
   const input = { ...(incoming ?? {}) };
   // Fast path: nothing sent AND not enforcing required-ness → skip the defs
@@ -200,9 +211,14 @@ export async function validateAndStampCustomFields(
   // has no user-role context, so the client enforces those for the users who
   // actually see them; global required fields are guaranteed server-side.
   if (opts?.enforceRequired) {
+    const scope = opts.isB2c === undefined ? null : (opts.isB2c ? 'b2c' : 'b2b');
     for (const def of defs) {
       if (def.required !== true || def.hidden === true || def.field_type === 'formula') continue;
       if (Array.isArray(def.org_role_ids) && def.org_role_ids.length > 0) continue;
+      // Segment scope: a field defined for the other branch (b2c-only on a
+      // b2b lead, or vice-versa) is not required here. 'both'/null always
+      // applies. When the lead's segment is unknown, enforce as before.
+      if (scope && def.applies_to && def.applies_to !== 'both' && def.applies_to !== scope) continue;
       const v = input[def.field_key];
       const missing = v === null || v === undefined || v === ''
         || (Array.isArray(v) && v.length === 0);

@@ -652,6 +652,14 @@ export const customFieldSchema = z.object({
   // values. Admin toggles it under CRM Settings → Custom Fields.
   // Backend column added by migration_custom_field_hidden.sql.
   hidden: z.boolean().optional(),
+  // Which lead segment the field belongs to. 'both' (default) shows it on
+  // every form; 'b2c' shows it only on the B2C branch (e.g. a farmer lead),
+  // 'b2b' only on the B2B branch (e.g. a distributor/retailer). Lets one
+  // client run distinct field sets for its two customer types without
+  // per-client code. Only meaningful for entity_type='lead' (the only form
+  // with a B2C/B2B split); ignored for contact/account/deal/activity.
+  // Backend column added by migration_custom_field_applies_to.sql.
+  applies_to: z.enum(['both', 'b2c', 'b2b']).optional().nullable(),
   position: z.number().int().optional(),
   // Org roles that should see this field. Empty/null = all roles (universal).
   // Lets clients give each hierarchy role its own set of custom fields.

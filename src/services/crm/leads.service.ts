@@ -92,7 +92,7 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
   // formula that references custom_fields sees the cleaned values.
   payload.custom_fields = await validateAndStampCustomFields(
     org_id, payload.client_id ?? null, 'lead', payload.custom_fields,
-    { enforceRequired },
+    { enforceRequired, isB2c: payload.is_b2c },
   );
 
   const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload, user_id));
