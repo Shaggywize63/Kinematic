@@ -276,6 +276,7 @@ BEGIN
 END;
 $$;
 REVOKE EXECUTE ON FUNCTION public.finance_next_number(uuid, uuid, text) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.finance_next_number(uuid, uuid, text) TO service_role;
 
 -- ── Lock the tables to the service role ─────────────────────────────────────
 ALTER TABLE public.finance_settings           ENABLE ROW LEVEL SECURITY;

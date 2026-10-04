@@ -60,6 +60,25 @@ async function nextNumber(s: FinanceScope, kind: 'invoice' | 'quote' | 'payment'
 }
 export { nextNumber };
 
+const isDuplicate = (e: { code?: string; message: string } | null) => !!e && (e.code === '23505' || /duplicate key/i.test(e.message));
+
+/**
+ * Allocate a number and insert with it. If the counter was moved onto a number that is already
+ * taken (settings edited by hand), the unique index rejects the insert — skip ahead rather than fail.
+ */
+export async function insertNumbered<T>(
+  s: FinanceScope, kind: 'invoice' | 'quote' | 'payment',
+  insert: (number: string) => PromiseLike<{ data: T | null; error: { code?: string; message: string } | null }>,
+): Promise<{ data: T; number: string }> {
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const number = await nextNumber(s, kind);
+    const r = await insert(number);
+    if (!r.error && r.data) return { data: r.data, number };
+    if (!isDuplicate(r.error)) throw fail(r.error ?? { message: 'insert failed' });
+  }
+  throw new AppError(409, 'Could not find an unused number — check the numbering settings', 'NUMBERING');
+}
+
 async function loadRow(s: FinanceScope, id: string, docType?: DocType) {
   let q = scoped(db().from('finance_documents').select('*'), s).eq('id', id).is('deleted_at', null);
   if (docType) q = q.eq('doc_type', docType);
@@ -139,9 +158,8 @@ function itemRows(documentId: string, orgId: string, calc: ReturnType<typeof com
 
 export async function createDocument(s: FinanceScope, docType: DocType, input: DocumentInput, extra: Record<string, unknown> = {}) {
   const p = await prepare(s, input);
-  const number = await nextNumber(s, docType);
-  const row = {
-    org_id: s.org_id, client_id: s.client_id, doc_type: docType, number, status: 'draft',
+  const base = {
+    org_id: s.org_id, client_id: s.client_id, doc_type: docType, status: 'draft',
     ...headerFields(input, docType, p),
     amount_paid: 0,
     balance: docType === 'invoice' ? p.calc.totals.total : 0,
@@ -149,8 +167,8 @@ export async function createDocument(s: FinanceScope, docType: DocType, input: D
     created_by: s.user_id || null,
     ...extra,
   };
-  const { data, error } = await db().from('finance_documents').insert(row).select('*').single();
-  if (error) throw fail(error);
+  const { data, number } = await insertNumbered(s, docType, (n) =>
+    db().from('finance_documents').insert({ ...base, number: n }).select('*').single());
 
   const ins = await db().from('finance_document_items').insert(itemRows(data.id as string, s.org_id, p.calc));
   if (ins.error) {

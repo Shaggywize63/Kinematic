@@ -3,7 +3,7 @@ import { AppError } from '../../utils';
 import { FinanceScope, scoped } from './scope';
 import { round2 } from './money';
 import { getCustomer, pageParams, safeSearch } from './masters.service';
-import { nextNumber } from './documents.service';
+import { insertNumbered } from './documents.service';
 
 const db = () => supabaseAdmin;
 const fail = (e: { message: string }) => new AppError(500, e.message, 'DB_ERROR');
@@ -81,14 +81,13 @@ export async function recordPayment(s: FinanceScope, input: PaymentInput) {
   }
   const { merged, sum } = await validateAllocations(s, input.customer_id, allocations, amount);
 
-  const payment_number = await nextNumber(s, 'payment');
-  const { data: pay, error } = await db().from('finance_payments').insert({
-    org_id: s.org_id, client_id: s.client_id, payment_number, customer_id: input.customer_id,
-    payment_date: input.payment_date || new Date().toISOString().slice(0, 10),
-    amount, unused_amount: round2(amount - sum), mode: input.mode ?? 'bank_transfer',
-    reference: input.reference ?? null, notes: input.notes ?? null, created_by: s.user_id || null,
-  }).select('*').single();
-  if (error) throw fail(error);
+  const { data: pay, number: payment_number } = await insertNumbered(s, 'payment', (n) =>
+    db().from('finance_payments').insert({
+      org_id: s.org_id, client_id: s.client_id, payment_number: n, customer_id: input.customer_id,
+      payment_date: input.payment_date || new Date().toISOString().slice(0, 10),
+      amount, unused_amount: round2(amount - sum), mode: input.mode ?? 'bank_transfer',
+      reference: input.reference ?? null, notes: input.notes ?? null, created_by: s.user_id || null,
+    }).select('*').single());
 
   if (merged.size) {
     const ins = await db().from('finance_payment_allocations').insert(
