@@ -1,8 +1,8 @@
 -- Finance module (Zoho-Invoice-style billing): customers, items, quotes, invoices,
 -- payments received, numbering, activity trail.
 --
--- Target: Kinematic Supabase project (clldjlojtmrrpozydqxk) via apply_migration.
--- NOT applied to Tata (lnvxqjqfsxvtjvbzphou) — only run there if explicitly asked.
+-- Target: the Kinematic database (`kinematic` on RDS kinematic-mumbai-test; self-hosted Supabase stack on ECS).
+-- NOT applied to the Tata database (`tata`) — only run there if explicitly asked.
 --
 -- Tables are prefixed finance_* because `invoices`, `invoice_items`, `payments`
 -- and `ledger_entries` already exist for the Distribution module.
@@ -287,6 +287,14 @@ ALTER TABLE public.finance_document_items     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.finance_payments           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.finance_payment_allocations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.finance_document_events    ENABLE ROW LEVEL SECURITY;
+
+-- ── Allow the new package value ─────────────────────────────────────────────
+-- modules.package is constrained to a fixed list (modules_package_chk), which has no 'finance'.
+-- Without this the module row below is rejected and the whole migration rolls back.
+ALTER TABLE public.modules DROP CONSTRAINT IF EXISTS modules_package_chk;
+ALTER TABLE public.modules ADD CONSTRAINT modules_package_chk CHECK (
+  package IS NULL OR package = ANY (ARRAY['field_force','distribution','crm','business','system','people','audit','finance'])
+);
 
 -- ── Register the module (non-universal; never auto-granted) ─────────────────
 INSERT INTO public.modules (id, name, description, package, is_universal) VALUES
