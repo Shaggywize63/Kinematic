@@ -129,6 +129,37 @@ describe('grouping rows into invoices', () => {
   });
 });
 
+describe('Zoho India exports (tax split per component)', () => {
+  const H = ['Invoice Date', 'Invoice Number', 'Invoice Status', 'Customer Name', 'Primary Contact EmailID', 'Total', 'Balance', 'Notes', 'Item Name', 'Quantity', 'Item Price',
+    'CGST Rate %', 'SGST Rate %', 'IGST Rate %', 'Item Tax1 %'];
+  const t = (rows: Array<Record<string, string>>) => ({ headers: H, rows: rows.map((r) => Object.fromEntries(H.map((h) => [h, r[h] ?? '']))) });
+
+  it('reads the GST rate from "Item Tax1 %" and the contact email from "Primary Contact EmailID"', () => {
+    const { mapping } = detectColumns(H);
+    expect(mapping.tax_pct).toBe('Item Tax1 %');
+    expect(mapping.email).toBe('Primary Contact EmailID');
+    const [inv] = buildInvoices(t([{ 'Invoice Date': '2026-08-10', 'Invoice Number': 'A1', 'Invoice Status': 'Closed', 'Customer Name': 'BMW', 'Primary Contact EmailID': 'a@b.in', Total: '17700', 'Item Name': 'Seat', Quantity: '1', 'Item Price': '15000', 'Item Tax1 %': '18' }]), mapping);
+    expect(inv.lines[0].gst_rate).toBe(18);
+    expect(inv.customer.email).toBe('a@b.in');
+    expect(inv.warnings).toEqual([]);
+  });
+  it('falls back to CGST + SGST (or IGST) rates when there is no single tax % column', () => {
+    const H2 = H.filter((h) => h !== 'Item Tax1 %');
+    const { mapping } = detectColumns(H2);
+    const rows = [
+      { 'Invoice Date': '2026-06-25', 'Invoice Number': 'A1', 'Customer Name': 'X', 'Item Name': 'Web', Quantity: '1', 'Item Price': '40000', 'CGST Rate %': '9.00', 'SGST Rate %': '9.00', 'IGST Rate %': '0.00' },
+      { 'Invoice Date': '2026-07-02', 'Invoice Number': 'A2', 'Customer Name': 'Y', 'Item Name': 'App', Quantity: '1', 'Item Price': '100', 'CGST Rate %': '0.00', 'SGST Rate %': '0.00', 'IGST Rate %': '18.00' },
+    ];
+    const inv = buildInvoices({ headers: H2, rows: rows.map((r) => Object.fromEntries(H2.map((h) => [h, (r as Record<string, string>)[h] ?? '']))) }, mapping);
+    expect(inv.map((i) => i.lines[0].gst_rate)).toEqual([18, 18]);
+  });
+  it("drops Zoho's leading apostrophe on notes that start with a dash", () => {
+    const { mapping } = detectColumns(H);
+    const [inv] = buildInvoices(t([{ 'Invoice Date': '2026-08-10', 'Invoice Number': 'A1', 'Customer Name': 'BMW', Notes: "'-Billing cycle: quarterly", 'Item Name': 'Seat', Quantity: '1', 'Item Price': '10', 'Item Tax1 %': '0' }]), mapping);
+    expect(inv.notes).toBe('-Billing cycle: quarterly');
+  });
+});
+
 describe('reading files', () => {
   it('reads a CSV with a BOM, quoted commas and semicolon delimiters', async () => {
     const t = await readTable('x.csv', csv([['Invoice Number', 'Customer Name'], ['INV-1', 'Acme, Inc'], ['INV-2', 'Shri "Ram" Sales']]));

@@ -91,7 +91,7 @@ type Field =
   | 'number' | 'issue_date' | 'due_date' | 'status' | 'customer' | 'email' | 'gstin' | 'gst_treatment' | 'place_of_supply'
   | 'reference' | 'terms_days' | 'notes' | 'terms' | 'adjustment' | 'total' | 'balance' | 'item_name' | 'item_desc' | 'hsn'
   | 'qty' | 'rate' | 'disc_pct' | 'disc_amt' | 'tax_pct' | 'line_total' | 'bill_street' | 'bill_city' | 'bill_state'
-  | 'bill_code' | 'bill_country' | 'paid_date';
+  | 'bill_code' | 'bill_country' | 'paid_date' | 'cgst_pct' | 'sgst_pct' | 'igst_pct';
 
 // Normalised header names (lower-case letters, digits, % and #). Earlier entries win when several headers match.
 const ALIASES: Record<Field, string[]> = {
@@ -100,7 +100,7 @@ const ALIASES: Record<Field, string[]> = {
   due_date: ['duedate'],
   status: ['invoicestatus', 'status'],
   customer: ['customername', 'customer', 'displayname', 'clientname', 'billtoname'],
-  email: ['customeremail', 'emailid', 'email', 'primarycontactemail'],
+  email: ['customeremail', 'emailid', 'email', 'primarycontactemailid', 'primarycontactemail'],
   gstin: ['gstidentificationnumbergstin', 'gstidentificationnumber', 'customergstin', 'gstin', 'gstnumber'],
   gst_treatment: ['gsttreatment'],
   place_of_supply: ['placeofsupply', 'placeofsupplywithstatecode'],
@@ -118,7 +118,7 @@ const ALIASES: Record<Field, string[]> = {
   rate: ['itemprice', 'rate', 'unitprice', 'price'],
   disc_pct: ['discount%', 'itemdiscount%', 'discountpercent', 'entitydiscountpercent'],
   disc_amt: ['discountamount', 'itemdiscountamount'],
-  tax_pct: ['itemtax%', 'tax%', 'gst%', 'taxrate', 'taxpercentage', 'itemtaxpercent', 'taxpercent'],
+  tax_pct: ['itemtax%', 'itemtax1%', 'tax%', 'gst%', 'taxrate', 'taxpercentage', 'itemtaxpercent', 'taxpercent'],
   line_total: ['itemtotal', 'lineamount', 'amount'],
   bill_street: ['billingaddress', 'billingstreet', 'billingaddress1'],
   bill_city: ['billingcity'],
@@ -126,6 +126,8 @@ const ALIASES: Record<Field, string[]> = {
   bill_code: ['billingcode', 'billingpincode', 'billingzip', 'billingpostalcode'],
   bill_country: ['billingcountry'],
   paid_date: ['lastpaymentdate', 'paymentdate'],
+  // Zoho India exports split GST per component; they add up to the line's GST rate when there is no single tax % column.
+  cgst_pct: ['cgstrate%'], sgst_pct: ['sgstrate%'], igst_pct: ['igstrate%'],
 };
 
 export const FIELD_LABELS: Partial<Record<Field, string>> = {
@@ -133,7 +135,7 @@ export const FIELD_LABELS: Partial<Record<Field, string>> = {
   email: 'Customer email', gstin: 'GSTIN', gst_treatment: 'GST treatment', place_of_supply: 'Place of supply', reference: 'PO / reference',
   total: 'Invoice total', balance: 'Balance due', item_name: 'Item name', item_desc: 'Item description', hsn: 'HSN/SAC', qty: 'Quantity',
   rate: 'Item price', disc_pct: 'Discount %', disc_amt: 'Discount amount', tax_pct: 'Tax %', line_total: 'Item total', notes: 'Notes',
-  terms: 'Terms & conditions', adjustment: 'Adjustment', terms_days: 'Payment terms', paid_date: 'Last payment date',
+  terms: 'Terms & conditions', adjustment: 'Adjustment', terms_days: 'Payment terms', paid_date: 'Last payment date', cgst_pct: 'CGST rate %', sgst_pct: 'SGST rate %', igst_pct: 'IGST rate %',
 };
 
 const norm = (h: string) => h.toLowerCase().replace(/[^a-z0-9%#]/g, '');
@@ -229,6 +231,8 @@ export interface ParsedInvoice {
 
 export function buildInvoices(table: Table, mapping: Mapping): ParsedInvoice[] {
   const get = (row: Record<string, string>, f: Field) => (mapping[f] ? (row[mapping[f] as string] ?? '').trim() : '');
+  // Zoho prefixes text that starts with "-", "+" or "=" with an apostrophe so spreadsheets don't read it as a formula.
+  const getText = (row: Record<string, string>, f: Field) => get(row, f).replace(/^'(?=[-+=@])/, '');
   const order: string[] = [];
   const byNumber = new Map<string, ParsedInvoice>();
 
@@ -249,7 +253,7 @@ export function buildInvoices(table: Table, mapping: Mapping): ParsedInvoice[] {
           name: custName, email: get(row, 'email') || null, gstin: get(row, 'gstin').toUpperCase() || null,
           gst_treatment: gstTreatment(get(row, 'gst_treatment')), place_of_supply: stateCodeFromText(get(row, 'place_of_supply')), address: addr,
         },
-        reference: get(row, 'reference') || null, notes: get(row, 'notes') || null, terms: get(row, 'terms') || null,
+        reference: getText(row, 'reference') || null, notes: getText(row, 'notes') || null, terms: getText(row, 'terms') || null,
         terms_days: parseNumber(get(row, 'terms_days')), adjustment: parseNumber(get(row, 'adjustment')) ?? 0,
         file_total: parseNumber(get(row, 'total')), file_balance: parseNumber(get(row, 'balance')), paid_date: parseDate(get(row, 'paid_date')),
         lines: [], synthesised_line: false, problems: [], warnings: [],
@@ -285,13 +289,17 @@ export function buildInvoices(table: Table, mapping: Mapping): ParsedInvoice[] {
       const amt = parseNumber(get(row, 'disc_amt'));
       disc = amt && qty * rate > 0 ? round2((amt / (qty * rate)) * 100) : 0;
     }
-    const tax = parseNumber(get(row, 'tax_pct'));
+    let tax = parseNumber(get(row, 'tax_pct'));
+    if (tax === null) {
+      const parts = (['cgst_pct', 'sgst_pct', 'igst_pct'] as Field[]).map((f) => parseNumber(get(row, f))).filter((n): n is number => n !== null);
+      if (parts.length) tax = round2(parts.reduce((a, b) => a + b, 0));
+    }
     if (tax !== null && (tax < 0 || tax > 100)) { inv.problems.push(`Row ${rowNo}: tax % must be between 0 and 100`); return; }
     inv.lines.push({
       name: name || '(no description)', description: get(row, 'item_desc') || null, hsn_sac: get(row, 'hsn') || null,
       quantity: qty, rate, discount_pct: Math.min(100, Math.max(0, disc)), gst_rate: tax ?? 0,
     });
-    if (tax === null && mapping.tax_pct) inv.warnings.push(`Row ${rowNo}: no tax % given, treated as 0%`);
+    if (tax === null && (mapping.tax_pct || mapping.igst_pct || mapping.cgst_pct)) inv.warnings.push(`Row ${rowNo}: no tax % given, treated as 0%`);
   });
 
   for (const inv of byNumber.values()) {
