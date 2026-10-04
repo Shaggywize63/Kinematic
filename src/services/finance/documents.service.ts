@@ -143,8 +143,9 @@ function headerFields(
     seller_state_code: p.settings.state_code ?? null,
     ...p.calc.totals,
     adjustment_label: input.adjustment_label ?? null,
-    notes: input.notes ?? p.settings.default_notes ?? null,
-    terms: input.terms ?? p.settings.default_terms ?? null,
+    // Only a MISSING field takes the default; an explicitly cleared one (null) stays empty.
+    notes: input.notes !== undefined ? input.notes : p.settings.default_notes ?? null,
+    terms: input.terms !== undefined ? input.terms : p.settings.default_terms ?? null,
   };
 }
 
