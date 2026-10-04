@@ -366,7 +366,29 @@ router.post(
 
     const user = req.user;
 
-    const durationMinutes = (check_in_at && check_out_at) 
+    // Enforce 10-digit mobile numbers for every `phone`-type field (mirrors the
+    // guard in forms.controller.submitForm). `answers` is a field_id -> value
+    // map; strip formatting, require exactly 10 digits, store the normalized
+    // value. A different answers shape simply matches no keys (safe no-op).
+    if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+      const { data: phoneQs } = await supabaseAdmin
+        .from("builder_questions")
+        .select("id, label")
+        .eq("form_id", req.params.id)
+        .eq("qtype", "phone");
+      for (const q of (phoneQs || []) as Array<{ id: string; label?: string }>) {
+        const key = String(q.id);
+        const raw = (answers as Record<string, unknown>)[key];
+        if (raw == null || String(raw).trim() === "") continue;
+        const digits = String(raw).replace(/\D/g, "");
+        if (digits.length !== 10) {
+          throw new AppError(400, `${q.label || "Phone number"} must be a 10-digit mobile number.`, "INVALID_PHONE");
+        }
+        (answers as Record<string, unknown>)[key] = digits;
+      }
+    }
+
+    const durationMinutes = (check_in_at && check_out_at)
       ? Math.round((new Date(check_out_at).getTime() - new Date(check_in_at).getTime()) / 60000)
       : null;
 
