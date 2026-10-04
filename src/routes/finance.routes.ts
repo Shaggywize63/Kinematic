@@ -18,6 +18,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler';
 import { AppError } from '../utils';
+import { currentProjectKey, runWithProject } from '../lib/projects';
 import { requireFinanceAccess, isMasterCaller } from '../middleware/financeAccess';
 import type { AuthRequest } from '../types';
 import { scopeOf } from '../services/finance/scope';
@@ -210,13 +211,19 @@ router.post('/payments/:id/apply', asyncHandler(async (req: Request, res: Respon
 
 // ── import previous invoices (CSV / XLSX) ───────────────────────────────────
 const uploadFile = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } }).single('file');
-/** multer errors (too large, wrong field) become clean 400s instead of 500s. */
-const withFile = (req: Request, res: Response, next: NextFunction) =>
-  uploadFile(req, res, (err: unknown) => {
+/** multer errors (too large, wrong field) become clean 400s instead of 500s.
+ *  multer finishes inside a stream event callback, where the per-request project
+ *  (AsyncLocalStorage) is no longer bound — without re-entering it, the handler
+ *  falls back to the default (Tata) project and queries a database that has no
+ *  finance tables ("relation public.finance_settings does not exist"). */
+const withFile = (req: Request, res: Response, next: NextFunction) => {
+  const project = currentProjectKey();
+  uploadFile(req, res, (err: unknown) => runWithProject(project, () => {
     if (!err) return next();
     const e = err as { code?: string; message?: string };
     return next(new AppError(400, e.code === 'LIMIT_FILE_SIZE' ? 'The file is larger than 5 MB. Split it and import in parts.' : (e.message || 'Upload failed'), 'UPLOAD'));
-  });
+  }));
+};
 const importOptions = z.object({ create_customers: z.boolean(), allow_total_mismatch: z.boolean(), advance_numbering: z.boolean() }).partial();
 function importInput(req: Request) {
   if (!req.file) throw new AppError(400, 'Choose a .csv or .xlsx file to import', 'NO_FILE');
