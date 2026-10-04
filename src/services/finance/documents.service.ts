@@ -46,7 +46,7 @@ export function displayStatus(d: { doc_type: string; status: string; due_date?: 
   return d.status;
 }
 
-async function addEvent(s: FinanceScope, documentId: string, event: string, detail: Record<string, unknown> = {}) {
+export async function addEvent(s: FinanceScope, documentId: string, event: string, detail: Record<string, unknown> = {}) {
   const { error } = await db().from('finance_document_events').insert({
     org_id: s.org_id, document_id: documentId, event, detail, actor: s.actor || null,
   });
@@ -157,7 +157,9 @@ function itemRows(documentId: string, orgId: string, calc: ReturnType<typeof com
   }));
 }
 
-export async function createDocument(s: FinanceScope, docType: DocType, input: DocumentInput, extra: Record<string, unknown> = {}) {
+export async function createDocument(
+  s: FinanceScope, docType: DocType, input: DocumentInput, extra: Record<string, unknown> = {}, opts: { number?: string } = {},
+) {
   const p = await prepare(s, input);
   const base = {
     org_id: s.org_id, client_id: s.client_id, doc_type: docType, status: 'draft',
@@ -168,8 +170,23 @@ export async function createDocument(s: FinanceScope, docType: DocType, input: D
     created_by: s.user_id || null,
     ...extra,
   };
-  const { data, number } = await insertNumbered(s, docType, (n) =>
-    db().from('finance_documents').insert({ ...base, number: n }).select('*').single());
+  let data: Record<string, unknown>;
+  let number: string;
+  if (opts.number) {
+    // Historical document keeping its original number (import). A clash is the caller's problem to report.
+    number = opts.number;
+    const r = await db().from('finance_documents').insert({ ...base, number }).select('*').single();
+    if (r.error) {
+      if (isDuplicate(r.error)) throw new AppError(409, `${number} already exists`, 'DUPLICATE_NUMBER');
+      throw fail(r.error);
+    }
+    data = r.data as Record<string, unknown>;
+  } else {
+    const r = await insertNumbered(s, docType, (n) =>
+      db().from('finance_documents').insert({ ...base, number: n }).select('*').single());
+    data = r.data as Record<string, unknown>;
+    number = r.number;
+  }
 
   const ins = await db().from('finance_document_items').insert(itemRows(data.id as string, s.org_id, p.calc));
   if (ins.error) {

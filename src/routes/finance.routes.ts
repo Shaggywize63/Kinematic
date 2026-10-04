@@ -7,12 +7,14 @@
  *   invoices | quotes         list / create / get / update / delete, send, pdf, share-link, clone
  *                             invoices: mark-sent, void   quotes: mark-sent, accept, decline, convert
  *   payments                  list / create / get / update / delete, apply
+ *   import/invoices/preview|commit   bring in previously issued invoices from a CSV/XLSX export
  *   reports/dashboard         overview (receivables ageing, sales vs receipts)
  *   reports/:name             tabular reports; ?format=csv exports the same filters
  *
  * Public, no-login invoice links live in finance-public.routes.ts.
  */
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler';
 import { AppError } from '../utils';
@@ -23,6 +25,7 @@ import * as masters from '../services/finance/masters.service';
 import * as docs from '../services/finance/documents.service';
 import * as payments from '../services/finance/payments.service';
 import * as reports from '../services/finance/reports.service';
+import * as importer from '../services/finance/import.service';
 
 const router = Router();
 router.use(requireFinanceAccess);
@@ -203,6 +206,32 @@ router.put('/payments/:id', asyncHandler(async (req: Request, res: Response) => 
 router.delete('/payments/:id', asyncHandler(async (req: Request, res: Response) => res.json(await payments.deletePayment(scopeOf(req), idParam(req)))));
 router.post('/payments/:id/apply', asyncHandler(async (req: Request, res: Response) => {
   res.json(await payments.applyPayment(scopeOf(req), idParam(req), parse(z.object({ allocations }), req.body).allocations));
+}));
+
+// ── import previous invoices (CSV / XLSX) ───────────────────────────────────
+const uploadFile = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } }).single('file');
+/** multer errors (too large, wrong field) become clean 400s instead of 500s. */
+const withFile = (req: Request, res: Response, next: NextFunction) =>
+  uploadFile(req, res, (err: unknown) => {
+    if (!err) return next();
+    const e = err as { code?: string; message?: string };
+    return next(new AppError(400, e.code === 'LIMIT_FILE_SIZE' ? 'The file is larger than 5 MB. Split it and import in parts.' : (e.message || 'Upload failed'), 'UPLOAD'));
+  });
+const importOptions = z.object({ create_customers: z.boolean(), allow_total_mismatch: z.boolean(), advance_numbering: z.boolean() }).partial();
+function importInput(req: Request) {
+  if (!req.file) throw new AppError(400, 'Choose a .csv or .xlsx file to import', 'NO_FILE');
+  let raw: unknown = {};
+  try { raw = req.body?.options ? JSON.parse(String(req.body.options)) : {}; } catch { throw new AppError(400, 'Invalid import options', 'VALIDATION'); }
+  const opts = { ...importer.DEFAULT_OPTIONS, ...parse(importOptions, raw) } as importer.ImportOptions;
+  return { name: req.file.originalname, buffer: req.file.buffer, opts };
+}
+router.post('/import/invoices/preview', withFile, asyncHandler(async (req: Request, res: Response) => {
+  const f = importInput(req);
+  res.json(await importer.previewInvoiceImport(scopeOf(req), f.name, f.buffer, f.opts));
+}));
+router.post('/import/invoices/commit', withFile, asyncHandler(async (req: Request, res: Response) => {
+  const f = importInput(req);
+  res.status(201).json(await importer.commitInvoiceImport(scopeOf(req), f.name, f.buffer, f.opts));
 }));
 
 // ── reports ─────────────────────────────────────────────────────────────────

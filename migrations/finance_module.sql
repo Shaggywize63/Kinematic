@@ -300,3 +300,9 @@ ALTER TABLE public.modules ADD CONSTRAINT modules_package_chk CHECK (
 INSERT INTO public.modules (id, name, description, package, is_universal) VALUES
   ('finance', 'Finance', 'Invoices, quotes, customers, items, payments received and finance reports', 'finance', false)
 ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description, package=EXCLUDED.package, is_universal=EXCLUDED.is_universal;
+
+-- ── Tell PostgREST about the new tables ─────────────────────────────────────
+-- The self-hosted PostgREST (ECS) has no DDL event trigger like hosted Supabase, so it keeps serving its
+-- old schema cache and every finance query fails with "not found in the schema cache" until it reloads.
+-- NOTIFY is delivered when this transaction commits.
+NOTIFY pgrst, 'reload schema';
