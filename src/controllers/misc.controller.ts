@@ -532,15 +532,23 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
     throw new AppError(400, 'Please provide a valid email address', 'VALIDATION_ERROR')
   }
 
+  // Normalize the login email to lowercase. GoTrue lowercases auth.users.email,
+  // so storing a capitalized value in public.users.email leaves the two diverged
+  // — and the login project-resolver (resolveProjectForEmailAsync) looks the
+  // email up case-sensitively after lowercasing its input, so a capitalized
+  // profile row is never found and the login misroutes to the fallback tenant
+  // and is rejected as "Invalid credentials". Keep both sides lowercase.
+  const normEmail = email ? String(email).trim().toLowerCase() : '';
+
   // New users are created active — enforce the org's active-user cap.
-  await assertActiveUserCap(admin.org_id, email);
+  await assertActiveUserCap(admin.org_id, normEmail || email);
 
   // Check for duplication. Scope to the caller's org (this was a cross-org
   // existence oracle) and strip PostgREST filter metacharacters from the
   // interpolated values so neither can break out of the .or() predicate.
   // SECURITY_AUDIT_2026-07.md finding M-2.
   const safeMobile = String(mobile ?? '').replace(/[(),"\\]/g, '');
-  const safeEmail = email ? String(email).trim().replace(/[(),"\\]/g, '') : '';
+  const safeEmail = normEmail ? normEmail.replace(/[(),"\\]/g, '') : '';
   const { data: existingUser, error: checkErr } = await supabaseAdmin
     .from('users')
     .select('id, name, mobile, email')
@@ -553,7 +561,7 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
     if (email && existingUser.email?.toLowerCase() === email.toLowerCase().trim()) throw new AppError(400, `Email ${email} is already registered with ${existingUser.name}`, 'DUPLICATE_ERROR');
   }
 
-  const authEmail = email?.trim() || `${mobile}@kinematic.app`
+  const authEmail = normEmail || `${mobile}@kinematic.app`
 
   // 1. Create Supabase Auth user
   const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
@@ -592,7 +600,7 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
       client_id:     pickedClientId,
       name:          name.trim(),
       mobile:        mobile.trim(),
-      email:         email?.trim() || null,
+      email:         normEmail || null,
       role:          role || 'executive',
       // Hierarchy role drives module access via org_roles.permissions; the
       // legacy `role` column above only governs requireRole() route tiers.
@@ -615,7 +623,7 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
       .single()
 
   // The email now lives in this project — drop any stale login-routing cache.
-  if (email) clearEmailProjectCache(email);
+  if (normEmail) clearEmailProjectCache(normEmail);
 
   const { permissions, assigned_cities } = req.body
 
@@ -705,6 +713,11 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
   if (updates.email && !emailRegex.test(updates.email)) {
     throw new AppError(400, 'Please provide a valid email address', 'VALIDATION_ERROR')
   }
+  // Normalize to lowercase so the stored profile email matches GoTrue's
+  // (lowercased) auth.users.email and the login project-resolver can find it.
+  // This value flows straight into the DB update, the dedup check and the
+  // GoTrue email mirror below, so normalizing it here fixes all three.
+  if (typeof updates.email === 'string') updates.email = updates.email.trim().toLowerCase();
 
   // 3. Duplication Check
   if (updates.mobile || updates.email) {
