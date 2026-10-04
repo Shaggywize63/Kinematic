@@ -93,3 +93,30 @@ describe('finance access gate', () => {
     expect(run({ email: 'a@c.com', role: 'admin', client_id: null, enabled_modules: ['finance'] })).toBe(403);
   });
 });
+
+describe('invoice PDF logo', () => {
+  // 1x1 PNG
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const base = (settings: Record<string, unknown>) => ({
+    doc: { doc_type: 'invoice', number: 'INV-1', status: 'sent', issue_date: '2026-10-01', due_date: '2026-10-10', customer_snapshot: { name: 'C' }, bill_to: {}, ship_to: {},
+      subtotal: 100, discount_total: 0, taxable_value: 100, cgst: 9, sgst: 9, igst: 0, tax_total: 18, adjustment: 0, round_off: 0, total: 118, amount_paid: 0, balance: 118 },
+    items: [{ name: 'x', quantity: 1, rate: 100, discount_pct: 0, gst_rate: 18, taxable_value: 100, cgst: 9, sgst: 9, igst: 0, total: 118 }],
+    settings: { business_name: 'Biz', ...settings },
+  });
+  const render = async (settings: Record<string, unknown>) => (await import('../src/services/finance/pdf.service')).renderDocumentPdf(base(settings) as never);
+
+  it('embeds an uploaded (data URL) logo without any network fetch', async () => {
+    const withLogo = await render({ logo_url: PNG });
+    expect(withLogo.subarray(0, 4).toString()).toBe('%PDF');
+    expect(withLogo.toString('latin1')).toContain('/Subtype /Image');
+    expect((await render({})).toString('latin1')).not.toContain('/Subtype /Image');
+  });
+  it('honours the show_logo switch and ignores unusable logos instead of failing', async () => {
+    expect((await render({ logo_url: PNG, template: { show_logo: false } })).toString('latin1')).not.toContain('/Subtype /Image');
+    for (const bad of ['data:image/gif;base64,AAAA', 'data:image/png;base64,', 'not a url', 'http://169.254.169.254/x.png', 'https://localhost/x.png']) {
+      const pdf = await render({ logo_url: bad });
+      expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
+      expect(pdf.toString('latin1')).not.toContain('/Subtype /Image');
+    }
+  });
+});

@@ -71,7 +71,12 @@ const settingsSchema = z.object({
   business_name: str(200), email, phone: str(30), website: str(200),
   address_line1: str(200), address_line2: str(200), city: str(100), state: str(100), state_code: stateCode, pincode: str(12), country: str(80),
   gstin, pan,
-  logo_url: z.preprocess(blank, z.string().url().startsWith('https://', 'Logo URL must be https').max(1000).nullable().optional()),
+  // Either an https link, or a PNG/JPEG uploaded in Finance Settings (stored inline as a data URL so the
+  // invoice never depends on an external host). 400 KB of base64 is ample for a downsized logo.
+  logo_url: z.preprocess(blank, z.string().max(400_000).refine(
+    (v) => (/^https:\/\//i.test(v) && v.length <= 1000) || /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/]+=*$/.test(v),
+    'Logo must be an https link or an uploaded PNG/JPEG',
+  ).nullable().optional()),
   fiscal_year_start_month: z.coerce.number().int().min(1).max(12),
   invoice_prefix: z.string().trim().max(20), quote_prefix: z.string().trim().max(20), payment_prefix: z.string().trim().max(20),
   invoice_next_number: z.coerce.number().int().min(1).max(1e9), quote_next_number: z.coerce.number().int().min(1).max(1e9),

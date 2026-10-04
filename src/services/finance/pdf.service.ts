@@ -25,9 +25,18 @@ function isPrivateHost(host: string) {
   return /^(localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|\[?::1\]?$)/i.test(host) || host.endsWith('.internal') || host.endsWith('.local');
 }
 
+const LOGO_MAX_BYTES = 1_500_000;
+const DATA_URL = /^data:image\/(?:png|jpeg);base64,([A-Za-z0-9+/]+=*)$/;
+
 async function fetchLogo(url?: string | null): Promise<Buffer | null> {
   if (!url) return null;
   try {
+    // Uploaded in Finance Settings: stored inline, no network needed.
+    const inline = DATA_URL.exec(url);
+    if (inline) {
+      const buf = Buffer.from(inline[1], 'base64');
+      return buf.length > 0 && buf.length <= LOGO_MAX_BYTES ? buf : null;
+    }
     const u = new URL(url);
     if (u.protocol !== 'https:' || isPrivateHost(u.hostname)) return null;
     const ctl = new AbortController();
@@ -37,7 +46,7 @@ async function fetchLogo(url?: string | null): Promise<Buffer | null> {
     const type = res.headers.get('content-type') || '';
     if (!res.ok || !/image\/(png|jpe?g)/i.test(type)) return null; // pdfkit only embeds PNG/JPEG
     const buf = Buffer.from(await res.arrayBuffer());
-    return buf.length <= 1_500_000 ? buf : null;
+    return buf.length <= LOGO_MAX_BYTES ? buf : null;
   } catch {
     return null;
   }
@@ -65,11 +74,13 @@ export async function renderDocumentPdf({ doc, items, settings, payments = [] }:
 
   // ── header: seller (left) + document title (right) ────────────────────────
   let y = M;
-  let textX = M;
+  // Logos are usually wide wordmarks, so they get their own row above the seller details.
+  let sellerY = y;
   if (logo) {
-    try { pdf.image(logo, M, y, { fit: [70, 56] }); textX = M + 82; } catch { /* unreadable image — skip */ }
+    try { pdf.image(logo, M, y, { fit: [200, 58] }); sellerY = y + 66; } catch { /* unreadable image — skip */ }
   }
-  pdf.fillColor(ink).font('Helvetica-Bold').fontSize(14).text(settings.business_name || 'Business', textX, y, { width: 270 });
+  const textX = M;
+  pdf.fillColor(ink).font('Helvetica-Bold').fontSize(14).text(settings.business_name || 'Business', textX, sellerY, { width: 270 });
   pdf.font('Helvetica').fontSize(8.5).fillColor(dim);
   const sellerLines = [
     ...addressLines({ line1: settings.address_line1, line2: settings.address_line2, city: settings.city, state: settings.state, pincode: settings.pincode, country: settings.country }),
