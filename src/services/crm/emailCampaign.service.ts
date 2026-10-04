@@ -151,11 +151,29 @@ export async function suppressionSet(orgId: string): Promise<Set<string>> {
 // ── CSV / XLSX recipient list (dedicated audience — creates NO CRM leads) ─────
 
 const RECIPIENT_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Finds a real email ANYWHERE inside a cell, so we tolerate the common
+// contact-export shapes: "Name <a@b.com>", a trailing comment, surrounding
+// quotes, or several addresses in one cell (we take the first).
+const EMAIL_FIND_RE = /[^\s@<>,;:"'()[\]]+@[^\s@<>,;:"'()[\]]+\.[^\s@<>,;:"'()[\]]+/;
 
-function pickColumn(headers: string[], patterns: RegExp[]): number {
+/** Pull the first valid email out of a cell, lowercased, or null. */
+function extractEmail(cell: unknown): string | null {
+  if (cell == null) return null;
+  const m = String(cell).match(EMAIL_FIND_RE);
+  if (!m) return null;
+  const e = m[0].trim().toLowerCase().replace(/[.,;:]+$/, '');
+  return RECIPIENT_EMAIL_RE.test(e) ? e : null;
+}
+
+// `exclude` lets the caller rule out look-alike headers that would otherwise
+// win on header order — e.g. Google Contacts emits "E-mail 1 - Label" (value
+// "*") BEFORE "E-mail 1 - Value" (the actual address), and a loose /e-?mail/
+// would lock onto the Label column.
+function pickColumn(headers: string[], patterns: RegExp[], exclude: RegExp[] = []): number {
   for (let i = 0; i < headers.length; i++) {
     const h = String(headers[i] ?? '').trim().toLowerCase();
-    if (h && patterns.some((p) => p.test(h))) return i;
+    if (!h || exclude.some((p) => p.test(h))) continue;
+    if (patterns.some((p) => p.test(h))) return i;
   }
   return -1;
 }
@@ -192,7 +210,11 @@ export async function parseRecipientsFile(
     if (records.length) { headers = records[0].map((h) => String(h ?? '').trim()); rows = records.slice(1); }
   }
 
-  const emailIdx = pickColumn(headers, [/^e-?mail(\s*(address|id))?$/, /e-?mail/]);
+  const emailIdx = pickColumn(
+    headers,
+    [/^e-?mail(\s*(address|id))?$/, /e-?mail/],
+    [/label/, /type/, /status/, /opt[-_\s]?out/, /unsub/],
+  );
   const firstIdx = pickColumn(headers, [/^first[_\s]?name$/, /^f[_\s]?name$/, /given/, /^name$/, /full[_\s]?name/]);
   const lastIdx = pickColumn(headers, [/^last[_\s]?name$/, /^l[_\s]?name$/, /surname/, /family/]);
 
@@ -206,11 +228,21 @@ export async function parseRecipientsFile(
 
   for (const row of rows) {
     if (recipients.length >= MAX_AUDIENCE) break;
-    let emailRaw: unknown = emailIdx >= 0 ? row[emailIdx] : undefined;
-    if (emailRaw == null || String(emailRaw).trim() === '') emailRaw = row.find((c) => typeof c === 'string' && c.includes('@'));
-    const email = norm(emailRaw);
-    if (!email) { skipped.no_email++; continue; }
-    if (!RECIPIENT_EMAIL_RE.test(email)) { skipped.invalid++; continue; }
+    // Prefer the mapped email column, but tolerate it pointing at the wrong
+    // column (e.g. Google's "E-mail 1 - Label" = "*") by scanning the whole
+    // row for the first cell that actually contains an email.
+    let email = emailIdx >= 0 ? extractEmail(row[emailIdx]) : null;
+    if (!email) {
+      for (const c of row) { const e = extractEmail(c); if (e) { email = e; break; } }
+    }
+    if (!email) {
+      const mapped = emailIdx >= 0 ? row[emailIdx] : undefined;
+      // A non-empty mapped cell we couldn't parse is "invalid"; a truly blank
+      // row with no email anywhere is "no-email".
+      if (mapped != null && String(mapped).trim() !== '') skipped.invalid++;
+      else skipped.no_email++;
+      continue;
+    }
     if (seen.has(email)) { skipped.duplicate++; continue; }
     seen.add(email);
     const first = firstIdx >= 0 ? String(row[firstIdx] ?? '').trim() : '';
