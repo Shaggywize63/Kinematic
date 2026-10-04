@@ -113,6 +113,8 @@ import distConsumerRegRoutes   from './routes/distribution/consumer-registration
 import distGstinRoutes         from './routes/distribution/gstin.routes';
 import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
+import financeRoutes           from './routes/finance.routes';
+import financePublicRoutes     from './routes/finance-public.routes';
 import whatsappWebhookPublicRoutes from './routes/crm/whatsapp-webhook-public.routes';
 import oauthRoutes             from './routes/oauth.routes';
 import { authorizationServerMetadata } from './controllers/oauth.controller';
@@ -451,6 +453,9 @@ app.use(`${V1}/distribution/capture`, capturePublicRoutes);
 // shared secret (KINI_WEB_CHAT_KEY) checked in the controller. Mounted
 // BEFORE the auth catch-all so it never needs a Supabase JWT.
 app.use(`${V1}/kini/public`, kiniPublicRoutes);
+// Public invoice/quote share links — token in the path is the credential, so this
+// must sit BEFORE the global requireAuth gate below.
+app.use(`${V1}/finance/public`, financePublicRoutes);
 
 // ── Public app-version check (NO auth) ───────────────────────────────
 // The mobile apps poll this on cold start to learn the latest / minimum
@@ -701,6 +706,8 @@ app.use(`${V1}/crm/webhooks/whatsapp`, whatsappWebhookPublicRoutes);
 
 // ── CRM module ──────────────────────────────────────
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
+// Finance: master admin only; shareable per client via the non-universal `finance` module.
+app.use(`${V1}/finance`, requireAuth, financeRoutes);
 
 // ── KINI agentic v2 (flag-gated; legacy /crm/ai/chat untouched) ─────────────
 // Per-tenant rollout is controlled by org_settings(key='kini_agentic_v2'),

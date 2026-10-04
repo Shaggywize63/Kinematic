@@ -29,6 +29,11 @@ const EMPTY: Entitlements = { enabled_modules: [], enabled_packages: [] };
 // dashboard's SELLABLE_PACKAGES + the modules.package column.
 const PAID_DISTRIBUTION_PACKAGE = 'distribution';
 
+// Add-on packages that are explicitly granted, never implied. Finance (billing
+// data) follows the same rule as Distribution: a non-super platform user with no
+// client_id does NOT get it just for being a platform user.
+const EXPLICIT_GRANT_PACKAGES = [PAID_DISTRIBUTION_PACKAGE, 'finance'];
+
 // Cache: clientId → entitlements. Invalidate via clearEntitlementCache().
 // Short TTL since entitlement changes are rare and immediate visibility matters.
 const ENTITLEMENT_CACHE_TTL_MS = 60 * 1000;
@@ -101,13 +106,19 @@ export async function resolveEntitlements(opts: {
     // keeps the legacy "platform user sees all" behaviour so no existing tenant
     // is locked out of non-SCM modules. This is what stops SCM/Distribution
     // leaking into the nav by default.
-    const distIds = rows.filter(r => r.package === PAID_DISTRIBUTION_PACKAGE).map(r => r.id);
-    if (distIds.length === 0) return all;
-    if (await orgGrantsDistribution(opts.orgId, distIds)) return all;
-    const distSet = new Set(distIds);
+    const hidden = new Set<string>();
+    const hiddenPackages = new Set<string>();
+    for (const pkg of EXPLICIT_GRANT_PACKAGES) {
+      const ids = rows.filter(r => r.package === pkg).map(r => r.id);
+      if (ids.length === 0) continue;
+      if (await orgGrantsDistribution(opts.orgId, ids)) continue;
+      ids.forEach(id => hidden.add(id));
+      hiddenPackages.add(pkg);
+    }
+    if (hidden.size === 0) return all;
     return {
-      enabled_modules: all.enabled_modules.filter(id => !distSet.has(id)),
-      enabled_packages: all.enabled_packages.filter(p => p !== PAID_DISTRIBUTION_PACKAGE),
+      enabled_modules: all.enabled_modules.filter(id => !hidden.has(id)),
+      enabled_packages: all.enabled_packages.filter(p => !hiddenPackages.has(p)),
     };
   }
 
