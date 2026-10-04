@@ -4938,6 +4938,38 @@ emailCampaigns.post('/', waAdminOnly, emailCampaignEntitled, wrap(async (req, re
     throttle_per_min: body.throttle_per_min,
   }) });
 }));
+// Dedicated recipient list — upload a CSV/XLSX of recipients for a campaign.
+// These become recipient rows with lead_id = null and are NEVER written to
+// crm_leads. `parse-recipients` is a stateless preview (count + sample);
+// `from-csv` creates the draft campaign and inserts the recipients.
+emailCampaigns.post('/parse-recipients', waAdminOnly, emailCampaignEntitled, upload.single('file'), wrap(async (req, res) => {
+  if (!req.file) throw new AppError(400, 'No file uploaded', 'NO_FILE');
+  const out = await emailCampaignSvc.parseRecipientsFile(req.file.originalname, req.file.buffer);
+  res.json({ success: true, data: {
+    count: out.recipients.length,
+    skipped: out.skipped,
+    total_candidates: out.total_candidates,
+    sample: out.recipients.slice(0, 5).map((r) => ({ email: r.email, first_name: r.first_name })),
+  } });
+}));
+emailCampaigns.post('/from-csv', waAdminOnly, emailCampaignEntitled, upload.single('file'), wrap(async (req, res) => {
+  if (!req.file) throw new AppError(400, 'No file uploaded', 'NO_FILE');
+  const b = (req.body || {}) as Record<string, string>;
+  if (!b.name || !b.name.trim()) throw new AppError(400, 'A campaign name is required', 'BAD_REQUEST');
+  // multer drops withProject's AsyncLocalStorage context (see /import/upload),
+  // so re-enter the request's project for the recipient DB writes.
+  const projectKey = (req as AuthRequest & { projectKey?: string }).projectKey || currentProjectKey();
+  const campaign = await runWithProject(projectKey, async () => {
+    const parsed = await emailCampaignSvc.parseRecipientsFile(req.file!.originalname, req.file!.buffer);
+    return emailCampaignSvc.createCampaignFromRecipients(ecScope(req), {
+      name: b.name.trim(),
+      template_id: b.template_id || null,
+      from_email: b.from_email || undefined,
+      throttle_per_min: b.throttle_per_min ? Number(b.throttle_per_min) : undefined,
+    }, parsed.recipients);
+  });
+  res.status(201).json({ success: true, data: campaign });
+}));
 emailCampaigns.get('/:id', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.getCampaign(ecScope(req), req.params.id) })));
 emailCampaigns.get('/:id/recipients', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.listRecipients(ecScope(req), req.params.id, req.query) })));
 emailCampaigns.get('/:id/analytics', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.getAnalytics(ecScope(req), req.params.id) })));

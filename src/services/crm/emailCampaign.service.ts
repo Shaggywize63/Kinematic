@@ -16,6 +16,8 @@
  * progress. Batch claiming is a compare-and-swap on recipient.status so the
  * launch call and a scheduler tick never double-send the same row.
  */
+import { parse as parseCsv } from 'csv-parse/sync';
+import * as ExcelJS from 'exceljs';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
@@ -146,6 +148,83 @@ export async function suppressionSet(orgId: string): Promise<Set<string>> {
   return set;
 }
 
+// ── CSV / XLSX recipient list (dedicated audience — creates NO CRM leads) ─────
+
+const RECIPIENT_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function pickColumn(headers: string[], patterns: RegExp[]): number {
+  for (let i = 0; i < headers.length; i++) {
+    const h = String(headers[i] ?? '').trim().toLowerCase();
+    if (h && patterns.some((p) => p.test(h))) return i;
+  }
+  return -1;
+}
+
+/**
+ * Parse an uploaded CSV/XLSX into campaign recipients. These become recipient
+ * rows with `lead_id = null` — they are NEVER written to crm_leads. Needs a
+ * header row with an email column; first_name / last_name columns are optional
+ * and feed the {{first_name}} / {{last_name}} merge vars.
+ */
+export async function parseRecipientsFile(
+  fileName: string,
+  buffer: Buffer,
+): Promise<{ recipients: AudienceRecipient[]; skipped: { no_email: number; invalid: number; duplicate: number }; total_candidates: number }> {
+  const lower = (fileName || '').toLowerCase();
+  let headers: string[] = [];
+  let rows: string[][] = [];
+
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buffer as unknown as ArrayBuffer);
+    const ws = wb.worksheets[0];
+    if (ws) {
+      ws.getRow(1).eachCell({ includeEmpty: true }, (cell, idx) => { headers[idx - 1] = String(cell.value ?? '').trim(); });
+      ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+        if (rowNumber === 1) return;
+        const r: string[] = [];
+        row.eachCell({ includeEmpty: true }, (cell, idx) => { r[idx - 1] = String(cell.value ?? '').trim(); });
+        rows.push(r);
+      });
+    }
+  } else {
+    const records = parseCsv(buffer.toString('utf-8'), { skip_empty_lines: true, trim: true, bom: true, relax_column_count: true }) as string[][];
+    if (records.length) { headers = records[0].map((h) => String(h ?? '').trim()); rows = records.slice(1); }
+  }
+
+  const emailIdx = pickColumn(headers, [/^e-?mail(\s*(address|id))?$/, /e-?mail/]);
+  const firstIdx = pickColumn(headers, [/^first[_\s]?name$/, /^f[_\s]?name$/, /given/, /^name$/, /full[_\s]?name/]);
+  const lastIdx = pickColumn(headers, [/^last[_\s]?name$/, /^l[_\s]?name$/, /surname/, /family/]);
+
+  // Headerless single-list fallback: if no email header matched but the first
+  // row's cells include an email, treat row 1 as data too.
+  if (emailIdx < 0 && headers.some((h) => h.includes('@'))) rows = [headers, ...rows];
+
+  const seen = new Set<string>();
+  const recipients: AudienceRecipient[] = [];
+  const skipped = { no_email: 0, invalid: 0, duplicate: 0 };
+
+  for (const row of rows) {
+    if (recipients.length >= MAX_AUDIENCE) break;
+    let emailRaw: unknown = emailIdx >= 0 ? row[emailIdx] : undefined;
+    if (emailRaw == null || String(emailRaw).trim() === '') emailRaw = row.find((c) => typeof c === 'string' && c.includes('@'));
+    const email = norm(emailRaw);
+    if (!email) { skipped.no_email++; continue; }
+    if (!RECIPIENT_EMAIL_RE.test(email)) { skipped.invalid++; continue; }
+    if (seen.has(email)) { skipped.duplicate++; continue; }
+    seen.add(email);
+    const first = firstIdx >= 0 ? String(row[firstIdx] ?? '').trim() : '';
+    const last = lastIdx >= 0 ? String(row[lastIdx] ?? '').trim() : '';
+    recipients.push({
+      lead_id: null,
+      email,
+      first_name: first || null,
+      vars: { first_name: first || 'there', last_name: last, email },
+    });
+  }
+  return { recipients, skipped, total_candidates: rows.length };
+}
+
 async function loadTemplate(orgId: string, templateId: string) {
   const { data } = await supabaseAdmin.from(TEMPLATES)
     .select('id, subject, body_html, body_text')
@@ -264,6 +343,65 @@ export async function createCampaign(
   return data;
 }
 
+/**
+ * Create a draft campaign from an uploaded recipient list (CSV/XLSX). The
+ * recipients are inserted straight into crm_email_campaign_recipients with
+ * lead_id = null — NO crm_leads rows are created. The audience is tagged
+ * { source: 'csv' } so launchCampaign skips the lead-audience resolver.
+ */
+export async function createCampaignFromRecipients(
+  scope: Scope,
+  input: { name: string; template_id?: string | null; subject?: string; body_html?: string; body_text?: string; from_email?: string; throttle_per_min?: number },
+  recipients: AudienceRecipient[],
+) {
+  if (!recipients.length) throw new AppError(400, 'No valid recipients found in the file — it needs an email column.', 'EMPTY_AUDIENCE');
+
+  let subject = (input.subject || '').trim();
+  let bodyHtml = input.body_html || '';
+  let bodyText = input.body_text || '';
+  if (input.template_id) {
+    const tpl = await loadTemplate(scope.orgId, input.template_id);
+    if (!tpl) throw new AppError(404, 'Email template not found', 'NOT_FOUND');
+    subject = subject || (tpl.subject || '');
+    bodyHtml = bodyHtml || (tpl.body_html || '');
+    bodyText = bodyText || (tpl.body_text || '');
+  }
+  if (!subject) throw new AppError(400, 'A subject is required', 'BAD_REQUEST');
+  if (!bodyHtml) throw new AppError(400, 'Email body is required (pick a template or provide HTML)', 'BAD_REQUEST');
+
+  const { data: campaign, error } = await supabaseAdmin.from(CAMPAIGNS).insert({
+    org_id: scope.orgId,
+    client_id: scope.clientId ?? null,
+    name: input.name,
+    template_id: input.template_id ?? null,
+    subject,
+    body_html: bodyHtml,
+    body_text: bodyText || htmlToPlainText(bodyHtml),
+    from_email: input.from_email || null,
+    audience: { source: 'csv', count: recipients.length },
+    throttle_per_min: clampThrottle(input.throttle_per_min),
+    status: 'draft',
+    total: recipients.length,
+    created_by: scope.userId ?? null,
+  }).select('*').single();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  for (let i = 0; i < recipients.length; i += INSERT_CHUNK) {
+    const chunk = recipients.slice(i, i + INSERT_CHUNK).map((r) => ({
+      campaign_id: campaign.id,
+      org_id: scope.orgId,
+      lead_id: null,
+      email: r.email,
+      first_name: r.first_name,
+      vars: r.vars,
+      status: 'queued',
+    }));
+    const { error: rErr } = await supabaseAdmin.from(RECIPIENTS).insert(chunk);
+    if (rErr) throw new AppError(500, rErr.message, 'DB_ERROR');
+  }
+  return campaign;
+}
+
 /** Draft → sending. Materialises recipients, then kicks an immediate first batch. */
 export async function launchCampaign(scope: Scope, id: string) {
   const campaign = await loadCampaign(scope, id);
@@ -273,7 +411,19 @@ export async function launchCampaign(scope: Scope, id: string) {
 
   // Only (re)materialise recipients on the first launch from draft. A resume
   // from paused keeps the already-inserted recipient rows.
-  if (campaign.status === 'draft') {
+  if (campaign.status === 'draft' && (campaign.audience || {}).source === 'csv') {
+    // CSV campaign: recipients were already inserted at create (lead_id = null).
+    // Do NOT run the lead-audience resolver — just confirm there are queued
+    // recipients and flip to sending.
+    const { count } = await supabaseAdmin.from(RECIPIENTS)
+      .select('id', { count: 'exact', head: true }).eq('campaign_id', id).eq('status', 'queued');
+    if (!count) throw new AppError(400, 'This campaign has no queued recipients.', 'EMPTY_AUDIENCE');
+    await supabaseAdmin.from(CAMPAIGNS).update({
+      status: 'sending', total: count, sent: 0, failed: 0, skipped: 0,
+      launched_at: new Date().toISOString(), last_batch_at: null, completed_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', id);
+  } else if (campaign.status === 'draft') {
     const { recipients } = await resolveAudience(scope, (campaign.audience || {}) as AudienceFilter);
     if (!recipients.length) throw new AppError(400, 'Audience is empty — no eligible recipients with an email address.', 'EMPTY_AUDIENCE');
 
