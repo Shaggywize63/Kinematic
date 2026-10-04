@@ -15,6 +15,7 @@ import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
+import { runWithProject, currentProjectKey } from '../lib/projects';
 import { chunk } from '../lib/chunk';
 import { isSteelDealerClient } from '../lib/steelDealer';
 
@@ -4956,7 +4957,16 @@ router.use('/email-campaigns', emailCampaigns);
 const imp = express.Router();
 imp.post('/upload', upload.single('file'), wrap(async (req, res) => {
   if (!req.file) throw new AppError(400, 'No file uploaded', 'NO_FILE');
-  const out = await importSvc.uploadFile(orgId(req), userId(req), req.file.originalname, req.file.buffer);
+  // multer consumes the request stream OUTSIDE withProject's AsyncLocalStorage
+  // context (it's a per-route middleware; the stream was created before the ALS
+  // run), so by the time this handler runs currentProjectKey() has reverted to
+  // the default project — the crm_import_jobs row would be written to the WRONG
+  // project, and the JSON preview/commit calls (which keep the context) then
+  // 404 "Import job not found". Re-enter the request's project (stashed on
+  // req.projectKey by withProject) for the DB write.
+  const projectKey = (req as AuthRequest & { projectKey?: string }).projectKey || currentProjectKey();
+  const out = await runWithProject(projectKey, () =>
+    importSvc.uploadFile(orgId(req), userId(req), req.file!.originalname, req.file!.buffer));
   // FE reads `r.data.id` from this response to seed the import job
   // state; without an `id` field the Map → Preview flow silently
   // no-ops (Preview's `if (!job) return` exits without a toast).
@@ -5002,7 +5012,11 @@ imp.get('/jobs', wrap(async (req, res) => res.json(await importSvc.listJobs(orgI
 // kind='activities' so the two never bleed into each other.
 imp.post('/activities/upload', upload.single('file'), wrap(async (req, res) => {
   if (!req.file) throw new AppError(400, 'No file uploaded', 'NO_FILE');
-  res.status(201).json(await activityImportSvc.uploadFile(orgId(req), userId(req), req.file.originalname, req.file.buffer));
+  // See /upload above: re-enter the request's project (multer drops the ALS
+  // context) so the job is created in the right project, not the default.
+  const projectKey = (req as AuthRequest & { projectKey?: string }).projectKey || currentProjectKey();
+  res.status(201).json(await runWithProject(projectKey, () =>
+    activityImportSvc.uploadFile(orgId(req), userId(req), req.file!.originalname, req.file!.buffer)));
 }));
 imp.post('/activities/preview', wrap(async (req, res) => {
   const body = parse(v.importPreviewSchema, req.body);
