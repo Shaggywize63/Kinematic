@@ -161,6 +161,43 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     return badRequest(res, 'Turn on location to submit this form.', { code: 'LOCATION_REQUIRED' });
   }
 
+  // Enforce 10-digit mobile numbers for every `phone`-type field. The builder's
+  // "Phone" field type means an Indian 10-digit mobile (matching the lead/user
+  // mobile rule in crm.validators.ts, /^\d{10}$/). Clients that don't cap the
+  // input otherwise let 11+ digit numbers through — observed: a Gold Scheme
+  // Registration "Phone Number" captured as 11 digits (83108384652). This is the
+  // authoritative, client-agnostic guard; strip any formatting, require exactly
+  // 10 digits, and store the normalized value. Runs before any row is written so
+  // a bad submission leaves nothing behind.
+  if (template_id && Array.isArray(responses) && responses.length) {
+    const { data: phoneQs } = await supabaseAdmin
+      .from('builder_questions')
+      .select('id, label')
+      .eq('form_id', template_id)
+      .eq('qtype', 'phone');
+    const phoneFields = new Map<string, string>(
+      (phoneQs || []).map((q: any) => [String(q.id), (q.label as string) || 'Phone number']),
+    );
+    if (phoneFields.size) {
+      for (const r of responses) {
+        const fieldId = String(r.field_id ?? r.question_id ?? '');
+        if (!phoneFields.has(fieldId)) continue;
+        const raw = r.value ?? r.response;
+        if (raw == null || String(raw).trim() === '') continue; // empty: required-ness handled by the form itself
+        const digits = String(raw).replace(/\D/g, '');
+        if (digits.length !== 10) {
+          return badRequest(
+            res,
+            `${phoneFields.get(fieldId)} must be a 10-digit mobile number.`,
+            { code: 'INVALID_PHONE', field_id: fieldId },
+          );
+        }
+        // Normalize what we store to the 10 digits (drop any stray formatting).
+        r.value = digits;
+      }
+    }
+  }
+
   const durationMinutes = (check_in_at && check_out_at)
     ? Math.round((new Date(check_out_at).getTime() - new Date(check_in_at).getTime()) / 60000)
     : null;
