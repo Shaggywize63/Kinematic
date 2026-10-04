@@ -313,6 +313,12 @@ export async function resolveProjectForEmailAsync(email?: string | null): Promis
   if (cached && Date.now() - cached.at < EMAIL_PROJECT_TTL_MS) return cached.project;
 
   // 2. Data-driven: which project's users table holds this email?
+  // NOTE: this probe matches `email` case-sensitively against the lowercased
+  // input `e`, so it relies on the invariant that every account-creation path
+  // stores `users.email` lowercased (createUser / updateUser in
+  // misc.controller.ts and provisionClient.service.ts all do). A capitalized
+  // profile row would be missed here and the login would misroute to the
+  // fallback tenant and be rejected — see the comments at those write sites.
   let firstInactive: string | null = null;
   for (const key of projectSearchOrder()) {
     // Bound each probe so an unreachable project is skipped (as intended) instead
