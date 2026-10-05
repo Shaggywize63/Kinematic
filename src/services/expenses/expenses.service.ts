@@ -198,7 +198,9 @@ export interface ClaimItemInput {
 }
 
 const validItems = (items: ClaimItemInput[] | undefined) =>
-  (items ?? []).filter((i) => i && (CATEGORIES as readonly string[]).includes(i.category as string));
+  (items ?? []).filter((i) => i && (CATEGORIES as readonly string[]).includes(i.category as string))
+    // "" is how a client that omits nulls asks for the receipt to be removed.
+    .map((i) => (i.receipt_url === '' ? { ...i, receipt_url: null } : i));
 
 /** A mileage line with a distance but no amount is priced at the policy rate. */
 function priceMileage<T extends { category?: string | null; amount?: number | null; distance_km?: number | null }>(items: T[], rate: number): T[] {

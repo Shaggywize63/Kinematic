@@ -92,7 +92,11 @@ const itemSchema = z.object({
   to_location: z.string().max(200).optional().nullable(),
   merchant: z.string().max(200).optional().nullable(),
   // Only web links or our own storage objects — never javascript: or data: URIs.
-  receipt_url: z.string().url().max(2048).refine((u) => /^https?:\/\//i.test(u), 'Receipt must be a web link').optional().nullable(),
+  // An empty string means "remove the receipt" — for clients (the Android app) that cannot send an explicit null.
+  receipt_url: z.union([
+    z.literal(''),
+    z.string().url().max(2048).refine((u) => /^https?:\/\//i.test(u), 'Receipt must be a web link'),
+  ]).optional().nullable(),
   ai_extracted: z.any().optional(),
 });
 const createSchema = z.object({

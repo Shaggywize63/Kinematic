@@ -419,6 +419,25 @@ describe('submitting a claim', () => {
   });
 });
 
+describe('editing a claim', () => {
+  const draftClaim = { id: CLAIM, org_id: ORG, user_id: REP, status: 'draft', claim_no: 'EXP-1', currency: 'INR', total_amount: 600, submit_count: 0 };
+  const withReceipt = [{ id: 'l1', claim_id: CLAIM, category: 'food', amount: 600, item_date: '2026-10-01', receipt_url: 'https://x.test/storage/v1/object/public/kinematic-receipts/o/u/r.jpg' }];
+
+  it('keeps the receipt on a line when the client does not mention it', async () => {
+    arrange(draftClaim, withReceipt);
+    await svc.updateClaim(asRep, CLAIM, { items: [{ id: 'l1', category: 'food', amount: 650 } as any] });
+    const row = updatesOf('expense_claim_items')[0];
+    expect(row.amount).toBe(650);
+    expect(row.receipt_url).toBe(withReceipt[0].receipt_url);
+  });
+
+  it('removes the receipt when the client sends an empty string (Gson clients cannot send null)', async () => {
+    arrange(draftClaim, withReceipt);
+    await svc.updateClaim(asRep, CLAIM, { items: [{ id: 'l1', category: 'food', amount: 600, receipt_url: '' } as any] });
+    expect(updatesOf('expense_claim_items')[0].receipt_url).toBeNull();
+  });
+});
+
 describe('reimbursement', () => {
   it('only reimburses an approved claim, as an admin', async () => {
     arrange(submittedClaim({ status: 'approved', approved_amount: 600 }));
