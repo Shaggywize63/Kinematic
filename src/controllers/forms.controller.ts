@@ -311,16 +311,36 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const isClientBound = isUUID((user as any).client_id);
   const isSuper = !isClientBound && (role === 'super_admin' || role === 'admin' || role === 'main_admin' || role === 'master_admin');
 
-  // Rule: only the platform tier sees across orgs, and only when it hasn't
-  // picked a specific client UUID. Everyone else (org admins, client-bound
-  // sub_admins) is scoped to their own org. `pickedClientId` is the optional
-  // per-client sub-tenant narrow that applies regardless of role. (org_id is
-  // the parent organisation; client_id is the sub-tenant, so a picked client
-  // UUID is matched on client_id, not org_id.)
-  const isGlobal = !isClientBound && (isGlobalVal || isSagar || isSuper);
+  // Resolve the selected client from the JWT (pinned), an explicit ?client_id=
+  // query param, or the X-Client-Id header the dashboard auto-attaches for its
+  // global client picker. Reading the header here closes a cross-tenant leak:
+  // when a platform admin "acting as a client" sent the scope only as a header,
+  // this endpoint never saw it, stayed global, and returned EVERY org's rows.
+  const headerClientId = req.headers['x-client-id'] as string | undefined;
   const pickedClientId = isClientBound
     ? ((user as any).client_id as string)
-    : ((client_id && isUUID(client_id as string) && !isGlobalVal) ? (client_id as string) : null);
+    : (isUUID(client_id as string) && !isGlobalVal) ? (client_id as string)
+    : (isUUID(headerClientId as string) && !isGlobalVal) ? (headerClientId as string)
+    : null;
+
+  // Cross-org (global) view is for the platform tier ONLY, and ONLY when no
+  // specific client is selected. The moment a client is picked (JWT / query /
+  // header) the request is scoped to that client — a super_admin acting as a
+  // client must never see other tenants' submissions.
+  const isGlobal = !isClientBound && (isSuper || isSagar) && !pickedClientId;
+
+  // The org every query is scoped to. Client-bound / org-scoped callers use
+  // their own org. A platform admin who picked a client is scoped to THAT
+  // client's org (resolved from the clients table) — essential for
+  // builder_submissions, which carry only org_id and no client_id. A truly
+  // global platform admin gets no org filter (the intended cross-tenant view).
+  let scopeOrgId: string | null = isGlobal ? null : (user.org_id ?? null);
+  if (!isClientBound && pickedClientId) {
+    const { data: pickedClient } = await supabaseAdmin
+      .from('clients').select('org_id').eq('id', pickedClientId).maybeSingle();
+    const pickedOrg = (pickedClient as { org_id?: string } | null)?.org_id;
+    if (pickedOrg) scopeOrgId = pickedOrg;
+  }
 
   const istDateFrom = parseAppDate(date_from as string);
   const istDateTo = date_to ? parseAppDate(date_to as string) : istDateFrom;
@@ -366,7 +386,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   let q1 = supabaseAdmin.from('form_submissions').select(select1, { count: 'exact' });
   // Non-global callers (org-scoped admins / supervisors) only see rows in
   // their own org. Super admins / Sagar skip this.
-  if (!isGlobal) q1 = q1.eq('org_id', user.org_id);
+  if (scopeOrgId) q1 = q1.eq('org_id', scopeOrgId);
   // Client picker narrows to a specific sub-tenant, but still surfaces
   // rows with NULL client_id (org-level submissions that predate the
   // client_id stamping, or were submitted by org-level reps). Without
@@ -403,7 +423,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   `;
   // Builder forms usually store responses in JSON, skip extra join unless needed
   let q2 = supabaseAdmin.from('builder_submissions').select(select2, { count: 'exact' });
-  if (!isGlobal) q2 = q2.eq('org_id', user.org_id);
+  if (scopeOrgId) q2 = q2.eq('org_id', scopeOrgId);
   // builder_submissions doesn't carry a client_id column yet; org-level
   // builder rows are visible to every picker selection by default. If
   // and when a client_id column is added, mirror the q1 OR-filter here.
