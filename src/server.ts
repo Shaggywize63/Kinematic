@@ -12,6 +12,7 @@ import { dispatchActivityReminders } from './services/crm/activityReminders.serv
 import { dispatchPendingPushes } from './services/notifications.service';
 import { runRouteDeviationScan } from './services/routeDeviation.service';
 import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './services/alertScans.service';
+import { dispatchInvoiceRenewalReminders } from './services/finance/recurringReminders.service';
 import { knownProjectKeys, runWithProject } from './lib/projects';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -237,6 +238,23 @@ if (String(process.env.ALERT_SCANS_ENABLED ?? 'true').toLowerCase() !== 'false')
     }
   }, 3600 * 1000).unref();
   logger.info(`[alert-scans] daily scanners enabled (missed-visit@${missedHour}:00, stock-expiry@${expiryHour}:00, low-stock@${lowStockHour}:00 UTC)`);
+}
+
+// Finance recurring-invoice reminders. Hourly tick that fires once a day at the
+// configured UTC hour: for every tenant, remind the finance admin to raise the
+// next recurring invoice whose next_invoice_date has arrived (bell + push +
+// email). Idempotent (next_invoice_date rolls forward once reminded) and
+// self-gating (tenants without finance tables are a no-op), so a missed or
+// doubled hour never double-reminds. Toggle with FINANCE_INVOICE_REMINDER_ENABLED=false;
+// set the hour with FINANCE_INVOICE_REMINDER_HOUR_UTC (0-23, default 3 ≈ 08:30 IST).
+if (String(process.env.FINANCE_INVOICE_REMINDER_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const hour = Math.min(23, Math.max(0, Number(process.env.FINANCE_INVOICE_REMINDER_HOUR_UTC ?? 3)));
+  setInterval(() => {
+    if (new Date().getUTCHours() !== hour) return;
+    forEachProject('finance-invoice-reminders', () => dispatchInvoiceRenewalReminders({ limit: 200 }))
+      .catch((e) => logger.warn(`[finance-reminders] tick failed: ${e?.message ?? e}`));
+  }, 3600 * 1000).unref();
+  logger.info(`[finance-reminders] scheduler enabled (fires at ${hour}:00 UTC ≈ 08:30 IST, all projects)`);
 }
 
 // Graceful shutdown

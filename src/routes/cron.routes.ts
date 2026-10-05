@@ -36,6 +36,7 @@ import {
 import { runCarryForward } from '../services/leave.service';
 import { runRouteDeviationScan } from '../services/routeDeviation.service';
 import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from '../services/alertScans.service';
+import { dispatchInvoiceRenewalReminders } from '../services/finance/recurringReminders.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 
@@ -522,6 +523,30 @@ router.post('/low-stock-scan', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: out });
   } catch (err: any) {
     logger.error(`[cron] low-stock-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/finance-invoice-reminders
+ *
+ * Finance: reminds the finance admin to RAISE the next recurring invoice when a
+ * recurring invoice's next_invoice_date arrives (in-app bell + push, and email
+ * unless turned off). Remind-only — nothing is auto-created. Idempotent: each
+ * cycle reminds once, then next_invoice_date rolls forward. Self-gating — a
+ * tenant without the finance tables (Tata) is a silent no-op. Both tenants
+ * schedule it, so drive with { all_projects: true }; a { project } body restricts
+ * it. Also runs as a once-a-day in-process tick (see server.ts). Run daily.
+ * Body: { all_projects?, project?, limit? }.
+ */
+router.post('/finance-invoice-reminders', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string; limit?: number };
+    const limit = Math.min(500, Math.max(1, Number(body.limit) || 100));
+    const result = await runForRequestedProjects(body, () => dispatchInvoiceRenewalReminders({ limit }));
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] finance-invoice-reminders crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });

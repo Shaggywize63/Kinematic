@@ -136,6 +136,13 @@ const documentSchema = z.object({
   items: z.array(line).min(1, 'Add at least one item').max(200),
   adjustment: z.coerce.number().min(-1e7).max(1e7).optional(), adjustment_label: str(60),
   notes: str(2000), terms: str(4000),
+  // Recurring invoice (invoices only). next_invoice_date is derived server-side.
+  recurrence_enabled: z.boolean().optional(),
+  recurrence_interval: z.preprocess(blank, z.enum(['weekly', 'monthly', 'quarterly', 'half_yearly', 'yearly', 'custom']).nullable().optional()),
+  recurrence_custom_every: z.coerce.number().int().min(1).max(366).nullable().optional(),
+  recurrence_custom_unit: z.preprocess(blank, z.enum(['day', 'month']).nullable().optional()),
+  recurrence_start: z.preprocess(blank, dateStr.nullable().optional()),
+  recurrence_reminder_email: z.boolean().optional(),
 });
 const sendSchema = z.object({
   to: email, cc: z.array(z.string().email()).max(5).optional(), subject: str(200), message: str(5000), attach_pdf: z.boolean().optional(),
