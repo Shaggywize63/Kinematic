@@ -58,11 +58,17 @@ export interface SendEmailInput {
    * base64 `content`.
    */
   attachments?: EmailAttachment[];
+  /**
+   * Rewrite links through the click tracker (default true). Transactional mail that must be
+   * openable everywhere (e.g. a customer's invoice link) sets this to false so the recipient
+   * gets the real URL — no extra hop that a mail client or link scanner could block.
+   */
+  track_links?: boolean;
 }
 
 export async function sendEmail(input: SendEmailInput) {
   const trackingToken = crypto.randomBytes(16).toString('hex');
-  const trackedHtml = wrapTracking(input.body_html, trackingToken);
+  const trackedHtml = wrapTracking(input.body_html, trackingToken, input.track_links !== false);
   const fromEmail = input.from_email
     || process.env.CRM_FROM_EMAIL
     || `noreply@${process.env.CRM_TRACKING_DOMAIN || 'kinematic.app'}`;
@@ -346,7 +352,7 @@ export function signRedirect(token: string, url: string): string {
   return crypto.createHmac('sha256', trackingSecret()).update(`${token}\n${url}`).digest('hex').slice(0, 24);
 }
 
-function wrapTracking(html: string, token: string): string {
+export function wrapTracking(html: string, token: string, trackLinks = true): string {
   const base = process.env.CRM_TRACKING_BASE_URL || '';
   if (!base) return html;
   const root = base.replace(/\/$/, '');
@@ -355,7 +361,7 @@ function wrapTracking(html: string, token: string): string {
   // Rewrite only http(s) links through the click tracker; leave mailto:, tel:,
   // #anchors and {{merge_vars}} untouched (wrapping a mailto: broke it before).
   // Each gets a signature so the handler can safely 302 to the original URL.
-  const rewritten = html.replace(/href=("|')([^"']+)("|')/g, (m, q1, url, q2) => {
+  const rewritten = !trackLinks ? html : html.replace(/href=("|')([^"']+)("|')/g, (m, q1, url, q2) => {
     if (!/^https?:\/\//i.test(url)) return m;
     const sig = signRedirect(token, url);
     return `href=${q1}${root}/api/v1/crm/emails/track/click/${token}?u=${encodeURIComponent(url)}&s=${sig}${q2}`;

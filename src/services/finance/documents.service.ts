@@ -425,6 +425,7 @@ export async function sendDocument(s: FinanceScope, docType: DocType, id: string
     ${docType === 'invoice' && doc.due_date ? `<tr><td style="padding:10px 14px;color:#666;border-top:1px solid #eee">Due date</td><td style="padding:10px 14px;text-align:right;border-top:1px solid #eee">${esc(doc.due_date)}</td></tr>` : ''}
   </table>
   <p style="text-align:center;margin:24px 0"><a href="${esc(link)}" style="background:#E01E2C;color:#fff;text-decoration:none;padding:12px 22px;border-radius:6px;font-weight:bold">View ${label.toLowerCase()}</a></p>
+  <p style="color:#888;font-size:12px;line-height:1.5;word-break:break-all">If the button does not open, copy this link into your browser:<br><a href="${esc(link)}" style="color:#888">${esc(link)}</a></p>
   <p style="color:#888;font-size:12px">Regards,<br>${esc(business)}</p></div>`;
 
   const attachments = input.attach_pdf === false ? undefined : [{
@@ -436,6 +437,7 @@ export async function sendDocument(s: FinanceScope, docType: DocType, id: string
   const result = await sendEmail({
     org_id: s.org_id, user_id: s.user_id || undefined, to, cc: input.cc, subject,
     body_html: html, attachments,
+    track_links: false, // customers must be able to open the invoice link everywhere: send the real URL, not a tracker redirect
     from_email: process.env.FINANCE_FROM_EMAIL || undefined,
   }) as { suppressed?: string; status?: string; error?: string | null };
 
