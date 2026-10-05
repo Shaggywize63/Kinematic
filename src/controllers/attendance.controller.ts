@@ -460,7 +460,17 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   // org's attendance — other tenants'/seeded rows leaked in as "mock" data.
   const isClientBound = isUUID((user as any).client_id);
   const isSuper = !isClientBound && (role === 'super_admin' || role === 'admin' || role === 'main_admin' || role === 'master_admin');
-  const isGlobal = !isClientBound && (isSagar || isSuper) && (!req.query.client_id || !isUUID(req.query.client_id as string));
+  // Resolve the selected client from the JWT (pinned), ?client_id=, or the
+  // X-Client-Id header. A super-admin "acting as a client" sets that header, and
+  // it MUST be honoured even when the top-right picker still reads "All clients"
+  // (which sends no client_id) — otherwise acting-as-ClientA returned EVERY org's
+  // attendance (cross-tenant leak).
+  const headerClientId = req.headers['x-client-id'] as string | undefined;
+  const pickedClientId = isClientBound ? ((user as any).client_id as string)
+    : isUUID(headerClientId as string) ? (headerClientId as string)
+    : isUUID(client_id as string) ? (client_id as string)
+    : null;
+  const isGlobal = !isClientBound && (isSagar || isSuper) && !pickedClientId;
 
   let query = supabaseAdmin
     .from('attendance')
@@ -474,8 +484,17 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
 
   // Auth / Org Filtering
   if (!isGlobal) {
-    // Always scope to the caller's own org; narrow to a client only within that org.
-    query = scopeOwnOrg(query, user.org_id, (client_id && isUUID(client_id)) ? client_id : undefined);
+    // Scope to the picked client's org (super-admin acting as a client) or the
+    // caller's own org, plus the client itself. Resolving the picked client's
+    // org is what isolates a Trent view from a ByteBack view, etc.
+    let scopeOrgId = user.org_id;
+    if (!isClientBound && pickedClientId) {
+      const { data: pc } = await supabaseAdmin
+        .from('clients').select('org_id').eq('id', pickedClientId).maybeSingle();
+      const pcOrg = (pc as { org_id?: string } | null)?.org_id;
+      if (pcOrg) scopeOrgId = pcOrg;
+    }
+    query = scopeOwnOrg(query, scopeOrgId, pickedClientId ?? undefined);
   }
 
   // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
