@@ -380,7 +380,12 @@ router.post(
         const key = String(q.id);
         const raw = (answers as Record<string, unknown>)[key];
         if (raw == null || String(raw).trim() === "") continue;
-        const digits = String(raw).replace(/\D/g, "");
+        let digits = String(raw).replace(/\D/g, "");
+        // Normalize common Indian mobile formats (+91 / 0091 / trunk 0) to the
+        // 10-digit subscriber number before validating — matches submitForm.
+        if (digits.length === 12 && digits.startsWith("91")) digits = digits.slice(2);
+        else if (digits.length === 13 && digits.startsWith("091")) digits = digits.slice(3);
+        else if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
         if (digits.length !== 10) {
           throw new AppError(400, `${q.label || "Phone number"} must be a 10-digit mobile number.`, "INVALID_PHONE");
         }
@@ -397,6 +402,11 @@ router.post(
       .insert({
         form_id: req.params.id,
         user_id: user?.id, // Fix: Changed from submitted_by to user_id to match schema
+        // Stamp the submitter's org so the row is visible to the org-scoped
+        // dashboard (getAllSubmissions filters builder_submissions by org_id).
+        // Without this, builder submissions landed with org_id = NULL and never
+        // appeared in any client's Work Activities view.
+        org_id: user?.org_id ?? null,
         answers: answers || {},
         location_lat,
         location_lng,
