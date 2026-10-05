@@ -154,6 +154,8 @@ function itemRows(documentId: string, orgId: string, calc: ReturnType<typeof com
     document_id: documentId, org_id: orgId, position: i, item_id: l.item_id, name: l.name, description: l.description,
     hsn_sac: l.hsn_sac, quantity: l.quantity, unit: l.unit, rate: l.rate, discount_pct: l.discount_pct,
     gst_rate: l.gst_rate, taxable_value: l.taxable_value, cgst: l.cgst, sgst: l.sgst, igst: l.igst, total: l.total,
+    // Only sent when set, so documents without a duration still save on a database that predates the column.
+    ...(l.duration_months ? { duration_months: l.duration_months } : {}),
   }));
 }
 
@@ -343,6 +345,7 @@ function inputFromDocument(doc: Awaited<ReturnType<typeof getDocument>>): Docume
       item_id: (i.item_id as string) ?? null, name: String(i.name), description: (i.description as string) ?? null,
       hsn_sac: (i.hsn_sac as string) ?? null, quantity: num(i.quantity), unit: (i.unit as string) ?? null,
       rate: num(i.rate), discount_pct: num(i.discount_pct), gst_rate: num(i.gst_rate),
+      duration_months: (i.duration_months as number | null) ?? null,
     })),
   };
 }

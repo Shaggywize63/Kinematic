@@ -125,6 +125,7 @@ const line = z.object({
   description: str(1000), hsn_sac: str(20), unit: str(30),
   quantity: z.coerce.number().gt(0, 'Quantity must be greater than 0').max(1e9),
   rate: money, discount_pct: z.coerce.number().min(0).max(100).optional(), gst_rate: z.coerce.number().min(0).max(100).optional(),
+  duration_months: z.preprocess(blank, z.coerce.number().int().min(1).max(120).nullable().optional()),
 });
 const documentSchema = z.object({
   customer_id: z.string().uuid('Select a customer'),

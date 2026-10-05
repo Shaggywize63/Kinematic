@@ -1,5 +1,5 @@
 import PDFDocument from 'pdfkit';
-import { amountInWords } from './money';
+import { amountInWords, durationLabel } from './money';
 import { stateLabel } from './gstStates';
 
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -161,7 +161,8 @@ export async function renderDocumentPdf({ doc, items, settings, payments = [] }:
   y = drawHead(y);
 
   items.forEach((it, idx) => {
-    const desc = [it.description].filter(Boolean).join('');
+    const durText = durationLabel(it.duration_months);
+    const desc = [it.description, durText ? `Duration: ${durText} · rate is per month` : ''].filter(Boolean).join('\n');
     pdf.font('Helvetica-Bold').fontSize(8.5);
     const h1 = pdf.heightOfString(String(it.name), { width: cols[1].w - 8 });
     pdf.font('Helvetica').fontSize(7.5);

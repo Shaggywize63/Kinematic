@@ -1,4 +1,4 @@
-import { computeDocument, amountInWords, round2 } from '../src/services/finance/money';
+import { computeDocument, amountInWords, round2, durationLabel, durationOf } from '../src/services/finance/money';
 import { displayStatus } from '../src/services/finance/documents.service';
 import { reportToCsv } from '../src/services/finance/reports.service';
 import { isMasterCaller, requireFinanceAccess } from '../src/middleware/financeAccess';
@@ -118,5 +118,31 @@ describe('invoice PDF logo', () => {
       expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
       expect(pdf.toString('latin1')).not.toContain('/Subtype /Image');
     }
+  });
+});
+
+describe('line duration (rate is per month)', () => {
+  const opts = { sellerStateCode: '06', placeOfSupply: '20' };
+  it('multiplies quantity × rate by the months and taxes the result', () => {
+    // 25 users × ₹650/user/month × 3 months (a quarter) = 48,750 + 18% IGST = 57,525 (a real Kinematic invoice)
+    const { totals, lines } = computeDocument([{ name: 'Kinematic', quantity: 25, rate: 650, gst_rate: 18, duration_months: 3 }], opts);
+    expect(lines[0]).toMatchObject({ gross: 48750, taxable_value: 48750, duration_months: 3 });
+    expect(totals).toMatchObject({ subtotal: 48750, taxable_value: 48750, igst: 8775, total: 57525 });
+  });
+  it('treats a missing or invalid duration as one-time (×1) and applies discount after duration', () => {
+    const base = { name: 'x', quantity: 2, rate: 100, gst_rate: 0 };
+    for (const d of [undefined, null, 0, -3, 500, NaN]) {
+      expect(computeDocument([{ ...base, duration_months: d as number }], opts).totals.total).toBe(200);
+    }
+    expect(computeDocument([{ ...base, duration_months: 12, discount_pct: 10 }], opts).totals.total).toBe(2160);
+  });
+  it('labels common durations and falls back to months', () => {
+    expect(durationLabel(1)).toBe('1 month (Month)');
+    expect(durationLabel(3)).toBe('3 months (Quarter)');
+    expect(durationLabel(6)).toBe('6 months (Half-year)');
+    expect(durationLabel(12)).toBe('12 months (Year)');
+    expect(durationLabel(18)).toBe('18 months');
+    expect(durationLabel(null)).toBeNull();
+    expect(durationOf('3')).toBe(3);
   });
 });
