@@ -349,9 +349,25 @@ async function verifyToken(token: string): Promise<{ sub: string; exp?: number; 
  *   - User has never logged in via the new build (active_session_id IS NULL).
  *   - User has logged out (clear_user_session set active_session_id to NULL).
  */
+// Clients that deliberately share logins across reps, or run one account on
+// several devices (e.g. Rajkamal's field team on a handful of shared accounts).
+// For these, single-active-session enforcement is disabled so a second login
+// doesn't instantly kick the other device with DEVICE_REPLACED (which the apps
+// treat as a hard logout). Every other tenant keeps one-device security.
+// Override via MULTI_SESSION_CLIENT_IDS (comma-separated client UUIDs); defaults
+// to Rajkamal Jewellers.
+const MULTI_SESSION_CLIENT_IDS = new Set(
+  (process.env.MULTI_SESSION_CLIENT_IDS || '0490f34d-d9a3-4f39-99e2-8f3adba8c583')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+);
+
 function rejectIfStaleSession(req: AuthRequest, res: Response, user: AuthRequest['user']): boolean {
   const platform = String(req.headers['x-kinematic-platform'] || '').toLowerCase();
   if (platform !== 'android' && platform !== 'ios') return false;
+
+  // Multi-session clients (shared accounts) are exempt — never kick the device.
+  const clientId = String((user as any)?.client_id || '').toLowerCase();
+  if (clientId && MULTI_SESSION_CLIENT_IDS.has(clientId)) return false;
 
   const activeSessionId = (user as any)?.active_session_id as string | null | undefined;
   if (!activeSessionId) return false;

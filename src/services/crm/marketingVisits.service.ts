@@ -19,6 +19,7 @@
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
+import { logger } from '../../lib/logger';
 import * as crud from './crud.service';
 import { createLead, getLead, updateLead } from './leads.service';
 
@@ -173,6 +174,31 @@ export async function endMarketingVisit(input: EndVisitInput) {
     lead = await updateLead(org_id, leadId, { status: input.next_status } as never, user_id);
   } else if (leadId) {
     lead = await getLead(org_id, leadId).catch(() => null);
+  }
+
+  // Materialise the follow-up date into a real reminder. Previously it lived only
+  // in metadata.visit.next_followup_at, which the reminder generator never scans
+  // (it reads crm_activities.due_at on open rows), so no reminder ever fired for a
+  // marketing-visit follow-up. Create an OPEN follow-up activity so the existing
+  // generator → push/bell pipeline reminds the rep when it comes due. The
+  // source_visit_id marker keeps it idempotent with the backfill. Best-effort: a
+  // failure here must never fail the visit completion.
+  if (input.next_followup_at) {
+    try {
+      await crud.create('crm_activities', org_id, {
+        type: 'task',
+        subject: `Follow-up — ${leadName(lead as { first_name?: string | null; last_name?: string | null } | null)}`,
+        lead_id: leadId ?? null,
+        client_id: (existing.client_id as string | null) ?? client_id ?? null,
+        status: 'planned',
+        owner_id: user_id ?? null,
+        assigned_to: user_id ?? null,
+        due_at: input.next_followup_at,
+        metadata: { kind: 'visit_followup', source_visit_id: id },
+      }, user_id);
+    } catch (e: any) {
+      logger.warn(`[marketing-visit] follow-up reminder create failed for visit ${id}: ${e?.message || e}`);
+    }
   }
 
   return { visit, lead };
