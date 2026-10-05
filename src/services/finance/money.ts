@@ -6,6 +6,20 @@ export const num = (v: unknown, d = 0) => {
   return Number.isFinite(n) ? n : d;
 };
 
+/** Whole months 1..120, else null (one-time). */
+export const durationOf = (v: unknown): number | null => {
+  const n = Math.round(num(v, NaN));
+  return Number.isFinite(n) && n >= 1 && n <= 120 ? n : null;
+};
+
+/** "3 months (Quarter)" — what an invoice prints for a line's duration. */
+export function durationLabel(months: number | null | undefined): string | null {
+  const m = durationOf(months);
+  if (m === null) return null;
+  const named: Record<number, string> = { 1: 'Month', 3: 'Quarter', 6: 'Half-year', 12: 'Year' };
+  return named[m] ? `${m} month${m === 1 ? '' : 's'} (${named[m]})` : `${m} months`;
+}
+
 export interface LineInput {
   item_id?: string | null;
   name: string;
@@ -16,6 +30,8 @@ export interface LineInput {
   rate: number;
   discount_pct?: number;
   gst_rate?: number;
+  /** Billing duration in months (1 month, 3 quarter, 6, 12 year). The rate is per month; null/absent = one-time (×1). */
+  duration_months?: number | null;
 }
 
 export interface LineComputed extends Required<Pick<LineInput, 'name' | 'quantity' | 'rate'>> {
@@ -25,6 +41,8 @@ export interface LineComputed extends Required<Pick<LineInput, 'name' | 'quantit
   unit: string | null;
   discount_pct: number;
   gst_rate: number;
+  duration_months: number | null;
+  gross: number;
   taxable_value: number;
   cgst: number;
   sgst: number;
@@ -57,7 +75,8 @@ export function computeDocument(
 ): { lines: LineComputed[]; totals: Totals; intraState: boolean } {
   const intra = isIntraState(opts.sellerStateCode, opts.placeOfSupply);
   const out: LineComputed[] = lines.map((l) => {
-    const gross = round2(num(l.quantity, 1) * num(l.rate));
+    const months = durationOf(l.duration_months);
+    const gross = round2(num(l.quantity, 1) * num(l.rate) * (months ?? 1));
     const pct = Math.min(100, Math.max(0, num(l.discount_pct)));
     const discount_amt = round2((gross * pct) / 100);
     const taxable = round2(gross - discount_amt);
@@ -73,6 +92,8 @@ export function computeDocument(
       rate: num(l.rate),
       discount_pct: pct,
       gst_rate: rate,
+      duration_months: months,
+      gross,
       taxable_value: taxable,
       cgst: t.cgst,
       sgst: t.sgst,
@@ -83,7 +104,7 @@ export function computeDocument(
   });
 
   const sum = (f: (l: LineComputed) => number) => round2(out.reduce((s, l) => s + f(l), 0));
-  const subtotal = sum((l) => l.quantity * l.rate);
+  const subtotal = sum((l) => l.gross);
   const discount_total = sum((l) => l.discount_amt);
   const taxable_value = sum((l) => l.taxable_value);
   const cgst = sum((l) => l.cgst);
