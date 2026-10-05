@@ -18,6 +18,7 @@
  */
 import { Router, Request, Response } from 'express';
 import * as emailsSvc from '../../services/crm/emails.service';
+import { withEmailUnsubscribeProject } from '../../middleware/withProject';
 
 const router: Router = Router();
 
@@ -57,8 +58,8 @@ const handle = async (req: Request, res: Response) => {
   );
 };
 
-router.get('/', handle);
-router.post('/', handle);
+router.get('/', withEmailUnsubscribeProject, handle);
+router.post('/', withEmailUnsubscribeProject, handle);
 
 export default router;
 

@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../types';
-import { runWithProject, isKnownProject, fallbackProjectKey, resolveProjectForIntegrationAsync, resolveProjectForTokenAsync, resolveProjectForCaptureTokenAsync } from '../lib/projects';
+import { runWithProject, isKnownProject, fallbackProjectKey, resolveProjectForIntegrationAsync, resolveProjectForTokenAsync, resolveProjectForCaptureTokenAsync, resolveProjectForEmailTrackingTokenAsync } from '../lib/projects';
 
 // Reads the X-Kinematic-Project header and runs the remainder of the request
 // inside that project's AsyncLocalStorage context, so supabase / supabaseAdmin
@@ -71,6 +71,28 @@ export async function withIntegrationProject(req: AuthRequest, _res: Response, n
 export async function withCaptureProject(req: AuthRequest, _res: Response, next: NextFunction) {
   const token = String(req.params.token || '').trim();
   const project = await resolveProjectForCaptureTokenAsync(token);
+  (req as AuthRequest & { projectKey?: string }).projectKey = project;
+  runWithProject(project, () => next());
+}
+
+// Routes the unauthenticated email-tracking surface (open pixel, click
+// redirector — `/crm/emails/track/{open,click}/:token`) to whichever project
+// holds the message's `crm_email_logs` row. The recipient's mail client sends no
+// auth and no project header, so without this every Kinematic-tenant open/click
+// was looked up in the default (Tata) database, found nothing, and was silently
+// dropped. Applied at ROUTE level so `:token` is in scope.
+export async function withEmailTrackingProject(req: AuthRequest, _res: Response, next: NextFunction) {
+  const token = String(req.params.token || '').trim();
+  const project = await resolveProjectForEmailTrackingTokenAsync(token);
+  (req as AuthRequest & { projectKey?: string }).projectKey = project;
+  runWithProject(project, () => next());
+}
+
+// Same, for the public unsubscribe link, whose token arrives as `?t=`
+// (a GET from the footer link, or an RFC 8058 one-click POST from Gmail/Yahoo).
+export async function withEmailUnsubscribeProject(req: AuthRequest, _res: Response, next: NextFunction) {
+  const token = String((req.query as Record<string, unknown>)?.t ?? '').trim();
+  const project = await resolveProjectForEmailTrackingTokenAsync(token);
   (req as AuthRequest & { projectKey?: string }).projectKey = project;
   runWithProject(project, () => next());
 }

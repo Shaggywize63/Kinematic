@@ -8,17 +8,21 @@
  */
 import { Router, Request, Response } from 'express';
 import * as emailsSvc from '../../services/crm/emails.service';
+import { withEmailTrackingProject } from '../../middleware/withProject';
+import { logger } from '../../lib/logger';
 
 const router: Router = Router();
 
-router.get('/open/:token', async (req: Request, res: Response) => {
-  await emailsSvc.recordOpen(req.params.token).catch(() => {});
+router.get('/open/:token', withEmailTrackingProject, async (req: Request, res: Response) => {
+  await emailsSvc.recordOpen(req.params.token)
+    .catch((e) => logger.warn(`[email-tracking] open not recorded: ${e?.message || e}`));
   res.set('Content-Type', 'image/gif');
   res.send(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
 });
 
-router.get('/click/:token', async (req: Request, res: Response) => {
-  await emailsSvc.recordClick(req.params.token).catch(() => {});
+router.get('/click/:token', withEmailTrackingProject, async (req: Request, res: Response) => {
+  await emailsSvc.recordClick(req.params.token)
+    .catch((e) => logger.warn(`[email-tracking] click not recorded: ${e?.message || e}`));
   // Open-redirect guard. Before: `res.redirect(302, req.query.u)` — anyone could
   // craft a phishing link `${api}/.../track/click/<token>?u=https://attacker.com`
   // that 302s the recipient off-platform. A host allowlist fixed that but ALSO
