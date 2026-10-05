@@ -542,6 +542,59 @@ export async function resolveProjectForCaptureTokenAsync(token?: string | null):
   return fallbackProjectKey();
 }
 
+// Short TTL cache for email-tracking-token→project so an inbox client that
+// fetches the pixel several times (image proxies, previews, re-opens) doesn't
+// probe every project DB each time.
+const emailTrackingProjectCache = new Map<string, { project: string; at: number }>();
+const EMAIL_TRACKING_PROJECT_TTL_MS = 5 * 60_000;
+const EMAIL_TRACKING_CACHE_MAX = 5000;
+
+/**
+ * Resolve which Supabase project holds the `crm_email_logs` row for an email
+ * tracking token. The open pixel, click redirector and unsubscribe link are hit
+ * straight from a recipient's inbox — no Authorization and no
+ * `X-Kinematic-Project` header — so without this they always run against the
+ * fallback (Tata) project: a Kinematic-tenant token is never found there and
+ * every open / click / unsubscribe was silently dropped (campaign reports
+ * stuck at "Opened 0"). The token is a random 32-char secret, so at most one
+ * project holds it.
+ *
+ * A single-project deployment short-circuits with zero DB work, and an unknown
+ * token falls back to the default project (where the handler no-ops), so Tata
+ * routing is unchanged.
+ */
+export async function resolveProjectForEmailTrackingTokenAsync(token?: string | null): Promise<string> {
+  const t = (token || '').trim();
+  if (!t) return fallbackProjectKey();
+
+  const keys = projectSearchOrder();
+  if (keys.length <= 1) return fallbackProjectKey();
+
+  const cached = emailTrackingProjectCache.get(t);
+  if (cached && Date.now() - cached.at < EMAIL_TRACKING_PROJECT_TTL_MS) return cached.project;
+
+  for (const key of keys) {
+    // Bound each probe so an unreachable project is skipped, not awaited forever.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PROJECT_PROBE_TIMEOUT_MS);
+    try {
+      const { data } = await adminClientFor(key)
+        .from('crm_email_logs').select('id').eq('tracking_pixel_token', t)
+        .limit(1).abortSignal(ctrl.signal).maybeSingle();
+      if (data) {
+        if (emailTrackingProjectCache.size >= EMAIL_TRACKING_CACHE_MAX) {
+          const first = emailTrackingProjectCache.keys().next().value;
+          if (first !== undefined) emailTrackingProjectCache.delete(first);
+        }
+        emailTrackingProjectCache.set(t, { project: key, at: Date.now() });
+        return key;
+      }
+    } catch { /* project unreachable / timed out — skip it */ }
+    finally { clearTimeout(timer); }
+  }
+  return fallbackProjectKey();
+}
+
 /**
  * Resolve which Supabase project a user id lives in by finding the project whose
  * `users` table holds that id. Used by the Google OAuth callback — an

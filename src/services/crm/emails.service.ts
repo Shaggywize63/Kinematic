@@ -309,26 +309,38 @@ export async function listLogs(org_id: string, filters: Record<string, unknown> 
   return data ?? [];
 }
 
+// Statuses a later open/click must not overwrite: a click outranks an open, and
+// an unsubscribe / bounce is a terminal signal for the recipient.
+const KEEP_STATUS = new Set(['clicked', 'unsubscribed', 'bounced']);
+
 export async function recordOpen(token: string) {
-  const { data } = await supabaseAdmin.from('crm_email_logs').select('id, open_count')
+  const { data, error } = await supabaseAdmin.from('crm_email_logs')
+    .select('id, status, open_count, opened_at')
     .eq('tracking_pixel_token', token).maybeSingle();
+  if (error) throw new Error(`lookup failed: ${error.message}`);
   if (!data) return;
-  await supabaseAdmin.from('crm_email_logs').update({
-    status: 'opened',
-    opened_at: new Date().toISOString(),
+  const patch: Record<string, unknown> = {
     open_count: (data.open_count ?? 0) + 1,
-  }).eq('id', data.id);
+    opened_at: data.opened_at ?? new Date().toISOString(),
+  };
+  if (!KEEP_STATUS.has(String(data.status))) patch.status = 'opened';
+  const { error: upErr } = await supabaseAdmin.from('crm_email_logs').update(patch).eq('id', data.id);
+  if (upErr) throw new Error(`update failed: ${upErr.message}`);
 }
 
 export async function recordClick(token: string) {
-  const { data } = await supabaseAdmin.from('crm_email_logs').select('id, click_count, first_clicked_at')
+  const { data, error } = await supabaseAdmin.from('crm_email_logs')
+    .select('id, status, click_count, first_clicked_at')
     .eq('tracking_pixel_token', token).maybeSingle();
+  if (error) throw new Error(`lookup failed: ${error.message}`);
   if (!data) return;
-  await supabaseAdmin.from('crm_email_logs').update({
-    status: 'clicked',
-    first_clicked_at: data.first_clicked_at ?? new Date().toISOString(),
+  const patch: Record<string, unknown> = {
     click_count: (data.click_count ?? 0) + 1,
-  }).eq('id', data.id);
+    first_clicked_at: data.first_clicked_at ?? new Date().toISOString(),
+  };
+  if (!['unsubscribed', 'bounced'].includes(String(data.status))) patch.status = 'clicked';
+  const { error: upErr } = await supabaseAdmin.from('crm_email_logs').update(patch).eq('id', data.id);
+  if (upErr) throw new Error(`update failed: ${upErr.message}`);
 }
 
 export async function renderTemplate(html: string, vars: Record<string, string | number>): Promise<string> {
