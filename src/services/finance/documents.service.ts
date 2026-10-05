@@ -7,6 +7,7 @@ import { computeDocument, LineInput, round2, num } from './money';
 import { getSettings, getCustomer, pageParams, safeSearch } from './masters.service';
 import { publicDocUrl } from './share';
 import { renderDocumentPdf } from './pdf.service';
+import { normalizeRecurrence, RecurrenceInput } from './recurrence';
 
 const db = () => supabaseAdmin;
 const fail = (e: { message: string }) => new AppError(500, e.message, 'DB_ERROR');
@@ -35,6 +36,14 @@ export interface DocumentInput {
   adjustment_label?: string | null;
   notes?: string | null;
   terms?: string | null;
+  // Recurring invoice (invoices only): repeat on a cadence; next_invoice_date is
+  // DERIVED from recurrence_start + the duration (never sent by the client).
+  recurrence_enabled?: boolean;
+  recurrence_interval?: string | null;
+  recurrence_custom_every?: number | null;
+  recurrence_custom_unit?: string | null;
+  recurrence_start?: string | null;
+  recurrence_reminder_email?: boolean;
 }
 
 // Overdue / expired are derived from dates, never stored, so they can't go stale.
@@ -163,6 +172,7 @@ export async function createDocument(
   s: FinanceScope, docType: DocType, input: DocumentInput, extra: Record<string, unknown> = {}, opts: { number?: string } = {},
 ) {
   const p = await prepare(s, input);
+  const rec = normalizeRecurrence(input as RecurrenceInput, docType, input.issue_date || today(), today());
   const base = {
     org_id: s.org_id, client_id: s.client_id, doc_type: docType, status: 'draft',
     ...headerFields(input, docType, p),
@@ -170,6 +180,8 @@ export async function createDocument(
     balance: docType === 'invoice' ? p.calc.totals.total : 0,
     share_token: crypto.randomBytes(24).toString('base64url'),
     created_by: s.user_id || null,
+    ...rec,
+    recurrence_reminded_at: null,
     ...extra,
   };
   let data: Record<string, unknown>;
@@ -229,8 +241,14 @@ export async function updateDocument(s: FinanceScope, docType: DocType, id: stri
     throw fail(ins.error);
   }
 
+  // Re-derive the recurrence schedule from the (possibly edited) start + duration.
+  // next_invoice_date is always recomputed, and reminded_at cleared so the fresh
+  // schedule reminds cleanly on its next due date.
+  const rec = normalizeRecurrence(input as RecurrenceInput, docType, header.issue_date, today());
+
   const { error } = await scoped(db().from('finance_documents').update({
-    ...header, balance, status, updated_by: s.user_id || null, updated_at: new Date().toISOString(),
+    ...header, balance, status, ...rec, recurrence_reminded_at: null,
+    updated_by: s.user_id || null, updated_at: new Date().toISOString(),
   }), s).eq('id', id);
   if (error) throw fail(error);
   await addEvent(s, id, 'updated');
