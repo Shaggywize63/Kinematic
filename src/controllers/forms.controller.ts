@@ -328,8 +328,13 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const headerClientId = req.headers['x-client-id'] as string | undefined;
   const pickedClientId = isClientBound
     ? ((user as any).client_id as string)
+    // A real X-Client-Id header pins a specific client and MUST win over the
+    // picker's "All clients" (Kinematic) sentinel: a super-admin "acting as a
+    // client" sets this header, and while the picker still reads "All clients"
+    // the page sends client_id=Kinematic — which previously flipped the request
+    // global and leaked every org's submissions. The header is authoritative.
+    : isUUID(headerClientId as string) ? (headerClientId as string)
     : (isUUID(client_id as string) && !isGlobalVal) ? (client_id as string)
-    : (isUUID(headerClientId as string) && !isGlobalVal) ? (headerClientId as string)
     : null;
 
   // Cross-org (global) view is for the platform tier ONLY, and ONLY when no
