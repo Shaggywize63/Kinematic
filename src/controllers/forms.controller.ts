@@ -184,7 +184,16 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
         if (!phoneFields.has(fieldId)) continue;
         const raw = r.value ?? r.response;
         if (raw == null || String(raw).trim() === '') continue; // empty: required-ness handled by the form itself
-        const digits = String(raw).replace(/\D/g, '');
+        let digits = String(raw).replace(/\D/g, '');
+        // Normalize the common Indian mobile formats reps actually type BEFORE
+        // validating — these are valid numbers, not errors, and hard-rejecting
+        // them was blocking real submissions (e.g. a Gold Scheme rep who entered
+        // the number with +91). Strip a country code (+91 → 12 digits, 0091 → 13)
+        // or a trunk 0 (11 digits) down to the 10-digit subscriber number; only a
+        // genuinely wrong length is still rejected.
+        if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2);
+        else if (digits.length === 13 && digits.startsWith('091')) digits = digits.slice(3);
+        else if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
         if (digits.length !== 10) {
           return badRequest(
             res,
@@ -192,7 +201,7 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
             { code: 'INVALID_PHONE', field_id: fieldId },
           );
         }
-        // Normalize what we store to the 10 digits (drop any stray formatting).
+        // Store the normalized 10 digits (drop any country code / formatting).
         r.value = digits;
       }
     }
