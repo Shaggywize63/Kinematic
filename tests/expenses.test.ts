@@ -68,6 +68,18 @@ describe('policy normalisation', () => {
   });
 });
 
+describe('showing who a policy is assigned to', () => {
+  it('names the assigned people, and keeps a removed user visible', async () => {
+    __mock.reset();
+    __mock.setDefault('users', { data: [{ id: REP, name: 'Asha' }] });
+    const named = pol({ id: 'me', applies_to: { everyone: false, roles: [], org_role_ids: [], user_ids: [REP, BOSS] } });
+    const everyone = pol({ id: 'all' });
+    const out = await policy.attachPeopleNames({ id: ADMIN, org_id: ORG, role: 'admin' }, [named, everyone]);
+    expect(out[0].people).toEqual([{ id: REP, name: 'Asha' }, { id: BOSS, name: 'Removed user' }]);
+    expect(out[1].people).toEqual([]);
+  });
+});
+
 // ── resolution ───────────────────────────────────────────────────────────────
 describe('which policy governs a person', () => {
   const everyone = pol({ id: 'all', name: 'Everyone' });

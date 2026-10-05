@@ -167,7 +167,7 @@ router.put('/policy', requireAdminOrAbove, asyncHandler<AuthRequest>(async (req,
 
 // ── policies (admin) — static paths first, then /:id ────────────────────────
 router.get('/policies', requireAdminOrAbove, asyncHandler<AuthRequest>(async (req, res) => {
-  res.json({ success: true, data: await policies.listPolicies(actor(req)) });
+  res.json({ success: true, data: await policies.attachPeopleNames(actor(req), await policies.listPolicies(actor(req))) });
 }));
 router.get('/policies/presets', requireAdminOrAbove, asyncHandler<AuthRequest>(async (_req, res) => {
   res.json({ success: true, data: policies.policyPresets() });
@@ -182,7 +182,7 @@ router.post('/policies', requireAdminOrAbove, asyncHandler<AuthRequest>(async (r
   res.status(201).json({ success: true, data: await policies.createPolicy(actor(req), parse(policySchema, req.body)) });
 }));
 router.get('/policies/:id', requireAdminOrAbove, asyncHandler<AuthRequest>(async (req, res) => {
-  res.json({ success: true, data: await policies.getPolicyById(actor(req), idParam(req)) });
+  res.json({ success: true, data: (await policies.attachPeopleNames(actor(req), [await policies.getPolicyById(actor(req), idParam(req))]))[0] });
 }));
 router.put('/policies/:id', requireAdminOrAbove, asyncHandler<AuthRequest>(async (req, res) => {
   res.json({ success: true, data: await policies.updatePolicy(actor(req), idParam(req), parse(policyPatchSchema, req.body)) });

@@ -483,6 +483,21 @@ export async function listPolicies(actor: Actor): Promise<ExpensePolicy[]> {
   return all.map((p) => ({ ...p, covers: counts.get(p.id as string) ?? 0 }));
 }
 
+/**
+ * Names for the people a policy is assigned to, so the editor can show who they
+ * are (the policy itself only stores ids). A person who has since been removed
+ * still appears, so an admin can see and clear the stale assignment.
+ */
+export async function attachPeopleNames<T extends ExpensePolicy>(actor: Actor, list: T[]): Promise<Array<T & { people: Array<{ id: string; name: string }> }>> {
+  const ids = Array.from(new Set(list.flatMap((p) => p.applies_to.user_ids))).slice(0, 1000);
+  const names = new Map<string, string>();
+  if (ids.length) {
+    const { data } = await supabaseAdmin.from('users').select('id, name').eq('org_id', actor.org_id).in('id', ids);
+    for (const u of (data as any[]) ?? []) names.set(u.id, u.name);
+  }
+  return list.map((p) => ({ ...p, people: p.applies_to.user_ids.map((id) => ({ id, name: names.get(id) ?? 'Removed user' })) }));
+}
+
 export async function getPolicyById(actor: Actor, id: string): Promise<ExpensePolicy> {
   await requireV2();
   const { data } = await supabaseAdmin.from('expense_policies').select('*')
