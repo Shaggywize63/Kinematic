@@ -4,6 +4,7 @@ import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, scopeOwnOrg, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
+import { resolveLivePosition } from '../lib/livePosition';
 import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome, getMockBroadcasts, getMockLearningMaterials } from '../utils/demoData';
 
 /* ─────────────────────────────────────────────────────────────
@@ -559,15 +560,12 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
     const rec  = attMap.get(fe.id) as any;
     const zone = fe.zones as unknown as { name: string; city: string; meeting_lat: number; meeting_lng: number } | null;
     
-    // Logic: 
-    // 1. If we have a HEARTBEAT/Live location (within last 24h), use it as primary
-    // 2. Otherwise use attendance checkin location as secondary
-    // 3. Last fallback is zone meeting point
-    const hasLastLoc = fe.last_latitude !== null && fe.last_longitude !== null && fe.last_location_updated_at && (new Date().getTime() - new Date(fe.last_location_updated_at).getTime() < 86400000); // 24h
-    
-    const lat = hasLastLoc ? fe.last_latitude : (rec?.checkin_lat ?? zone?.meeting_lat ?? null);
-    const lng = hasLastLoc ? fe.last_longitude : (rec?.checkin_lng ?? zone?.meeting_lng ?? null);
-    
+    // Position precedence (live heartbeat → check-in point → zone meeting point)
+    // and its provenance live in resolveLivePosition so they can be unit-tested.
+    const pos = resolveLivePosition(fe, rec, zone);
+    const lat = pos.lat;
+    const lng = pos.lng;
+
     return {
       id: fe.id, 
       name: fe.name, 
@@ -584,6 +582,11 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
       checkout_at: rec?.checkout_at || null,
       lat,
       lng,
+      // Where lat/lng came from ('live' | 'checkin' | 'zone' | null) and when it
+      // was captured, so the map can label a stale/fallback pin honestly.
+      location_source: pos.source,
+      location_captured_at: pos.captured_at,
+      // NOTE: this is the CHECK-IN address, not the rep's current position.
       address: rec?.checkin_address || null,
       total_hours: enrichWithHours(rec)?.total_hours || null,
       is_regularised: rec?.is_regularised || false,
