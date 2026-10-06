@@ -5,7 +5,8 @@ import { AuthRequest } from '../types';
 import { asyncHandler, AppError, ok, created, badRequest, conflict, notFound, forbidden, sendSuccess, todayDate, dbToday, isoDate, isUUID, scopeOwnOrg, parseAppDate, formatAppDate } from '../utils';
 import { isWithinGeofence } from '../lib/haversine';
 import { DEMO_ORG_ID, isDemo, getMockAttendanceToday, getMockAttendanceHistory } from '../utils/demoData';
-import { getPagination, buildPaginatedResult } from '../utils/pagination';
+import { getPagination } from '../utils/pagination';
+import { shapeAttendanceHistory } from '../lib/attendanceHistory';
 import { logger } from '../lib/logger';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 
@@ -430,7 +431,7 @@ export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, buildPaginatedResult(getMockAttendanceHistory(isoDate(new Date())), 3, 1, 20));
+  if (isDemo(user)) return ok(res, shapeAttendanceHistory(getMockAttendanceHistory(isoDate(new Date())), 3, 1, 20));
   const { page, limit, from, to } = getPagination(req.query.page as string, req.query.limit as string);
   const { data, error, count } = await supabaseAdmin
     .from('attendance')
@@ -441,7 +442,7 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (error) { badRequest(res, error.message); return; }
   const results = (data || []).map(enrichWithHours);
-  ok(res, buildPaginatedResult(results, count || 0, page, limit));
+  ok(res, shapeAttendanceHistory(results, count || 0, page, limit));
 });
 
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
