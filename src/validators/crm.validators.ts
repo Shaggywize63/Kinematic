@@ -194,7 +194,19 @@ const leadCreateBase = z.object({
 // while still rejecting an entirely nameless lead. Base object is kept
 // separate because .refine() returns a ZodEffects, which doesn't expose
 // .partial() for leadUpdateSchema below.
-export const leadCreateSchema = leadCreateBase.refine(
+// A visit scheduled from the lead form ("Schedule Visit"): the server creates the
+// planned activity in the same request as the lead, so it also works for a lead
+// created offline on a phone. Create-only on purpose — it is not part of
+// leadCreateBase, so leadUpdateSchema (a partial of the base) never accepts it.
+export const scheduleVisitSchema = z.object({
+  due_at: z.string().min(10).max(40).refine((s) => !Number.isNaN(Date.parse(s)), 'due_at must be a valid date and time'),
+  subject: z.string().trim().max(200).optional().nullable(),
+  type: z.string().trim().min(1).max(50).optional(),
+});
+
+export const leadCreateSchema = leadCreateBase.extend({
+  schedule_visit: scheduleVisitSchema.optional().nullable(),
+}).refine(
   (l) => Boolean((l.first_name ?? '').trim() || (l.last_name ?? '').trim()),
   { message: 'A lead name is required', path: ['last_name'] },
 );
@@ -739,8 +751,30 @@ export const draftEmailTemplateSchema = z.object({
 export const summarizeSchema = z.object({});
 
 // Settings — including new business_type for B2B/B2C
+// Per-client lead-form behaviour kept in crm_settings.config.lead_form. Everything is
+// optional, and a tenant without it behaves exactly as before.
+//   segment_labels  what to call the two lead types in the UI ("Dealer" / "Farmers"
+//                   instead of "B2B" / "B2C"); the stored values stay b2b / b2c
+//   address_on_b2b  B2B leads capture an address + map pin too (they only keep a
+//                   company and a contact otherwise)
+//   schedule_visit  which lead types get a "Schedule Visit" date + time on the form
+const segmentLabel = z.string().trim().min(1).max(40);
+export const leadFormConfigSchema = z.object({
+  segment_labels: z.object({ b2b: segmentLabel.optional(), b2c: segmentLabel.optional() }).strict().optional(),
+  address_on_b2b: z.boolean().optional(),
+  schedule_visit: z.object({ segments: z.array(z.enum(['b2b', 'b2c'])).max(2) }).strict().optional(),
+}).strict();
+
 export const settingsUpdateSchema = z.object({
-  config: z.record(z.unknown()).optional(),
+  config: z.record(z.unknown()).optional().superRefine((c, ctx) => {
+    if (!c || c.lead_form === undefined || c.lead_form === null) return;
+    const r = leadFormConfigSchema.safeParse(c.lead_form);
+    if (!r.success) {
+      for (const issue of r.error.issues) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lead_form', ...issue.path], message: issue.message });
+      }
+    }
+  }),
   business_type: z.enum(['b2b','b2c','both']).optional(),
 });
 

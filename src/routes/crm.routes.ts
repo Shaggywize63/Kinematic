@@ -28,6 +28,7 @@ import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as leadsSvc from '../services/crm/leads.service';
+import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
@@ -666,7 +667,7 @@ leads.post('/', wrap(async (req, res) => {
   // off before the lead insert (it's not a column on crm_leads), use it
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, ...rest } = parsed;
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, schedule_visit: scheduleVisit, ...rest } = parsed;
   // client_id is the tenant boundary — always derive it server-side from the
   // caller's scope (which honours a super-admin's X-Client-Id header), never from
   // the request body. See SECURITY_AUDIT_2026-07.md finding H-2.
@@ -767,7 +768,23 @@ leads.post('/', wrap(async (req, res) => {
     ? { auto_log_site_visit_prefill: { lead_id: lead.id, subject: buildSiteVisitSubject(lead), type: 'meeting' } }
     : {};
 
-  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse });
+  // "Schedule Visit" from the lead form: create the planned activity (the reminder
+  // service notifies the rep ~30 min before). The lead already exists, so a failure
+  // here must not fail the create — report it and let the app tell the rep.
+  let scheduledVisitResponse: Record<string, unknown> = {};
+  if (scheduleVisit && lead?.id) {
+    try {
+      const visit = await scheduledVisitSvc.createScheduledVisit({
+        org_id: orgId(req), user_id: userId(req), lead: lead as unknown as Record<string, unknown>, visit: scheduleVisit as scheduledVisitSvc.ScheduleVisitInput,
+      });
+      scheduledVisitResponse = { scheduled_visit: visit };
+    } catch (e) {
+      console.warn(`[schedule_visit] could not create the visit for lead ${lead.id}: ${(e as Error).message}`);
+      scheduledVisitResponse = { scheduled_visit_error: 'The lead was saved, but the visit could not be scheduled. Add it from Activities.' };
+    }
+  }
+
+  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse });
 }));
 // Approve / reject a pending lead. Restricted to managers — a supervisor/admin
 // role, or any user with HR-module access (matches "notify the manager or a

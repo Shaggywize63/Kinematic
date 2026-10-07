@@ -33,6 +33,9 @@ import {
   listPolicies, policyUserOf, priorMonthSpend, resolvePolicy, resolvePolicyForUserId, toClientShape, updatePolicy,
 } from './policy.service';
 import { assertReceiptsOwned, signReceipt } from './receipts.service';
+import {
+  ODOMETER_KEYS, ODOMETER_PHOTO_KEYS, assertOdometerOrder, assertOdometerStorable, hasOdometerInput, priceVehicleLine, vehicleFlowOn,
+} from './vehicleAllowance';
 
 export type { Actor } from './access';
 
@@ -195,12 +198,23 @@ export interface ClaimItemInput {
   merchant?: string | null;
   receipt_url?: string | null;
   ai_extracted?: any;
+  // Travel allowance by vehicle — only meaningful under a policy with vehicle_rates.
+  vehicle_type?: string | null;
+  odometer_start?: number | null;
+  odometer_end?: number | null;
+  odometer_start_photo_url?: string | null;
+  odometer_end_photo_url?: string | null;
 }
 
 const validItems = (items: ClaimItemInput[] | undefined) =>
   (items ?? []).filter((i) => i && (CATEGORIES as readonly string[]).includes(i.category as string))
-    // "" is how a client that omits nulls asks for the receipt to be removed.
-    .map((i) => (i.receipt_url === '' ? { ...i, receipt_url: null } : i));
+    // "" is how a client that omits nulls asks for the receipt (or an odometer photo) to be removed.
+    .map((i) => {
+      const cleared: Record<string, null> = {};
+      if (i.receipt_url === '') cleared.receipt_url = null;
+      for (const k of ODOMETER_PHOTO_KEYS) if ((i as any)[k] === '') cleared[k] = null;
+      return Object.keys(cleared).length ? { ...i, ...cleared } : i;
+    });
 
 /** A mileage line with a distance but no amount is priced at the policy rate. */
 function priceMileage<T extends { category?: string | null; amount?: number | null; distance_km?: number | null }>(items: T[], rate: number): T[] {
@@ -208,12 +222,33 @@ function priceMileage<T extends { category?: string | null; amount?: number | nu
     ? { ...i, amount: round2(Number(i.distance_km) * rate) } : i));
 }
 
-const itemRow = (claim_id: string, org_id: string, i: ClaimItemInput) => ({
-  claim_id, org_id, category: i.category, item_date: i.item_date ?? null, description: i.description ?? null,
-  amount: Number(i.amount || 0), distance_km: i.distance_km ?? null, from_location: i.from_location ?? null,
-  to_location: i.to_location ?? null, merchant: i.merchant ?? null, receipt_url: i.receipt_url ?? null,
-  ai_extracted: i.ai_extracted ?? null,
-});
+/**
+ * Price the lines under the policy. With vehicle rates, a mileage line's distance and amount come
+ * from the odometer readings and the chosen vehicle; otherwise a mileage line with a distance and
+ * no amount is priced at the single policy rate, exactly as before.
+ */
+function priceItems<T extends ClaimItemInput>(items: T[], rules: ExpensePolicy['rules']): T[] {
+  if (vehicleFlowOn(rules)) {
+    return items.map((i) => (i.category === 'mileage' ? priceVehicleLine(i as any, rules.vehicle_rates!) as T : i));
+  }
+  return priceMileage(items, rules.mileage_rate);
+}
+
+const itemRow = (claim_id: string, org_id: string, i: ClaimItemInput) => {
+  const row: Record<string, unknown> = {
+    claim_id, org_id, category: i.category, item_date: i.item_date ?? null, description: i.description ?? null,
+    amount: Number(i.amount || 0), distance_km: i.distance_km ?? null, from_location: i.from_location ?? null,
+    to_location: i.to_location ?? null, merchant: i.merchant ?? null, receipt_url: i.receipt_url ?? null,
+    ai_extracted: i.ai_extracted ?? null,
+  };
+  // Odometer columns only exist after migrations/expense_odometer.sql, so they are written only
+  // when the line actually carries them — every other claim's insert is byte-for-byte unchanged.
+  for (const k of ODOMETER_KEYS) {
+    const v = (i as any)[k];
+    if (v !== undefined) row[k] = v ?? null;
+  }
+  return row;
+};
 
 export async function listMyClaims(actor: Actor, status?: string) {
   let q = supabaseAdmin.from('expense_claims').select('*')
@@ -238,15 +273,25 @@ export async function getClaim(actor: Actor, id: string) {
   await stampNames([c]);
   await stampNames((approvals as any[]) ?? []);
   // A viewable link per receipt (short-lived; gated by the visibility check above).
-  const withReceipts = await Promise.all(items.map(async (it) => ({ ...it, receipt_signed_url: await signReceipt(actor.org_id, it.receipt_url) })));
+  const withReceipts = await Promise.all(items.map(async (it) => ({
+    ...it,
+    receipt_signed_url: await signReceipt(actor.org_id, it.receipt_url),
+    // Same for the odometer photos (only present on lines recorded under a vehicle policy).
+    ...(it.odometer_start_photo_url || it.odometer_end_photo_url ? {
+      odometer_start_photo_signed_url: await signReceipt(actor.org_id, it.odometer_start_photo_url),
+      odometer_end_photo_signed_url: await signReceipt(actor.org_id, it.odometer_end_photo_url),
+    } : {}),
+  })));
   return { ...c, items: withReceipts, approvals: approvals ?? [] };
 }
 
 /** Create a draft claim with its lines. Totals are computed from the lines. */
 export async function createClaim(actor: Actor, body: { title?: string | null; items?: ClaimItemInput[] }) {
   const policy = await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
-  const items = priceMileage(validItems(body.items), policy.rules.mileage_rate);
+  const items = priceItems(validItems(body.items), policy.rules);
   assertReceiptsOwned(actor, items);
+  assertOdometerOrder(items);
+  await assertOdometerStorable(items);
   const total = round2(items.reduce((s, i) => s + Number(i.amount || 0), 0));
   const distance = round2(items.filter((i) => i.category === 'mileage').reduce((s, i) => s + Number(i.distance_km || 0), 0));
 
@@ -306,7 +351,7 @@ async function analyze(org_id: string, claimUserId: string, claimId: string, ite
 export async function checkClaim(actor: Actor, body: { items?: ClaimItemInput[]; claim_id?: string }) {
   const policy = await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
   // Unsaved lines are identified by their position, so a warning can point at a row.
-  const items = priceMileage(validItems(body.items), policy.rules.mileage_rate).map((i, idx) => ({ ...i, id: String(idx) }));
+  const items = priceItems(validItems(body.items), policy.rules).map((i, idx) => ({ ...i, id: String(idx) }));
   const a = await analyze(actor.org_id, actor.id, body.claim_id ?? '00000000-0000-0000-0000-000000000000', items, policy, null);
   return {
     policy: toClientShape(policy),
@@ -366,9 +411,11 @@ export async function updateClaim(actor: Actor, id: string, body: { title?: stri
     throw new AppError(400, 'This claim has already been approved and can no longer be edited', 'BAD_STATE');
   }
   const policy = c.policy_snapshot?.rules ? (c.policy_snapshot as ExpensePolicy) : await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
-  const items = priceMileage(validItems(body.items), policy.rules.mileage_rate);
+  const items = priceItems(validItems(body.items), policy.rules);
   if (!items.length) throw new AppError(400, 'Add at least one line', 'EMPTY');
   assertReceiptsOwned(actor, items);
+  assertOdometerOrder(items);
+  await assertOdometerStorable(items);
 
   const existing = await loadItems(id);
   const byId = new Map(existing.map((i) => [i.id, i]));
@@ -381,6 +428,7 @@ export async function updateClaim(actor: Actor, id: string, body: { title?: stri
       // A client that never heard of receipts must not wipe the one on file.
       if (i.receipt_url === undefined) row.receipt_url = prev.receipt_url;
       if (i.ai_extracted === undefined) row.ai_extracted = prev.ai_extracted;
+      // (An odometer field the client did not send is simply left out of the update, so it keeps its value.)
       const { error } = await supabaseAdmin.from('expense_claim_items').update(row).eq('id', prev.id);
       if (error) throw new AppError(500, error.message, 'DB');
     } else {
@@ -441,6 +489,19 @@ export async function submitClaim(actor: Actor, id: string) {
   let items = await loadItems(id);
   if (!items.length) throw new AppError(400, 'Add at least one line before submitting', 'EMPTY');
 
+  // Travel allowance by vehicle: a draft may have been saved before the rates changed, so price
+  // each trip at the policy's current rate for its vehicle.
+  if (vehicleFlowOn(policy.rules)) {
+    for (const it of items) {
+      if (it.category !== 'mileage') continue;
+      const priced = priceVehicleLine(it as any, policy.rules.vehicle_rates!) as any;
+      if (Number(priced.amount) !== Number(it.amount) || Number(priced.distance_km ?? 0) !== Number(it.distance_km ?? 0)) {
+        await supabaseAdmin.from('expense_claim_items').update({ amount: priced.amount, distance_km: priced.distance_km }).eq('id', it.id);
+        it.amount = priced.amount;
+        it.distance_km = priced.distance_km;
+      }
+    }
+  }
   // Price any mileage line that has a distance but no amount yet.
   for (const it of items) {
     if (it.category === 'mileage' && Number(it.distance_km) > 0 && !(Number(it.amount) > 0)) {

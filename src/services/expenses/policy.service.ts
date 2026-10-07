@@ -17,6 +17,7 @@ import { currentProjectKey } from '../../lib/projects';
 import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
 import { Actor, isApprover } from './access';
+import { VehicleRate, normalizeVehicleRates, odometerProblems } from './vehicleAllowance';
 
 export const CATEGORIES = ['mileage', 'travel', 'food', 'lodging', 'fuel', 'toll', 'misc'] as const;
 export type Category = (typeof CATEGORIES)[number];
@@ -45,6 +46,14 @@ export interface PolicyRules {
   /** 'flag' lets a violating claim through to the approver; 'block' stops submission. */
   enforcement: 'flag' | 'block';
   categories: Record<Category, CategoryRule>;
+  /**
+   * Travel allowance by vehicle: the vehicle types this policy pays for and each one's
+   * per-km cost. When non-empty, a mileage line is priced from the odometer readings
+   * and the chosen vehicle instead of one flat `mileage_rate` (see vehicleAllowance.ts).
+   */
+  vehicle_rates?: VehicleRate[];
+  /** With vehicle rates: whether a photo of each odometer reading is mandatory (default true). */
+  odometer_photos_required?: boolean;
 }
 
 export interface AppliesTo {
@@ -147,6 +156,8 @@ export function normalizeRules(raw: any, legacy?: any): PolicyRules {
     escalate_over: numOrNull(r.escalate_over ?? legacy?.escalate_over),
     enforcement: r.enforcement === 'block' ? 'block' : 'flag',
     categories,
+    vehicle_rates: normalizeVehicleRates(r.vehicle_rates),
+    odometer_photos_required: r.odometer_photos_required !== false,
   };
 }
 
@@ -305,6 +316,15 @@ export function evaluateAgainstPolicy(
     if (CATEGORIES.includes(c) && R.categories[c].enabled === false) {
       add({ code: 'category_not_allowed', severity: 'high', category: c, item_id: it.id,
         detail: `${c} expenses are not reimbursable under "${policy.name}".` }, true);
+    }
+  }
+
+  // 1b. Travel allowance by vehicle: a mileage line needs its vehicle, both odometer
+  // readings and (by default) a photo of each. Always blocking — a rep cannot submit
+  // a trip the approver has nothing to verify.
+  for (const it of items) {
+    for (const prob of odometerProblems(it, R)) {
+      add({ code: prob.code, severity: 'high', category: 'mileage', item_id: it.id, detail: prob.detail }, true);
     }
   }
 
