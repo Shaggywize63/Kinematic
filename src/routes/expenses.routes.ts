@@ -98,8 +98,6 @@ const itemSchema = z.object({
   from_location: z.string().max(200).optional().nullable(),
   to_location: z.string().max(200).optional().nullable(),
   merchant: z.string().max(200).optional().nullable(),
-  // Only web links or our own storage objects — never javascript: or data: URIs.
-  // An empty string means "remove the receipt" — for clients (the Android app) that cannot send an explicit null.
   // Travel allowance by vehicle (policies with vehicle_rates): the vehicle and the odometer
   // readings before / after, each with a photo. Distance and amount are computed server-side.
   vehicle_type: z.string().max(40).optional().nullable(),
@@ -107,6 +105,8 @@ const itemSchema = z.object({
   odometer_end: num(100_000_000).optional().nullable(),
   odometer_start_photo_url: photoRef.optional().nullable(),
   odometer_end_photo_url: photoRef.optional().nullable(),
+  // Only web links or our own storage objects — never javascript: or data: URIs.
+  // An empty string means "remove the receipt" — for clients (the Android app) that cannot send an explicit null.
   receipt_url: z.union([
     z.literal(''),
     z.string().url().max(2048).refine((u) => /^https?:\/\//i.test(u), 'Receipt must be a web link'),
