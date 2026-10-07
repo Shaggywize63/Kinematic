@@ -18,19 +18,64 @@ channels the recipient has a token for, plus the bell.
 
 ### Reliability rules (why notifications now actually arrive)
 
-- **`type` is always `'general'`.** `notification_type` is a Postgres ENUM;
+- **`type` is mostly `'general'`.** `notification_type` is a Postgres ENUM;
   inserting an unknown value fails **silently** and the notification vanishes.
   (This is what previously dropped `security_alert` / `daily_briefing` and the
-  `automation` action.) We categorise with **`data.kind`** instead — no schema
-  change ever needed for a new notification kind. See `src/services/notify.ts`.
-- **`data.kind`** is the routing key the mobile apps deep-link on. A kind with
-  no dedicated deep-link handler still shows the push (title + body) and the
-  bell entry — delivery never depends on the client knowing the kind.
+  `automation` action.) Prefer `'general'` plus **`data.kind`** for anything
+  new — no schema change ever needed for a new notification kind. See
+  `src/services/notify.ts`. (Some older writers use their own row `type`: `leave`,
+  `attendance`, `route_deviation`, `sos`, `security_alert`, `mention`, `message`,
+  `broadcast`, `daily_briefing`, `crm_activity_due`, `crm_conversation`,
+  `finance_invoice_due` — each must exist in the enum of every tenant database.)
+- **`data.kind` is the routing key** the mobile apps open a screen from. Older
+  writers used other conventions (`data.type`, `data.nudge_kind`, or nothing but
+  the row `type`), so the server **normalises** it where a row leaves the server —
+  in the push payload and in `GET /notifications` — see "Tap routing" below. A
+  kind with no dedicated screen still shows the push and the bell entry;
+  delivery never depends on the client knowing the kind.
 - **Best-effort**: a failed insert is logged, never thrown, so a notification
   can never break the business action (or scan) that triggered it.
 - **Deduped**: scan-driven alerts de-dupe so a re-run never double-notifies —
   either via a per-row `*_alerted_at` column or by checking the notifications
   table itself (keyed on `data.kind` + the entity id).
+
+### Tap routing — one `kind` per notification
+
+`src/lib/notificationRoute.ts` resolves a row's discriminator, in this order:
+`data.kind` → `data.type` (leave, attendance regularization, route deviation,
+call analysis) → `data.nudge_kind` (as `kini_<nudge>`) → the row `type`
+(sos, security_alert, mention, message, broadcast) → `general`. The result is
+always present as `data.kind` in **both** the FCM/APNs payload and the rows
+returned by `GET /notifications`, so a tap on a push and a tap in the in-app list
+route identically. Stored rows are not modified and older app builds simply see
+one extra key.
+
+The apps map `kind` plus the entity ids below to a screen. When a kind is unknown
+or its id is missing they fall back to the in-app notification list.
+
+| `kind` | Entity keys in the payload | Opens |
+|--------|----------------------------|-------|
+| `lead_assigned`, `new_lead`, `lead_pending_approval`, `lead_approval_decided`, `lead_from_google_ads`, `conversation_ready`, `crm_lead_stagnant`, `crm_lead_*escalation` | `lead_id` | Lead detail |
+| `deal_assigned`, `deal_won`, `deal_lost`, `deal_stage_changed`, `crm_deal_closing_soon`, `crm_deal_overdue` | `deal_id` | Deal detail |
+| `activity_assigned`, `crm_task_overdue` | `activity_id`, and `lead_id` / `deal_id` when linked | The linked lead (else deal), else Activities |
+| `automation` | `entity` (`lead`/`deal`/`contact`/`account`) + `entity_id` | That record |
+| `expense_submitted`, `expense_decision`, `expense_escalated`, `expense_reimbursed`, `expense_cancelled` | `claim_id` | Expense claim |
+| `leave_request`, `leave_cancelled` (both go to the approver) | `request_id` | Leave approvals |
+| `leave_decision` | `request_id`, `decision` | My leave |
+| `att_reg_request` / `att_reg_decision` | `request_id` | Regularizations |
+| `missed_visits` | `plan_id`, `plan_date` | Route plan |
+| `sos` | `sos_id`, `exec_id`, `lat`, `lng` | SOS |
+| `message` | `thread_id` | Chat thread |
+| `mention` | `source_kind`, `source_id`; `thread_id` (chat) or `lead_id` (lead update) | The chat thread, or the lead; else the notification list |
+| `broadcast` | `broadcast_id` | Broadcasts |
+| `crm_home` | — | CRM Home |
+| `kini_cold_deals` | `count` | Deals |
+| `kini_no_checkin` | — | Attendance / check-in |
+| `low_stock`, `stock_expiry` | — (`batch_id`, `sku_id` for expiry) | Stock |
+| anything else (`route_deviation`, `security_alert`, `location_off`, `kini_reminder`, `finance_invoice_due`, …) | — | The notification list |
+
+Keep ids under these key names when adding a notification, and prefer
+`data.kind` over `data.type` / `data.nudge_kind` for anything new.
 
 ### Shared helper — `src/services/notify.ts`
 

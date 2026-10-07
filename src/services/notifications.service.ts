@@ -20,6 +20,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { messaging } from '../lib/firebase';
 import { sendApns, apnsEnabled } from '../lib/apns';
 import { logger } from '../lib/logger';
+import { routedData } from '../lib/notificationRoute';
 
 export interface DispatchResult {
   scanned: number;
@@ -40,7 +41,7 @@ export async function dispatchPendingPushes(opts?: {
   // resurrect 30-day-old notifications.
   const { data: rows, error } = await supabaseAdmin
     .from('notifications')
-    .select('id, user_id, title, body, data')
+    .select('id, user_id, title, body, type, data')
     .is('sent_at', null)
     .gte('created_at', new Date(Date.now() - maxAgeHours * 60 * 60 * 1000).toISOString())
     .order('created_at', { ascending: true })
@@ -83,13 +84,12 @@ export async function dispatchPendingPushes(opts?: {
       continue;
     }
 
-    // Flat string-to-string data payload — shared by both transports.
+    // Flat string-to-string data payload — shared by both transports. `kind` is
+    // always present (see lib/notificationRoute.ts) so the app can route the tap.
     const dataPayload: Record<string, string> = { notification_id: row.id };
-    if (row.data && typeof row.data === 'object') {
-      for (const [k, v] of Object.entries(row.data as Record<string, unknown>)) {
-        if (v === null || v === undefined) continue;
-        dataPayload[k] = typeof v === 'string' ? v : JSON.stringify(v);
-      }
+    for (const [k, v] of Object.entries(routedData(row))) {
+      if (v === null || v === undefined) continue;
+      dataPayload[k] = typeof v === 'string' ? v : JSON.stringify(v);
     }
 
     try {

@@ -52,7 +52,8 @@ router.post(
     // showing the user a phantom send.
     const mentionIds = parseMentionIds(parsed.body);
     if (mentionIds.length > 0) {
-      await persistMentions(auth, 'lead_update', update.id, mentionIds);
+      // lead_id lets a tap on the mention open the lead (source_id is the update id).
+      await persistMentions(auth, 'lead_update', update.id, mentionIds, { lead_id: req.params.leadId });
     }
     return res.status(201).json({ success: true, data: update });
   }),
