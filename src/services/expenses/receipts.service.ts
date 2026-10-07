@@ -96,13 +96,20 @@ function parseRef(url: string): { bucket: string; path: string } | null {
  * links pass through untouched. This is what stops someone attaching another
  * person's (or another tenant's) object as their "receipt".
  */
-export function assertReceiptsOwned(actor: Actor, items: Array<{ receipt_url?: string | null }>): void {
+export function assertReceiptsOwned(
+  actor: Actor,
+  items: Array<{ receipt_url?: string | null; odometer_start_photo_url?: string | null; odometer_end_photo_url?: string | null }>,
+): void {
+  // The odometer photos are uploaded through the same endpoint as receipts, so they get
+  // the same rule: only the claimant's own objects.
   for (const it of items) {
-    if (!it.receipt_url) continue;
-    const ref = parseRef(it.receipt_url);
-    if (!ref) continue;
-    if (!ref.path.startsWith(`${actor.org_id}/${actor.id}/`) || ref.path.includes('..')) {
-      throw new AppError(400, 'A receipt on this claim was not uploaded by you', 'RECEIPT_FORBIDDEN');
+    for (const url of [it.receipt_url, it.odometer_start_photo_url, it.odometer_end_photo_url]) {
+      if (!url) continue;
+      const ref = parseRef(url);
+      if (!ref) continue;
+      if (!ref.path.startsWith(`${actor.org_id}/${actor.id}/`) || ref.path.includes('..')) {
+        throw new AppError(400, 'A receipt or photo on this claim was not uploaded by you', 'RECEIPT_FORBIDDEN');
+      }
     }
   }
 }

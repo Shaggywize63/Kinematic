@@ -177,12 +177,21 @@ export function cell(v: unknown): string {
 export async function claimsCsv(actor: Actor, f: ClaimFilters): Promise<string> {
   const claims = await fetchForReport(actor, f);
   const items = await itemsFor(claims.map((c) => c.id));
+  return buildClaimsCsv(claims, items);
+}
+
+/** The CSV text for these claims and their lines (pure, so it can be tested without a database). */
+export function buildClaimsCsv(claims: any[], items: any[]): string {
   const byClaim = new Map<string, any[]>();
   for (const it of items) byClaim.set(it.claim_id, [...(byClaim.get(it.claim_id) ?? []), it]);
 
   const head = ['Claim no', 'Claimant', 'Employee ID', 'Status', 'Policy', 'Submitted', 'Decided', 'Decided by', 'Claim remark',
     'Category', 'Line date', 'Merchant', 'Description', 'Amount', 'Line status', 'Line remark', 'Receipt',
     'Claim total', 'Approved amount', 'Reimbursed on', 'Reimbursement ref'];
+  // Travel allowance by vehicle: appended only when a claim in this report has odometer data, so
+  // every other tenant's export keeps exactly the columns it has always had.
+  const withTrip = items.some((it) => it.vehicle_type || it.odometer_start != null || it.odometer_end != null);
+  if (withTrip) head.push('Distance (km)', 'Vehicle', 'Odometer before', 'Odometer after');
   const out: string[] = [head.map(cell).join(',')];
   const day = (d: unknown) => (d ? String(d).slice(0, 10) : '');
   for (const c of claims) {
@@ -192,6 +201,7 @@ export async function claimsCsv(actor: Actor, f: ClaimFilters): Promise<string> 
         c.claim_no, c.user_name, c.employee_id, c.status, c.policy_name, day(c.submitted_at), day(c.reviewed_at), c.reviewer_name, c.review_note,
         it.category, day(it.item_date), it.merchant, it.description, it.amount, it.decision ?? '', it.decision_note, it.receipt_url ? 'Yes' : 'No',
         c.total_amount, c.approved_amount ?? '', day(c.reimbursed_at), c.reimbursed_ref,
+        ...(withTrip ? [it.distance_km ?? '', it.vehicle_type ?? '', it.odometer_start ?? '', it.odometer_end ?? ''] : []),
       ].map(cell).join(','));
     }
   }
