@@ -45,9 +45,15 @@ async function visibleClaimIds(actor: Actor): Promise<string[] | null> {
   return Array.from(new Set(((data as any[]) ?? []).map((r) => r.claim_id)));
 }
 
-/** Build the filtered query. Returns null when the filters can match nothing. */
+/**
+ * Build the filtered query. Returns null when the filters can match nothing.
+ *
+ * The builder is returned INSIDE an object on purpose: a PostgREST query builder is awaitable, so
+ * `return q` from an async function would await it — running the query and handing the caller the
+ * result instead of the builder, and the caller's `.order(...)` then throws "q.order is not a function".
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function buildQuery(actor: Actor, f: ClaimFilters, columns: string, count: boolean): Promise<any | null> {
+async function buildQuery(actor: Actor, f: ClaimFilters, columns: string, count: boolean): Promise<{ q: any } | null> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let q: any = supabaseAdmin.from('expense_claims').select(columns, count ? { count: 'exact' } : undefined).eq('org_id', actor.org_id);
   if (actor.client_id) q = q.eq('client_id', actor.client_id);
@@ -76,7 +82,7 @@ async function buildQuery(actor: Actor, f: ClaimFilters, columns: string, count:
     const uids = ((us as any[]) ?? []).map((u) => u.id);
     q = q.or([`claim_no.ilike.%${term}%`, `title.ilike.%${term}%`, ...(uids.length ? [`user_id.in.(${uids.join(',')})`] : [])].join(','));
   }
-  return q;
+  return { q };
 }
 
 async function applyCity(rows: any[], city?: string) {
@@ -90,9 +96,9 @@ async function applyCity(rows: any[], city?: string) {
 export async function listAllClaims(actor: Actor, f: ClaimFilters) {
   const limit = Math.min(100, Math.max(1, Math.round(Number(f.limit) || 25)));
   const page = Math.max(1, Math.round(Number(f.page) || 1));
-  const q = await buildQuery(actor, f, '*', true);
-  if (!q) return { rows: [], total: 0, page, limit };
-  const { data, error, count } = await q.order('submitted_at', { ascending: false, nullsFirst: false })
+  const built = await buildQuery(actor, f, '*', true);
+  if (!built) return { rows: [], total: 0, page, limit };
+  const { data, error, count } = await built.q.order('submitted_at', { ascending: false, nullsFirst: false })
     .order('created_at', { ascending: false }).range((page - 1) * limit, page * limit - 1);
   if (error) throw new AppError(500, error.message, 'DB');
   const rows = await applyCity((data as any[]) ?? [], f.city);
@@ -100,9 +106,9 @@ export async function listAllClaims(actor: Actor, f: ClaimFilters) {
 }
 
 async function fetchForReport(actor: Actor, f: ClaimFilters) {
-  const q = await buildQuery(actor, f, '*', false);
-  if (!q) return [];
-  const { data, error } = await q.order('submitted_at', { ascending: false, nullsFirst: false }).limit(EXPORT_CAP);
+  const built = await buildQuery(actor, f, '*', false);
+  if (!built) return [];
+  const { data, error } = await built.q.order('submitted_at', { ascending: false, nullsFirst: false }).limit(EXPORT_CAP);
   if (error) throw new AppError(500, error.message, 'DB');
   return stampNames(await applyCity((data as any[]) ?? [], f.city));
 }
