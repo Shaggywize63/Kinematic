@@ -76,12 +76,18 @@ When a policy has at least one vehicle rate, a **mileage** line is no longer a t
 ### One-time database migration (required before odometer data can be saved)
 
 ```bash
-npm run db:migrate migrations/expense_odometer.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f migrations/expense_odometer.sql
 ```
 
 It is additive (`ADD COLUMN IF NOT EXISTS` on `expense_claim_items`). Until it has run, a claim line that
 carries odometer data is refused with HTTP 409 `ODOMETER_NOT_ENABLED`; everything else keeps working.
-Run it against the database the **Agrisynx** project uses.
+Run it against the database the **Agrisynx** project uses, connecting as the table owner.
+
+> Status: applied to the **Kinematic** project (Agrisynx's database) on 2026-10-07; the Tata project has
+> not had it and does not need it unless it starts using vehicle allowances.
+>
+> `npm run db:migrate` calls an `exec_migration` RPC that the self-hosted AWS Postgres projects do not
+> have, so use `psql` as above (from a task inside the VPC — the database is not publicly reachable).
 
 ## 4. Seeding the two lead forms
 
