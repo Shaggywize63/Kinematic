@@ -11,6 +11,7 @@ import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlert
 import * as hierarchy from '../services/crm/hierarchy.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { normalizeMobile, newUserContactProblem } from '../lib/userContact';
+import { userAccessRows } from '../lib/userAccessRows';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -663,37 +664,24 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
-  // 5. Save permissions and city assignments — a SINGLE insert each, stamped
-  // with org_id. (Previously each was inserted twice: once here with org_id and
-  // again below without it, leaving duplicate, org-less rows.)
-  const tasks = [];
-
-  if (Array.isArray(permissions) && permissions.length > 0) {
-    tasks.push(
-      supabaseAdmin.from('user_module_permissions').insert(
-        permissions.map((p: string) => ({
-          user_id: authId,
-          module_id: p,
-          org_id: admin.org_id
-        }))
-      )
-    );
-  }
-
-  if (Array.isArray(assigned_cities) && assigned_cities.length > 0) {
-    tasks.push(
-      supabaseAdmin.from('user_city_assignments').insert(
-        assigned_cities.map((c: string) => ({
-          user_id: authId,
-          city_id: c,
-          org_id: admin.org_id
-        }))
-      )
-    );
-  }
-
-  if (tasks.length > 0) {
-    await Promise.all(tasks);
+  // 5. Save permissions and city assignments — one insert each. Neither table has an org_id
+  // column (just user_id + module_id / city_id), so the old inserts that stamped one were rejected
+  // by PostgREST; with the result never checked, the user was created without the modules and
+  // cities the admin picked. Write the real columns, and if either insert fails undo the whole
+  // creation (the profile delete cascades to any rows already written) and say what failed.
+  const { permissionRows, cityRows } = userAccessRows(authId, permissions, assigned_cities)
+  const writes = [
+    permissionRows.length ? { what: 'module permissions', run: supabaseAdmin.from('user_module_permissions').insert(permissionRows) } : null,
+    cityRows.length ? { what: 'city assignments', run: supabaseAdmin.from('user_city_assignments').insert(cityRows) } : null,
+  ].filter((w): w is NonNullable<typeof w> => w !== null)
+  const outcomes = await Promise.all(writes.map((w) => w.run))
+  const failedAt = outcomes.findIndex((o) => o.error)
+  if (failedAt >= 0) {
+    const err = outcomes[failedAt].error!
+    await supabaseAdmin.from('users').delete().eq('id', authId)
+    await supabaseAdmin.auth.admin.deleteUser(authId)
+    const badRef = err.code === '23503' // unknown module / city id
+    throw new AppError(badRef ? 400 : 500, `Could not save the user's ${writes[failedAt].what}: ${err.message}`, badRef ? 'VALIDATION_ERROR' : 'DB_ERROR')
   }
 
   sendSuccess(res, { ...data, permissions: permissions || [], assigned_cities: assigned_cities || [] }, 'User created', 201)
