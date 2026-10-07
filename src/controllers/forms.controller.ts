@@ -38,6 +38,12 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   // EVERY published form from the app (iOS always sends is_active=true).
   if (is_active !== undefined) {
     q = is_active === 'true' ? q.eq('status', 'published') : q.neq('status', 'published');
+  } else {
+    // The Android app sends no is_active filter, so without this it lists EVERY form —
+    // including ones an admin has archived (retired) in the builder — and reps keep filling
+    // in the retired copy. Archived forms are only returned when asked for explicitly
+    // (?is_active=false); drafts are still returned, as before.
+    q = q.neq('status', 'archived');
   }
 
   // Prioritize activity-specific forms over global ones, then by creation date
