@@ -6,6 +6,7 @@ import { clearEmailProjectCache } from '../lib/projects';
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
+import { routedData } from '../lib/notificationRoute';
 import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlerts, getMockUsers, getMockGrievances } from '../utils/demoData';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
@@ -160,7 +161,10 @@ export const getNotifications = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*', { count: 'exact' }).eq('user_id', user.id)
     .order('created_at', { ascending: false }).range(offset, offset + limit - 1)
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
-  sendPaginated(res, data || [], count || 0, page, limit)
+  // Every row carries `data.kind` so a tap in the in-app list routes exactly like
+  // a tap on the push (see lib/notificationRoute.ts).
+  const rows = (data || []).map((n: any) => ({ ...n, data: routedData(n) }))
+  sendPaginated(res, rows, count || 0, page, limit)
 })
 
 export const markRead = asyncHandler<AuthRequest>(async (req, res) => {

@@ -222,6 +222,8 @@ export async function persistMentions(
   source_kind: SourceKind,
   source_id: string,
   mentioned_user_ids: string[],
+  /** Extra routing keys for the notification (e.g. `thread_id` for a chat message). */
+  extra: Record<string, unknown> = {},
 ): Promise<void> {
   if (mentioned_user_ids.length === 0) return;
   const me = req.user!;
@@ -252,7 +254,7 @@ export async function persistMentions(
     title,
     body:    bodyByKind[source_kind],
     type:    'mention',
-    data:    { source_kind, source_id, mentioner_id: me.id },
+    data:    { source_kind, source_id, mentioner_id: me.id, ...extra },
   }));
   await supabaseAdmin.from('notifications').insert(notifRows);
 
@@ -498,7 +500,8 @@ export async function sendMessage(req: AuthRequest, threadId: string, body: stri
   // specifically tagged user; this notifies the wider thread).
   const mentionIds = parseMentionIds(text);
   if (mentionIds.length > 0) {
-    await persistMentions(req, 'message', (msg as any).id, mentionIds);
+    // thread_id lets a tap on the mention open the conversation (source_id is the message id).
+    await persistMentions(req, 'message', (msg as any).id, mentionIds, { thread_id: threadId });
   }
 
   // Fan out a generic "new message" notification to thread members.

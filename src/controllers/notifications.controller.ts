@@ -232,7 +232,8 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
     body: content,
     type: 'broadcast',
     is_read: false,
-    broadcast_id: broadcast?.id || null
+    broadcast_id: broadcast?.id || null,
+    data: { kind: 'broadcast', broadcast_id: broadcast?.id || null }
   }));
 
   // Self-ping sender
@@ -243,7 +244,8 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
     body: content,
     type: 'broadcast',
     is_read: false,
-    broadcast_id: broadcast?.id || null
+    broadcast_id: broadcast?.id || null,
+    data: { kind: 'broadcast', broadcast_id: broadcast?.id || null }
   });
 
   const chunkSize = 100;
@@ -257,7 +259,8 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
   // client parses the data dict (type / lead_id / deal_id / task_id) and
   // routes its nav stack accordingly.
   if (send_push) {
-    const data = { title, body: content, type: 'broadcast' };
+    const data: Record<string, string> = { title, body: content, type: 'broadcast', kind: 'broadcast' };
+    if (broadcast?.id) data.broadcast_id = String(broadcast.id);
 
     const fcmTokens = (targetUsers as any[])
       .map(u => u.fcm_token)
