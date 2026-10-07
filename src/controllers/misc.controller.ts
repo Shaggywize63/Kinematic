@@ -10,6 +10,7 @@ import { routedData } from '../lib/notificationRoute';
 import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlerts, getMockUsers, getMockGrievances } from '../utils/demoData';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
+import { normalizeMobile, newUserContactProblem } from '../lib/userContact';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -518,16 +519,17 @@ function callerModuleSet(user: { permissions?: string[]; role_permissions?: stri
 }
 
 export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
-  const { name, mobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email, org_role_id } = req.body
+  const { name, mobile: rawMobile, password, app_password, role, zone_id, supervisor_id, employee_id, joined_date, city, email, org_role_id } = req.body
   const admin = req.user!
 
-  // Validate required fields
-  if (!name || !mobile || !password) {
-    throw new AppError(400, 'name, mobile and password are required', 'VALIDATION_ERROR')
+  // Validate required fields. A mobile number is optional; the person must be able to sign in,
+  // so one of mobile / email is required, and a mobile that is given must be 10 digits.
+  if (!name || !password) {
+    throw new AppError(400, 'name and password are required', 'VALIDATION_ERROR')
   }
-  if (!/^\d{10}$/.test(mobile)) {
-    throw new AppError(400, 'Mobile number must be exactly 10 digits', 'VALIDATION_ERROR')
-  }
+  const mobile = normalizeMobile(rawMobile)
+  const contactProblem = newUserContactProblem({ mobile, email })
+  if (contactProblem) throw new AppError(400, contactProblem, 'VALIDATION_ERROR')
   // Password policy (≥10 chars, no common/sequenced/repeated patterns).
   const pol = require('../middleware/security').validatePassword(password)
   if (!pol.ok) throw new AppError(400, pol.reason, 'WEAK_PASSWORD')
@@ -551,17 +553,20 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   // existence oracle) and strip PostgREST filter metacharacters from the
   // interpolated values so neither can break out of the .or() predicate.
   // SECURITY_AUDIT_2026-07.md finding M-2.
-  const safeMobile = String(mobile ?? '').replace(/[(),"\\]/g, '');
+  const safeMobile = mobile ? mobile.replace(/[(),"\\]/g, '') : '';
   const safeEmail = normEmail ? normEmail.replace(/[(),"\\]/g, '') : '';
-  const { data: existingUser, error: checkErr } = await supabaseAdmin
-    .from('users')
-    .select('id, name, mobile, email')
-    .eq('org_id', admin.org_id)
-    .or(`mobile.eq.${safeMobile}${safeEmail ? `,email.eq.${safeEmail}` : ''}`)
-    .maybeSingle();
+  const dupFilter = [safeMobile && `mobile.eq.${safeMobile}`, safeEmail && `email.eq.${safeEmail}`].filter(Boolean).join(',');
+  const { data: existingUser } = dupFilter
+    ? await supabaseAdmin
+        .from('users')
+        .select('id, name, mobile, email')
+        .eq('org_id', admin.org_id)
+        .or(dupFilter)
+        .maybeSingle()
+    : { data: null };
 
   if (existingUser) {
-    if (existingUser.mobile === mobile) throw new AppError(400, `Mobile ${mobile} is already registered with ${existingUser.name}`, 'DUPLICATE_ERROR');
+    if (mobile && existingUser.mobile === mobile) throw new AppError(400, `Mobile ${mobile} is already registered with ${existingUser.name}`, 'DUPLICATE_ERROR');
     if (email && existingUser.email?.toLowerCase() === email.toLowerCase().trim()) throw new AppError(400, `Email ${email} is already registered with ${existingUser.name}`, 'DUPLICATE_ERROR');
   }
 
@@ -577,7 +582,7 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (authErr) {
     const msg = authErr.message.toLowerCase().includes('already')
-      ? `Mobile ${mobile} is already registered`
+      ? (normEmail ? `Email ${normEmail} is already registered` : `Mobile ${mobile} is already registered`)
       : authErr.message
     throw new AppError(400, msg, 'AUTH_ERROR')
   }
@@ -603,7 +608,7 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
       org_id:        admin.org_id,
       client_id:     pickedClientId,
       name:          name.trim(),
-      mobile:        mobile.trim(),
+      mobile,                       // null when none was given (column is nullable — migrations/users_mobile_optional.sql)
       email:         normEmail || null,
       role:          role || 'executive',
       // Hierarchy role drives module access via org_roles.permissions; the
@@ -625,6 +630,17 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
       .insert(userData)
       .select('*, zones!zone_id(name)')
       .single()
+
+  // A failed insert used to be ignored: the sign-in account created above stayed behind with no
+  // profile and the caller was told "User created". Undo it and say what went wrong.
+  if (error || !data) {
+    await supabaseAdmin.auth.admin.deleteUser(authId)
+    if (error?.code === '23502' && /mobile/i.test(error.message)) {
+      throw new AppError(409, 'This database still requires a mobile number. Apply migrations/users_mobile_optional.sql first.', 'MOBILE_OPTIONAL_NOT_ENABLED')
+    }
+    if (error?.code === '23505') throw new AppError(400, 'A user with this mobile number or email already exists', 'DUPLICATE_ERROR')
+    throw new AppError(500, `Could not create the user: ${error?.message ?? 'no row returned'}`, 'DB_ERROR')
+  }
 
   // The email now lives in this project — drop any stale login-routing cache.
   if (normEmail) clearEmailProjectCache(normEmail);
