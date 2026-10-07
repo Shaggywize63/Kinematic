@@ -33,16 +33,20 @@ interface ActivityRow {
   deal_id: string | null;
 }
 
-/** "now due" / "due in 25 min" / "was due 2h ago" — a human due-time phrase. */
-function duePhrase(dueIso: string): string {
-  const diffMin = Math.round((new Date(dueIso).getTime() - Date.now()) / 60_000);
-  if (diffMin >= 1 && diffMin < 60) return `due in ${diffMin} min`;
-  if (Math.abs(diffMin) < 1) return 'now due';
+/**
+ * The verb phrase that ends the reminder sentence — "is due in 25 min" / "is now due" /
+ * "was due 2h ago". It carries its own verb so the sentence reads right in every case
+ * (it used to be spliced after a fixed "is", giving "is was due 23h ago").
+ */
+export function dueClause(dueIso: string, now: number = Date.now()): string {
+  const diffMin = Math.round((new Date(dueIso).getTime() - now) / 60_000);
+  if (diffMin >= 1 && diffMin < 60) return `is due in ${diffMin} min`;
+  if (Math.abs(diffMin) < 1) return 'is now due';
   if (diffMin <= -1) {
     const h = Math.round(-diffMin / 60);
     return h >= 1 ? `was due ${h}h ago` : `was due ${-diffMin} min ago`;
   }
-  return 'due soon';
+  return 'is due soon';
 }
 
 /**
@@ -100,7 +104,7 @@ export async function dispatchActivityReminders(opts: { limit?: number } = {}): 
         org_id: a.org_id,
         user_id: recipient,
         title: `Reminder: ${label}`,
-        body: `Your ${kindWord} “${label}” is ${duePhrase(a.due_at)}.`,
+        body: `Your ${kindWord} “${label}” ${dueClause(a.due_at)}.`,
         type: 'crm_activity_due',
         data: {
           kind: 'crm_task_overdue',
