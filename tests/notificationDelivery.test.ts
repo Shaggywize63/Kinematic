@@ -111,7 +111,13 @@ describe('mention notifications carry what a tap needs', () => {
     });
   });
 
-  it('other mentions are unchanged (no extra keys)', async () => {
+  it('a lead-update mention includes the lead so the app can open it', async () => {
+    await persistMentions(req, 'lead_update', 'LU1', ['u2'], { lead_id: 'L9' });
+    const insert = supa().chainsFor('notifications')[0].ops.find((o: any) => o.method === 'insert');
+    expect(insert.args[0][0].data).toEqual({ source_kind: 'lead_update', source_id: 'LU1', mentioner_id: 'u1', lead_id: 'L9' });
+  });
+
+  it('without extra keys the payload is unchanged', async () => {
     await persistMentions(req, 'lead_update', 'LU1', ['u2']);
     const insert = supa().chainsFor('notifications')[0].ops.find((o: any) => o.method === 'insert');
     expect(insert.args[0][0].data).toEqual({ source_kind: 'lead_update', source_id: 'LU1', mentioner_id: 'u1' });

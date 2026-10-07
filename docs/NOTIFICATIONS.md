@@ -60,13 +60,13 @@ or its id is missing they fall back to the in-app notification list.
 | `activity_assigned`, `crm_task_overdue` | `activity_id`, and `lead_id` / `deal_id` when linked | The linked lead (else deal), else Activities |
 | `automation` | `entity` (`lead`/`deal`/`contact`/`account`) + `entity_id` | That record |
 | `expense_submitted`, `expense_decision`, `expense_escalated`, `expense_reimbursed`, `expense_cancelled` | `claim_id` | Expense claim |
-| `leave_request` | `request_id` | Leave approvals |
-| `leave_decision`, `leave_cancelled` | `request_id` | My leave |
+| `leave_request`, `leave_cancelled` (both go to the approver) | `request_id` | Leave approvals |
+| `leave_decision` | `request_id`, `decision` | My leave |
 | `att_reg_request` / `att_reg_decision` | `request_id` | Regularizations |
 | `missed_visits` | `plan_id`, `plan_date` | Route plan |
 | `sos` | `sos_id`, `exec_id`, `lat`, `lng` | SOS |
 | `message` | `thread_id` | Chat thread |
-| `mention` | `source_kind`, `source_id`, `thread_id` (chat mentions) | Chat thread (chat mention), else the notification list |
+| `mention` | `source_kind`, `source_id`; `thread_id` (chat) or `lead_id` (lead update) | The chat thread, or the lead; else the notification list |
 | `broadcast` | `broadcast_id` | Broadcasts |
 | `crm_home` | — | CRM Home |
 | `kini_cold_deals` | `count` | Deals |
