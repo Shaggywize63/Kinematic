@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { clientHasFlag } from '../lib/clientFlags';
+import { isDuplicateHeartbeat, isNullIsland } from '../lib/heartbeatGuard';
 import { clearEmailProjectCache } from '../lib/projects';
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
 import { AuthRequest } from '../types';
@@ -1101,6 +1102,16 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     throw new AppError(400, 'Latitude and longitude are required', 'VALIDATION_ERROR');
   }
 
+  // Repeat of the exact fix this user just sent (see lib/heartbeatGuard): acknowledge, store nothing.
+  const kind = activity_type || 'HEARTBEAT';
+  if (kind === 'HEARTBEAT' && isDuplicateHeartbeat(user.id, latitude, longitude)) {
+    sendSuccess(res, null, 'Status updated');
+    return;
+  }
+  // 0,0 means "no fix" (the app sends it for login events). Keep the battery/device sync but never let it
+  // overwrite the rep's real last position or refresh the "last seen" time.
+  const hasFix = !isNullIsland(latitude, longitude);
+
   const now = new Date().toISOString();
   // Bug Fix: 0% battery is valid.
   const batteryLevel = battery !== undefined ? battery : (battery_percentage !== undefined ? battery_percentage : null);
@@ -1112,18 +1123,16 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     supabaseAdmin
       .from('users')
       .update({
-        last_latitude: latitude,
-        last_longitude: longitude,
+        ...(hasFix && { last_latitude: latitude, last_longitude: longitude, last_location_updated_at: now }),
         battery_percentage: batteryLevel,
         device_model: device_model || undefined,
         device_brand: device_brand || undefined,
         os_version: os_version || undefined,
-        last_location_updated_at: now,
         // A real fix arrived, so location is on. The "off since" timestamp
         // (location_status_updated_at) is set by the location-status endpoint
         // on an off-transition and isn't shown while status is 'on', so we
         // don't touch it here — keeping the heartbeat a single write.
-        location_status: 'on',
+        ...(hasFix && { location_status: 'on' }),
         ...(location_precise !== undefined && { location_precise: !!location_precise })
       })
       .eq('id', user.id),
@@ -1173,7 +1182,7 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     client_id: user.client_id,
     user_id: user.id,
     attendance_id: att?.id || null,
-    activity_type: activity_type || 'HEARTBEAT',
+    activity_type: kind,
     lat: latitude,
     lng: longitude,
     battery_percentage: batteryLevel,
