@@ -28,7 +28,13 @@ export interface DispatchResult {
   failed: number;
   skipped_no_token: number;
   firebase_disabled: boolean;
+  /** True when Google rejected OUR service-account credential (not a user's token) for at least one send. */
+  credential_error: boolean;
 }
+
+// These mean the server's Firebase credential is unusable (revoked / rotated / wrong project) — they say
+// nothing about the user's token, so they must never clear it.
+const CREDENTIAL_ERROR_CODES = ['app/invalid-credential', 'messaging/authentication-error', 'messaging/third-party-auth-error'];
 
 export async function dispatchPendingPushes(opts?: {
   limit?: number;
@@ -49,10 +55,10 @@ export async function dispatchPendingPushes(opts?: {
 
   if (error) {
     logger.error(`[push.dispatch] query failed: ${error.message}`);
-    return { scanned: 0, sent: 0, failed: 0, skipped_no_token: 0, firebase_disabled: !messaging };
+    return { scanned: 0, sent: 0, failed: 0, skipped_no_token: 0, firebase_disabled: !messaging, credential_error: false };
   }
   if (!rows || rows.length === 0) {
-    return { scanned: 0, sent: 0, failed: 0, skipped_no_token: 0, firebase_disabled: !messaging };
+    return { scanned: 0, sent: 0, failed: 0, skipped_no_token: 0, firebase_disabled: !messaging, credential_error: false };
   }
 
   // Bulk-fetch the push tokens for all unique recipients in one query. A user
@@ -71,6 +77,7 @@ export async function dispatchPendingPushes(opts?: {
   let sent = 0;
   let failed = 0;
   let skipped_no_token = 0;
+  let credentialFailures = 0;
 
   for (const row of rows) {
     const tokens = tokenByUser.get(row.user_id) || { fcm: null, apns: null };
@@ -98,8 +105,10 @@ export async function dispatchPendingPushes(opts?: {
           token: tokens.fcm as string,
           notification: { title: row.title, body: row.body },
           data: dataPayload,
-          // High priority so the device wakes screen for stagnant-lead nudges.
-          android: { priority: 'high' },
+          // High priority so the device wakes screen for stagnant-lead nudges. The channel is the app's
+          // high-importance "Kinematic Alerts" one; an app that hasn't created it yet falls back to FCM's
+          // default channel, so this is safe for older installs.
+          android: { priority: 'high', notification: { channelId: 'kinematic_notifications' } },
           // APNs sound so iOS plays the default alert tone.
           apns: { payload: { aps: { sound: 'default' } } },
         });
@@ -129,16 +138,19 @@ export async function dispatchPendingPushes(opts?: {
     } catch (err: any) {
       const msg = String(err?.errorInfo?.code || err?.message || err);
       logger.warn(`[push.dispatch] FCM send failed for ${row.id}: ${msg}`);
+      const credentialError = CREDENTIAL_ERROR_CODES.some((c) => msg.includes(c));
+      if (credentialError) credentialFailures++;
 
       // Invalid / unregistered tokens never become valid again — null
       // them on the user row so subsequent dispatches stop counting the
       // user as reachable. This catches phone resets, app uninstalls,
       // and stale-token cases.
       if (
+        !credentialError && (
         msg.includes('registration-token-not-registered') ||
         msg.includes('invalid-argument') ||
         msg.includes('not-found') ||
-        msg.includes('mismatched-credential')
+        msg.includes('mismatched-credential'))
       ) {
         await supabaseAdmin.from('users').update({ fcm_token: null }).eq('id', row.user_id);
       }
@@ -149,5 +161,14 @@ export async function dispatchPendingPushes(opts?: {
     }
   }
 
-  return { scanned: rows.length, sent, failed, skipped_no_token, firebase_disabled: !messaging };
+  if (credentialFailures > 0) {
+    // One loud line per run (the per-row warnings above are easy to miss). The rows are still stamped
+    // sent_at so a broken credential can't make the loop busy-retry, which means these pushes are lost.
+    logger.error(
+      `[push.dispatch] ${credentialFailures} push(es) NOT delivered: Google rejected the Firebase service-account credential ` +
+      '(revoked, rotated, or for a different Firebase project than the Android app). Update FIREBASE_SERVICE_ACCOUNT.',
+    );
+  }
+
+  return { scanned: rows.length, sent, failed, skipped_no_token, firebase_disabled: !messaging, credential_error: credentialFailures > 0 };
 }

@@ -1,5 +1,6 @@
 import app from './app';
 import { logger } from './lib/logger';
+import { probeFirebaseCredential } from './lib/firebase';
 import { loadDynamicProjects } from './lib/platformProjects';
 import { runScheduledAutomations } from './services/crm/automations.service';
 import { resumeWaitingFlowRuns } from './services/crm/flows.service';
@@ -23,6 +24,15 @@ const server = app.listen(PORT, () => {
   logger.info(`   Health      : http://localhost:${PORT}/health`);
   logger.info(`   API base    : http://localhost:${PORT}/api/v1`);
 });
+
+// Push health check. A revoked / wrong-project Firebase key still logs "initialized successfully" and
+// then silently drops every Android push, so verify it with Google at boot and shout if it is rejected.
+probeFirebaseCredential()
+  .then((r) => {
+    if (r.ok) logger.info('[firebase] service-account credential verified — Android push is available');
+    else logger.error(`[firebase] Android push is DISABLED: ${r.reason}. Put a current service-account key for the Firebase project the Android app uses into FIREBASE_SERVICE_ACCOUNT.`);
+  })
+  .catch((e) => logger.warn(`[firebase] credential probe failed: ${e?.message ?? e}`));
 
 // Hydrate the dynamic project registry with any client projects created by the
 // onboarding provisioner. Non-fatal: a failure just means those tenants aren't
