@@ -512,6 +512,54 @@ export async function cancelCampaign(scope: Scope, id: string) {
   return loadCampaign(scope, id);
 }
 
+/**
+ * Finished campaign → sending again, but ONLY for the recipients whose send failed.
+ *
+ * "Failed" means the provider/API rejected the send (an outage, an unverified From, a transient 4xx/5xx).
+ * Bounced and unsubscribed recipients are NOT retried (re-mailing a hard bounce hurts the sender's
+ * reputation), and recipients that were sent or skipped are untouched, so nobody gets the email twice.
+ * A failed recipient that has since become suppressed is simply skipped by sendEmail() again.
+ *
+ * Only a `completed` campaign can be resent: while one is still sending, its failures are not final.
+ * Ordering is chosen so no step can strand rows: the failed rows are re-queued first (a `completed`
+ * campaign never processes them), then the campaign is re-opened with a compare-and-swap on its status
+ * — if that loses a race, the rows go back to `failed` and nothing has happened.
+ */
+export async function resendFailedRecipients(scope: Scope, id: string): Promise<{ campaign: any; requeued: number }> {
+  const c = await loadCampaign(scope, id);
+  if (c.status !== 'completed') {
+    throw new AppError(400, `Failed recipients can be resent once the campaign has finished (it is "${c.status}")`, 'BAD_STATE');
+  }
+
+  // 1. Re-queue exactly the failed rows. The returned ids are the rows THIS call flipped.
+  const { data: flipped, error: qErr } = await supabaseAdmin.from(RECIPIENTS)
+    .update({ status: 'queued' })
+    .eq('campaign_id', id).eq('status', 'failed').select('id');
+  if (qErr) throw new AppError(500, qErr.message, 'DB_ERROR');
+  const ids = ((flipped || []) as { id: string }[]).map((r) => r.id);
+  if (!ids.length) throw new AppError(400, 'There are no failed recipients to resend', 'NO_FAILED_RECIPIENTS');
+
+  // 2. Re-open the campaign. They are no longer counted as failed; a repeat failure is counted again.
+  const { data: reopened } = await supabaseAdmin.from(CAMPAIGNS)
+    .update({
+      status: 'sending', completed_at: null, last_batch_at: null,
+      failed: Math.max(0, (c.failed ?? 0) - ids.length),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', id).eq('org_id', scope.orgId).eq('status', 'completed').select('id');
+  if (!reopened || !(reopened as unknown[]).length) {
+    // Lost a race (another resend, a cancel…): put the rows back exactly as they were.
+    await supabaseAdmin.from(RECIPIENTS).update({ status: 'failed' }).in('id', ids).eq('status', 'queued');
+    throw new AppError(409, 'This campaign changed while resending — refresh and try again', 'BAD_STATE');
+  }
+
+  // Immediate first batch (fire-and-forget), as launch does; the claim CAS makes this safe with the scheduler.
+  void processCampaignBatch(scope.orgId, id).catch((e) =>
+    logger.warn(`[email-campaign] resend batch failed for ${id}: ${(e as Error).message}`));
+
+  return { campaign: await loadCampaign(scope, id), requeued: ids.length };
+}
+
 // ── Paced sending ────────────────────────────────────────────────────────────
 
 /**
@@ -590,7 +638,7 @@ export async function processCampaignBatch(orgId: string, id: string): Promise<{
         if (result.suppressed) {
           skipped++;
           await supabaseAdmin.from(RECIPIENTS).update({
-            status: 'skipped', skip_reason: result.suppressed, email_log_id: result.id ?? null,
+            status: 'skipped', skip_reason: result.suppressed, email_log_id: result.id ?? null, error: null,
           }).eq('id', rec.id);
         } else if (result.status === 'failed') {
           failed++;
@@ -599,8 +647,9 @@ export async function processCampaignBatch(orgId: string, id: string): Promise<{
           }).eq('id', rec.id);
         } else {
           sent++;
+          // `error: null` matters on a resend: the row still carries the earlier failure's message.
           await supabaseAdmin.from(RECIPIENTS).update({
-            status: 'sent', email_log_id: result.id ?? null, sent_at: new Date().toISOString(),
+            status: 'sent', email_log_id: result.id ?? null, sent_at: new Date().toISOString(), error: null,
           }).eq('id', rec.id);
         }
       } catch (e) {
@@ -677,16 +726,19 @@ export async function processDueEmailCampaignsAllProjects(): Promise<{ processed
 export async function getAnalytics(scope: Scope, id: string) {
   const campaign = await loadCampaign(scope, id);
   const base = () => supabaseAdmin.from(LOGS).select('id', { count: 'exact', head: true }).eq('org_id', scope.orgId).eq('campaign_id', id);
-  const [total, failed, bounced, unsub, opened, clicked] = await Promise.all([
+  const [total, failed, bounced, unsub, opened, clicked, failedNow] = await Promise.all([
     base(),
     base().eq('status', 'failed'),
     base().eq('status', 'bounced'),
     base().eq('status', 'unsubscribed'),
     base().gt('open_count', 0),
     base().gt('click_count', 0),
+    // Recipients whose latest attempt failed. The log count above is failed ATTEMPTS: after a resend it still
+    // includes the attempts that were since retried, so it can not drive the "Failed" figure.
+    supabaseAdmin.from(RECIPIENTS).select('id', { count: 'exact', head: true }).eq('campaign_id', id).eq('status', 'failed'),
   ]);
   const totalLogs = total.count ?? 0;
-  const failedN = failed.count ?? 0;
+  const failedN = failed.count ?? 0;      // failed attempts: only used to work out `delivered`
   const bouncedN = bounced.count ?? 0;
   const delivered = Math.max(0, totalLogs - failedN - bouncedN);
   const openedN = opened.count ?? 0;
@@ -707,7 +759,7 @@ export async function getAnalytics(scope: Scope, id: string) {
       recipients: campaign.total ?? 0,
       queued: Math.max(0, (campaign.total ?? 0) - (campaign.sent ?? 0) - (campaign.failed ?? 0) - (campaign.skipped ?? 0)),
       sent: campaign.sent ?? 0,
-      failed: failedN,
+      failed: failedNow.count ?? 0,
       skipped: campaign.skipped ?? 0,
       delivered,
       bounced: bouncedN,

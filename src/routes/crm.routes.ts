@@ -5012,6 +5012,8 @@ emailCampaigns.post('/:id/launch', waAdminOnly, emailCampaignEntitled, wrap(asyn
 emailCampaigns.post('/:id/pause', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.pauseCampaign(ecScope(req), req.params.id) })));
 emailCampaigns.post('/:id/resume', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.resumeCampaign(ecScope(req), req.params.id) })));
 emailCampaigns.post('/:id/cancel', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.cancelCampaign(ecScope(req), req.params.id) })));
+// Re-send ONLY the recipients whose send failed (completed campaigns). Bounced/unsubscribed/sent ones are untouched.
+emailCampaigns.post('/:id/resend-failed', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.resendFailedRecipients(ecScope(req), req.params.id) })));
 emailCampaigns.post('/:id/process', waAdminOnly, emailCampaignEntitled, wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.processCampaignBatch(orgId(req), req.params.id) })));
 router.use('/email-campaigns', emailCampaigns);
 
