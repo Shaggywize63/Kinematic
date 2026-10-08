@@ -29,6 +29,7 @@ import { validateAndStampCustomFields } from '../services/crm/customFields.servi
 import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
+import { fireActivityLifecycle } from '../services/crm/activityTriggers';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
@@ -3153,6 +3154,9 @@ activities.post('/', wrap(async (req, res) => {
     );
   }
   const created = await crud.create('crm_activities', orgId(req), payload, userId(req)) as Record<string, unknown>;
+  // Run the tenant's `activity_created` (and, for a logged-complete activity, `activity_completed`)
+  // automations. Fire-and-forget: never blocks or fails the write.
+  void fireActivityLifecycle(orgId(req), userId(req), null, created);
   // Side-effect: mirror to the assignee/owner's Google Calendar when
   // they've connected the integration. Fire-and-forget — calendar
   // hiccups must not block the CRM write or the response.
@@ -3190,6 +3194,8 @@ activities.patch('/:id', wrap(async (req, res) => {
     );
   }
   const updated = await crud.update('crm_activities', orgId(req), req.params.id, patched, userId(req), clientScope(req).id) as Record<string, unknown>;
+  // `activity_completed` fires once, on the empty -> set transition of completed_at (not on later edits).
+  void fireActivityLifecycle(orgId(req), userId(req), existing, updated);
   void (async () => {
     try {
       const { pushActivity } = await import('../services/integrations/googleCalendar.service');
@@ -3237,7 +3243,9 @@ tasks.get('/', wrap(async (req, res) => res.json(
 tasks.post('/', wrap(async (req, res) => {
   const parsed = parse(v.taskSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, type: 'task' as const, client_id: clientId(req) };
-  res.status(201).json(await stampOwnerName(await crud.create('crm_activities', orgId(req), payload, userId(req))));
+  const createdTask = await crud.create('crm_activities', orgId(req), payload, userId(req)) as Record<string, unknown>;
+  void fireActivityLifecycle(orgId(req), userId(req), null, createdTask);
+  res.status(201).json(await stampOwnerName(createdTask));
 }));
 tasks.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id)))));
 tasks.patch('/:id', wrap(async (req, res) => {
@@ -3246,7 +3254,11 @@ tasks.patch('/:id', wrap(async (req, res) => {
   if (parsed.status === 'done' && !parsed.completed_at) {
     payload.completed_at = new Date().toISOString();
   }
-  res.json(await stampOwnerName(await crud.update('crm_activities', orgId(req), req.params.id, payload, userId(req), clientScope(req).id)));
+  // The row as it was, so `activity_completed` fires only when this patch completes it.
+  const taskBefore = await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, unknown>;
+  const updatedTask = await crud.update('crm_activities', orgId(req), req.params.id, payload, userId(req), clientScope(req).id) as Record<string, unknown>;
+  void fireActivityLifecycle(orgId(req), userId(req), taskBefore, updatedTask);
+  res.json(await stampOwnerName(updatedTask));
 }));
 tasks.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_activities', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 router.use('/tasks', rbac.requireModuleAccess('crm_tasks'), tasks);
