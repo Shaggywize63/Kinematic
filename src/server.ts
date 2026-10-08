@@ -11,6 +11,7 @@ import { processDueEmailCampaignsAllProjects } from './services/crm/emailCampaig
 import { runAutoReplenishmentAllProjects } from './services/distribution/replenishment.service';
 import { dispatchActivityReminders } from './services/crm/activityReminders.service';
 import { runTrackingWatchdog } from './services/trackingWatchdog.service';
+import { runAttendanceSweep } from './services/attendanceSweep.service';
 import { dispatchPendingPushes } from './services/notifications.service';
 import { runRouteDeviationScan } from './services/routeDeviation.service';
 import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './services/alertScans.service';
@@ -218,6 +219,21 @@ if (String(process.env.TRACKING_WATCHDOG_ENABLED ?? 'true').toLowerCase() !== 'f
       .catch((e) => logger.warn(`[tracking-watchdog] tick failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[tracking-watchdog] scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Forgotten check-outs. Every few minutes, across all tenant projects: auto-check-out any shift still open
+// when its IST day ended (stamped 12:00 AM IST), then remind reps who are still checked in 10 hours after
+// they started. Both steps are idempotent (conditional update / notifications ledger), so overlapping ticks
+// or several instances are harmless. A client with real overnight shifts opts out per org with
+// org_settings `attendance_auto_checkout` / `attendance_checkout_reminder` = false. Toggle the whole job with
+// ATTENDANCE_SWEEP_ENABLED=false; tune with ATTENDANCE_SWEEP_INTERVAL_SEC (default 300s).
+if (String(process.env.ATTENDANCE_SWEEP_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(60, Number(process.env.ATTENDANCE_SWEEP_INTERVAL_SEC ?? 300)) * 1000;
+  setInterval(() => {
+    forEachProject('attendance-sweep', () => runAttendanceSweep())
+      .catch((e) => logger.warn(`[attendance-sweep] tick failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[attendance-sweep] scheduler enabled (every ${everyMs / 1000}s: 10h check-out reminder, 12:00 AM IST auto-checkout)`);
 }
 
 // Field-force route-deviation scan. Periodic tick that alerts supervisors about
