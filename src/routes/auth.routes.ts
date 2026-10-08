@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { SignJWT } from 'jose';
 import * as ctrl from '../controllers/auth.controller';
 import { requireAuth, MASTER_ADMIN_EMAIL } from '../middleware/auth';
+import { perRouteLimit } from '../middleware/security';
 import { adminClientFor, listProjectKeys, projectHs256Key, isKnownProject } from '../lib/projects';
 import { AuthRequest } from '../types';
 
@@ -159,9 +160,12 @@ router.post('/login',   ctrl.login);
 router.post('/forgot-password', ctrl.forgotPassword);
 router.post('/reset-password',  ctrl.resetPassword);
 // Authenticated password change — powers the forced "set a new password on
-// first login" flow. Requires a valid session (the user is already logged in
-// with their temp/initial password).
-router.post('/change-password', requireAuth, ctrl.changePassword);
+// first login" flow AND the voluntary "Change password" in each client's
+// Settings (which must send current_password; the controller verifies it).
+// Limited to 10 tries / 15 min per (IP, user) so a stolen session cannot be
+// used to guess the current password. The limiter sits AFTER requireAuth so its
+// key carries the user id.
+router.post('/change-password', requireAuth, perRouteLimit({ windowMs: 15 * 60 * 1000, max: 10 }), ctrl.changePassword);
 router.post('/refresh', ctrl.refresh);
 router.post('/logout',  requireAuth, ctrl.logout);
 router.get('/me',       requireAuth, ctrl.me);
