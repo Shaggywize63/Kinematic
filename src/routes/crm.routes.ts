@@ -1340,6 +1340,40 @@ leads.get('/geo', wrap(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   res.json({ success: true, data: data ?? [] });
 }));
+// NOTE: every literal GET under /leads (the reports below, /export*, …) MUST be registered
+// BEFORE `leads.get('/:id')`, otherwise Express hands e.g. "export-area-leads-report" to
+// the by-id handler as an id and the caller gets a 404. tests/routeOrder.test.ts enforces this.
+// ─── Report: Area-wise Leads (lead distribution by area/city) ────────────────
+// Groups the scoped lead set by the `area` custom field (fallback city) with
+// open / converted counts. Reuses the fully-scoped lead fetch (client + city +
+// hierarchy), so it respects the same visibility as every other lead report.
+// CSV + ?format=json (dashboard table).
+leads.get('/export-area-leads-report', wrap(async (req, res) => {
+  const rows = await fetchScopedReportLeads(req);
+  const OPEN = new Set(['new', 'working', 'nurturing', 'qualified']);
+  interface ARow { area: string; total: number; open: number; converted: number }
+  const byArea = new Map<string, ARow>();
+  for (const r of rows as any[]) {
+    const area = (String(r['custom__area'] ?? r.city ?? '').trim()) || '(Unspecified)';
+    const row = byArea.get(area) ?? { area, total: 0, open: 0, converted: 0 };
+    row.total++;
+    const st = String(r.status ?? '').toLowerCase();
+    if (st === 'converted') row.converted++;
+    else if (OPEN.has(st)) row.open++;
+    byArea.set(area, row);
+  }
+  const out = Array.from(byArea.values()).sort((a, b) => b.total - a.total || a.area.localeCompare(b.area));
+  const sum = (pick: (r: ARow) => number) => out.reduce((s, r) => s + pick(r), 0);
+  const gt: ARow = { area: 'Grand Total', total: sum((r) => r.total), open: sum((r) => r.open), converted: sum((r) => r.converted) };
+  const cols = [
+    { label: 'Area', get: (r: ARow) => r.area },
+    { label: 'Total Leads', get: (r: ARow) => r.total },
+    { label: 'Open', get: (r: ARow) => r.open },
+    { label: 'Converted', get: (r: ARow) => r.converted },
+  ];
+  sendReportCsv(req, res, 'area-leads-report', cols, [...out, gt]);
+}));
+
 leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))))));
 leads.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.leadUpdateSchema, req.body);
@@ -1561,37 +1595,6 @@ router.get('/home', wrap(async (req, res) => {
     client_id: clientId(req),
   });
   res.json({ success: true, data: payload });
-}));
-
-// ─── Report: Area-wise Leads (lead distribution by area/city) ────────────────
-// Groups the scoped lead set by the `area` custom field (fallback city) with
-// open / converted counts. Reuses the fully-scoped lead fetch (client + city +
-// hierarchy), so it respects the same visibility as every other lead report.
-// CSV + ?format=json (dashboard table).
-leads.get('/export-area-leads-report', wrap(async (req, res) => {
-  const rows = await fetchScopedReportLeads(req);
-  const OPEN = new Set(['new', 'working', 'nurturing', 'qualified']);
-  interface ARow { area: string; total: number; open: number; converted: number }
-  const byArea = new Map<string, ARow>();
-  for (const r of rows as any[]) {
-    const area = (String(r['custom__area'] ?? r.city ?? '').trim()) || '(Unspecified)';
-    const row = byArea.get(area) ?? { area, total: 0, open: 0, converted: 0 };
-    row.total++;
-    const st = String(r.status ?? '').toLowerCase();
-    if (st === 'converted') row.converted++;
-    else if (OPEN.has(st)) row.open++;
-    byArea.set(area, row);
-  }
-  const out = Array.from(byArea.values()).sort((a, b) => b.total - a.total || a.area.localeCompare(b.area));
-  const sum = (pick: (r: ARow) => number) => out.reduce((s, r) => s + pick(r), 0);
-  const gt: ARow = { area: 'Grand Total', total: sum((r) => r.total), open: sum((r) => r.open), converted: sum((r) => r.converted) };
-  const cols = [
-    { label: 'Area', get: (r: ARow) => r.area },
-    { label: 'Total Leads', get: (r: ARow) => r.total },
-    { label: 'Open', get: (r: ARow) => r.open },
-    { label: 'Converted', get: (r: ARow) => r.converted },
-  ];
-  sendReportCsv(req, res, 'area-leads-report', cols, [...out, gt]);
 }));
 
 router.use('/leads', rbac.requireModuleAccess('crm_leads'), leads);
