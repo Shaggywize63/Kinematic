@@ -267,10 +267,13 @@ export const sendNotification = asyncHandler(async (req: AuthRequest, res: Respo
       .filter((t: any): t is string => !!t && t.length > 10);
     if (fcmTokens.length > 0 && messaging) {
       try {
+        // Data-only (title/body already ride in `data`): the Android app builds the alert itself, so it
+        // looks and routes the same whether the app is open, backgrounded or closed. Same as the
+        // per-user dispatcher in notifications.service.
         const response = await messaging.sendEachForMulticast({
-          notification: { title, body: content },
           tokens: fcmTokens,
           data,
+          android: { priority: 'high' },
         });
         logger.info(`FCM: Sent to ${response.successCount} users, failed for ${response.failureCount}`);
       } catch (fcmErr: any) {
