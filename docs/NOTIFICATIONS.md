@@ -71,6 +71,7 @@ or its id is missing they fall back to the in-app notification list.
 | `crm_home` | — | CRM Home |
 | `kini_cold_deals` | `count` | Deals |
 | `kini_no_checkin` | — | Attendance / check-in |
+| `checkout_reminder` | `attendance_id` | Attendance / check-in |
 | `low_stock`, `stock_expiry` | — (`batch_id`, `sku_id` for expiry) | Stock |
 | anything else (`route_deviation`, `security_alert`, `location_off`, `kini_reminder`, `finance_invoice_due`, …) | — | The notification list |
 
@@ -117,6 +118,7 @@ Keep ids under these key names when adding a notification, and prefer
 | 20 | **Off-route visit** (check-in beyond the outlet geofence) | `route_deviation` | Rep's supervisor | scan — `route-deviation-scan` |
 | 21 | **SOS / panic** raised | (sos) | Managers / safety contacts | inline — SOS controller |
 | 22 | **Attendance regularization** request / decision | (attendance) | Rep / approver | inline — attendance service |
+| 22a | **Forgot to check out** — still checked in 10 h after starting (once per shift). If still open at 12:00 AM IST the shift is auto-checked-out (`attendance.notes` records it). Opt an org out with `org_settings` `attendance_checkout_reminder` / `attendance_auto_checkout` = `false` | `checkout_reminder` | Rep (self) | scheduled — attendance-sweep tick (all projects) |
 | 23 | **Leave** request / decision | (leave) | Rep / approver | inline — leave service |
 | 24 | **Expense** submitted / decided | (expense) | Rep / approver | inline — expenses service |
 
