@@ -475,18 +475,58 @@ export const resetPassword = asyncHandler<Request>(async (req, res) => {
 });
 
 // POST /api/v1/auth/change-password
-// Authenticated. Lets a signed-in user set a new password — this is what the
-// forced "change password on first login" flow calls. Clears
-// must_change_password so clients stop gating the session on it.
-const changePasswordSchema = z.object({ new_password: z.string().min(6) });
+// Authenticated. Two callers:
+//  * the forced "change password on first login" flow (users.must_change_password
+//    is true): only new_password is needed — the user just signed in with the temporary one;
+//  * a voluntary change from Settings: current_password is REQUIRED and verified, so an
+//    unattended or stolen session cannot silently take the account over.
+// Clears must_change_password so clients stop gating the session on it.
+//
+// Failures use 400 with a machine-readable `code` (never 401 — the mobile apps read a 401 as
+// "session expired" and sign the user out): CURRENT_PASSWORD_REQUIRED, INVALID_CURRENT_PASSWORD,
+// SAME_PASSWORD, or the password-policy / PASSWORD_UPDATE_FAILED reasons below.
+const changePasswordSchema = z.object({
+  new_password: z.string().min(6),
+  current_password: z.string().max(200).optional(),
+});
 export const changePassword = asyncHandler<AuthRequest>(async (req, res) => {
   if (!req.user) return unauthorized(res);
   const body = changePasswordSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
+  // The shared demo account must never have its password changed from a demo session.
+  if (isDemo(req.user)) return ok(res, { ok: true }, 'Password updated');
+
   // Same strength policy the admin create-user path enforces.
   const pol = require('../middleware/security').validatePassword(body.data.new_password);
   if (!pol.ok) return badRequest(res, pol.reason || 'Password does not meet the requirements');
+
+  // Forced first-login change: no current password to check. Anything else must prove it.
+  const { data: flagRow } = await supabaseAdmin
+    .from('users').select('must_change_password').eq('id', req.user.id).maybeSingle();
+  const forced = (flagRow as { must_change_password?: boolean } | null)?.must_change_password === true;
+  if (!forced) {
+    const current = body.data.current_password ?? '';
+    if (!current) {
+      return res.status(400).json({ success: false, error: 'Enter your current password.', code: 'CURRENT_PASSWORD_REQUIRED' });
+    }
+    if (current === body.data.new_password) {
+      return res.status(400).json({ success: false, error: 'Your new password must be different from the current one.', code: 'SAME_PASSWORD' });
+    }
+    // Verify against GoTrue using the account's real sign-in email (users.email, or the
+    // synthetic <mobile>@kinematic.app for mobile-only users) — the same identity login uses.
+    const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(req.user.id);
+    const signInEmail = authUser?.user?.email;
+    if (!signInEmail) return serverError(res);
+    const { error: verifyErr } = await supabase.auth.signInWithPassword({ email: signInEmail, password: current });
+    if (verifyErr) {
+      if (verifyErr.status === 429) {
+        return res.status(429).json({ success: false, error: 'Too many attempts. Please wait a few minutes and try again.', code: 'TOO_MANY_REQUESTS' });
+      }
+      logger.warn(`change-password: wrong current password for ${req.user.id}`);
+      return res.status(400).json({ success: false, error: 'Your current password is incorrect.', code: 'INVALID_CURRENT_PASSWORD' });
+    }
+  }
 
   const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.user.id, {
     password: body.data.new_password,
