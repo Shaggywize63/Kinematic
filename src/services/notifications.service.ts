@@ -2,6 +2,8 @@
  * Notifications dispatch service — fans out unsent rows from
  * public.notifications via Firebase Cloud Messaging (mobile push).
  *
+ * Android pushes are DATA-ONLY (title/body inside `data`; the app builds the alert). iOS goes over APNs.
+ *
  * Called every minute by a pg_cron job → supabase edge function
  * `crm-dispatch-pushes` → /api/v1/cron/dispatch-pushes (this service).
  *
@@ -34,6 +36,13 @@ export interface DispatchResult {
 
 // These mean the server's Firebase credential is unusable (revoked / rotated / wrong project) — they say
 // nothing about the user's token, so they must never clear it.
+// FCM caps a message at 4 KB and rejects an oversized one with `invalid-argument`, which would wrongly
+// clear the user's token (see the catch below). Cap the text we copy into `data`.
+const clip = (v: unknown, max: number): string => {
+  const t = String(v ?? '');
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+};
+
 const CREDENTIAL_ERROR_CODES = ['app/invalid-credential', 'messaging/authentication-error', 'messaging/third-party-auth-error'];
 
 export async function dispatchPendingPushes(opts?: {
@@ -101,16 +110,16 @@ export async function dispatchPendingPushes(opts?: {
 
     try {
       if (canFcm) {
+        // DATA-ONLY on purpose: no `notification` block. Android then always calls the app's
+        // onMessageReceived, which builds the alert itself (its own channel, sound and tap routing)
+        // whether the app is open, in the background or closed - instead of the system tray showing a
+        // generic notification the app can't control. title/body ride in `data` for that. This FCM path
+        // is Android-only (iOS goes direct over APNs, below). `priority: high` is what lets a data
+        // message wake a dozing device.
         const messageId = await messaging!.send({
           token: tokens.fcm as string,
-          notification: { title: row.title, body: row.body },
-          data: dataPayload,
-          // High priority so the device wakes screen for stagnant-lead nudges. The channel is the app's
-          // high-importance "Kinematic Alerts" one; an app that hasn't created it yet falls back to FCM's
-          // default channel, so this is safe for older installs.
-          android: { priority: 'high', notification: { channelId: 'kinematic_notifications' } },
-          // APNs sound so iOS plays the default alert tone.
-          apns: { payload: { aps: { sound: 'default' } } },
+          data: { ...dataPayload, title: clip(row.title, 200), body: clip(row.body, 1000) },
+          android: { priority: 'high' },
         });
         await supabaseAdmin
           .from('notifications')

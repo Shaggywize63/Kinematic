@@ -5,7 +5,7 @@
  *   - a rejected SERVER credential is reported at error level and flagged in the result;
  *   - it never clears a user's push token (the token is fine — the server is not);
  *   - a genuinely dead token (app uninstalled) is still cleared, as before;
- *   - pushes go out on the app's high-importance channel.
+ *   - Android pushes are data-only (title/body in data, no visible-notification block).
  */
 const send = jest.fn();
 
@@ -69,12 +69,34 @@ describe('a dead device token', () => {
 });
 
 describe('push payload', () => {
-  it('targets the high-importance Kinematic Alerts channel and stays high priority', async () => {
+  it('is data-only: no visible-notification block, title/body inside data, high priority', async () => {
     send.mockResolvedValue('projects/p/messages/1');
     await dispatchPendingPushes();
     const msg = send.mock.calls[0][0];
-    expect(msg.android).toEqual({ priority: 'high', notification: { channelId: 'kinematic_notifications' } });
-    expect(msg.notification).toEqual({ title: 'Reminder: Call Asha', body: 'is due in 20 min' });
-    expect(msg.data).toMatchObject({ notification_id: 'n1', kind: 'crm_task_overdue', activity_id: 'a1' });
+    expect(msg.notification).toBeUndefined();          // the app builds the alert, not the system tray
+    expect(msg.apns).toBeUndefined();
+    expect(msg.android).toEqual({ priority: 'high' }); // and no android.notification either (that would make it a notification message)
+    expect(msg.data).toMatchObject({
+      notification_id: 'n1', kind: 'crm_task_overdue', activity_id: 'a1',
+      title: 'Reminder: Call Asha', body: 'is due in 20 min',
+    });
+    for (const v of Object.values(msg.data)) expect(typeof v).toBe('string'); // FCM data is string -> string
+  });
+
+  it('the row\'s own title/body win over same-named keys in its data', async () => {
+    supa().setDefault('notifications', { data: [{ ...row('n9'), data: { kind: 'x', title: 'spoofed', body: 'spoofed' } }] });
+    send.mockResolvedValue('projects/p/messages/1');
+    await dispatchPendingPushes();
+    expect(send.mock.calls[0][0].data).toMatchObject({ title: 'Reminder: Call Asha', body: 'is due in 20 min' });
+  });
+
+  it('caps long text so FCM never rejects it as oversized (which would clear the token)', async () => {
+    supa().setDefault('notifications', { data: [{ ...row('n10'), title: 'T'.repeat(500), body: 'B'.repeat(5000) }] });
+    send.mockResolvedValue('projects/p/messages/1');
+    await dispatchPendingPushes();
+    const d = send.mock.calls[0][0].data;
+    expect(d.title.length).toBeLessThanOrEqual(200);
+    expect(d.body.length).toBeLessThanOrEqual(1000);
+    expect(d.body.endsWith('…')).toBe(true);
   });
 });
