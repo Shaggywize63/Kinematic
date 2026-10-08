@@ -10,6 +10,7 @@ import { processDueBroadcastsAllProjects } from './services/crm/broadcast.servic
 import { processDueEmailCampaignsAllProjects } from './services/crm/emailCampaign.service';
 import { runAutoReplenishmentAllProjects } from './services/distribution/replenishment.service';
 import { dispatchActivityReminders } from './services/crm/activityReminders.service';
+import { runTrackingWatchdog } from './services/trackingWatchdog.service';
 import { dispatchPendingPushes } from './services/notifications.service';
 import { runRouteDeviationScan } from './services/routeDeviation.service';
 import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './services/alertScans.service';
@@ -203,6 +204,20 @@ if (String(process.env.CRM_ACTIVITY_REMINDER_ENABLED ?? 'true').toLowerCase() !=
       .catch((e) => logger.warn(`[activity-reminders] tick failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[activity-reminders] scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Tracking watchdog. Phones kill the background location service; every few minutes find reps who are
+// checked in but have gone quiet and send their phone a silent data-only wake-up push so it restarts
+// tracking itself - no one has to change a phone setting. Conservative (see the service). Across all
+// tenant projects. Toggle with TRACKING_WATCHDOG_ENABLED=false; tune with TRACKING_WATCHDOG_INTERVAL_SEC
+// (default 300s).
+if (String(process.env.TRACKING_WATCHDOG_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(60, Number(process.env.TRACKING_WATCHDOG_INTERVAL_SEC ?? 300)) * 1000;
+  setInterval(() => {
+    forEachProject('tracking-watchdog', () => runTrackingWatchdog())
+      .catch((e) => logger.warn(`[tracking-watchdog] tick failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[tracking-watchdog] scheduler enabled (every ${everyMs / 1000}s)`);
 }
 
 // Field-force route-deviation scan. Periodic tick that alerts supervisors about

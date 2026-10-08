@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
-import { clientHasFlag } from '../lib/clientFlags';
+import { isLiveTrackingDisabled } from '../lib/liveTracking';
 import { isDuplicateHeartbeat, isNullIsland } from '../lib/heartbeatGuard';
 import { clearEmailProjectCache } from '../lib/projects';
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
@@ -1070,19 +1070,6 @@ export const resolveSOS = asyncHandler<AuthRequest>(async (req, res) => {
   sendSuccess(res, data, 'SOS Alert resolved')
 })
 
-// CLIENTS
-// Tenants opted out of continuous live-location tracking — pings from
-// these clients are silently no-op'd so reps don't see errors but the
-// device's battery isn't hit by background GPS. Tata Tiscon flagged
-// battery-drain complaints; their reps use one-shot lead-create geo
-// capture instead. New tenants can be added here without a schema
-// change; longer-term move this to clients.settings.disable_live_tracking.
-// Hardcoded fallback (Tata) OR the data-driven clients.settings flag
-// `disable_live_tracking` — new tenants (e.g. PASA) opt in via data.
-const LIVE_TRACKING_DISABLED_CLIENT_IDS = new Set<string>([
-  'a1f67468-526e-4734-be3a-2cb132cc2804', // Tata Tiscon
-]);
-
 export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version,
           is_mock, location_accuracy_m, location_precise } = req.body;
@@ -1092,7 +1079,7 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   // we don't persist the row. 204 (no content) so the client stops
   // retrying. App-side gating in iOS + Android stops the pings at the
   // source.
-  if (user.client_id && (LIVE_TRACKING_DISABLED_CLIENT_IDS.has(user.client_id) || await clientHasFlag(user.client_id, 'disable_live_tracking'))) {
+  if (user.client_id && await isLiveTrackingDisabled(user.client_id)) {
     res.status(204).end();
     return;
   }
