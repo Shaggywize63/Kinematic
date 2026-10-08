@@ -16,6 +16,7 @@
  */
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
+import { collapseDuplicatePings } from '../lib/trailThin';
 import { AuthRequest } from '../types';
 import { asyncHandler, AppError, sendSuccess } from '../utils';
 
@@ -57,5 +58,7 @@ export const getUserLocationTrail = asyncHandler<AuthRequest>(async (req: AuthRe
     .limit(5000);
 
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  sendSuccess(res, data ?? [], 'Location trail fetched');
+  // Older Android builds stored the same fix many times a second; collapse those (and 0,0 "no fix"
+  // rows) so the map and the CSV show real pings, not thousands of stacked copies.
+  sendSuccess(res, collapseDuplicatePings(data ?? []), 'Location trail fetched');
 });
