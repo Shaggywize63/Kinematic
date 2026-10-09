@@ -16,6 +16,7 @@ import { z } from 'zod/v3';
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
 import { clientScopedList, get, update, create } from '../services/crm/crud.service';
+import { guardOwnerChange, OWNER_ASSIGN_FORBIDDEN, OWNER_ASSIGN_FORBIDDEN_MESSAGE } from '../services/crm/ownerAssignment';
 import {
   McpCtx, mcpCtxFromReq, textResult, errorResult, denyIfNotAllowed, ownerScopeOpts, audit,
 } from './context';
@@ -128,6 +129,24 @@ function registerTools(server: McpServer, ctx: McpCtx): void {
     if (args.owner_id != null) payload.owner_id = args.owner_id;
     if (args.notes != null) payload.notes = args.notes;
     if (Object.keys(payload).length === 0) return errorResult('Nothing to update — pass status, owner_id, or notes.');
+
+    // A client that restricts lead assignment to admins (crm_settings.config.lead_form.owner_assignment =
+    // 'admin_only') applies the same rule to the assistant, which acts as the connected user.
+    if (payload.owner_id !== undefined) {
+      try {
+        await guardOwnerChange(
+          { id: ctx.userId, org_id: ctx.orgId, role: ctx.user.role, client_id: ctx.userClientId, data_scope: ctx.user.org_role_data_scope ?? null },
+          args.lead_id, payload,
+        );
+      } catch (e: any) {
+        if (e?.code === OWNER_ASSIGN_FORBIDDEN) {
+          await audit(ctx, { tool: 'update_lead', targetType: 'lead', targetId: args.lead_id, request: payload, outcome: 'denied' });
+          return errorResult(OWNER_ASSIGN_FORBIDDEN_MESSAGE);
+        }
+        throw e;
+      }
+      if (Object.keys(payload).length === 0) return textResult('Nothing to change — that is already the lead owner.');
+    }
 
     try {
       const updated = await update('crm_leads', ctx.orgId, args.lead_id, payload, ctx.userId, ctx.userClientId) as any;

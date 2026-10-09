@@ -7,8 +7,10 @@
  * default row (client_id IS NULL).
  */
 import { supabaseAdmin } from '../../lib/supabase';
+import type { LeadFormSettings } from '../../types/crm.types';
 
-export type LeadFormConfig = Record<string, unknown>;
+/** `config.lead_form` as stored: the known keys (see LeadFormSettings) plus whatever a newer build wrote. */
+export type LeadFormConfig = Record<string, unknown> & LeadFormSettings;
 
 async function configRow(org_id: string, client_id: string | null): Promise<Record<string, unknown> | null> {
   let q = supabaseAdmin.from('crm_settings').select('config').eq('org_id', org_id);
@@ -44,4 +46,13 @@ export function hasSegmentLabels(leadForm: LeadFormConfig | null | undefined): b
     const v = (labels as Record<string, unknown>)[k];
     return typeof v === 'string' && v.trim() !== '';
   });
+}
+
+/**
+ * Has the client restricted choosing a lead's owner to admins
+ * (`lead_form.owner_assignment === 'admin_only'`)? Anything else — absent, null, an unknown value — is
+ * "no extra rule", i.e. today's behaviour.
+ */
+export function isAdminOnlyOwnerAssignment(leadForm: LeadFormConfig | null | undefined): boolean {
+  return leadForm?.owner_assignment === 'admin_only';
 }

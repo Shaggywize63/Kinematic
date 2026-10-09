@@ -71,6 +71,8 @@ When a policy has at least one vehicle rate, a **mileage** line is no longer a t
 * saving a draft is lenient (only *after < before* is refused); **submitting** is blocked until vehicle,
   both readings and (unless `odometer_photos_required: false`) both photos are present;
 * submit re-prices every vehicle line at the *current* rates;
+* a policy with **exactly one** vehicle rate needs no choice: a mileage line that arrives without a `vehicle_type`
+  is priced and stored with that vehicle (section 7.3);
 * policies without `vehicle_rates` are untouched.
 
 ### One-time database migration (required before odometer data can be saved)
@@ -269,6 +271,9 @@ Optional: `API_URL` (default `https://api.kinematicapp.com`), `PROJECT` (`X-Kine
    default config in the same write, so nothing it was being served is lost.
 4. **Targets** (same `PATCH /crm/settings` as step 3) — enables `config.targets.types` = sales + collection (a type
    already listed keeps its label). Section 6 explains the table migration this needs.
+5. **Lead owners** (same `PATCH /crm/settings` as step 3) — sets `config.lead_form.owner_assignment = "admin_only"`,
+   keeping the other `lead_form` keys (the endpoint replaces `lead_form` as a whole, so the tool reads and merges).
+   Section 7.
 
 The token must be an admin who can edit the client in Client Management (`PATCH /clients/:id` needs an admin of the org
 that owns it) and manage expense policies and CRM settings. If you'd rather apply the data directly in the database,
@@ -358,3 +363,67 @@ daily) — same queries, same responses. With it: it must be an enabled type, el
 ```
 
 `target` / `pct` are `null` for someone with no target. As on the lead board, anyone with an org role, a target or an entry is listed.
+
+## 7. Admin-only lead owners, and the sole-vehicle default (contract H)
+
+Both are **opt-in by data** and default to today's behaviour; nothing hard-codes a client. The web dashboard and the
+Android / iOS apps implement against exactly this.
+
+### 7.1 `config.lead_form.owner_assignment`
+
+```json
+{ "config": { "lead_form": { "segment_labels": { "b2b": "Dealer", "b2c": "Farmers" }, "owner_assignment": "admin_only" } } }
+```
+
+* Optional, in the same `lead_form` object as section 1 (`PATCH /crm/settings` replaces `lead_form` as a whole, so send
+  the whole object). The only value is `"admin_only"`; `null` or leaving it out clears it; anything else is a **400**.
+  `GET /crm/settings` returns it inside `config.lead_form`. Absent / `null` = today's behaviour: whoever can assign
+  leads today still can.
+* **Admin** = the expenses notion, `isApprover` in `src/services/expenses/access.ts`: role `admin`, `super_admin`,
+  `main_admin`, `org_admin`, `sub_admin` or `client`, **and** an org-role data scope that is not `own`. So a rep on a flat
+  tenant (role `sub_admin`, scope `own`), a supervisor and a city manager are not admins here. (The CRM's older
+  `OWNER_ASSIGN_ROLES` list in `crm.routes.ts`, which still runs afterwards, is a mass-assignment guard with no notion of
+  data scope; this switch can only restrict on top of it.)
+* Apps: when `owner_assignment === "admin_only"` and the signed-in user is not an admin, hide the owner picker (create and
+  edit), bulk-assign and the import owner column. The server enforces it regardless.
+
+What the server does for a client with the switch, when the caller is **not** an admin:
+
+| Path | Result |
+| --- | --- |
+| `POST /crm/leads` | Any `owner_id` is **ignored**, the lead takes the normal default (see below). `schedule_visit` is unaffected: its activity goes to the lead's owner, which is now the creator. |
+| `PATCH /crm/leads/:id` (there is no PUT) | An `owner_id` different from the lead's current owner (including `null`) is **403** `OWNER_ASSIGN_FORBIDDEN`, message `Only an admin can assign leads`. The unchanged owner (apps resend the whole object, case-insensitively equal) is accepted and not rewritten. |
+| `POST /crm/leads/bulk-assign` | **403** `OWNER_ASSIGN_FORBIDDEN`. |
+| `POST /crm/import/commit` (CSV with an owner / owner email column) | The owner columns are **ignored**: every row takes the default owner, and a row that matches an existing lead does not reassign it. |
+| `POST /crm/marketing-visits/start` with a new `lead` | `lead.owner_id` is **ignored**, as on create. |
+| KINI `crm_update_lead` (owner change) and `crm_bulk_reassign_leads`; MCP `update_lead` (owner change) | Refused with the same message (the assistant acts as the user). The unchanged owner is accepted. |
+| `POST /crm/leads/:id/convert`, `/won`, `/reopen`, the Google Contacts sync | Nothing to enforce: they take no owner choice (convert's contact / account / deal inherit the lead's owner; the sync passes no owner, so imports take the default owner). |
+
+The error body is the CRM envelope: `{ "success": false, "error": { "code": "OWNER_ASSIGN_FORBIDDEN", "message": "Only an admin can assign leads" } }`.
+
+Never blocked, because no person is choosing: assignment rules and round-robin, automations / workflows, inbound
+webhooks (web forms, Meta, Google Ads), the chatbot inbox and consumer registrations. They call the lead service directly.
+
+**The default owner** when `owner_id` is omitted or ignored is: the first matching active assignment rule (a fixed user or
+a round-robin pool) → the creator → `config.default_owner_id`. So with an assignment rule configured, a rep's lead can
+still land on the rule's assignee (that is automation, left alone); with none, the rep owns what they create.
+If the settings row cannot be read the switch is treated as off (and a warning logged), so a settings hiccup never
+takes lead edits down for other clients.
+
+Not covered (not leads): the owner of a deal, contact, account or activity.
+
+### 7.2 Agrisynx's value
+
+`src/tools/agrisynx-app-config.ts` writes `lead_form.owner_assignment = "admin_only"` (merged into the existing
+`lead_form`; run before or after `agrisynx-lead-forms.ts`, which now also keeps it). `--dry-run` prints
+`[dry-run] update settings: only an admin may choose a lead's owner (config.lead_form.owner_assignment=admin_only)`; a
+second run prints `lead owners: already admin-only` and writes nothing.
+
+### 7.3 Sole-vehicle default (expenses)
+
+When a policy has **exactly one** `vehicle_rates` entry, a mileage line that arrives without a vehicle (`vehicle_type`
+absent, `null`, `""` or blank) is priced at, and **stored with**, that vehicle. This applies in create, update, the
+pre-submit check and submit (a draft saved without a vehicle gets it filled in at submit), so an older app build that
+cannot pre-select the vehicle still produces a priced line and does not hit `vehicle_missing`. With two or more rates
+nothing changes (the rep must pick), and a `vehicle_type` that is not in the policy is still an error as before.
+Code: `soleVehicle` / `withSoleVehicle` in `src/services/expenses/vehicleAllowance.ts`.

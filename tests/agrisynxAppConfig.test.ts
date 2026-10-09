@@ -188,25 +188,145 @@ describe('the rupee targets config', () => {
   });
 });
 
-describe('the whole CRM settings patch (consent block + targets)', () => {
-  it('carries both, valid for the settings API, and nothing else when the client has its own row', () => {
+describe('admin-only lead owners (lead_form.owner_assignment)', () => {
+  it("sets owner_assignment to 'admin_only' on a client with no lead_form yet", () => {
+    expect(app.OWNER_ASSIGNMENT).toBe('admin_only');
+    for (const none of [undefined, null, {}, 'junk', [], 3]) expect(app.planLeadForm(none)).toEqual({ owner_assignment: 'admin_only' });
+  });
+  it('keeps every other lead_form key (the endpoint replaces lead_form as a whole), and does not mutate its input', () => {
+    const existing = Object.freeze({ segment_labels: { b2b: 'Dealer', b2c: 'Farmers' }, address_on_b2b: true, schedule_visit: { segments: ['b2b'] }, future: { x: 1 } });
+    expect(app.planLeadForm(existing)).toEqual({ ...existing, owner_assignment: 'admin_only' });
+    expect('owner_assignment' in existing).toBe(false);
+  });
+  it('turns a cleared (null) or different value back on', () => {
+    expect(app.planLeadForm({ owner_assignment: null })).toEqual({ owner_assignment: 'admin_only' });
+    expect(app.planLeadForm({ owner_assignment: 'anyone' })).toEqual({ owner_assignment: 'admin_only' });
+  });
+  it('is idempotent, and is detected as unchanged regardless of key order', () => {
+    const once = app.planLeadForm({ address_on_b2b: true });
+    expect(app.sameJson(app.planLeadForm(once), once)).toBe(true);
+    expect(app.sameJson(app.planLeadForm({ owner_assignment: 'admin_only', address_on_b2b: true }), once)).toBe(true);
+    expect(app.sameJson(app.planLeadForm({ address_on_b2b: true }), { address_on_b2b: true })).toBe(false);   // a client without it needs the write
+  });
+  it('is accepted by the settings API validator, next to the lead-form seed\'s own keys', () => {
+    const seeded = app.planLeadForm(forms.LEAD_FORM);
+    expect(v.settingsUpdateSchema.safeParse({ config: { lead_form: seeded } }).success).toBe(true);
+    expect(v.settingsUpdateSchema.safeParse({ config: { lead_form: app.planLeadForm(undefined) } }).success).toBe(true);
+  });
+  it('is read as on by the server (what the enforcement looks at)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { isAdminOnlyOwnerAssignment } = require('../src/services/crm/leadFormConfig') as typeof import('../src/services/crm/leadFormConfig');
+    expect(isAdminOnlyOwnerAssignment(app.planLeadForm(undefined) as any)).toBe(true);
+  });
+  it('survives the lead-form seed being run afterwards (either order keeps both)', () => {
+    const afterApp = app.planCrmSettings({}).config;                                  // app-config first
+    const afterForms = forms.planSettings(afterApp);                                  // then the lead-form seed
+    expect(afterForms.config.lead_form).toEqual({ ...forms.LEAD_FORM, owner_assignment: 'admin_only' });
+    expect(app.planLeadForm(afterForms.config.lead_form)).toEqual(afterForms.config.lead_form);   // and app-config again: no change
+  });
+});
+
+describe('the whole CRM settings patch (consent block + targets + lead owners)', () => {
+  it('carries all three, valid for the settings API, and nothing else when the client has its own row', () => {
     const patch = app.planCrmSettings({ field_overrides: { 'lead.phone': { label: 'Mobile' } }, lead_form: { address_on_b2b: true } });
-    expect(Object.keys(patch.config).sort()).toEqual(['field_overrides', 'targets']);
+    expect(Object.keys(patch.config).sort()).toEqual(['field_overrides', 'lead_form', 'targets']);
     expect((patch.config.field_overrides as any)['lead.phone']).toEqual({ label: 'Mobile' });
     expect((patch.config.field_overrides as any)['lead.data_consent@b2b']).toEqual({ hidden: true, required: false });
     expect(patch.config.targets).toEqual({ types: [{ key: 'sales' }, { key: 'collection' }] });
+    expect(patch.config.lead_form).toEqual({ address_on_b2b: true, owner_assignment: 'admin_only' });
     expect(v.settingsUpdateSchema.safeParse(patch).success).toBe(true);
   });
   it('carries the inherited org-level config across when the client has no row of its own, with ours on top', () => {
     const patch: any = app.planCrmSettings({ lead_form: { address_on_b2b: true }, targets: { types: [{ key: 'sales', label: 'Orders' }] }, score_boost_signals: ['a'] }, true);
-    expect(patch.config.lead_form).toEqual({ address_on_b2b: true });
+    expect(patch.config.lead_form).toEqual({ address_on_b2b: true, owner_assignment: 'admin_only' });
     expect(patch.config.targets).toEqual({ types: [{ key: 'sales', label: 'Orders' }, { key: 'collection' }] });
     expect('score_boost_signals' in patch.config).toBe(false);
+  });
+  it('detects each part as done or not, so a re-run writes nothing', () => {
+    const row = { field_overrides: { 'lead.phone': { label: 'Mobile' } }, lead_form: { address_on_b2b: true }, consent: { lead_pii: { required: false } } };
+    const first: any = app.planCrmSettings(row);
+    expect(app.sameJson(first.config.lead_form, row.lead_form)).toBe(false);
+    expect(app.sameJson(first.config.targets, undefined)).toBe(false);
+    const applied = { ...row, ...first.config };                                       // PATCH merges top-level keys
+    const second: any = app.planCrmSettings(applied);
+    for (const k of ['field_overrides', 'lead_form', 'targets']) expect({ k, same: app.sameJson(second.config[k], applied[k]) }).toEqual({ k, same: true });
+    expect(applied.consent).toEqual(row.consent);                                      // and what it does not manage is untouched
   });
   it('is idempotent: planning from its own output changes nothing', () => {
     const once = app.planCrmSettings({});
     const twice = app.planCrmSettings(once.config);
     expect(app.sameJson(twice, once)).toBe(true);
+  });
+});
+
+// ── the tool end to end (against a fake API), dry run and real run ───────────
+describe('running the tool', () => {
+  const API = 'https://api.test';
+  const CID = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a';
+  const settled = {
+    policies: [{ id: 'p1', name: 'Agrisynx field policy', client_id: CID, is_active: true, rules: app.planExpenseRules(undefined) }],
+    client: { id: CID, settings: { app_ui: app.planAppUi(undefined) } },
+  };
+  const settledConfig = (): any => app.planCrmSettings({}).config;
+
+  /** A fake API: returns the canned reads and records every call. */
+  function fakeApi(settingsRow: any) {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (global as any).fetch = jest.fn(async (url: string, init: any = {}) => {
+      const path = String(url).replace(API, '');
+      const method = init.method || 'GET';
+      calls.push({ method, path, body: init.body ? JSON.parse(init.body) : undefined });
+      const reply = (json: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(json) });
+      if (method === 'GET' && path === '/api/v1/expenses/policies') return reply({ data: settled.policies });
+      if (method === 'GET' && path === '/api/v1/clients') return reply({ data: [settled.client] });
+      if (method === 'GET' && path === '/api/v1/crm/settings') return reply({ data: settingsRow });
+      return reply({ success: true });
+    });
+    return calls;
+  }
+  async function run(args: string[], settingsRow: any) {
+    const calls = fakeApi(settingsRow);
+    const logs: string[] = [];
+    const log = jest.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    const argv = process.argv;
+    const keys = ['TOKEN', 'CLIENT_ID', 'API_URL', 'PROJECT'] as const;
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    process.argv = ['node', 'agrisynx-app-config.ts', ...args];
+    Object.assign(process.env, { TOKEN: 't', CLIENT_ID: CID, API_URL: API, PROJECT: 'kinematic' });
+    try { await app.main(); } finally {
+      process.argv = argv; log.mockRestore();
+      for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    }
+    return { calls, logs };
+  }
+  const writes = (calls: Array<{ method: string }>) => calls.filter((c) => c.method !== 'GET');
+
+  it('dry run: says it would turn admin-only lead owners on, and writes nothing', async () => {
+    const { calls, logs } = await run(['--dry-run'], { id: 'cs-1', client_id: CID, config: { lead_form: { segment_labels: { b2b: 'Dealer' } } } });
+    expect(writes(calls)).toEqual([]);
+    expect(logs).toContain("[dry-run] update settings: only an admin may choose a lead's owner (config.lead_form.owner_assignment=admin_only)");
+    expect(logs).toContain('Dry run only — nothing was changed.');
+  });
+  it('real run: one settings PATCH carries lead_form with the existing keys kept and owner_assignment on', async () => {
+    const { calls } = await run([], { id: 'cs-1', client_id: CID, config: { lead_form: { segment_labels: { b2b: 'Dealer' }, address_on_b2b: true } } });
+    const patches = writes(calls).filter((c) => c.path === '/api/v1/crm/settings');
+    expect(patches).toHaveLength(1);
+    expect(patches[0].method).toBe('PATCH');
+    expect(patches[0].body.config.lead_form).toEqual({ segment_labels: { b2b: 'Dealer' }, address_on_b2b: true, owner_assignment: 'admin_only' });
+    expect(v.settingsUpdateSchema.safeParse(patches[0].body).success).toBe(true);
+  });
+  it('is idempotent: when everything is already set it says so and writes nothing', async () => {
+    const { calls, logs } = await run([], { id: 'cs-1', client_id: CID, config: settledConfig() });
+    expect(writes(calls)).toEqual([]);
+    expect(logs).toContain('lead owners: already admin-only');
+    expect(logs).toContain('lead consent block: already hidden');
+    expect(logs).toContain('targets: sales + collection already enabled');
+  });
+  it('writes the settings again when only the lead owners are missing', async () => {
+    const { owner_assignment: _drop, ...leadForm } = settledConfig().lead_form;
+    const { calls, logs } = await run([], { id: 'cs-1', client_id: CID, config: { ...settledConfig(), lead_form: leadForm } });
+    expect(logs).toContain('lead consent block: already hidden');
+    expect(writes(calls).map((c) => c.path)).toEqual(['/api/v1/crm/settings']);
   });
 });
 

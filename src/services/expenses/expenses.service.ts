@@ -224,8 +224,9 @@ function priceMileage<T extends { category?: string | null; amount?: number | nu
 
 /**
  * Price the lines under the policy. With vehicle rates, a mileage line's distance and amount come
- * from the odometer readings and the chosen vehicle; otherwise a mileage line with a distance and
- * no amount is priced at the single policy rate, exactly as before.
+ * from the odometer readings and the chosen vehicle (a line with no vehicle takes the policy's only
+ * vehicle when it has exactly one rate); otherwise a mileage line with a distance and no amount is
+ * priced at the single policy rate, exactly as before.
  */
 function priceItems<T extends ClaimItemInput>(items: T[], rules: ExpensePolicy['rules']): T[] {
   if (vehicleFlowOn(rules)) {
@@ -495,10 +496,19 @@ export async function submitClaim(actor: Actor, id: string) {
     for (const it of items) {
       if (it.category !== 'mileage') continue;
       const priced = priceVehicleLine(it as any, policy.rules.vehicle_rates!) as any;
+      const patch: Record<string, unknown> = {};
       if (Number(priced.amount) !== Number(it.amount) || Number(priced.distance_km ?? 0) !== Number(it.distance_km ?? 0)) {
-        await supabaseAdmin.from('expense_claim_items').update({ amount: priced.amount, distance_km: priced.distance_km }).eq('id', it.id);
-        it.amount = priced.amount;
-        it.distance_km = priced.distance_km;
+        patch.amount = priced.amount;
+        patch.distance_km = priced.distance_km;
+      }
+      // A line saved without a vehicle under a one-vehicle policy is stored with that vehicle. (Only when the
+      // row actually has the column: a database that has not run expense_odometer.sql has no vehicle_type.)
+      if (priced.vehicle_type !== it.vehicle_type && Object.prototype.hasOwnProperty.call(it, 'vehicle_type')) {
+        patch.vehicle_type = priced.vehicle_type;
+      }
+      if (Object.keys(patch).length) {
+        await supabaseAdmin.from('expense_claim_items').update(patch).eq('id', it.id);
+        Object.assign(it, patch);
       }
     }
   }

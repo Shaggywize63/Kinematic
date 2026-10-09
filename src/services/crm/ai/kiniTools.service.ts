@@ -11,6 +11,7 @@ import * as dealsSvc from '../deals.service';
 import * as leaderboardSvc from '../leaderboard.service';
 import * as kiniMemory from './kiniMemory.service';
 import { sendWhatsapp } from '../whatsapp.service';
+import * as ownerAssign from '../ownerAssignment';
 
 /**
  * Per-call context threaded from the chat controller into a tool's exec.
@@ -27,6 +28,9 @@ export interface KiniToolContext {
   user_id?: string | null;
   city?: string | null;
   role?: string | null;
+  /** The operator's org-role data scope ('own' | 'team' | 'all'); with `role` it decides who counts as an admin
+   *  (expenses' isApprover) for lead_form.owner_assignment = 'admin_only'. Absent = not an own-scope user. */
+  data_scope?: string | null;
 }
 
 export interface KiniTool {
@@ -207,6 +211,15 @@ const assertAccountInClientScope = (org_id: string, client_id: string | null, ac
 const ADMIN_ROLES = new Set(['super_admin', 'admin', 'main_admin', 'sub_admin', 'org_admin', 'client']);
 const MANAGER_ROLES = new Set([...ADMIN_ROLES, 'city_manager', 'supervisor']);
 const roleOf = (ctx?: KiniToolContext): string => String(ctx?.role ?? '').toLowerCase().trim();
+
+/**
+ * The operator as an expenses-style actor, for lead_form.owner_assignment = 'admin_only' (only an admin may
+ * choose a lead's owner). A context without a role (the legacy v1 endpoints) is not an admin, so under that
+ * switch it cannot reassign; a client without the switch is untouched.
+ */
+const kiniActor = (org_id: string, client_id: string | null, ctx?: KiniToolContext) => ({
+  id: ctx?.user_id ?? '', org_id, role: ctx?.role ?? null, client_id, data_scope: ctx?.data_scope ?? null,
+});
 
 /** Tool-error payload when the actor's role isn't in `allowed`, else null. */
 function roleGate(allowed: Set<string>, ctx: KiniToolContext | undefined, human: string): { data: { error: string } } | null {
@@ -632,7 +645,7 @@ export const tools: KiniTool[] = [
       notes: { type: 'string' },
       lost_reason: { type: 'string', description: 'Reason text shown alongside an unqualified/lost transition.' },
     }},
-    exec: async (org_id, client_id, args) => {
+    exec: async (org_id, client_id, args, ctx) => {
       const { id, ...rest } = args as Record<string, unknown>;
       // Client-scope re-check. When the actor is client-scoped, a
       // prompt-injected note ("convert all leads") could otherwise
@@ -640,6 +653,10 @@ export const tools: KiniTool[] = [
       // same org. updateLead only enforces org_id; we enforce client
       // here.
       await assertLeadInClientScope(org_id, client_id, String(id));
+      // owner_assignment = 'admin_only': a non-admin cannot change the owner through the assistant either
+      // (the current owner passed back unchanged is fine). The refusal throws and executeTool reports it to the
+      // model as a tool error ("Only an admin can assign leads"), like the other guards here.
+      await ownerAssign.guardOwnerChange(kiniActor(org_id, client_id, ctx), String(id), rest);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const lead = await leadsSvc.updateLead(org_id, String(id), rest as any);
       return { card: { type: 'lead_updated', data: lead }, data: lead };
@@ -1103,6 +1120,10 @@ export const tools: KiniTool[] = [
     exec: async (org_id, client_id, args, ctx) => {
       const denied = roleGate(MANAGER_ROLES, ctx, 'manager or admin');
       if (denied) return denied;
+      // owner_assignment = 'admin_only': reassigning is the whole point of this tool, so a non-admin is refused.
+      // (Thrown, so executeTool reports a flat { error } that the confirm endpoint turns into a 400; a returned
+      // { data: { error } } would arrive double-wrapped and the confirm would announce "Leads reassigned.")
+      await ownerAssign.assertMayChooseOwner(kiniActor(org_id, client_id, ctx));
       const newOwner = String(args.new_owner_id ?? '');
       if (!isUuid(newOwner)) return { data: { error: 'A valid new_owner_id is required.' } };
       if (args.current_owner_id !== undefined && args.current_owner_id !== null && args.current_owner_id !== '' && !isUuid(String(args.current_owner_id))) {

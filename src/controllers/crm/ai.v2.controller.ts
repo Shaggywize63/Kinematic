@@ -266,7 +266,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
             // Thread the active city scope (from the client's KiniContext —
             // mirrors the dashboard's global `?city=`) and the operator role
             // so tools can city-scope reads and the RBAC gate can apply.
-            { user_id, city: context?.city ?? null, role: role ?? null },
+            { user_id, city: context?.city ?? null, role: role ?? null, data_scope: user.org_role_data_scope ?? null },
           );
           const out = r ?? { data: { error: `Unknown tool: ${name}` } };
           let resultSize = 0;
@@ -586,7 +586,7 @@ export const chatStream = asyncHandler(async (req: AuthRequest, res: Response) =
             effectiveClientId,
             name,
             args as Record<string, unknown>,
-            { user_id, city: context?.city ?? null, role: role ?? null },
+            { user_id, city: context?.city ?? null, role: role ?? null, data_scope: user.org_role_data_scope ?? null },
           );
           const out = r ?? { data: { error: `Unknown tool: ${name}` } };
           let resultSize = 0;
@@ -780,7 +780,7 @@ export const confirm = asyncHandler(async (req: AuthRequest, res: Response) => {
     typeof req.query.city === 'string' && req.query.city.trim()
       ? req.query.city.trim()
       : (req.body as { context?: { city?: unknown } })?.context?.city;
-  const ctx = { user_id, city: typeof ctxCity === 'string' ? ctxCity : null, role: role ?? null };
+  const ctx = { user_id, city: typeof ctxCity === 'string' ? ctxCity : null, role: role ?? null, data_scope: user.org_role_data_scope ?? null };
 
   const platform = platformOf(req);
   const t0 = Date.now();

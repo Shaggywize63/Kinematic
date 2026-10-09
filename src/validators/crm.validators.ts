@@ -758,11 +758,14 @@ export const summarizeSchema = z.object({});
 //   address_on_b2b  B2B leads capture an address + map pin too (they only keep a
 //                   company and a contact otherwise)
 //   schedule_visit  which lead types get a "Schedule Visit" date + time on the form
+//   owner_assignment  'admin_only' = only an admin may choose or change a lead's owner (the server enforces
+//                   it, see services/crm/ownerAssignment.ts); absent or null = no extra rule
 const segmentLabel = z.string().trim().min(1).max(40);
 export const leadFormConfigSchema = z.object({
   segment_labels: z.object({ b2b: segmentLabel.optional(), b2c: segmentLabel.optional() }).strict().optional(),
   address_on_b2b: z.boolean().optional(),
   schedule_visit: z.object({ segments: z.array(z.enum(['b2b', 'b2c'])).max(2) }).strict().optional(),
+  owner_assignment: z.literal('admin_only').nullish(),
 }).strict();
 
 // Rupee targets kept in crm_settings.config.targets. Opt-in per client: absent or `types: []` = the

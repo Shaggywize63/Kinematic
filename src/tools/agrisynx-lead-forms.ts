@@ -128,11 +128,17 @@ export function planFields(existing: ExistingField[]): Step[] {
   });
 }
 
-/** The settings patch: our overrides laid over whatever is already configured. */
+/**
+ * The settings patch: our overrides laid over whatever is already configured. PATCH /crm/settings replaces
+ * `lead_form` as a whole, so the lead_form keys this seed does not own (e.g. owner_assignment, written by
+ * agrisynx-app-config.ts) are carried over: running the two tools in either order keeps both.
+ */
 export function planSettings(existingConfig: Record<string, unknown> | null | undefined) {
   const current = (existingConfig?.field_overrides && typeof existingConfig.field_overrides === 'object'
     ? existingConfig.field_overrides : {}) as Record<string, Override>;
-  return { config: { field_overrides: { ...current, ...FIELD_OVERRIDES }, lead_form: LEAD_FORM } };
+  const leadForm = (existingConfig?.lead_form && typeof existingConfig.lead_form === 'object' && !Array.isArray(existingConfig.lead_form)
+    ? existingConfig.lead_form : {}) as Record<string, unknown>;
+  return { config: { field_overrides: { ...current, ...FIELD_OVERRIDES }, lead_form: { ...leadForm, ...LEAD_FORM } } };
 }
 
 // ── applying it through the API ─────────────────────────────────────────────
