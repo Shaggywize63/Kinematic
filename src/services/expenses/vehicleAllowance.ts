@@ -78,6 +78,28 @@ export function normalizeVehicleRates(raw: unknown): VehicleRate[] {
 
 export const vehicleFlowOn = (rules?: { vehicle_rates?: VehicleRate[] } | null): boolean => !!rules?.vehicle_rates?.length;
 
+/** The policy's only vehicle, or null when it has none or several (with several the rep must pick one). */
+export function soleVehicle(rates?: ReadonlyArray<VehicleRate> | null): VehicleRate | null {
+  return rates && rates.length === 1 ? rates[0] : null;
+}
+
+const isBlankVehicle = (v: unknown): boolean => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
+
+/**
+ * Sole-vehicle default. A mileage line that arrives without a vehicle (null / undefined / '') under a policy
+ * that pays for exactly ONE vehicle is that vehicle: older app builds cannot pre-select it, and there is
+ * nothing to choose between. With two or more rates nothing changes (the rep must pick), and a vehicle that
+ * is named but is not in the policy is left alone so it is still an error exactly as before.
+ * Pure: returns the same object when there is nothing to fill in.
+ */
+export function withSoleVehicle<T extends OdometerFields & { category?: string | null }>(
+  item: T, rates?: ReadonlyArray<VehicleRate> | null,
+): T {
+  if (item.category !== 'mileage' || !isBlankVehicle(item.vehicle_type)) return item;
+  const sole = soleVehicle(rates);
+  return sole ? { ...item, vehicle_type: sole.id } : item;
+}
+
 /** Did this line carry any vehicle / odometer field at all (even an explicit null)? */
 export const hasOdometerInput = (i: object): boolean =>
   ODOMETER_KEYS.some((k) => (i as Record<string, unknown>)[k] !== undefined);
@@ -86,20 +108,24 @@ export const hasOdometerInput = (i: object): boolean =>
  * Price a mileage line from its odometer readings and vehicle. Never throws — an
  * unusable pair simply leaves the line unpriced and `odometerViolations` explains
  * it. (Use `assertOdometerOrder` where a bad pair must be refused outright.)
+ *
+ * A line without a vehicle under a policy with exactly one vehicle rate is priced
+ * at, and returned with, that vehicle (see `withSoleVehicle`).
  */
 export function priceVehicleLine<T extends OdometerFields & { category?: string | null; amount?: number | null; distance_km?: number | null }>(
   item: T, rates: VehicleRate[],
 ): T {
   if (item.category !== 'mileage') return item;
-  const start = num(item.odometer_start);
-  const end = num(item.odometer_end);
+  const line = withSoleVehicle(item, rates);
+  const start = num(line.odometer_start);
+  const end = num(line.odometer_end);
   if (start != null && end != null && end >= start) {
     const km = round2(end - start);
-    const rate = rates.find((r) => r.id === item.vehicle_type);
-    return { ...item, distance_km: km, amount: rate ? round2(km * rate.rate_per_km) : 0 };
+    const rate = rates.find((r) => r.id === line.vehicle_type);
+    return { ...line, distance_km: km, amount: rate ? round2(km * rate.rate_per_km) : 0 };
   }
   // Only one reading so far (or an impossible pair): nothing to price yet.
-  return { ...item, distance_km: null, amount: 0 };
+  return { ...line, distance_km: null, amount: 0 };
 }
 
 /** Refuse a saved line whose "after" reading is below its "before" reading. */
@@ -125,7 +151,9 @@ export function odometerProblems(
 ): OdometerProblem[] {
   if (item.category !== 'mileage' || !vehicleFlowOn(rules)) return [];
   const problems: OdometerProblem[] = [];
-  if (!rules.vehicle_rates!.some((r) => r.id === item.vehicle_type)) {
+  // (a blank vehicle is the policy's only vehicle when it has exactly one rate)
+  const vehicle = withSoleVehicle(item, rules.vehicle_rates).vehicle_type;
+  if (!rules.vehicle_rates!.some((r) => r.id === vehicle)) {
     problems.push({ code: 'vehicle_missing', detail: 'Pick the vehicle you travelled in.' });
   }
   const start = num(item.odometer_start);

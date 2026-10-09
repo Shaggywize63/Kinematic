@@ -103,6 +103,19 @@ describe('agrisynx settings', () => {
   });
 });
 
+describe('the lead_form block the seed writes', () => {
+  it('keeps the lead_form keys the seed does not own (owner_assignment is written by agrisynx-app-config.ts)', () => {
+    const p = setup.planSettings({ lead_form: { owner_assignment: 'admin_only', segment_labels: { b2b: 'Old' } } });
+    expect(p.config.lead_form).toEqual({ ...setup.LEAD_FORM, owner_assignment: 'admin_only' });      // ours wins for the keys it owns
+    expect(v.settingsUpdateSchema.safeParse(p).success).toBe(true);
+  });
+  it('is exactly the seed\'s own block on a client that has none', () => {
+    for (const none of [undefined, null, {}, { lead_form: null }, { lead_form: [] }, { lead_form: 'x' }]) {
+      expect(setup.planSettings(none as any).config.lead_form).toEqual(setup.LEAD_FORM);
+    }
+  });
+});
+
 describe('planning is idempotent', () => {
   it('creates everything on a fresh client', () => {
     expect(setup.planFields([]).map((s) => s.op)).toEqual(Array(setup.CUSTOM_FIELDS.length).fill('create'));

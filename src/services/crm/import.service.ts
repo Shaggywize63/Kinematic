@@ -194,6 +194,9 @@ export async function commitJob(
   job_id: string,
   user_id: string | null = null,
   client_id: string | null = null,
+  // The importer may not choose lead owners (lead_form.owner_assignment = 'admin_only' and they are not an
+  // admin): the file's owner / owner_email columns are ignored and every lead takes the default owner.
+  ignoreOwnerColumns = false,
 ) {
   const { data: job, error: loadErr } = await supabaseAdmin.from('crm_import_jobs').select('*')
     .eq('org_id', org_id).eq('id', job_id).eq('kind', 'leads').single();
@@ -210,7 +213,7 @@ export async function commitJob(
 
   // Fire-and-forget. Node keeps this in the event loop until it finishes,
   // even after the HTTP response has been returned to the FE.
-  void runCommitInBackground(org_id, job_id, user_id, client_id, rows, (job.mapping ?? {}) as Record<string, string>, Array.isArray(job.errors) ? job.errors : []);
+  void runCommitInBackground(org_id, job_id, user_id, client_id, rows, (job.mapping ?? {}) as Record<string, string>, Array.isArray(job.errors) ? job.errors : [], ignoreOwnerColumns);
 
   return { ...job, status: 'running', processed_rows: 0, total_rows: rows.length };
 }
@@ -223,6 +226,7 @@ async function runCommitInBackground(
   rows: Record<string, unknown>[],
   mapping: Record<string, string>,
   existingErrors: any[],
+  ignoreOwnerColumns = false,
 ) {
   // Auto-create or fetch the single "Excel/CSV Import" lead source per org
   // so every import attributes its leads consistently. Reports and
@@ -315,7 +319,7 @@ async function runCommitInBackground(
       // is present. Email wins when both columns are mapped.
       const ownerVal = textOrNull(mapped.owner_email) ?? textOrNull(mapped.owner_name);
       const ownerKey = ownerVal ? ownerVal.toLowerCase() : null;
-      const owner_id = ownerKey ? (ownerByEmail.get(ownerKey) ?? ownerByName.get(ownerKey) ?? null) : null;
+      const owner_id = ownerKey && !ignoreOwnerColumns ? (ownerByEmail.get(ownerKey) ?? ownerByName.get(ownerKey) ?? null) : null;
       const srcName = textOrNull(mapped.source);
       const rowSourceId = (srcName && sourceByName.get(srcName.toLowerCase())) || source_id;
       try {

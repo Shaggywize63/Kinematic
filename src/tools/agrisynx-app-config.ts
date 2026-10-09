@@ -3,7 +3,7 @@
  * Sales / Collection rupee targets.
  *
  * Everything here is DATA behind existing admin endpoints, so nothing changes for any other client.
- * Four parts, each idempotent (an unchanged part is detected and not written again):
+ * Five parts, each idempotent (an unchanged part is detected and not written again):
  *
  *   1. Expense policy   PUT|POST /api/v1/expenses/policies   rules.categories (all but mileage disabled),
  *                       rules.category_labels {mileage:"Travel"}, route_fields:false, single_line:true,
@@ -21,6 +21,11 @@
  *                       same request as part 3. Needs migrations/crm_target_entries.sql applied (psql, as the
  *                       table owner) before reps can log entries; until then the API answers 409
  *                       TARGET_ENTRIES_NOT_ENABLED and shows progress 0. Existing labels are kept.
+ *   5. Lead owners      PATCH /api/v1/crm/settings              config.lead_form.owner_assignment='admin_only':
+ *                       only an admin may choose or change a lead's owner (the server enforces it; reps'
+ *                       leads are owned by them). Written in the same request as parts 3 and 4. config.lead_form
+ *                       is replaced as a whole by the endpoint, so the current value is read and merged
+ *                       (segment labels, schedule visit, ... are kept).
  *
  *   TOKEN=<admin access token> CLIENT_ID=<agrisynx client uuid> \
  *     npx tsx src/tools/agrisynx-app-config.ts [--dry-run]
@@ -61,6 +66,9 @@ export const CONSENT_OVERRIDES = Object.fromEntries(CONSENT_OVERRIDE_KEYS.map((k
 
 /** crm_settings.config.targets: the rupee target types the client gets (labels left to their defaults). */
 export const TARGET_KEYS = ['sales', 'collection'] as const;
+
+/** crm_settings.config.lead_form.owner_assignment: only an admin may choose or change a lead's owner. */
+export const OWNER_ASSIGNMENT = 'admin_only';
 
 export const DEFAULT_POLICY_NAME = 'Agrisynx field policy';
 
@@ -162,15 +170,28 @@ export function planTargetsConfig(existing: unknown): Json {
   return { ...cur, types: [...types, ...TARGET_KEYS.filter((k) => !have.has(k)).map((key) => ({ key }))] };
 }
 
-/** The whole CRM settings patch: the hidden consent block and the rupee targets (see planConsentSettings for `inherited`). */
+/**
+ * `config.lead_form` with admin-only lead assignment on. The endpoint replaces lead_form as a whole, so what
+ * is already there (segment labels, address on B2B, schedule visit, anything newer) is kept and only
+ * `owner_assignment` is set.
+ */
+export function planLeadForm(existing: unknown): Json {
+  const cur: Json = isPlain(existing) ? existing : {};
+  return { ...cur, owner_assignment: OWNER_ASSIGNMENT };
+}
+
+/**
+ * The whole CRM settings patch: the hidden consent block, the rupee targets and admin-only lead assignment
+ * (see planConsentSettings for `inherited`).
+ */
 export function planCrmSettings(existingConfig: unknown, inherited = false) {
   const consent = planConsentSettings(existingConfig, inherited);
   const cfg: Json = isPlain(existingConfig) ? existingConfig : {};
-  return { config: { ...consent.config, targets: planTargetsConfig(cfg.targets) } };
+  return { config: { ...consent.config, targets: planTargetsConfig(cfg.targets), lead_form: planLeadForm(cfg.lead_form) } };
 }
 
 // ── applying it through the API ─────────────────────────────────────────────
-async function main() {
+export async function main() {
   const dry = process.argv.includes('--dry-run');
   const api = (process.env.API_URL || 'https://api.kinematicapp.com').replace(/\/$/, '');
   const token = process.env.TOKEN;
@@ -229,8 +250,8 @@ async function main() {
     if (!dry) await call('PATCH', `/api/v1/clients/${clientId}`, { app_ui: appUi });
   }
 
-  // 3 + 4. consent block hidden on the lead forms, rupee targets enabled (PATCH merges config keys shallowly, so
-  // send all of field_overrides / targets, built from what is there now)
+  // 3 + 4 + 5. consent block hidden on the lead forms, rupee targets enabled, lead owners admin-only (PATCH merges
+  // config keys shallowly, so send all of field_overrides / targets / lead_form, built from what is there now)
   const settings = await call('GET', '/api/v1/crm/settings');
   const row = settings?.data ?? settings;
   // The org-level default row (no client_id) is what a client without its own row is served.
@@ -238,11 +259,14 @@ async function main() {
   const patch = planCrmSettings(row?.config, inherited);
   const consentDone = sameJson(patch.config.field_overrides, row?.config?.field_overrides);
   const targetsDone = sameJson(patch.config.targets, row?.config?.targets);
+  const ownersDone = sameJson(patch.config.lead_form, row?.config?.lead_form);
   if (consentDone) console.log('lead consent block: already hidden');
   else console.log(`${tag}update settings: hide ${CONSENT_OVERRIDE_KEYS.join(', ')}`);
   if (targetsDone) console.log('targets: sales + collection already enabled');
   else console.log(`${tag}update settings: enable the sales + collection targets (config.targets.types)`);
-  if (!(consentDone && targetsDone) && !dry) await call('PATCH', '/api/v1/crm/settings', patch);
+  if (ownersDone) console.log('lead owners: already admin-only');
+  else console.log(`${tag}update settings: only an admin may choose a lead's owner (config.lead_form.owner_assignment=${OWNER_ASSIGNMENT})`);
+  if (!(consentDone && targetsDone && ownersDone) && !dry) await call('PATCH', '/api/v1/crm/settings', patch);
   console.log('Note: reps can only log sales / collection entries once migrations/crm_target_entries.sql has been applied (psql, as the table owner).');
 
   console.log(dry ? 'Dry run only — nothing was changed.' : 'Done. Reload the dashboard and the apps.');

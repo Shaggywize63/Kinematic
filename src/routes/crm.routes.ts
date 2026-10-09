@@ -29,6 +29,7 @@ import { validateAndStampCustomFields } from '../services/crm/customFields.servi
 import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
+import * as ownerAssign from '../services/crm/ownerAssignment';
 import { fireActivityLifecycle } from '../services/crm/activityTriggers';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
@@ -435,6 +436,16 @@ const OWNER_ASSIGN_ROLES = new Set([
   'super_admin', 'admin', 'main_admin', 'sub_admin', 'city_manager', 'supervisor', 'client',
 ]);
 
+/** Who is calling, in the shape the expenses access rules (isApprover) understand. */
+function crmActor(req: Request): { id: string; org_id: string; role: string | null; client_id: string | null; data_scope: string | null } {
+  const u = (req as AuthRequest).user as any;
+  return { id: u.id, org_id: orgId(req), role: u.role ?? null, client_id: clientId(req), data_scope: u.org_role_data_scope ?? null };
+}
+
+// Per-client "only an admin may choose a lead's owner" (crm_settings.config.lead_form.owner_assignment =
+// 'admin_only'): see services/crm/ownerAssignment.ts. It is checked BEFORE sanitizeOwnerId below, which still
+// runs afterwards, so the switch can only ever restrict; a client without it is untouched.
+
 /** Strip a client-supplied owner_id unless the caller is allowed to assign owners. */
 function sanitizeOwnerId<T extends object>(req: Request, payload: T): void {
   if (!payload || !('owner_id' in payload)) return;
@@ -693,6 +704,8 @@ leads.post('/', wrap(async (req, res) => {
   await enforceLeadRequiredFields(orgId(req), payload.client_id as string | null ?? null, payload, 'create');
   // Data minimisation: never store built-in fields the admin has hidden.
   await stripHiddenLeadFields(orgId(req), payload.client_id as string | null ?? null, payload);
+  // owner_assignment = 'admin_only': a non-admin's owner_id is ignored (the lead gets the default owner).
+  await ownerAssign.dropOwnerUnlessAllowed(crmActor(req), payload);
   sanitizeOwnerId(req, payload); // reps can't self-assign an arbitrary owner (H-2)
 
   // DPDP §6 consent: optionally HARD-GATE creation on affirmative consent (a
@@ -1410,6 +1423,9 @@ leads.patch('/:id', wrap(async (req, res) => {
   await enforceLeadRequiredFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>, 'update');
   // Data minimisation: never store built-in fields the admin has hidden.
   await stripHiddenLeadFields(orgId(req), (rest as Record<string, unknown>).client_id as string | null ?? clientId(req), rest as Record<string, unknown>);
+  // owner_assignment = 'admin_only': a non-admin changing the owner is 403 OWNER_ASSIGN_FORBIDDEN; resending the
+  // current owner (apps send the whole object) is fine.
+  await ownerAssign.guardOwnerChange(crmActor(req), req.params.id, rest as Record<string, unknown>);
   sanitizeOwnerId(req, rest as Record<string, unknown>); // reps can't reassign owner (H-2)
   const lead = await leadsSvc.updateLead(orgId(req), req.params.id, rest, userId(req));
   // Same revert as the leads.post handler: don't auto-insert the
@@ -1463,6 +1479,8 @@ leads.get('/:id/deals', wrap(async (req, res) => res.json(
 )));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
+  // owner_assignment = 'admin_only': assigning is the whole point of this endpoint, so a non-admin is refused (403).
+  await ownerAssign.assertMayChooseOwner(crmActor(req));
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
 }));
 // Recompute the score for every non-terminal lead in scope — powers the
@@ -1615,6 +1633,8 @@ marketingVisits.post('/start', wrap(async (req, res) => {
   // Validate/normalise the inline new-lead object through the lead schema so a
   // visit-created lead goes through the exact same rules as the lead form.
   const leadPayload = body.lead ? parse(v.leadCreateSchema, body.lead) : null;
+  // owner_assignment = 'admin_only': a non-admin's owner_id on the new lead is ignored (as on POST /leads).
+  if (leadPayload) await ownerAssign.dropOwnerUnlessAllowed(crmActor(req), leadPayload);
   const out = await marketingVisitsSvc.startMarketingVisit({
     org_id: orgId(req), user_id: userId(req), client_id: clientId(req),
     lead_id: body.lead_id ?? null,
@@ -4498,8 +4518,7 @@ const MANAGER_ROLES = ['supervisor', 'city_manager', 'sub_admin', 'admin', 'supe
 
 /** Who is calling, in the shape the expenses access rules (isApprover) understand. */
 function targetActor(req: Request): { id: string; org_id: string; role: string | null; client_id: string | null; data_scope: string | null } {
-  const u = (req as AuthRequest).user as any;
-  return { id: u.id, org_id: orgId(req), role: u.role ?? null, client_id: clientId(req), data_scope: u.org_role_data_scope ?? null };
+  return crmActor(req);
 }
 /** `?type=` on a request: undefined when absent (today's behaviour), else the enabled type or a 400. */
 const targetTypeOf = (req: Request, raw: unknown) => targetEntriesSvc.resolveTargetType(orgId(req), clientId(req), raw);
@@ -5133,7 +5152,9 @@ imp.post('/commit', wrap(async (req, res) => {
   // inherits the right client_id. Without this, a super-admin importing
   // while the dashboard's client picker points at a tenant would dump
   // leads as client_id=null and the tenant view wouldn't show them.
-  const result = await importSvc.commitJob(orgId(req), body.job_id, userId(req), clientId(req));
+  // owner_assignment = 'admin_only': a non-admin's owner / owner_email column is ignored (leads get the default owner).
+  const ignoreOwnerColumns = !(await ownerAssign.mayChooseOwner(crmActor(req)));
+  const result = await importSvc.commitJob(orgId(req), body.job_id, userId(req), clientId(req), ignoreOwnerColumns);
   res.json({ success: true, data: result });
 }));
 imp.get('/jobs/:id', wrap(async (req, res) => {
@@ -5697,6 +5718,7 @@ Active client scope: ${cid ?? 'none (org-wide view)'}. Every tool call is hard-f
           user_id: userId(req) ?? null,
           city: typeof req.query.city === 'string' ? req.query.city : null,
           role: actor.role ?? null,
+          data_scope: (reqUser as { org_role_data_scope?: string | null } | undefined)?.org_role_data_scope ?? null,
         });
       },
       max_tokens: 1500,

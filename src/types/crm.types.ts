@@ -361,6 +361,30 @@ export interface DashboardSummary {
   leads_by_segment?: { b2b: number; b2c: number };
 }
 
+/**
+ * Who may choose a lead's owner, for a client that opts in
+ * (crm_settings.config.lead_form.owner_assignment). Absent (or null) = no extra rule: whoever can assign
+ * leads today still can. 'admin_only' = only an admin (expenses' isApprover) may choose or change a lead's
+ * owner; everyone else gets the default owner (assignment rules, else themself) and cannot reassign.
+ */
+export type LeadOwnerAssignment = 'admin_only';
+
+/**
+ * crm_settings.config.lead_form: the per-client lead-form switches. Every key is optional and a client
+ * without any of them behaves exactly as before. Validated on write by `leadFormConfigSchema`
+ * (src/validators/crm.validators.ts) and served unchanged inside `config.lead_form` by GET /crm/settings.
+ */
+export interface LeadFormSettings {
+  /** What to call the two lead types ("Dealer" / "Farmers" instead of "B2B" / "B2C"). */
+  segment_labels?: { b2b?: string; b2c?: string };
+  /** B2B leads capture an address + map pin too. */
+  address_on_b2b?: boolean;
+  /** Which lead types get the "Schedule Visit" date + time on the create form. */
+  schedule_visit?: { segments: Array<'b2b' | 'b2c'> };
+  /** See LeadOwnerAssignment. null / absent = off. */
+  owner_assignment?: LeadOwnerAssignment | null;
+}
+
 export interface KiniContext {
   module?: string;
   route?: string;
