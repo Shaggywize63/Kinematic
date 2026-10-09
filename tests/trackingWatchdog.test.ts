@@ -113,6 +113,23 @@ describe('tracking watchdog', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('a sender-id mismatch stops the run like any credential problem and never clears a token', async () => {
+    seed([rep('a'), rep('b')]);
+    send.mockRejectedValue(Object.assign(new Error('x'), { errorInfo: { code: 'messaging/mismatched-credential' } }));
+    const r = await runTrackingWatchdog({ now: NOW });
+    expect(r).toMatchObject({ credential_error: true, failed: 1, sent: 0 });
+    const clears = supa().chainsFor('users').flatMap((c: any) => c.ops.filter((o: any) => o.method === 'update' && o.args[0]?.fcm_token === null));
+    expect(clears).toHaveLength(0);
+  });
+
+  it('keeps the token when a wake-up fails for a reason that is not the token (e.g. an outage)', async () => {
+    seed([rep('a')]);
+    send.mockRejectedValue(Object.assign(new Error('x'), { errorInfo: { code: 'messaging/server-unavailable' } }));
+    await runTrackingWatchdog({ now: NOW });
+    const clears = supa().chainsFor('users').flatMap((c: any) => c.ops.filter((o: any) => o.method === 'update' && o.args[0]?.fcm_token === null));
+    expect(clears).toHaveLength(0);
+  });
+
   it('clears the token of a phone that has uninstalled the app', async () => {
     seed([rep('gone')]);
     send.mockRejectedValue(Object.assign(new Error('x'), { errorInfo: { code: 'messaging/registration-token-not-registered' } }));
