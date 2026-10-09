@@ -3,7 +3,8 @@
  * (requireAuth + requireModule('field_expenses') applied at mount).
  *
  *   Everyone:  GET  policy                    the policy that governs you
- *              POST receipts                  upload a receipt photo (+ optional OCR)
+ *              POST receipts[?scan=0|odometer] upload a receipt / odometer photo (+ optional OCR)
+ *              GET  odometer-history          my odometer lines (approvers: anyone's, same client)
  *              POST scan-receipt              OCR only (older clients)
  *              GET  mileage                   GPS-derived distance suggestion
  *              POST claims/check              what would the policy say about these lines?
@@ -35,6 +36,7 @@ import * as expenses from '../services/expenses/expenses.service';
 import * as policies from '../services/expenses/policy.service';
 import * as reports from '../services/expenses/claimReports.service';
 import { uploadReceipt } from '../services/expenses/receipts.service';
+import { odometerHistory } from '../services/expenses/odometerHistory.service';
 import { scanReceipt, ReceiptMediaType } from '../services/expenses/receiptScan.service';
 
 const router = Router();
@@ -172,9 +174,21 @@ const policySchema = z.object({
       rate_per_km: num(10_000),
     })).max(20).optional(),
     odometer_photos_required: z.boolean().optional(),
+    // Presentation-only switches (see PolicyRules). A blank label means "use the default name".
+    category_labels: z.record(z.string(), z.string().trim().max(30, 'A category name can be 30 characters at most')).optional(),
+    route_fields: z.boolean().optional(),
+    single_line: z.boolean().optional(),
+    odometer_camera_only: z.boolean().optional(),
   }).optional(),
 });
 const policyPatchSchema = policySchema.partial();
+// Empty query values (`?from=`) mean "not given". `limit` is clamped to 1..200 by the service.
+const odometerHistorySchema = z.object({
+  from: dateStr.optional(),
+  to: dateStr.optional(),
+  user_id: uuid.optional(),
+  all: z.enum(['1', 'true', '0', 'false']).optional(),
+});
 const scanSchema = z.object({ image: z.string().min(16), media_type: z.enum(['image/jpeg', 'image/png', 'image/webp']).optional() });
 const idParam = (req: Request) => {
   const id = req.params.id;
@@ -228,6 +242,14 @@ router.get('/mileage', asyncHandler<AuthRequest>(async (req, res) => {
   res.json({ success: true, data: await expenses.mileageSuggestion(actor(req), from, to, forUser) });
 }));
 
+// ── odometer history (before /claims/:id) ───────────────────────────────────
+// Your own odometer lines, newest first. `user_id` / `all=1` are for approvers (403 otherwise).
+router.get('/odometer-history', asyncHandler<AuthRequest>(async (req, res) => {
+  const s = (k: string) => (req.query[k] ? String(req.query[k]) : undefined);
+  const q = parse(odometerHistorySchema, { from: s('from'), to: s('to'), user_id: s('user_id'), all: s('all') });
+  res.json({ success: true, data: await odometerHistory(actor(req), { ...q, all: q.all === '1' || q.all === 'true', limit: Number(req.query.limit) || undefined }) });
+}));
+
 // ── receipts ────────────────────────────────────────────────────────────────
 const uploadAny = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } }).any();
 /** multer finishes inside a stream callback where the per-request project
@@ -244,7 +266,9 @@ const withFile = (req: Request, res: Response, next: NextFunction) => {
 router.post('/receipts', withFile, asyncHandler<AuthRequest>(async (req, res) => {
   const file = (req.files as Express.Multer.File[] | undefined)?.[0];
   if (!file) throw new AppError(400, 'Attach the receipt as a file', 'NO_FILE');
-  const scan = String(req.query.scan ?? '1') !== '0';
+  // ?scan=0 stores the photo only; ?scan=odometer reads the odometer instead of a receipt.
+  const mode = String(req.query.scan ?? '1');
+  const scan: boolean | 'odometer' = mode.toLowerCase() === 'odometer' ? 'odometer' : mode !== '0';
   res.status(201).json({ success: true, data: await uploadReceipt(actor(req), file, { scan }) });
 }));
 // OCR only — what older app builds call. Kept for compatibility.

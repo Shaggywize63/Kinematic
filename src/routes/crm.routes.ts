@@ -696,6 +696,10 @@ leads.post('/', wrap(async (req, res) => {
 
   // DPDP §6 consent: optionally HARD-GATE creation on affirmative consent (a
   // per-tenant setting; default record-only). The notice is shown client-side.
+  // Hiding the "Data Collection & Consent" block (field override `lead.data_consent`,
+  // optionally @b2b / @b2c) only removes it from the forms: it does NOT lift this gate.
+  // A client with consent.lead_pii.required = true that also hides the block would have every
+  // create refused with CONSENT_REQUIRED — keeping the two settings consistent is the admin's job.
   if (await leadConsentRequired(orgId(req), payload.client_id as string | null ?? null)) {
     if (!consentInput || consentInput.consented !== true) {
       throw new AppError(400, 'Consent to collect the lead\'s personal data is required', 'CONSENT_REQUIRED');
