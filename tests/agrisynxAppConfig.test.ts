@@ -160,6 +160,56 @@ describe('the consent block', () => {
   });
 });
 
+describe('the rupee targets config', () => {
+  it('enables sales and collection with their default labels', () => {
+    expect(app.planTargetsConfig(undefined)).toEqual({ types: [{ key: 'sales' }, { key: 'collection' }] });
+    expect(app.planTargetsConfig(null)).toEqual({ types: [{ key: 'sales' }, { key: 'collection' }] });
+    expect(app.planTargetsConfig({ types: [] })).toEqual({ types: [{ key: 'sales' }, { key: 'collection' }] });
+  });
+  it('keeps a type that is already there, with its position and label, and adds only what is missing', () => {
+    expect(app.planTargetsConfig({ types: [{ key: 'collection', label: 'Recovery' }] }))
+      .toEqual({ types: [{ key: 'collection', label: 'Recovery' }, { key: 'sales' }] });
+    expect(app.planTargetsConfig({ types: [{ key: 'sales', label: 'Orders' }, { key: 'collection' }] }))
+      .toEqual({ types: [{ key: 'sales', label: 'Orders' }, { key: 'collection' }] });
+  });
+  it('keeps any other key in config.targets, and does not mutate its input', () => {
+    const existing = Object.freeze({ types: Object.freeze([]) as unknown as unknown[], future: { x: 1 } });
+    expect(app.planTargetsConfig(existing)).toMatchObject({ future: { x: 1 } });
+  });
+  it('is idempotent, and is accepted by the settings API validator', () => {
+    const once = app.planTargetsConfig(undefined);
+    expect(app.sameJson(app.planTargetsConfig(once), once)).toBe(true);
+    expect(v.settingsUpdateSchema.safeParse({ config: { targets: once } }).success).toBe(true);
+  });
+  it('is read back as both types by the server', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { normalizeTargetTypes } = require('../src/services/crm/targetEntries.service') as typeof import('../src/services/crm/targetEntries.service');
+    expect(normalizeTargetTypes(app.planTargetsConfig(undefined)).map((t) => t.key)).toEqual(['sales', 'collection']);
+  });
+});
+
+describe('the whole CRM settings patch (consent block + targets)', () => {
+  it('carries both, valid for the settings API, and nothing else when the client has its own row', () => {
+    const patch = app.planCrmSettings({ field_overrides: { 'lead.phone': { label: 'Mobile' } }, lead_form: { address_on_b2b: true } });
+    expect(Object.keys(patch.config).sort()).toEqual(['field_overrides', 'targets']);
+    expect((patch.config.field_overrides as any)['lead.phone']).toEqual({ label: 'Mobile' });
+    expect((patch.config.field_overrides as any)['lead.data_consent@b2b']).toEqual({ hidden: true, required: false });
+    expect(patch.config.targets).toEqual({ types: [{ key: 'sales' }, { key: 'collection' }] });
+    expect(v.settingsUpdateSchema.safeParse(patch).success).toBe(true);
+  });
+  it('carries the inherited org-level config across when the client has no row of its own, with ours on top', () => {
+    const patch: any = app.planCrmSettings({ lead_form: { address_on_b2b: true }, targets: { types: [{ key: 'sales', label: 'Orders' }] }, score_boost_signals: ['a'] }, true);
+    expect(patch.config.lead_form).toEqual({ address_on_b2b: true });
+    expect(patch.config.targets).toEqual({ types: [{ key: 'sales', label: 'Orders' }, { key: 'collection' }] });
+    expect('score_boost_signals' in patch.config).toBe(false);
+  });
+  it('is idempotent: planning from its own output changes nothing', () => {
+    const once = app.planCrmSettings({});
+    const twice = app.planCrmSettings(once.config);
+    expect(app.sameJson(twice, once)).toBe(true);
+  });
+});
+
 // ── the policy API accepts exactly what the tool sends ───────────────────────
 describe('what the tool sends to the expense policy API', () => {
   const server = express();

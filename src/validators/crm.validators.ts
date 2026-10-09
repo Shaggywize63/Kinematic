@@ -765,13 +765,56 @@ export const leadFormConfigSchema = z.object({
   schedule_visit: z.object({ segments: z.array(z.enum(['b2b', 'b2c'])).max(2) }).strict().optional(),
 }).strict();
 
+// Rupee targets kept in crm_settings.config.targets. Opt-in per client: absent or `types: []` = the
+// feature is off and the targets surface behaves exactly as before. A blank label is refused (it would
+// render as an empty tab); leave `label` out for the default ("Sales target" / "Collection target").
+const targetTypeLabel = z.string().trim().min(1).max(40);
+export const targetsConfigSchema = z.object({
+  types: z.array(z.object({
+    key: z.enum(['sales', 'collection']),
+    label: targetTypeLabel.optional(),
+  }).strict()).max(2).refine((t) => new Set(t.map((x) => x.key)).size === t.length, { message: 'Each target type can be listed once' }).optional(),
+}).strict();
+
+// ---------- Sales / Collection rupee targets ----------
+const ymd = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD').refine(
+  (d) => { const t = Date.parse(`${d}T00:00:00Z`); return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === d; },
+  'Not a real calendar date',
+);
+const targetKind = z.enum(['sales', 'collection']);
+
+// POST /crm/targets/entries. The amount is rounded to 2 decimals (paise); the date window (not in the
+// future, not older than 31 days) and the lead's existence are checked server-side against IST "today".
+export const targetEntryCreateSchema = z.object({
+  kind: targetKind,
+  amount: z.number().finite().gt(0, 'amount must be above 0').max(1_000_000_000, 'amount is too large')
+    .transform((a) => Math.round(a * 100) / 100)
+    .refine((a) => a > 0, 'amount must be at least 0.01'),
+  lead_id: uuid.nullish(),
+  note: z.string().trim().max(500).nullish(),
+  entry_date: ymd.nullish(),
+});
+
+// GET /crm/targets/entries (empty query values are dropped by the route before this runs).
+export const targetEntriesQuerySchema = z.object({
+  kind: targetKind.optional(),
+  from: ymd.optional(),
+  to: ymd.optional(),
+  user_id: uuid.optional(),
+  all: z.enum(['1', 'true', '0', 'false']).optional(),
+});
+
 export const settingsUpdateSchema = z.object({
   config: z.record(z.unknown()).optional().superRefine((c, ctx) => {
-    if (!c || c.lead_form === undefined || c.lead_form === null) return;
-    const r = leadFormConfigSchema.safeParse(c.lead_form);
-    if (!r.success) {
-      for (const issue of r.error.issues) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lead_form', ...issue.path], message: issue.message });
+    if (!c) return;
+    // Both blocks are optional, and null clears them.
+    for (const [key, schema] of [['lead_form', leadFormConfigSchema], ['targets', targetsConfigSchema]] as const) {
+      if (c[key] === undefined || c[key] === null) continue;
+      const r = schema.safeParse(c[key]);
+      if (!r.success) {
+        for (const issue of r.error.issues) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, ...issue.path], message: issue.message });
+        }
       }
     }
   }),

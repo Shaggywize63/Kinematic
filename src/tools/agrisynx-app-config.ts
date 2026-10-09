@@ -1,8 +1,9 @@
 /**
- * Agrisynx app configuration — expenses as "Travel", the app's tabs / home tiles, and the consent block.
+ * Agrisynx app configuration — expenses as "Travel", the app's tabs / home tiles, the consent block and the
+ * Sales / Collection rupee targets.
  *
  * Everything here is DATA behind existing admin endpoints, so nothing changes for any other client.
- * Three parts, each idempotent (an unchanged part is detected and not written again):
+ * Four parts, each idempotent (an unchanged part is detected and not written again):
  *
  *   1. Expense policy   PUT|POST /api/v1/expenses/policies   rules.categories (all but mileage disabled),
  *                       rules.category_labels {mileage:"Travel"}, route_fields:false, single_line:true,
@@ -15,6 +16,11 @@
  *                       WhatsApp consent boxes on dealers) on the lead forms. config.field_overrides is also
  *                       replaced as a whole, so it is read first and merged. Same values the lead-form
  *                       seed (agrisynx-lead-forms.ts) writes — run either, or both.
+ *   4. Targets          PATCH /api/v1/crm/settings              config.targets.types = sales + collection (the
+ *                       monthly rupee targets and the order / collection entries behind them). Written in the
+ *                       same request as part 3. Needs migrations/crm_target_entries.sql applied (psql, as the
+ *                       table owner) before reps can log entries; until then the API answers 409
+ *                       TARGET_ENTRIES_NOT_ENABLED and shows progress 0. Existing labels are kept.
  *
  *   TOKEN=<admin access token> CLIENT_ID=<agrisynx client uuid> \
  *     npx tsx src/tools/agrisynx-app-config.ts [--dry-run]
@@ -52,6 +58,9 @@ export const CONSENT_OVERRIDE_KEYS = [
   'lead.data_consent@b2b', 'lead.data_consent@b2c', 'lead.marketing_consent@b2b', 'lead.whatsapp_consent@b2b',
 ];
 export const CONSENT_OVERRIDES = Object.fromEntries(CONSENT_OVERRIDE_KEYS.map((k) => [k, FIELD_OVERRIDES[k]]));
+
+/** crm_settings.config.targets: the rupee target types the client gets (labels left to their defaults). */
+export const TARGET_KEYS = ['sales', 'collection'] as const;
 
 export const DEFAULT_POLICY_NAME = 'Agrisynx field policy';
 
@@ -142,6 +151,24 @@ export function planConsentSettings(existingConfig: unknown, inherited = false) 
   return { config: { ...rest, field_overrides } };
 }
 
+/**
+ * `config.targets` with Sales and Collection enabled. Whatever is already there stays: a type that is
+ * already listed keeps its position and label, only the missing ones are added (in sales, collection order).
+ */
+export function planTargetsConfig(existing: unknown): Json {
+  const cur: Json = isPlain(existing) ? existing : {};
+  const types = (Array.isArray(cur.types) ? cur.types : []).filter(isPlain) as Json[];
+  const have = new Set(types.map((t) => t.key));
+  return { ...cur, types: [...types, ...TARGET_KEYS.filter((k) => !have.has(k)).map((key) => ({ key }))] };
+}
+
+/** The whole CRM settings patch: the hidden consent block and the rupee targets (see planConsentSettings for `inherited`). */
+export function planCrmSettings(existingConfig: unknown, inherited = false) {
+  const consent = planConsentSettings(existingConfig, inherited);
+  const cfg: Json = isPlain(existingConfig) ? existingConfig : {};
+  return { config: { ...consent.config, targets: planTargetsConfig(cfg.targets) } };
+}
+
 // ── applying it through the API ─────────────────────────────────────────────
 async function main() {
   const dry = process.argv.includes('--dry-run');
@@ -202,17 +229,21 @@ async function main() {
     if (!dry) await call('PATCH', `/api/v1/clients/${clientId}`, { app_ui: appUi });
   }
 
-  // 3. consent block hidden on the lead forms (PATCH merges config keys shallowly, so send all of field_overrides)
+  // 3 + 4. consent block hidden on the lead forms, rupee targets enabled (PATCH merges config keys shallowly, so
+  // send all of field_overrides / targets, built from what is there now)
   const settings = await call('GET', '/api/v1/crm/settings');
   const row = settings?.data ?? settings;
   // The org-level default row (no client_id) is what a client without its own row is served.
   const inherited = !!row?.id && !row?.client_id;
-  const patch = planConsentSettings(row?.config, inherited);
-  if (sameJson(patch.config.field_overrides, row?.config?.field_overrides)) console.log('lead consent block: already hidden');
-  else {
-    console.log(`${tag}update settings: hide ${CONSENT_OVERRIDE_KEYS.join(', ')}`);
-    if (!dry) await call('PATCH', '/api/v1/crm/settings', patch);
-  }
+  const patch = planCrmSettings(row?.config, inherited);
+  const consentDone = sameJson(patch.config.field_overrides, row?.config?.field_overrides);
+  const targetsDone = sameJson(patch.config.targets, row?.config?.targets);
+  if (consentDone) console.log('lead consent block: already hidden');
+  else console.log(`${tag}update settings: hide ${CONSENT_OVERRIDE_KEYS.join(', ')}`);
+  if (targetsDone) console.log('targets: sales + collection already enabled');
+  else console.log(`${tag}update settings: enable the sales + collection targets (config.targets.types)`);
+  if (!(consentDone && targetsDone) && !dry) await call('PATCH', '/api/v1/crm/settings', patch);
+  console.log('Note: reps can only log sales / collection entries once migrations/crm_target_entries.sql has been applied (psql, as the table owner).');
 
   console.log(dry ? 'Dry run only — nothing was changed.' : 'Done. Reload the dashboard and the apps.');
 }

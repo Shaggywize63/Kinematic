@@ -247,8 +247,8 @@ Pure data, nothing to build: `PATCH /api/v1/clients/:id` with `{ "app_ui": { …
 
 ### 5.7 Applying it: `src/tools/agrisynx-app-config.ts`
 
-Everything in 5.1, 5.5 and 5.6 is expressible through existing endpoints, so there is a ready-to-run, idempotent tool
-(an unchanged part is detected and not written again):
+Everything in 5.1, 5.5, 5.6 and section 6 (targets config) is expressible through existing endpoints, so there is a
+ready-to-run, idempotent tool (an unchanged part is detected and not written again):
 
 ```bash
 TOKEN=<admin access token> CLIENT_ID=<agrisynx client uuid> \
@@ -267,7 +267,94 @@ Optional: `API_URL` (default `https://api.kinematicapp.com`), `PROJECT` (`X-Kine
 3. **Consent block** (`GET`, then `PATCH /crm/settings`) — merges the four hidden overrides into `field_overrides`
    (which the endpoint also replaces as a whole). A client with no settings row of its own yet inherits the org-level
    default config in the same write, so nothing it was being served is lost.
+4. **Targets** (same `PATCH /crm/settings` as step 3) — enables `config.targets.types` = sales + collection (a type
+   already listed keeps its label). Section 6 explains the table migration this needs.
 
 The token must be an admin who can edit the client in Client Management (`PATCH /clients/:id` needs an admin of the org
 that owns it) and manage expense policies and CRM settings. If you'd rather apply the data directly in the database,
 the values are exactly the JSON above.
+
+## 6. Sales and Collection rupee targets
+
+Reps log the orders they closed and the payments they collected, in rupees, in the app; a manager sets a **monthly**
+rupee target per person / role / default; progress is the **running total for the current calendar month in IST**.
+Opt-in per client; a client without the config (Tata included) has none of it and the lead targets behave exactly as before.
+
+### 6.1 Config, migration
+
+```json
+{ "config": { "targets": { "types": [ { "key": "sales" }, { "key": "collection", "label": "Recovery target" } ] } } }
+```
+
+`PATCH /api/v1/crm/settings` (shallow-merged, so send the whole `targets` object). `key` is `sales` or `collection`; `label`
+is optional (1–40 chars, default "Sales target" / "Collection target"); each key once. Absent or `types: []` = feature off.
+The schema is `.strict()`: an unknown key or type is a 400. A target is an ordinary `crm_targets` row with metric
+`sales_amount` / `collection_amount` and period `monthly` (`target_value` is a whole-rupee integer: the value is floored).
+`crm_targets` itself is unchanged.
+
+Entries live in a new table. **Apply the migration before reps log anything** — as the table owner, with psql, from a task
+inside the VPC (like `expense_odometer.sql`; `npm run db:migrate` needs an `exec_migration` RPC the self-hosted projects lack):
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f migrations/crm_target_entries.sql
+```
+
+It is additive (`CREATE TABLE / INDEX IF NOT EXISTS`, RLS on with no policies, the service role bypasses it). Until it has
+run the API degrades instead of failing: `POST /entries` answers **409 `TARGET_ENTRIES_NOT_ENABLED`**, `/progress` reports
+`achieved: 0`, and the entry history is `[]` (the check is cached, a negative answer for 30 s). Agrisynx's database only; the Tata
+database does not need it.
+
+### 6.2 Endpoints (`/api/v1/crm/targets/…`, CRM module)
+
+Every new endpoint answers an empty / disabled result — not an error — for a client with no `config.targets`; only writes 400.
+
+| Endpoint | Who | Response `data` |
+| --- | --- | --- |
+| `GET /types` | any CRM user | `{ types: [ { key, label, metric, period: "monthly", unit: "INR" } ] }` (`[]` when off) |
+| `GET /progress` | any CRM user, for themself | `{ period_start, period_end, types: [ { key, label, target, achieved, pct, source } ] }` |
+| `POST /entries` | any CRM user, for themself | 201, the entry (shape below) |
+| `GET /entries` | own; approvers may pass `user_id` / `all=1` | `[ entry … ]`, newest first |
+| `DELETE /entries/:id` | the owner within 24 h of logging it, an approver any time | `{ id }` |
+
+* **`/progress`**: `period_start` / `period_end` are the first and last day of the current IST month (`YYYY-MM-DD`). `target` is
+  resolved **user → role → level → default** (the client's own row beats an org-wide one), `null` when there is none (a `0` on a
+  person clears the role's target for them); `source` is `user | role | level | default | null`; `achieved` is the sum of the caller's
+  non-deleted entries of that kind dated inside the month (exact to the paisa); `pct = round(achieved / target × 100)` or `null`.
+  The month is the **IST** calendar month: an entry dated the 31st counts to that month, and at 00:30 IST on the 1st (still the 31st in
+  UTC) progress has already rolled over to the new month.
+* **`POST /entries`** body `{ kind: "sales" | "collection", amount, lead_id?, note?, entry_date? }`. `amount` is a number above 0
+  and up to 1,000,000,000, rounded to 2 decimals; `note` up to 500 chars; `lead_id` a uuid of a live lead **in the same org and
+  client** (else 400); `entry_date` `YYYY-MM-DD`, default today in IST, **not in the future and not older than 31 days** (else 400).
+  `kind` must be an enabled type (else **400 `TARGET_TYPE_NOT_ENABLED`**). The entry always belongs to the caller.
+* **An entry** (also what `POST` returns): `{ id, kind, amount, entry_date, lead_id, lead_name, note, user_id, user_name, created_at }`.
+* **`GET /entries`** `?kind=&from=&to=&limit=50[&user_id=][&all=1]` — `limit` defaults to 50, max 200; `from` / `to` bound
+  `entry_date`; only enabled kinds are returned. `user_id` (someone else) and `all=1` are for approvers (`isApprover`: admin-class
+  roles, never an own-scope field exec) → **403** otherwise, and are scoped to the caller's org **and client**. Naming yourself is allowed.
+* **`DELETE /entries/:id`** soft-deletes (`deleted_at`; the entry stops counting). 404 when it does not exist or is not in the
+  caller's org and client; 403 for the owner after 24 h or for anyone else who is not an approver.
+
+### 6.3 The existing admin endpoints take `type`
+
+`GET /targets`, `PUT /targets`, `GET /targets/levels`, `GET /targets/leaderboard` and `GET /targets/leaderboard-role` accept an
+optional `type` (`sales` | `collection`; query on GET, body on PUT). **Without it they are exactly the lead target** (`leads_created`,
+daily) — same queries, same responses. With it: it must be an enabled type, else **400 `TARGET_TYPE_NOT_ENABLED`**, and then
+
+* `GET /targets?type=sales` and `PUT /targets {type, …}` work on the `sales_amount` / `monthly` rows, same shapes and the same
+  manager-only / no-frontline-champion guards. `target_value` is validated as a number from 0 to 1,000,000,000 (a negative, a
+  larger number or a non-number is a 400 `VALIDATION`) and floored to whole rupees; `user_id` / `org_role_id` /
+  `hierarchy_level_id` must be uuids.
+* `GET /targets/levels` and `/leaderboard-role` return what they always do (the org roles, and the one role the board is scoped to);
+  there is nothing per type, so `type` is only validated.
+* `GET /targets/leaderboard?type=sales` is the rupee board for the current IST month (`period` is ignored; same people as the
+  lead board — the configured role, a non-manager pinned to their own):
+
+```json
+{ "type": "sales", "label": "Sales target", "metric": "sales_amount", "period": "monthly",
+  "period_start": "2026-10-01", "period_end": "2026-10-31", "generated_at": "…",
+  "stats": { "participants": 12, "total_target": 1200000, "total_achieved": 640000, "meeting_target": 3, "target_participants": 12,
+             "top_performer": { "name": "Asha", "achieved": 120000 }, "lowest_performer": { "name": "Bala", "achieved": 0 } },
+  "entries": [ { "user_id": "…", "name": "Asha", "role": "Dealer Rep", "target": 100000, "achieved": 120000, "pct": 120 } ],
+  "role_id": null }
+```
+
+`target` / `pct` are `null` for someone with no target. As on the lead board, anyone with an org role, a target or an entry is listed.

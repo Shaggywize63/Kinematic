@@ -14,6 +14,10 @@ import { AppError } from '../../utils';
 const DEFAULT_METRIC = 'leads_created';
 const DEFAULT_PERIOD = 'daily';
 
+/** Which crm_targets rows an operation is about. Omitted = the original per-FE lead target. */
+export interface TargetSpec { metric: string; period: string }
+const LEAD_SPEC: TargetSpec = { metric: DEFAULT_METRIC, period: DEFAULT_PERIOD };
+
 export interface TargetRow {
   id: string;
   user_id: string | null;
@@ -47,12 +51,12 @@ export async function listTargetRoles(org_id: string, client_id: string | null) 
 }
 
 /** All target rows for the manager UI: default + per-role + per-level + per-user. */
-export async function listTargets(org_id: string, client_id: string | null) {
+export async function listTargets(org_id: string, client_id: string | null, spec: TargetSpec = LEAD_SPEC) {
   let q = supabaseAdmin.from('crm_targets')
     .select('id, user_id, org_role_id, hierarchy_level_id, metric, period, target_value')
     .eq('org_id', org_id)
-    .eq('metric', DEFAULT_METRIC)
-    .eq('period', DEFAULT_PERIOD);
+    .eq('metric', spec.metric)
+    .eq('period', spec.period);
   // Same fix as listTargetRoles: no client picked → show every target row in
   // the org rather than only the org-wide (client_id IS NULL) ones.
   if (client_id) q = q.eq('client_id', client_id);
@@ -84,6 +88,7 @@ export async function setTarget(
   client_id: string | null,
   payload: { user_id?: string | null; org_role_id?: string | null; hierarchy_level_id?: string | null; target_value: number },
   actor_id?: string,
+  spec: TargetSpec = LEAD_SPEC,
 ) {
   const user_id = payload.user_id ?? null;
   // Treat an incoming hierarchy_level_id as a role id (that's what the level
@@ -94,7 +99,7 @@ export async function setTarget(
   const target_value = Math.max(0, Math.floor(Number(payload.target_value) || 0));
 
   let find = supabaseAdmin.from('crm_targets').select('id')
-    .eq('org_id', org_id).eq('metric', DEFAULT_METRIC).eq('period', DEFAULT_PERIOD);
+    .eq('org_id', org_id).eq('metric', spec.metric).eq('period', spec.period);
   find = client_id ? find.eq('client_id', client_id) : find.is('client_id', null);
   find = user_id ? find.eq('user_id', user_id) : find.is('user_id', null);
   find = org_role_id ? find.eq('org_role_id', org_role_id) : find.is('org_role_id', null);
@@ -109,15 +114,15 @@ export async function setTarget(
     return data;
   }
   const { data, error } = await supabaseAdmin.from('crm_targets')
-    .insert({ org_id, client_id, user_id, org_role_id, hierarchy_level_id, metric: DEFAULT_METRIC, period: DEFAULT_PERIOD, target_value, created_by: actor_id ?? null })
+    .insert({ org_id, client_id, user_id, org_role_id, hierarchy_level_id, metric: spec.metric, period: spec.period, target_value, created_by: actor_id ?? null })
     .select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return data;
 }
 
 /** Set the org-wide default (all scopes null). */
-export async function setAllTargets(org_id: string, client_id: string | null, target_value: number, actor_id?: string) {
-  return setTarget(org_id, client_id, { user_id: null, org_role_id: null, hierarchy_level_id: null, target_value }, actor_id);
+export async function setAllTargets(org_id: string, client_id: string | null, target_value: number, actor_id?: string, spec: TargetSpec = LEAD_SPEC) {
+  return setTarget(org_id, client_id, { user_id: null, org_role_id: null, hierarchy_level_id: null, target_value }, actor_id, spec);
 }
 
 /** Start of "today" in IST, as a UTC ISO string — leads are counted from here. */
@@ -153,6 +158,32 @@ function daysInPeriod(period: LeaderboardPeriod): number {
 }
 
 /**
+ * The people on a leaderboard: the field force for this tenant. `users` has no soft-delete column — it uses
+ * is_active; exclude only explicitly-disabled accounts (null/true kept). When a client is selected we scope
+ * to it; with no client picked (org-wide admin view) we show the whole org.
+ * The board is scoped to one hierarchy role (e.g. Consumer Champion), configurable per client. When set,
+ * only that role's users compete. A non-manager viewer is always pinned to their own role regardless of
+ * the configured default.
+ */
+export async function leaderboardUsers(
+  org_id: string,
+  client_id: string | null,
+  viewer?: { org_role_id?: string | null; org_role_data_scope?: string | null } | null,
+): Promise<{ users: any[]; roleId: string | null }> {
+  let uq = supabaseAdmin.from('users')
+    .select('id, name, email, city, org_role_id, hierarchy_level_id, role')
+    .eq('org_id', org_id).neq('is_active', false);
+  if (client_id) uq = uq.eq('client_id', client_id);
+  const roleId = (viewer?.org_role_data_scope === 'own' && viewer.org_role_id)
+    ? viewer.org_role_id
+    : await getLeaderboardRoleId(org_id, client_id);
+  if (roleId) uq = uq.eq('org_role_id', roleId);
+  const { data: uData, error: uErr } = await uq;
+  if (uErr) throw new AppError(500, uErr.message, 'DB_ERROR');
+  return { users: (uData ?? []) as any[], roleId };
+}
+
+/**
  * Leaderboard analytics for the Targets module: per-user leads created in the
  * window (today / this week / this month), each user's resolved target scaled
  * by days elapsed, plus aggregate stats (top, lowest, average, % meeting
@@ -167,25 +198,8 @@ export async function targetsLeaderboard(
   // only ever see peers in their tier, never the whole field force.
   viewer?: { org_role_id?: string | null; org_role_data_scope?: string | null } | null,
 ) {
-  // 1. Users in scope (the field force for this tenant). `users` has no
-  // soft-delete column — it uses is_active; exclude only explicitly-disabled
-  // accounts (null/true kept). When a client is selected we scope to it; with
-  // no client picked (org-wide admin view) we show the whole org.
-  let uq = supabaseAdmin.from('users')
-    .select('id, name, email, city, org_role_id, hierarchy_level_id, role')
-    .eq('org_id', org_id).neq('is_active', false);
-  if (client_id) uq = uq.eq('client_id', client_id);
-  // The leaderboard is scoped to one hierarchy role (e.g. Consumer Champion),
-  // configurable per client. When set, only that role's users compete. A
-  // non-manager viewer is always pinned to their own role regardless of the
-  // configured default.
-  const roleId = (viewer?.org_role_data_scope === 'own' && viewer.org_role_id)
-    ? viewer.org_role_id
-    : await getLeaderboardRoleId(org_id, client_id);
-  if (roleId) uq = uq.eq('org_role_id', roleId);
-  const { data: uData, error: uErr } = await uq;
-  if (uErr) throw new AppError(500, uErr.message, 'DB_ERROR');
-  const users = (uData ?? []) as any[];
+  // 1. Users in scope (the field force for this tenant).
+  const { users, roleId } = await leaderboardUsers(org_id, client_id, viewer);
 
   // 2. Target rows, for resolving each user's daily target.
   const { data: tData, error: tErr } = await supabaseAdmin.from('crm_targets')
