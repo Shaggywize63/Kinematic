@@ -7,10 +7,11 @@
  * Called every minute by a pg_cron job → supabase edge function
  * `crm-dispatch-pushes` → /api/v1/cron/dispatch-pushes (this service).
  *
- * Stamps `sent_at` and `fcm_message_id` on success. On a
- * "registration-token-not-registered" failure we also null the user's
- * fcm_token so we stop trying. Other failures still set `sent_at` so
- * the loop doesn't busy-retry the same broken row forever.
+ * Stamps `sent_at` and `fcm_message_id` on success. When Firebase says the
+ * token itself is dead ("registration-token-not-registered") we also null the
+ * user's fcm_token so we stop trying; any other failure keeps the token (see
+ * lib/fcmErrors) but still sets `sent_at` so the loop doesn't busy-retry the
+ * same broken row forever.
  *
  * Source of work: the 5 cron-inserted reminder kinds
  * (crm_lead_stagnant / *_escalation / crm_deal_closing_soon /
@@ -23,6 +24,7 @@ import { messaging } from '../lib/firebase';
 import { sendApns, apnsEnabled } from '../lib/apns';
 import { logger } from '../lib/logger';
 import { routedData } from '../lib/notificationRoute';
+import { classifyFcmError } from '../lib/fcmErrors';
 
 export interface DispatchResult {
   scanned: number;
@@ -34,16 +36,12 @@ export interface DispatchResult {
   credential_error: boolean;
 }
 
-// These mean the server's Firebase credential is unusable (revoked / rotated / wrong project) — they say
-// nothing about the user's token, so they must never clear it.
-// FCM caps a message at 4 KB and rejects an oversized one with `invalid-argument`, which would wrongly
-// clear the user's token (see the catch below). Cap the text we copy into `data`.
+// FCM caps a message at 4 KB and rejects an oversized one with `invalid-argument`. That no longer clears the
+// user's token (see lib/fcmErrors) but the push is still lost, so cap the text we copy into `data`.
 const clip = (v: unknown, max: number): string => {
   const t = String(v ?? '');
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 };
-
-const CREDENTIAL_ERROR_CODES = ['app/invalid-credential', 'messaging/authentication-error', 'messaging/third-party-auth-error'];
 
 export async function dispatchPendingPushes(opts?: {
   limit?: number;
@@ -147,20 +145,14 @@ export async function dispatchPendingPushes(opts?: {
     } catch (err: any) {
       const msg = String(err?.errorInfo?.code || err?.message || err);
       logger.warn(`[push.dispatch] FCM send failed for ${row.id}: ${msg}`);
-      const credentialError = CREDENTIAL_ERROR_CODES.some((c) => msg.includes(c));
-      if (credentialError) credentialFailures++;
+      const failure = classifyFcmError(err);
+      if (failure === 'credential') credentialFailures++;
 
-      // Invalid / unregistered tokens never become valid again — null
-      // them on the user row so subsequent dispatches stop counting the
-      // user as reachable. This catches phone resets, app uninstalls,
-      // and stale-token cases.
-      if (
-        !credentialError && (
-        msg.includes('registration-token-not-registered') ||
-        msg.includes('invalid-argument') ||
-        msg.includes('not-found') ||
-        msg.includes('mismatched-credential'))
-      ) {
+      // Only a token Firebase says is dead is cleared (phone reset, app uninstalled, token replaced): it never
+      // becomes valid again, so the user should stop counting as reachable. A rejected message, a rejected
+      // server credential or an outage says nothing about the token — clearing it there silences the phone
+      // until the app is next cold-started (see lib/fcmErrors).
+      if (failure === 'dead-token') {
         await supabaseAdmin.from('users').update({ fcm_token: null }).eq('id', row.user_id);
       }
 

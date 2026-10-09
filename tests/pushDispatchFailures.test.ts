@@ -68,6 +68,33 @@ describe('a dead device token', () => {
   });
 });
 
+describe('failures that say nothing about the user token', () => {
+  const failures: Array<[string, Error]> = [
+    ['a sender-id mismatch (token from another Firebase project / wrong server key)', fcmError('messaging/mismatched-credential')],
+    ['a rejected message (invalid-argument about the payload)', Object.assign(new Error('Android message is too big'), { errorInfo: { code: 'messaging/invalid-argument', message: 'Android message is too big' } })],
+    ['not-found', fcmError('messaging/not-found')],
+    ['an outage', fcmError('messaging/server-unavailable')],
+  ];
+  it.each(failures)('keeps the token on %s', async (_label, e) => {
+    send.mockRejectedValue(e);
+    await dispatchPendingPushes();
+    expect(tokenClears()).toHaveLength(0);
+  });
+
+  it('a sender-id mismatch is reported as a credential problem, not silently swallowed', async () => {
+    send.mockRejectedValue(fcmError('messaging/mismatched-credential'));
+    const r = await dispatchPendingPushes();
+    expect(r).toMatchObject({ failed: 2, credential_error: true });
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a malformed token (invalid-argument that names the token) IS cleared', async () => {
+    send.mockRejectedValue(Object.assign(new Error('x'), { errorInfo: { code: 'messaging/invalid-argument', message: 'The registration token is not a valid FCM registration token' } }));
+    await dispatchPendingPushes();
+    expect(tokenClears().length).toBeGreaterThan(0);
+  });
+});
+
 describe('push payload', () => {
   it('is data-only: no visible-notification block, title/body inside data, high priority', async () => {
     send.mockResolvedValue('projects/p/messages/1');

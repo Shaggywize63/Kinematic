@@ -18,6 +18,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { messaging } from '../lib/firebase';
 import { logger } from '../lib/logger';
 import { isLiveTrackingDisabled } from '../lib/liveTracking';
+import { classifyFcmError } from '../lib/fcmErrors';
 import { dbToday } from '../utils';
 
 export const WAKEUP_KIND = 'tracking_wakeup';
@@ -112,12 +113,13 @@ export async function runTrackingWatchdog(opts: { now?: number } = {}): Promise<
     } catch (err: any) {
       result.failed++;
       const msg = String(err?.errorInfo?.code || err?.message || err);
-      if (msg.includes('app/invalid-credential') || msg.includes('authentication-error') || msg.includes('third-party-auth-error')) {
+      const failure = classifyFcmError(err);
+      if (failure === 'credential') {
         // Our own credential is rejected: every send will fail. Stop; the push dispatcher already logs this loudly.
         result.credential_error = true;
         break;
       }
-      if (msg.includes('registration-token-not-registered')) {
+      if (failure === 'dead-token') {
         await supabaseAdmin.from('users').update({ fcm_token: null }).eq('id', rep.id);
       } else {
         logger.warn(`[tracking-watchdog] wake-up to ${rep.id} failed: ${msg}`);
