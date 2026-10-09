@@ -66,6 +66,7 @@ import * as webChatCtrl from '../controllers/crm/webChat.controller';
 import * as locationsSvc from '../services/crm/locations.service';
 import * as whatsappTranslate from '../services/crm/whatsappTranslate.service';
 import * as targetsSvc from '../services/crm/targets.service';
+import * as targetEntriesSvc from '../services/crm/targetEntries.service';
 import * as homeSvc from '../services/crm/home.service';
 import * as kiniQuota from '../services/crm/ai/kiniQuota.service';
 import {
@@ -696,6 +697,10 @@ leads.post('/', wrap(async (req, res) => {
 
   // DPDP §6 consent: optionally HARD-GATE creation on affirmative consent (a
   // per-tenant setting; default record-only). The notice is shown client-side.
+  // Hiding the "Data Collection & Consent" block (field override `lead.data_consent`,
+  // optionally @b2b / @b2c) only removes it from the forms: it does NOT lift this gate.
+  // A client with consent.lead_pii.required = true that also hides the block would have every
+  // create refused with CONSENT_REQUIRED — keeping the two settings consistent is the admin's job.
   if (await leadConsentRequired(orgId(req), payload.client_id as string | null ?? null)) {
     if (!consentInput || consentInput.consented !== true) {
       throw new AppError(400, 'Consent to collect the lead\'s personal data is required', 'CONSENT_REQUIRED');
@@ -4478,13 +4483,26 @@ router.use('/settings', (req, res, next) => {
   return rbac.requireModuleAccess('crm_settings')(req, res, next);
 }, settings);
 
-// ---------- TARGETS (per-FE daily lead targets) ----------------------
+// ---------- TARGETS (per-FE daily lead targets + Sales / Collection rupee targets) ----------
 // Managers/admins set targets (per FE or "same for all"); every CRM user
 // can read their own resolved target + today's achievement for the
 // dashboard ticker and the lead-add "1/5" badge. Tenant-scoped via the
 // X-Client-Id scope, so Tata Tiscon gets its own targets.
+//
+// Rupee targets (Agrisynx) are opt-in per client via crm_settings.config.targets.types. The admin
+// endpoints below take an optional `type` ('sales' | 'collection'; query on GET, body on PUT): without
+// it everything is exactly the lead target, with it the same endpoint works on the monthly rupee
+// target (and 400 TARGET_TYPE_NOT_ENABLED when the client has not enabled that type).
 const targets = express.Router();
 const MANAGER_ROLES = ['supervisor', 'city_manager', 'sub_admin', 'admin', 'super_admin', 'main_admin', 'client'] as const;
+
+/** Who is calling, in the shape the expenses access rules (isApprover) understand. */
+function targetActor(req: Request): { id: string; org_id: string; role: string | null; client_id: string | null; data_scope: string | null } {
+  const u = (req as AuthRequest).user as any;
+  return { id: u.id, org_id: orgId(req), role: u.role ?? null, client_id: clientId(req), data_scope: u.org_role_data_scope ?? null };
+}
+/** `?type=` on a request: undefined when absent (today's behaviour), else the enabled type or a 400. */
+const targetTypeOf = (req: Request, raw: unknown) => targetEntriesSvc.resolveTargetType(orgId(req), clientId(req), raw);
 
 // FE-facing: my target + achievement for today. Any authenticated CRM user.
 targets.get('/me', wrap(async (req, res) => {
@@ -4492,9 +4510,41 @@ targets.get('/me', wrap(async (req, res) => {
   res.json(await targetsSvc.myTargetToday(orgId(req), user.id, clientId(req)));
 }));
 
+// The rupee target types this client has enabled ([] = feature off). Any CRM user.
+targets.get('/types', wrap(async (req, res) => {
+  res.json({ success: true, data: { types: await targetEntriesSvc.loadTargetTypes(orgId(req), clientId(req)) } });
+}));
+
+// My target and running monthly total (IST calendar month) for each enabled rupee type. Any CRM user.
+targets.get('/progress', wrap(async (req, res) => {
+  res.json({ success: true, data: await targetEntriesSvc.myProgress(targetActor(req)) });
+}));
+
+// Entries a rep logs for their own sales / collections — the numbers progress is measured by.
+targets.post('/entries', wrap(async (req, res) => {
+  // (cast: the repo is not compiled with strictNullChecks, which makes z.infer mark every field optional)
+  const body = parse(v.targetEntryCreateSchema, req.body) as targetEntriesSvc.EntryInput;
+  res.status(201).json({ success: true, data: await targetEntriesSvc.createEntry(targetActor(req), body) });
+}));
+// Own entries by default; user_id / all=1 for approvers only (403 otherwise). Empty/disabled -> [].
+targets.get('/entries', wrap(async (req, res) => {
+  const s = (k: string) => (req.query[k] ? String(req.query[k]) : undefined);
+  const q = parse(v.targetEntriesQuerySchema, { kind: s('kind'), from: s('from'), to: s('to'), user_id: s('user_id'), all: s('all') });
+  res.json({ success: true, data: await targetEntriesSvc.listEntries(targetActor(req), {
+    kind: q.kind, from: q.from, to: q.to, user_id: q.user_id, all: q.all === '1' || q.all === 'true', limit: Number(req.query.limit) || undefined,
+  }) });
+}));
+// Soft delete: the owner within 24 h of logging it, an approver any time.
+targets.delete('/entries/:id', wrap(async (req, res) => {
+  const id = parse(z.string().uuid(), req.params.id);
+  res.json({ success: true, data: await targetEntriesSvc.deleteEntry(targetActor(req), id) });
+}));
+
 // Manager-facing: the hierarchy "levels" to set targets against — the org's
 // custom roles (org_roles), e.g. Tata's Consumer Champion / Area Sales Officer.
+// (The roles are the same for every target type; `type` is only validated.)
 targets.get('/levels', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  await targetTypeOf(req, req.query.type);
   res.json({ success: true, data: await targetsSvc.listTargetRoles(orgId(req), clientId(req)) });
 }));
 
@@ -4503,18 +4553,24 @@ targets.get('/levels', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
 // authenticated user: managers see the configured role (or whole force), while
 // a non-manager (e.g. a Consumer Champion) is locked to their own role so the
 // board only ever lists their peers.
+// With ?type=sales|collection it is instead the rupee board for the current IST month
+// (rows { user_id, name, role, target, achieved, pct }); ?period is ignored.
 targets.get('/leaderboard', wrap(async (req, res) => {
   const u = (req as AuthRequest).user!;
+  const viewer = { org_role_id: (u as any).org_role_id ?? null, org_role_data_scope: (u as any).org_role_data_scope ?? null };
+  const typed = await targetTypeOf(req, req.query.type);
+  if (typed) {
+    return res.json({ success: true, data: await targetEntriesSvc.typedLeaderboard(orgId(req), clientId(req), typed.type, viewer) });
+  }
   const p = String(req.query.period ?? 'today');
   const period = (['today', 'week', 'month'].includes(p) ? p : 'today') as targetsSvc.LeaderboardPeriod;
-  res.json({ success: true, data: await targetsSvc.targetsLeaderboard(orgId(req), clientId(req), period, {
-    org_role_id: (u as any).org_role_id ?? null,
-    org_role_data_scope: (u as any).org_role_data_scope ?? null,
-  }) });
+  res.json({ success: true, data: await targetsSvc.targetsLeaderboard(orgId(req), clientId(req), period, viewer) });
 }));
 
 // Manager-facing: which hierarchy role the leaderboard is scoped to (per client).
+// (One setting for every target type; `type` is only validated.)
 targets.get('/leaderboard-role', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  await targetTypeOf(req, req.query.type);
   res.json({ success: true, data: { role_id: await targetsSvc.getLeaderboardRoleId(orgId(req), clientId(req)) } });
 }));
 targets.put('/leaderboard-role', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
@@ -4524,7 +4580,8 @@ targets.put('/leaderboard-role', requireRole(...MANAGER_ROLES), wrap(async (req,
 
 // Manager-facing: list current targets (default + per-FE overrides).
 targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
-  res.json(await targetsSvc.listTargets(orgId(req), clientId(req)));
+  const typed = await targetTypeOf(req, req.query.type);
+  res.json(await targetsSvc.listTargets(orgId(req), clientId(req), typed?.spec));
 }));
 
 // Manager-facing: set a target. Body { target_value, user_id?,
@@ -4532,6 +4589,8 @@ targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
 // per-level (applies to everyone at that tier), all=true = org-wide default.
 // Consumer Champions are explicitly blocked even when their system role
 // would otherwise pass requireRole — they are view-only on targets.
+// With body.type ('sales' | 'collection') it sets the monthly rupee target instead, whose value must be a
+// number from 0 to 1,000,000,000 (floored to whole rupees); without it, exactly as before.
 targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   const me = (req as AuthRequest).user;
   // Block only the FRONTLINE champion from setting targets — a Consumer
@@ -4539,8 +4598,18 @@ targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   if (isFrontlineChampion(me)) {
     throw new AppError(403, 'Consumer Champions cannot set targets', 'FORBIDDEN');
   }
-  const { user_id, org_role_id, hierarchy_level_id, target_value, all } = req.body ?? {};
+  const { user_id, org_role_id, hierarchy_level_id, target_value, all, type } = req.body ?? {};
   if (target_value === undefined || target_value === null) throw new AppError(400, 'target_value is required', 'VALIDATION');
+  const typed = await targetTypeOf(req, type);
+  if (typed) {
+    const value = targetEntriesSvc.parseTargetValue(target_value);
+    const id = z.string().uuid().nullish();
+    const scope = parse(z.object({ user_id: id, org_role_id: id, hierarchy_level_id: id }), { user_id, org_role_id, hierarchy_level_id }) as { user_id?: string | null; org_role_id?: string | null; hierarchy_level_id?: string | null };
+    const row = all
+      ? await targetsSvc.setAllTargets(orgId(req), clientId(req), value, userId(req), typed.spec)
+      : await targetsSvc.setTarget(orgId(req), clientId(req), { ...scope, target_value: value }, userId(req), typed.spec);
+    return res.json(row);
+  }
   const row = all
     ? await targetsSvc.setAllTargets(orgId(req), clientId(req), Number(target_value), userId(req))
     : await targetsSvc.setTarget(orgId(req), clientId(req), { user_id: user_id ?? null, org_role_id: org_role_id ?? null, hierarchy_level_id: hierarchy_level_id ?? null, target_value: Number(target_value) }, userId(req));

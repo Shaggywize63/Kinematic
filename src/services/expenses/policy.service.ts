@@ -54,7 +54,23 @@ export interface PolicyRules {
   vehicle_rates?: VehicleRate[];
   /** With vehicle rates: whether a photo of each odometer reading is mandatory (default true). */
   odometer_photos_required?: boolean;
+  /**
+   * What the apps call each category (e.g. { mileage: "Travel" }). Display only — the stored
+   * category and every rule keep their canonical key. Trimmed, 1..30 chars, known categories only;
+   * `{}` = use the apps' built-in names.
+   */
+  category_labels?: Partial<Record<Category, string>>;
+  /** false = a mileage line has no From / To (default true). UI-only; the server never requires them. */
+  route_fields?: boolean;
+  /** true = the apps let a claim hold one line only (default false). UI-only: existing multi-line claims stay editable. */
+  single_line?: boolean;
+  /** true = the apps take odometer photos from the camera only, never the gallery (default false). UI-only. */
+  odometer_camera_only?: boolean;
 }
+
+/** The presentation-only rule keys (no server-side enforcement). */
+export const UI_RULE_KEYS = ['category_labels', 'route_fields', 'single_line', 'odometer_camera_only'] as const;
+export const CATEGORY_LABEL_MAX = 30;
 
 export interface AppliesTo {
   everyone: boolean;
@@ -131,6 +147,19 @@ export function normalizeApplies(raw: any): AppliesTo {
   return { everyone, roles, org_role_ids, user_ids };
 }
 
+/** Known categories only; trimmed; blank entries dropped; capped at CATEGORY_LABEL_MAX. */
+export function normalizeCategoryLabels(raw: unknown): Partial<Record<Category, string>> {
+  const out: Partial<Record<Category, string>> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  const o = raw as Record<string, unknown>;
+  for (const c of CATEGORIES) {
+    if (typeof o[c] !== 'string') continue;
+    const label = (o[c] as string).trim().slice(0, CATEGORY_LABEL_MAX).trim();
+    if (label) out[c] = label;
+  }
+  return out;
+}
+
 /** Fill every field with a sane value. `legacy` is an original-schema row whose
  *  scalar columns seed the rules when the rules column is empty. */
 export function normalizeRules(raw: any, legacy?: any): PolicyRules {
@@ -158,6 +187,11 @@ export function normalizeRules(raw: any, legacy?: any): PolicyRules {
     categories,
     vehicle_rates: normalizeVehicleRates(r.vehicle_rates),
     odometer_photos_required: r.odometer_photos_required !== false,
+    // Presentation-only switches. Every default reproduces the behaviour before they existed.
+    category_labels: normalizeCategoryLabels(r.category_labels),
+    route_fields: r.route_fields !== false,
+    single_line: r.single_line === true,
+    odometer_camera_only: r.odometer_camera_only === true,
   };
 }
 
@@ -282,6 +316,31 @@ export async function policyUserOf(user_id: string): Promise<PolicyUser> {
 
 export async function resolvePolicyForUserId(org_id: string, client_id: string | null, user_id: string): Promise<ExpensePolicy> {
   return resolvePolicy(org_id, client_id, await policyUserOf(user_id));
+}
+
+/**
+ * The governing policy of several people at once — one policy read for the lot, where
+ * resolvePolicyForUserId reads the policies again for every person. Same winner per person.
+ */
+export async function resolvePoliciesForUsers(org_id: string, client_id: string | null, user_ids: string[]): Promise<Map<string, ExpensePolicy>> {
+  const out = new Map<string, ExpensePolicy>();
+  const ids = Array.from(new Set(user_ids.filter(Boolean)));
+  if (!ids.length) return out;
+  if (!(await hasPolicyV2())) {
+    const p = await legacyPolicy(org_id, client_id);
+    for (const id of ids) out.set(id, p);
+    return out;
+  }
+  const [live, { data }] = await Promise.all([
+    fetchLive(org_id, client_id),
+    supabaseAdmin.from('users').select('id, role, org_role_id').eq('org_id', org_id).in('id', ids),
+  ]);
+  const byId = new Map(((data as any[]) ?? []).map((u) => [u.id, u]));
+  for (const id of ids) {
+    const u = byId.get(id);
+    out.set(id, pickPolicy(live, { id, role: u?.role ?? null, org_role_id: u?.org_role_id ?? null }) ?? { ...BUILT_IN_POLICY });
+  }
+  return out;
 }
 
 // ── evaluation ──────────────────────────────────────────────────────────────
@@ -442,11 +501,27 @@ export interface PolicyInput {
   rules?: any;
 }
 
+/**
+ * `body.rules` replaces the stored rules wholesale — except the presentation-only keys
+ * (UI_RULE_KEYS). An editor that predates them sends a full `rules` object without them, and
+ * re-normalising that would silently reset a configured client (labels, single line, ...) to
+ * defaults on every save. So a key the caller left out keeps its stored value; a key the caller
+ * sent (even `{}` / `false`) wins. Nothing changes when the caller sends no `rules` at all.
+ */
+export function mergeUiRuleKeys(incoming: any, existing: PolicyRules | undefined): any {
+  if (!incoming || typeof incoming !== 'object' || !existing) return incoming ?? existing;
+  const merged = { ...incoming };
+  for (const k of UI_RULE_KEYS) {
+    if (merged[k] === undefined && existing[k] !== undefined) merged[k] = existing[k];
+  }
+  return merged;
+}
+
 function toRow(actor: Actor, body: PolicyInput, existing?: ExpensePolicy) {
   const name = (body.name ?? existing?.name ?? '').toString().trim();
   if (!name) throw new AppError(400, 'Give the policy a name', 'VALIDATION');
   if (name.length > 80) throw new AppError(400, 'Policy name is too long (80 characters max)', 'VALIDATION');
-  const rules = normalizeRules(body.rules ?? existing?.rules);
+  const rules = normalizeRules(mergeUiRuleKeys(body.rules, existing?.rules));
   const applies = normalizeApplies(body.applies_to ?? existing?.applies_to);
   const from = body.effective_from !== undefined ? body.effective_from : existing?.effective_from ?? null;
   const to = body.effective_to !== undefined ? body.effective_to : existing?.effective_to ?? null;

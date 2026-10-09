@@ -92,14 +92,18 @@ export const FIELD_OVERRIDES: Record<string, Override> = {
   'lead.company@b2b': { label: 'Shop Name', required: true },
   'lead.phone@b2b': { label: 'Mobile Number', required: true },
   'lead.address_line1@b2b': { label: 'Location', required: true },
-  ...hide('b2b', ['email', 'title', 'industry', 'alternate_mobiles', 'status', 'source_id', 'address_line2', 'postal_code', 'country']),
+  // `data_consent` is the "Data Collection & Consent" block on the create forms (it records the
+  // consent ledger entry; see docs/AGRISYNX.md). Hidden here because the field team does not capture
+  // consent on the spot; the server only insists on it for a client with consent.lead_pii.required.
+  ...hide('b2b', ['email', 'title', 'industry', 'alternate_mobiles', 'status', 'source_id', 'address_line2', 'postal_code', 'country',
+    'marketing_consent', 'whatsapp_consent', 'data_consent']),
   // Farmers
   'lead.first_name@b2c': { label: 'Farmer Name', required: true },
   'lead.last_name@b2c': { hidden: true, required: false },
   'lead.phone@b2c': { label: 'Mobile Number', required: true },
   'lead.address_line1@b2c': { label: 'Location', required: true },
   ...hide('b2c', ['email', 'date_of_birth', 'gender', 'preferred_contact_method', 'alternate_mobiles', 'status', 'source_id',
-    'address_line2', 'postal_code', 'country', 'marketing_consent', 'whatsapp_consent']),
+    'address_line2', 'postal_code', 'country', 'marketing_consent', 'whatsapp_consent', 'data_consent']),
 };
 
 export const LEAD_FORM = {

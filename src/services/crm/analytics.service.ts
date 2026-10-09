@@ -7,6 +7,8 @@
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import type { DashboardSummary } from '../../types/crm.types';
+import { hasSegmentLabels, loadLeadFormConfig } from './leadFormConfig';
+import { logger } from '../../lib/logger';
 
 export interface DateRange { from?: string; to?: string }
 export type AnalyticsUnit = 'inr' | 'weight';
@@ -219,6 +221,12 @@ function defaultWindow(range?: DateRange) {
   return { fromIso, toIso };
 }
 
+/** True when the client has named its lead types. A settings read failure means "no" — never a failed dashboard. */
+async function leadTypesNamed(org_id: string, client_id: string | null): Promise<boolean> {
+  try { return hasSegmentLabels(await loadLeadFormConfig(org_id, client_id)); }
+  catch (e) { logger.warn(`[analytics] lead_form config unavailable: ${(e as Error).message}`); return false; }
+}
+
 export async function dashboardSummary(org_id: string, range?: DateRange, client_id: string | null = null, unit: AnalyticsUnit = 'inr', scope?: AnalyticsScope): Promise<DashboardSummary> {
   const { fromIso, toIso } = defaultWindow(range);
   const fromDate = fromIso.slice(0, 10);
@@ -239,6 +247,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     // wasn't cached on the lead).
     { data: estimateRows },
     { data: estimateDealRows },
+    segmentsOn,
   ] = await Promise.all([
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null), scope), client_id),
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), scope), client_id),
@@ -276,7 +285,22 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     // headline ₹ figure reflects the current window's pipeline. Window
     // applied via deal.created_at; 100k-row lift same as above.
     withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select('amount, lead_id').eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso).range(0, 99999), scope), client_id),
+    // Does this client name its lead types (Dealer / Farmers)? Only then does the response carry the split.
+    leadTypesNamed(org_id, client_id),
   ]);
+
+  // Total leads per lead type, on exactly the same basis as total_leads above (same org / client /
+  // visibility scope, no date window). Skipped entirely — not even queried — for a client that has
+  // not named its lead types, so their response stays byte-for-byte what it was.
+  let leads_by_segment: { b2b: number; b2c: number } | undefined;
+  if (segmentsOn) {
+    const bySegment = (isB2c: boolean) => withClient(applyLeadScope(
+      supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true })
+        .eq('org_id', org_id).is('deleted_at', null).eq('is_b2c', isB2c), scope), client_id);
+    const [b2b, b2c] = await Promise.all([bySegment(false), bySegment(true)]);
+    if (b2b.error || b2c.error) logger.warn(`[analytics] leads_by_segment skipped: ${(b2b.error || b2c.error)?.message}`);
+    else leads_by_segment = { b2b: b2b.count ?? 0, b2c: b2c.count ?? 0 };
+  }
 
   // Aggregate per-lead estimated_amount. Prefer the cached scalar the
   // create / convert paths stamp onto custom_fields.estimated_amount;
@@ -413,6 +437,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     by_stage,
     by_owner,
     by_source,
+    ...(leads_by_segment ? { leads_by_segment } : {}),
   };
 }
 

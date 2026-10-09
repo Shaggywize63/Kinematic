@@ -89,6 +89,18 @@ describe('agrisynx settings', () => {
   it('only ever hide things on the lead entity, scoped to a segment', () => {
     for (const k of Object.keys(setup.FIELD_OVERRIDES)) expect(k).toMatch(/^lead\.[a-z0-9_]+@(b2b|b2c)$/);
   });
+  it('hide the consent block on both lead types, and the dealer marketing / WhatsApp boxes for symmetry', () => {
+    for (const k of ['lead.data_consent@b2b', 'lead.data_consent@b2c', 'lead.marketing_consent@b2b', 'lead.whatsapp_consent@b2b',
+      'lead.marketing_consent@b2c', 'lead.whatsapp_consent@b2c']) {
+      expect({ k, o: setup.FIELD_OVERRIDES[k] }).toEqual({ k, o: { hidden: true, required: false } });
+    }
+  });
+  it('are laid over an admin\'s own override of the same key, and re-planning changes nothing', () => {
+    const once = setup.planSettings({ field_overrides: { 'lead.data_consent@b2b': { label: 'Consent', required: true } } });
+    expect((once.config.field_overrides as Record<string, unknown>)['lead.data_consent@b2b']).toEqual({ hidden: true, required: false });
+    expect(setup.planSettings(once.config)).toEqual(once);
+    expect(v.settingsUpdateSchema.safeParse(once).success).toBe(true);
+  });
 });
 
 describe('planning is idempotent', () => {

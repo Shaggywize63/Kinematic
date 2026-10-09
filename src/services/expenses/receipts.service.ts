@@ -14,6 +14,7 @@ import { currentProjectKey } from '../../lib/projects';
 import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
 import { scanReceipt, ReceiptMediaType } from './receiptScan.service';
+import { scanOdometer, EMPTY_ODOMETER, OdometerReading } from './odometerScan.service';
 import { Actor } from './access';
 
 export const RECEIPT_BUCKET = process.env.BUCKET_RECEIPTS || 'kinematic-receipts';
@@ -59,7 +60,11 @@ async function ensureBucket(): Promise<void> {
 
 export interface UploadedFile { buffer: Buffer; mimetype?: string; originalname?: string; size?: number }
 
-export async function uploadReceipt(actor: Actor, file: UploadedFile, opts: { scan?: boolean } = {}) {
+/**
+ * `scan`: omitted / true = read the photo as a receipt (today's behaviour); false = just store it;
+ * 'odometer' = read the vehicle odometer instead (response gains `odometer`, `scan` stays null).
+ */
+export async function uploadReceipt(actor: Actor, file: UploadedFile, opts: { scan?: boolean | 'odometer' } = {}) {
   if (!file?.buffer?.length) throw new AppError(400, 'No file received', 'NO_FILE');
   if (file.buffer.length > MAX_BYTES) throw new AppError(413, 'The file is larger than 10 MB', 'TOO_LARGE');
   const type = sniff(file.buffer);
@@ -74,8 +79,15 @@ export async function uploadReceipt(actor: Actor, file: UploadedFile, opts: { sc
   const { data: signed } = await supabaseAdmin.storage.from(RECEIPT_BUCKET).createSignedUrl(path, SIGN_TTL_SECONDS);
 
   // OCR is a convenience, never a requirement: a failure must not lose the upload.
+  const odometerMode = opts.scan === 'odometer';
   let scan: unknown = null;
-  if (opts.scan !== false && SCANNABLE.has(type)) {
+  let odometer: OdometerReading = { ...EMPTY_ODOMETER };
+  if (odometerMode) {
+    if (SCANNABLE.has(type)) {
+      try { odometer = await scanOdometer(file.buffer.toString('base64'), type as ReceiptMediaType); }
+      catch (e: any) { logger.warn(`[expenses] odometer OCR failed: ${e?.message || e}`); }
+    }
+  } else if (opts.scan !== false && SCANNABLE.has(type)) {
     try { scan = await scanReceipt(file.buffer.toString('base64'), type as ReceiptMediaType); }
     catch (e: any) { logger.warn(`[expenses] receipt OCR failed: ${e?.message || e}`); }
   }
@@ -83,6 +95,8 @@ export async function uploadReceipt(actor: Actor, file: UploadedFile, opts: { sc
   return {
     url: pub.publicUrl, path, bucket: RECEIPT_BUCKET, content_type: type, size: file.buffer.length,
     signed_url: signed?.signedUrl ?? null, scan,
+    // Only an odometer upload carries this key, so every other response is byte-for-byte what it was.
+    ...(odometerMode ? { odometer } : {}),
   };
 }
 

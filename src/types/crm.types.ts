@@ -355,6 +355,10 @@ export interface DashboardSummary {
    *  chart on the dashboard. Shape matches `by_stage` so the FunnelChart
    *  component can render either without a code branch. */
   by_source: Array<{ source: string; stage: string; name: string; count: number; value: number }>;
+  /** TOTAL leads per lead type (crm_leads.is_b2c false = b2b, true = b2c), on the same basis and
+   *  filters as `total_leads`. Present ONLY for a client that has named its lead types
+   *  (crm_settings.config.lead_form.segment_labels, e.g. Dealer / Farmers); absent otherwise. */
+  leads_by_segment?: { b2b: number; b2c: number };
 }
 
 export interface KiniContext {
