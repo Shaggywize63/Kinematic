@@ -3,6 +3,7 @@ import { requireAuth } from "../middleware/auth";
 import { asyncHandler, sendSuccess, AppError } from "../utils";
 import { supabaseAdmin } from "../lib/supabase";
 import { AuthRequest } from "../types";
+import { resolveVisitTimes } from "../services/formVisit.store";
 const router = Router();
 
 /* ── Forms ───────────────────────────────────────── */
@@ -393,9 +394,13 @@ router.post(
       }
     }
 
-    const durationMinutes = (check_in_at && check_out_at)
-      ? Math.round((new Date(check_out_at).getTime() - new Date(check_in_at).getTime()) / 60000)
-      : null;
+    // Visit times are sanitised, never rejected (old app builds keep working): a bad timestamp becomes
+    // null, a future one is clamped to server time, and a check-in with no check-out is closed at
+    // server time for clients whose `form_checkin_required` rule is on. See formVisit.service.ts.
+    const visit = await resolveVisitTimes(
+      (user as { client_id?: string | null } | undefined)?.client_id ?? null,
+      { check_in_at, check_out_at },
+    );
 
     const { data, error } = await supabaseAdmin
       .from("builder_submissions")
@@ -414,13 +419,13 @@ router.post(
         status: "submitted",
         outlet_id,
         outlet_name,
-        check_in_at,
-        check_out_at,
+        check_in_at: visit.check_in_at,
+        check_out_at: visit.check_out_at,
         check_in_gps,
         check_out_gps,
         gps,
         address,
-        duration_minutes: durationMinutes
+        duration_minutes: visit.duration_minutes
       })
       .select()
       .single();

@@ -128,6 +128,54 @@ export function priceVehicleLine<T extends OdometerFields & { category?: string 
   return { ...line, distance_km: null, amount: 0 };
 }
 
+// ── GPS distance (policy rule `gps_distance`) ────────────────────────────────
+
+const isBlank = (v: unknown): boolean => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
+
+/** Does this line carry any odometer reading or odometer photo at all (the vehicle does not count)? */
+export function hasOdometerData(item: OdometerFields): boolean {
+  return num(item.odometer_start) != null || num(item.odometer_end) != null
+    || !isBlank(item.odometer_start_photo_url) || !isBlank(item.odometer_end_photo_url);
+}
+
+/**
+ * Is this a "claim the distance from my GPS" line? Only when the policy opts in (`gps_distance`) AND
+ * pays by vehicle (`vehicle_rates` non-empty), and the line is a mileage line whose vehicle is one of
+ * those rates (a blank vehicle is the policy's only vehicle, as everywhere else), with a distance
+ * and NO odometer readings or photos. Everything else — including every line under a policy without
+ * `gps_distance` — is false, so those lines keep their odometer behaviour byte for byte.
+ */
+export function isGpsDistanceLine(
+  item: OdometerFields & { category?: string | null; distance_km?: number | string | null },
+  rules?: { vehicle_rates?: VehicleRate[]; gps_distance?: boolean } | null,
+): boolean {
+  if (!rules?.gps_distance || !vehicleFlowOn(rules)) return false;
+  if (item.category !== 'mileage') return false;
+  const vehicle = withSoleVehicle(item, rules.vehicle_rates).vehicle_type;
+  if (!rules.vehicle_rates!.some((r) => r.id === vehicle)) return false;
+  if (hasOdometerData(item)) return false;
+  return Number(item.distance_km) > 0;
+}
+
+/**
+ * Price a GPS-distance line: the given distance × the line's vehicle rate. The client never types
+ * the amount. The line is returned with its (sole) vehicle filled in and the odometer fields
+ * explicitly cleared, so a line converted from odometer to GPS does not keep stale readings.
+ */
+export function priceGpsLine<T extends OdometerFields & { category?: string | null; amount?: number | null; distance_km?: number | null }>(
+  item: T, rates: VehicleRate[], distanceKm: number,
+): T {
+  const line = withSoleVehicle(item, rates);
+  const rate = rates.find((r) => r.id === line.vehicle_type);
+  const km = round2(distanceKm);
+  return {
+    ...line,
+    distance_km: km,
+    amount: rate ? round2(km * rate.rate_per_km) : 0,
+    odometer_start: null, odometer_end: null, odometer_start_photo_url: null, odometer_end_photo_url: null,
+  };
+}
+
 /** Refuse a saved line whose "after" reading is below its "before" reading. */
 export function assertOdometerOrder(items: Array<OdometerFields & { category?: string | null }>): void {
   for (const i of items) {

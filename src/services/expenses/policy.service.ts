@@ -17,7 +17,7 @@ import { currentProjectKey } from '../../lib/projects';
 import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
 import { Actor, isApprover } from './access';
-import { VehicleRate, normalizeVehicleRates, odometerProblems } from './vehicleAllowance';
+import { VehicleRate, isGpsDistanceLine, normalizeVehicleRates, odometerProblems } from './vehicleAllowance';
 
 export const CATEGORIES = ['mileage', 'travel', 'food', 'lodging', 'fuel', 'toll', 'misc'] as const;
 export type Category = (typeof CATEGORIES)[number];
@@ -66,10 +66,21 @@ export interface PolicyRules {
   single_line?: boolean;
   /** true = the apps take odometer photos from the camera only, never the gallery (default false). UI-only. */
   odometer_camera_only?: boolean;
+  /**
+   * true = with `vehicle_rates`, a mileage line may claim the day's distance from the rep's GPS instead of
+   * odometer readings (default false). Unlike the switches above this one IS enforced server-side: the
+   * distance is checked against the GPS travel service when the line is saved (see expenses.service.ts).
+   */
+  gps_distance?: boolean;
 }
 
 /** The presentation-only rule keys (no server-side enforcement). */
 export const UI_RULE_KEYS = ['category_labels', 'route_fields', 'single_line', 'odometer_camera_only'] as const;
+/**
+ * The rule keys an editor that predates them must not silently reset: the presentation-only ones plus
+ * `gps_distance` (which does have server-side effect, but is just as easy for an old editor to lose).
+ */
+export const PRESERVED_RULE_KEYS = [...UI_RULE_KEYS, 'gps_distance'] as const;
 export const CATEGORY_LABEL_MAX = 30;
 
 export interface AppliesTo {
@@ -192,6 +203,7 @@ export function normalizeRules(raw: any, legacy?: any): PolicyRules {
     route_fields: r.route_fields !== false,
     single_line: r.single_line === true,
     odometer_camera_only: r.odometer_camera_only === true,
+    gps_distance: r.gps_distance === true,
   };
 }
 
@@ -381,7 +393,9 @@ export function evaluateAgainstPolicy(
   // 1b. Travel allowance by vehicle: a mileage line needs its vehicle, both odometer
   // readings and (by default) a photo of each. Always blocking — a rep cannot submit
   // a trip the approver has nothing to verify.
+  // A GPS-distance line (policy rule `gps_distance`, no odometer data) has no readings to ask for.
   for (const it of items) {
+    if (isGpsDistanceLine(it, R)) continue;
     for (const prob of odometerProblems(it, R)) {
       add({ code: prob.code, severity: 'high', category: 'mileage', item_id: it.id, detail: prob.detail }, true);
     }
@@ -503,15 +517,16 @@ export interface PolicyInput {
 
 /**
  * `body.rules` replaces the stored rules wholesale — except the presentation-only keys
- * (UI_RULE_KEYS). An editor that predates them sends a full `rules` object without them, and
- * re-normalising that would silently reset a configured client (labels, single line, ...) to
- * defaults on every save. So a key the caller left out keeps its stored value; a key the caller
- * sent (even `{}` / `false`) wins. Nothing changes when the caller sends no `rules` at all.
+ * (UI_RULE_KEYS) and `gps_distance` (PRESERVED_RULE_KEYS). An editor that predates them sends a full
+ * `rules` object without them, and re-normalising that would silently reset a configured client
+ * (labels, single line, GPS distance ...) to defaults on every save. So a key the caller left out keeps
+ * its stored value; a key the caller sent (even `{}` / `false`) wins. Nothing changes when the caller
+ * sends no `rules` at all.
  */
 export function mergeUiRuleKeys(incoming: any, existing: PolicyRules | undefined): any {
   if (!incoming || typeof incoming !== 'object' || !existing) return incoming ?? existing;
   const merged = { ...incoming };
-  for (const k of UI_RULE_KEYS) {
+  for (const k of PRESERVED_RULE_KEYS) {
     if (merged[k] === undefined && existing[k] !== undefined) merged[k] = existing[k];
   }
   return merged;

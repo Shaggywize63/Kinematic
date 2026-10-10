@@ -2,11 +2,20 @@
  * Attendance rules (per client) — PURE logic, no I/O.
  *
  * Stored at `clients.settings.attendance_rules` (jsonb):
- *   { shift_start, shift_end, grace_minutes, weekly_off, allow_offline_checkin }
+ *   { shift_start, shift_end, grace_minutes, weekly_off, allow_offline_checkin,
+ *     selfie_required, form_checkin_required }
  * Every key is optional; a missing key resolves to ATTENDANCE_RULES_DEFAULTS.
  * A client is `configured` iff it has an `attendance_rules` object at all — an
  * unconfigured client behaves exactly as before this feature existed (no `late`
- * key on records, legacy "before 10:00 IST" punctuality, server-time punches).
+ * key on records, legacy "before 10:00 IST" punctuality, server-time punches,
+ * selfie required for executives, no form check-in/out).
+ *
+ * `configured` alone does NOT switch on shift/late behaviour: that needs at
+ * least one of shift_start / shift_end / grace_minutes / weekly_off to be
+ * explicitly stored (see lateTrackingEnabled). A client that only sets the
+ * behavioural toggles (selfie_required, form_checkin_required,
+ * allow_offline_checkin) therefore gets no `late` key and keeps the legacy
+ * "before 10:00 IST" punctuality.
  *
  * This module has NO imports from the DB layer so it is unit-testable without a
  * database (see tests/attendanceRules.test.ts). The DB-facing wrapper lives in
@@ -22,16 +31,34 @@ export interface AttendanceRules {
   grace_minutes: number;          // 0..120
   weekly_off: number[];           // subset of 0..6, sorted, unique
   allow_offline_checkin: boolean;
+  /** Executives must send a selfie on check-in / check-out. Default true (today's behaviour). */
+  selfie_required: boolean;
+  /** Every form submission records a check-in / check-out (time + GPS). Default false. */
+  form_checkin_required: boolean;
 }
 
 export interface ResolvedAttendanceRules {
+  /** The client has an `attendance_rules` object at all. */
   configured: boolean;
+  /**
+   * Shift/late behaviour (the `late` key, rule-based punctuality) is on: at least
+   * one shift key is explicitly stored. Absent (undefined) is treated as ON for a
+   * `configured` value so hand-built fixtures keep their old meaning — only
+   * resolveAttendanceRules sets it, and it sets it for every call.
+   */
+  lateTracking?: boolean;
   rules: AttendanceRules;
 }
 
 export const ATTENDANCE_RULES_SETTINGS_KEY = 'attendance_rules';
-export const ATTENDANCE_RULE_KEYS = ['shift_start', 'shift_end', 'grace_minutes', 'weekly_off', 'allow_offline_checkin'] as const;
+export const ATTENDANCE_RULE_KEYS = [
+  'shift_start', 'shift_end', 'grace_minutes', 'weekly_off', 'allow_offline_checkin',
+  'selfie_required', 'form_checkin_required',
+] as const;
 export type AttendanceRuleKey = (typeof ATTENDANCE_RULE_KEYS)[number];
+
+/** The stored keys whose presence switches on shift/late behaviour. */
+export const LATE_TRACKING_KEYS = ['shift_start', 'shift_end', 'grace_minutes', 'weekly_off'] as const;
 
 export const ATTENDANCE_RULES_DEFAULTS: Readonly<AttendanceRules> = Object.freeze({
   shift_start: '09:30',
@@ -39,6 +66,8 @@ export const ATTENDANCE_RULES_DEFAULTS: Readonly<AttendanceRules> = Object.freez
   grace_minutes: 15,
   weekly_off: Object.freeze([0]) as unknown as number[],
   allow_offline_checkin: false,
+  selfie_required: true,
+  form_checkin_required: false,
 });
 
 export const ATTENDANCE_RULES_BOUNDS = Object.freeze({
@@ -132,7 +161,7 @@ export type RulesPatchResult =
   | { ok: false; error: string };
 
 /**
- * Validate a PATCH body: any NON-EMPTY subset of the 5 rule keys. The whole
+ * Validate a PATCH body: any NON-EMPTY subset of the rule keys. The whole
  * request is rejected on the first invalid value (or unknown key) — a partial
  * save that silently drops a field is harder to debug than a loud 400.
  */
@@ -170,10 +199,36 @@ export function validateRulesPatch(body: unknown): RulesPatchResult {
     if (typeof body.allow_offline_checkin !== 'boolean') return { ok: false, error: 'allow_offline_checkin must be true or false' };
     patch.allow_offline_checkin = body.allow_offline_checkin;
   }
+  if ('selfie_required' in body) {
+    if (typeof body.selfie_required !== 'boolean') return { ok: false, error: 'selfie_required must be true or false' };
+    patch.selfie_required = body.selfie_required;
+  }
+  if ('form_checkin_required' in body) {
+    if (typeof body.form_checkin_required !== 'boolean') return { ok: false, error: 'form_checkin_required must be true or false' };
+    patch.form_checkin_required = body.form_checkin_required;
+  }
   return { ok: true, patch };
 }
 
 // ── resolution ────────────────────────────────────────────────────────────
+
+/**
+ * True only when the stored `attendance_rules` object explicitly carries at
+ * least one of shift_start / shift_end / grace_minutes / weekly_off. This — not
+ * `configured` — is what gates the `late` annotation, rule-based punctuality and
+ * any other shift behaviour, so a client that saves ONLY selfie_required /
+ * form_checkin_required / allow_offline_checkin never suddenly gets late marking.
+ * `rawRules` is the stored `attendance_rules` value (anything else → false).
+ */
+export function lateTrackingEnabled(rawRules: unknown): boolean {
+  if (!isPlainObject(rawRules)) return false;
+  return LATE_TRACKING_KEYS.some((k) => rawRules[k] !== undefined && rawRules[k] !== null);
+}
+
+/** Whether shift/late behaviour applies to a resolved rule set (see lateTrackingEnabled). */
+export function lateTrackingOn(resolved: ResolvedAttendanceRules | null | undefined): boolean {
+  return !!resolved?.configured && resolved.lateTracking !== false;
+}
 
 /**
  * Resolve a client's rules from its `clients.settings` jsonb. A stored key that
@@ -183,13 +238,15 @@ export function validateRulesPatch(body: unknown): RulesPatchResult {
 export function resolveAttendanceRules(settings: unknown): ResolvedAttendanceRules {
   const stored = isPlainObject(settings) ? settings[ATTENDANCE_RULES_SETTINGS_KEY] : undefined;
   const rules = defaultAttendanceRules();
-  if (!isPlainObject(stored)) return { configured: false, rules };
+  if (!isPlainObject(stored)) return { configured: false, lateTracking: false, rules };
   if (parseHHMM(stored.shift_start) !== null) rules.shift_start = stored.shift_start as string;
   if (parseHHMM(stored.shift_end) !== null) rules.shift_end = stored.shift_end as string;
   if (validGrace(stored.grace_minutes)) rules.grace_minutes = stored.grace_minutes;
   if (validWeeklyOff(stored.weekly_off)) rules.weekly_off = normWeeklyOff(stored.weekly_off);
   if (typeof stored.allow_offline_checkin === 'boolean') rules.allow_offline_checkin = stored.allow_offline_checkin;
-  return { configured: true, rules };
+  if (typeof stored.selfie_required === 'boolean') rules.selfie_required = stored.selfie_required;
+  if (typeof stored.form_checkin_required === 'boolean') rules.form_checkin_required = stored.form_checkin_required;
+  return { configured: true, lateTracking: lateTrackingEnabled(stored), rules };
 }
 
 /**
@@ -237,16 +294,16 @@ export function computeLate(checkinAt: number | string | Date | null | undefined
 }
 
 /**
- * Punctuality bucket for ffm-analytics. Configured clients use their rules
- * (late = after shift_start + grace). Unconfigured clients keep the legacy
+ * Punctuality bucket for ffm-analytics. Clients with shift rules (lateTrackingOn)
+ * use them (late = after shift_start + grace). Everyone else keeps the legacy
  * rule: a check-in before 10:00 IST is on time.
  */
 export function classifyPunctuality(
   checkinAt: number | string | Date,
   resolved: ResolvedAttendanceRules | null | undefined,
 ): 'on_time' | 'late' {
-  if (resolved?.configured) {
-    const late = computeLate(checkinAt, resolved.rules);
+  if (lateTrackingOn(resolved)) {
+    const late = computeLate(checkinAt, resolved!.rules);
     return late?.is_late ? 'late' : 'on_time';
   }
   const p = istParts(checkinAt);
@@ -255,11 +312,12 @@ export function classifyPunctuality(
 
 /**
  * Attach `late` to an attendance record IN PLACE (mirrors enrichWithHours) —
- * only when the client is configured AND the record has a check-in. Otherwise
- * the record is returned untouched (legacy clients see no new key).
+ * only when the client has shift rules (lateTrackingOn) AND the record has a
+ * check-in. Otherwise the record is returned untouched (legacy clients see no
+ * new key).
  */
 export function applyLate<T extends { checkin_at?: unknown }>(record: T, resolved: ResolvedAttendanceRules | null | undefined): T {
-  if (!record || !resolved?.configured || !record.checkin_at) return record;
+  if (!record || !lateTrackingOn(resolved) || !record.checkin_at) return record;
   const late = computeLate(record.checkin_at as string | number | Date, resolved.rules);
   if (late) (record as T & { late?: LateInfo }).late = late;
   return record;

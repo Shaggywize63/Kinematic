@@ -18,19 +18,10 @@
  * speed under the limit); with them the same days land at realistic 8–25 km.
  */
 import { supabaseAdmin } from '../../lib/supabase';
+import { sumTrailKm } from './trail';
 
-const EARTH_KM = 6371;
-const MAX_SPEED_KMH = 150;   // faster than this between two fixes = teleport, not a drive
-const MAX_GAP_MIN = 15;      // gap beyond this = lost trail; don't infer distance across it
-const MAX_SEGMENT_KM = 20;   // a single consecutive-fix hop beyond this is a jump/bad fix
-
-function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(bLat - aLat);
-  const dLng = toRad(bLng - aLng);
-  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
-  return 2 * EARTH_KM * Math.asin(Math.min(1, Math.sqrt(s)));
-}
+// The segment guards (gap / hop / speed) and the haversine live in ./trail so the day-travel
+// service sums a trail with exactly the same rules.
 
 export interface MileageResult {
   distance_km: number;
@@ -50,27 +41,10 @@ export async function mileageFromTrail(orgId: string, userId: string, fromISO: s
     .order('captured_at', { ascending: true })
     .limit(10000);
 
-  const pts = (data as any[]) || [];
-  let dist = 0, used = 0, excluded = 0, skipped = 0;
-  let prev: any = null;
-  for (const p of pts) {
-    if (p.is_mock || p.is_suspect) { excluded++; continue; }
-    if (prev) {
-      const seg = haversineKm(Number(prev.lat), Number(prev.lng), Number(p.lat), Number(p.lng));
-      const dtMin = (new Date(p.captured_at).getTime() - new Date(prev.captured_at).getTime()) / 60_000;
-      const speed = dtMin > 0 ? seg / (dtMin / 60) : Infinity;
-      if (dtMin > 0 && dtMin <= MAX_GAP_MIN && seg <= MAX_SEGMENT_KM && speed <= MAX_SPEED_KMH) {
-        dist += seg;
-      } else {
-        skipped++;
-      }
-    }
-    prev = p;
-    used++;
-  }
+  const sum = sumTrailKm((data as any[]) || []);
   return {
-    distance_km: Math.round(dist * 100) / 100,
-    points_used: used, points_excluded: excluded, segments_skipped: skipped,
+    distance_km: Math.round(sum.km * 100) / 100,
+    points_used: sum.points_used, points_excluded: sum.points_excluded, segments_skipped: sum.segments_skipped,
     from: fromISO, to: toISO,
   };
 }

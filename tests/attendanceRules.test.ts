@@ -7,7 +7,7 @@ import {
   ATTENDANCE_RULES_DEFAULTS, ATTENDANCE_RULES_BOUNDS, defaultAttendanceRules, parseHHMM,
   validateRulesPatch, resolveAttendanceRules, mergeRulesIntoSettings, rulesAdminView,
   istParts, istDateOf, isValidYmd, addDaysYmd, weekdayOf, inclusiveDayCount,
-  computeLate, classifyPunctuality, applyLate,
+  computeLate, classifyPunctuality, applyLate, lateTrackingEnabled, lateTrackingOn,
   decideCapturedAt, CAPTURED_AT_MAX_FUTURE_MS, CAPTURED_AT_MAX_AGE_MS,
   validateSummaryRange, workingDaysInRange, buildAttendanceSummary, SUMMARY_MAX_RANGE_DAYS,
   type AttendanceRules,
@@ -25,6 +25,7 @@ describe('defaults and bounds', () => {
   it('match the contract', () => {
     expect(ATTENDANCE_RULES_DEFAULTS).toEqual({
       shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false,
+      selfie_required: true, form_checkin_required: false,
     });
     expect(ATTENDANCE_RULES_BOUNDS.grace_minutes).toEqual({ min: 0, max: 120 });
   });
@@ -54,6 +55,25 @@ describe('parseHHMM', () => {
 });
 
 describe('validateRulesPatch', () => {
+  it('accepts selfie_required / form_checkin_required booleans (alone or with other keys)', () => {
+    expect(validateRulesPatch({ selfie_required: false })).toEqual({ ok: true, patch: { selfie_required: false } });
+    expect(validateRulesPatch({ form_checkin_required: true })).toEqual({ ok: true, patch: { form_checkin_required: true } });
+    expect(validateRulesPatch({ selfie_required: true, form_checkin_required: false, grace_minutes: 5 }))
+      .toEqual({ ok: true, patch: { selfie_required: true, form_checkin_required: false, grace_minutes: 5 } });
+  });
+
+  it.each([
+    ['selfie_required as string', { selfie_required: 'false' }],
+    ['selfie_required as number', { selfie_required: 0 }],
+    ['selfie_required null', { selfie_required: null }],
+    ['form_checkin_required as string', { form_checkin_required: 'true' }],
+    ['form_checkin_required as number', { form_checkin_required: 1 }],
+    ['one bad new key rejects the whole request', { grace_minutes: 5, selfie_required: 'no' }],
+    ['one bad new key (form) rejects the whole request', { selfie_required: false, form_checkin_required: [] }],
+  ])('rejects %s', (_label, body) => {
+    expect(validateRulesPatch(body)).toMatchObject({ ok: false });
+  });
+
   it('accepts any subset and returns only the keys sent', () => {
     expect(validateRulesPatch({ grace_minutes: 20 })).toEqual({ ok: true, patch: { grace_minutes: 20 } });
     expect(validateRulesPatch({ shift_start: '10:00', shift_end: '19:30', allow_offline_checkin: true }))
@@ -109,31 +129,122 @@ describe('validateRulesPatch', () => {
 describe('resolveAttendanceRules', () => {
   it('a client with no attendance_rules is unconfigured and resolves to defaults', () => {
     for (const settings of [undefined, null, {}, { uses_supervisor_scope: true }, 'junk', [], { attendance_rules: null }, { attendance_rules: [] }, { attendance_rules: 'x' }]) {
-      expect(resolveAttendanceRules(settings)).toEqual({ configured: false, rules: defaultAttendanceRules() });
+      expect(resolveAttendanceRules(settings)).toEqual({ configured: false, lateTracking: false, rules: defaultAttendanceRules() });
     }
   });
 
-  it('an empty attendance_rules object IS configured (all defaults)', () => {
-    expect(resolveAttendanceRules({ attendance_rules: {} })).toEqual({ configured: true, rules: defaultAttendanceRules() });
+  it('an empty attendance_rules object IS configured (all defaults) but has no shift rules', () => {
+    expect(resolveAttendanceRules({ attendance_rules: {} })).toEqual({ configured: true, lateTracking: false, rules: defaultAttendanceRules() });
   });
 
   it('fills missing keys from the defaults', () => {
     const r = resolveAttendanceRules({ attendance_rules: { shift_start: '10:00', weekly_off: [0, 6] } });
-    expect(r).toEqual({ configured: true, rules: { shift_start: '10:00', shift_end: '18:00', grace_minutes: 15, weekly_off: [0, 6], allow_offline_checkin: false } });
+    expect(r).toEqual({
+      configured: true,
+      lateTracking: true,
+      rules: { shift_start: '10:00', shift_end: '18:00', grace_minutes: 15, weekly_off: [0, 6], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false },
+    });
   });
 
   it('a hand-edited invalid value falls back to its default instead of breaking', () => {
     const r = resolveAttendanceRules({ attendance_rules: { shift_start: '9am', grace_minutes: 999, weekly_off: [9], allow_offline_checkin: 'yes', shift_end: '17:00' } });
     expect(r.configured).toBe(true);
-    expect(r.rules).toEqual({ shift_start: '09:30', shift_end: '17:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false });
+    expect(r.rules).toEqual({ shift_start: '09:30', shift_end: '17:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false });
   });
 
   it('exposes the admin view with defaults and bounds', () => {
     const v = rulesAdminView(resolveAttendanceRules({ attendance_rules: { grace_minutes: 5 } }));
     expect(v.configured).toBe(true);
     expect(v.rules.grace_minutes).toBe(5);
-    expect(v.defaults).toEqual({ shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false });
+    expect(v.defaults).toEqual({ shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false });
     expect(v.bounds).toEqual({ grace_minutes: { min: 0, max: 120 } });
+  });
+
+  it('resolves selfie_required / form_checkin_required from the stored booleans', () => {
+    const r = resolveAttendanceRules({ attendance_rules: { selfie_required: false, form_checkin_required: true } });
+    expect(r.rules.selfie_required).toBe(false);
+    expect(r.rules.form_checkin_required).toBe(true);
+    // Absent -> today's behaviour: selfie required, no form check-in.
+    const d = resolveAttendanceRules({ attendance_rules: { shift_start: '10:00' } });
+    expect(d.rules.selfie_required).toBe(true);
+    expect(d.rules.form_checkin_required).toBe(false);
+  });
+
+  it('a hand-edited non-boolean selfie_required / form_checkin_required falls back to its default', () => {
+    const r = resolveAttendanceRules({ attendance_rules: { selfie_required: 'no', form_checkin_required: 1 } });
+    expect(r.rules.selfie_required).toBe(true);
+    expect(r.rules.form_checkin_required).toBe(false);
+  });
+
+  it('the admin view lists the two new keys in both rules and defaults', () => {
+    const v = rulesAdminView(resolveAttendanceRules({ attendance_rules: { selfie_required: false } }));
+    expect(Object.keys(v.rules).sort()).toEqual(['allow_offline_checkin', 'form_checkin_required', 'grace_minutes', 'selfie_required', 'shift_end', 'shift_start', 'weekly_off']);
+    expect(Object.keys(v.defaults).sort()).toEqual(Object.keys(v.rules).sort());
+    expect(v.rules.selfie_required).toBe(false);
+    expect(v.defaults.selfie_required).toBe(true);
+    // The internal lateTracking flag is NOT part of the admin view.
+    expect(v).not.toHaveProperty('lateTracking');
+  });
+});
+
+describe('lateTrackingEnabled (the guard that keeps non-shift clients out of late behaviour)', () => {
+  it.each([
+    ['shift_start', { shift_start: '10:00' }],
+    ['shift_end', { shift_end: '19:00' }],
+    ['grace_minutes', { grace_minutes: 0 }],
+    ['weekly_off', { weekly_off: [] }],
+  ])('is true when %s is explicitly stored', (_k, raw) => {
+    expect(lateTrackingEnabled(raw)).toBe(true);
+    expect(lateTrackingEnabled({ selfie_required: false, ...raw })).toBe(true);
+  });
+
+  it('is false for an object holding ONLY non-shift keys', () => {
+    expect(lateTrackingEnabled({ selfie_required: false })).toBe(false);
+    expect(lateTrackingEnabled({ form_checkin_required: true })).toBe(false);
+    expect(lateTrackingEnabled({ selfie_required: false, form_checkin_required: true, allow_offline_checkin: true })).toBe(false);
+    expect(lateTrackingEnabled({})).toBe(false);
+  });
+
+  it('is false when nothing / junk is stored, and ignores explicit null/undefined shift keys', () => {
+    for (const raw of [undefined, null, 'x', 5, [], { shift_start: null }, { grace_minutes: undefined }]) {
+      expect(lateTrackingEnabled(raw)).toBe(false);
+    }
+  });
+
+  it('resolveAttendanceRules marks lateTracking only when a shift key is stored', () => {
+    expect(resolveAttendanceRules({ attendance_rules: { selfie_required: false } })).toMatchObject({ configured: true, lateTracking: false });
+    expect(resolveAttendanceRules({ attendance_rules: { form_checkin_required: true } })).toMatchObject({ configured: true, lateTracking: false });
+    expect(resolveAttendanceRules({ attendance_rules: { selfie_required: false, grace_minutes: 10 } })).toMatchObject({ configured: true, lateTracking: true });
+    // Gomant-style full object: unaffected.
+    expect(resolveAttendanceRules({ attendance_rules: { shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: true } }))
+      .toMatchObject({ configured: true, lateTracking: true });
+  });
+
+  it('lateTrackingOn: needs configured AND shift keys; a hand-built {configured:true} (no flag) still means on', () => {
+    expect(lateTrackingOn(resolveAttendanceRules({ attendance_rules: { selfie_required: false } }))).toBe(false);
+    expect(lateTrackingOn(resolveAttendanceRules({ attendance_rules: { shift_end: '19:00' } }))).toBe(true);
+    expect(lateTrackingOn(resolveAttendanceRules({}))).toBe(false);
+    expect(lateTrackingOn(configured())).toBe(true);
+    expect(lateTrackingOn(unconfigured)).toBe(false);
+    expect(lateTrackingOn(null)).toBe(false);
+  });
+
+  it('a selfie/form-only client gets NO late key and the legacy 10:00 IST punctuality', () => {
+    const only = resolveAttendanceRules({ attendance_rules: { selfie_required: false, form_checkin_required: true } });
+    const rec: any = { checkin_at: ist('2026-10-09', '09:50') };            // late under the 09:30+15 defaults
+    applyLate(rec, only);
+    expect(rec).not.toHaveProperty('late');
+    // legacy: before 10:00 IST is on time, from 10:00 late — NOT the 09:45 shift cutoff
+    expect(classifyPunctuality(ist('2026-10-09', '09:50'), only)).toBe('on_time');
+    expect(classifyPunctuality(ist('2026-10-09', '10:00'), only)).toBe('late');
+  });
+
+  it('a shift-keyed client keeps rule-based late + punctuality', () => {
+    const shifted = resolveAttendanceRules({ attendance_rules: { shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], selfie_required: false } });
+    const rec: any = { checkin_at: ist('2026-10-09', '09:50') };
+    applyLate(rec, shifted);
+    expect(rec.late).toEqual({ is_late: true, minutes_late: 20 });
+    expect(classifyPunctuality(ist('2026-10-09', '09:50'), shifted)).toBe('late');
   });
 });
 

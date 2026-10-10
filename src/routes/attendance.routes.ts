@@ -41,6 +41,9 @@ router.get('/rules',         ctrl.getAttendanceRules);
 // Open to any authenticated user: managers get their team (same scope as /team),
 // a rep only ever gets themself.
 router.get('/summary',       ctrl.getAttendanceSummary);
+// Distance travelled on a day (check-in → forms → check-out legs, GPS trail with a straight-line
+// fallback). Any authenticated user for themself; someone else's needs manager/admin team scope.
+router.get('/travel',        ctrl.getTravel);
 router.post('/override',      requireSupervisorOrAbove, ctrl.overrideAttendance);
 router.patch('/:id/override', requireSupervisorOrAbove, ctrl.updateAttendanceOverride);
 export default router;

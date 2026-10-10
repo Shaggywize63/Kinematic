@@ -179,6 +179,8 @@ const policySchema = z.object({
     route_fields: z.boolean().optional(),
     single_line: z.boolean().optional(),
     odometer_camera_only: z.boolean().optional(),
+    // Claim the day's distance from the rep's GPS instead of odometer readings (needs vehicle_rates).
+    gps_distance: z.boolean().optional(),
   }).optional(),
 });
 const policyPatchSchema = policySchema.partial();

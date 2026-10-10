@@ -58,6 +58,12 @@ const MGR_PUNCHED = '55555555-5555-4555-8555-555555555555';
 const ist = (date: string, hhmm: string) => new Date(Date.parse(`${date}T${hhmm}:00+05:30`)).toISOString();
 
 const RULES_A = { shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: true };
+// What the API resolves/returns: the stored keys plus the defaults of the keys the client never set.
+const RESOLVED_A = { ...RULES_A, selfie_required: true, form_checkin_required: false };
+const DEFAULT_RULES = {
+  shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false,
+  selfie_required: true, form_checkin_required: false,
+};
 let CLIENTS: Record<string, { id: string; org_id: string; owner_org_id?: string | null; settings: Record<string, unknown> | null }>;
 
 const setUser = (u: Record<string, unknown>) => { (global as any).__testUser = u; };
@@ -109,8 +115,8 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({
       configured: true,
-      rules: RULES_A,
-      defaults: { shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false },
+      rules: RESOLVED_A,
+      defaults: DEFAULT_RULES,
       bounds: { grace_minutes: { min: 0, max: 120 } },
     });
   });
@@ -139,7 +145,7 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
     const res = await request(app).patch('/org-settings/attendance-rules').send({ shift_start: '10:00', weekly_off: [6, 0] });
     expect(res.status).toBe(200);
     expect(res.body.data.configured).toBe(true);
-    expect(res.body.data.rules).toEqual({ shift_start: '10:00', shift_end: '18:00', grace_minutes: 15, weekly_off: [0, 6], allow_offline_checkin: false });
+    expect(res.body.data.rules).toEqual({ ...DEFAULT_RULES, shift_start: '10:00', weekly_off: [0, 6] });
 
     const [upd] = updatesOf('clients');
     expect(upd.eqs.id).toBe(CB);
@@ -162,8 +168,34 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
     expect(again.body.data.rules).toMatchObject({ grace_minutes: 5, shift_start: '09:30', allow_offline_checkin: false });
   });
 
+  it('PATCH persists selfie_required / form_checkin_required and returns them in rules', async () => {
+    const res = await request(app).patch('/org-settings/attendance-rules').send({ selfie_required: false, form_checkin_required: true });
+    expect(res.status).toBe(200);
+    expect(res.body.data.rules).toMatchObject({ selfie_required: false, form_checkin_required: true, shift_start: '09:30' });
+    expect(res.body.data.defaults).toMatchObject({ selfie_required: true, form_checkin_required: false });
+    const [upd] = updatesOf('clients');
+    expect(payloadOf(upd, 'update').settings.attendance_rules).toEqual({ ...RULES_A, selfie_required: false, form_checkin_required: true });
+    // and the read-only app endpoint sees them (cache cleared by the write)
+    setUser(repA);
+    const rules = await request(app).get('/attendance/rules');
+    expect(rules.body.data.rules).toMatchObject({ selfie_required: false, form_checkin_required: true });
+  });
+
+  it('PATCH with ONLY the new keys on a legacy client stores just those keys (no shift keys appear)', async () => {
+    setUser({ ...adminA, client_id: CB });
+    const res = await request(app).patch('/org-settings/attendance-rules').send({ selfie_required: false });
+    expect(res.status).toBe(200);
+    const [upd] = updatesOf('clients');
+    expect(payloadOf(upd, 'update').settings).toEqual({ app_ui: { tabs: ['home'] }, attendance_rules: { selfie_required: false } });
+    expect(res.body.data.configured).toBe(true);
+  });
+
   it('PATCH rejects invalid values with 400 and writes NOTHING', async () => {
-    for (const body of [{ grace_minutes: 500 }, { shift_start: '9:30' }, { weekly_off: [9] }, { allow_offline_checkin: 'yes' }, { shift_start: '10:00', grace_minutes: -3 }, {}, { bogus: 1 }]) {
+    for (const body of [
+      { grace_minutes: 500 }, { shift_start: '9:30' }, { weekly_off: [9] }, { allow_offline_checkin: 'yes' },
+      { selfie_required: 'no' }, { form_checkin_required: 1 }, { grace_minutes: 5, selfie_required: null },
+      { shift_start: '10:00', grace_minutes: -3 }, {}, { bogus: 1 },
+    ]) {
       const res = await request(app).patch('/org-settings/attendance-rules').send(body);
       expect(res.status).toBe(400);
     }
@@ -226,17 +258,14 @@ describe('GET /attendance/rules (any authenticated user)', () => {
     setUser(repA);
     const res = await request(app).get('/attendance/rules');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ configured: true, rules: RULES_A });
+    expect(res.body.data).toEqual({ configured: true, rules: RESOLVED_A });
   });
 
   it('reports configured:false with defaults for a legacy client', async () => {
     setUser(repB);
     const res = await request(app).get('/attendance/rules');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({
-      configured: false,
-      rules: { shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false },
-    });
+    expect(res.body.data).toEqual({ configured: false, rules: DEFAULT_RULES });
   });
 
   it('is not an error for a user with no client in scope (unconfigured defaults)', async () => {
@@ -386,7 +415,7 @@ describe('POST /attendance/checkin and /checkout with captured_at (offline captu
   it('stamps late info from the captured time (what the stored checkin_at says)', async () => {
     const captured = minutesAgo(20);
     const res = await request(app).post(`/attendance/checkin?date=${istDay(captured)}`).set('Idempotency-Key', 'key-1').send({ ...GEO, captured_at: captured });
-    expect(res.body.data.late).toEqual(computeLate(captured, RULES_A));
+    expect(res.body.data.late).toEqual(computeLate(captured, RESOLVED_A));
   });
 
   it('IGNORES captured_at without an Idempotency-Key (server time is used)', async () => {
@@ -622,6 +651,188 @@ describe('GET /attendance/summary', () => {
     const ranges = __mock.chainsFor('attendance').map((c) => c.ops.find((o) => o.method === 'range')?.args);
     expect(ranges).toEqual([[0, 999], [1000, 1999]]);
     expect(res.body.data.rows.find((r: any) => r.user_id === REP).present).toBe(2);      // 09-01 and 09-02 (dupes collapse)
+  });
+});
+
+describe('a client that sets ONLY selfie_required / form_checkin_required gets no shift/late behaviour', () => {
+  const todayRow = (over: Record<string, unknown> = {}) => ({
+    id: 'att-1', user_id: REP, client_id: CA, date: '2026-10-09', status: 'checked_in',
+    checkin_at: ist('2026-10-09', '10:00'), checkout_at: null, total_hours: null, breaks: [], ...over,
+  });
+
+  it('GET /attendance/rules still reports configured:true (the object exists) and the new keys', async () => {
+    CLIENTS[CA].settings = { attendance_rules: { selfie_required: false, form_checkin_required: true } };
+    clearClientFlagCache();
+    setUser(repA);
+    const res = await request(app).get('/attendance/rules');
+    expect(res.body.data).toEqual({ configured: true, rules: { ...DEFAULT_RULES, selfie_required: false, form_checkin_required: true } });
+  });
+
+  it('GET /today OMITS `late` even though the client is "configured"', async () => {
+    CLIENTS[CA].settings = { attendance_rules: { selfie_required: false } };
+    clearClientFlagCache();
+    setUser(repA);
+    __mock.setDefault('attendance', { data: [todayRow()] });
+    const res = await request(app).get('/attendance/today');
+    expect(res.status).toBe(200);
+    expect('late' in res.body.data).toBe(false);
+  });
+
+  it('GET /today STILL adds `late` for a client with explicit shift keys (Gomant-style) that also sets the new keys', async () => {
+    CLIENTS[CA].settings = { attendance_rules: { ...RULES_A, selfie_required: false, form_checkin_required: true } };
+    clearClientFlagCache();
+    setUser(repA);
+    __mock.setDefault('attendance', { data: [todayRow()] });
+    const res = await request(app).get('/attendance/today');
+    expect(res.body.data.late).toEqual({ is_late: true, minutes_late: 30 });
+  });
+
+  it('a single explicit shift key is enough to switch late tracking on', async () => {
+    CLIENTS[CA].settings = { attendance_rules: { selfie_required: false, grace_minutes: 15 } };
+    clearClientFlagCache();
+    setUser(repA);
+    __mock.setDefault('attendance', { data: [todayRow()] });
+    const res = await request(app).get('/attendance/today');
+    expect(res.body.data.late).toEqual({ is_late: true, minutes_late: 30 });
+  });
+
+  it('ffm punctuality keeps the legacy 10:00 IST split for a new-keys-only client', async () => {
+    CLIENTS[CA].settings = { attendance_rules: { selfie_required: false } };
+    clearClientFlagCache();
+    __mock.setDefault('users', { data: [{ id: REP, name: 'Asha' }] });
+    __mock.setDefault('attendance', {
+      data: [
+        { user_id: REP, client_id: CA, status: 'checked_out', checkin_at: ist('2026-10-05', '09:50') },   // late under 09:30+15, on time under legacy
+        { user_id: REP, client_id: CA, status: 'checked_out', checkin_at: ist('2026-10-05', '10:05') },   // late either way
+      ],
+    });
+    const out = await new Promise<any>((resolve, reject) => {
+      const res: any = { status: () => res, json: (b: any) => resolve(b) };
+      attendancePunctuality({ user: { id: ADMIN, org_id: ORG, role: 'admin', client_id: null } }, res, reject);
+    });
+    const row = out.data.find((r: any) => r.fe_id === REP);
+    expect(row).toMatchObject({ on_time: 1, late: 1, absent: 0 });
+  });
+});
+
+describe('selfie_required (check-in / check-out)', () => {
+  const GEO = { latitude: 18.52, longitude: 73.85 };
+  const SELFIE = 'https://cdn.example.test/selfie.jpg';
+  const execA = { ...repA, role: 'executive' };
+  const execB = { ...repB, role: 'executive' };
+
+  function stubCheckin() {
+    __mock.setDefault('attendance', (chain) => {
+      const up = chain.ops.find((o) => o.method === 'upsert');
+      if (up) return { data: { id: 'att-new', breaks: [], ...(up.args[0] as object) } };
+      return { data: [] };
+    });
+  }
+  const checkinAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  const open = { id: 'att-open', user_id: REP, client_id: CA, date: istDateOf(Date.now()), status: 'checked_in', checkin_at: checkinAt, break_minutes: 0 };
+  function stubCheckout() {
+    __mock.setDefault('attendance', (chain) => {
+      const up = chain.ops.find((o) => o.method === 'update');
+      if (up) return { data: { ...open, breaks: [], ...(up.args[0] as object) } };
+      return { data: [open] };
+    });
+  }
+  const setRules = (rules: Record<string, unknown> | null) => {
+    CLIENTS[CA].settings = rules === null ? {} : { attendance_rules: rules };
+    clearClientFlagCache();
+  };
+  const upsertPayload = () => payloadOf(__mock.chainsFor('attendance').find((c) => c.ops.some((o) => o.method === 'upsert'))!, 'upsert');
+
+  describe('check-in', () => {
+    beforeEach(() => { stubCheckin(); });
+
+    it('default (no rule stored): an executive without a selfie is still rejected, exactly as before', async () => {
+      setRules(null);
+      setUser(execA);
+      const res = await request(app).post('/attendance/checkin').send(GEO);
+      expect(res.status).toBe(400);
+      expect(res.body.error ?? res.body.message).toMatch(/Selfie is mandatory for check-in/);
+      expect(__mock.chainsFor('attendance').some((c) => c.ops.some((o) => o.method === 'upsert'))).toBe(false);
+    });
+
+    it('a configured client that never set selfie_required still requires the selfie', async () => {
+      setUser(execA);                                           // CA = RULES_A (no selfie_required key)
+      expect((await request(app).post('/attendance/checkin').send(GEO)).status).toBe(400);
+    });
+
+    it('selfie_required:true explicitly: still rejected without a selfie', async () => {
+      setRules({ ...RULES_A, selfie_required: true });
+      setUser(execA);
+      expect((await request(app).post('/attendance/checkin').send(GEO)).status).toBe(400);
+    });
+
+    it('selfie_required:false: an executive checks in with GPS only; the selfie column is not written', async () => {
+      setRules({ selfie_required: false });
+      setUser(execA);
+      const res = await request(app).post('/attendance/checkin').send(GEO);
+      expect(res.status).toBe(201);
+      const payload = upsertPayload();
+      expect(payload.checkin_lat).toBe(GEO.latitude);
+      expect(payload.checkin_selfie_url ?? null).toBeNull();
+      expect('late' in res.body.data).toBe(false);              // new-keys-only client: no shift behaviour
+    });
+
+    it('selfie_required:false still STORES a selfie when the app sends one', async () => {
+      setRules({ selfie_required: false });
+      setUser(execA);
+      const res = await request(app).post('/attendance/checkin').send({ ...GEO, selfie_url: SELFIE });
+      expect(res.status).toBe(201);
+      expect(upsertPayload().checkin_selfie_url).toBe(SELFIE);
+    });
+
+    it('the rule is per client: client B (no rules) still requires it while client A opted out', async () => {
+      setRules({ selfie_required: false });
+      setUser(execB);
+      expect((await request(app).post('/attendance/checkin').send(GEO)).status).toBe(400);
+    });
+
+    it('non-executive roles were never gated (unchanged)', async () => {
+      setRules(null);
+      setUser(repA);                                            // field_executive
+      expect((await request(app).post('/attendance/checkin').send(GEO)).status).toBe(201);
+    });
+
+    it('offline path (captured_at + Idempotency-Key) is unchanged and works without a selfie when opted out', async () => {
+      setRules({ selfie_required: false, allow_offline_checkin: true });
+      setUser(execA);
+      const captured = new Date(Date.now() - 20 * 60_000).toISOString();
+      const res = await request(app).post(`/attendance/checkin?date=${istDateOf(captured)}`).set('Idempotency-Key', 'k1').send({ ...GEO, captured_at: captured });
+      expect(res.status).toBe(201);
+      expect(upsertPayload().checkin_at).toBe(captured);
+    });
+  });
+
+  describe('check-out', () => {
+    beforeEach(() => { stubCheckout(); });
+    const updatePayload = () => payloadOf(updatesOf('attendance')[0], 'update');
+
+    it('default: an executive without a selfie is rejected', async () => {
+      setRules(null);
+      setUser(execA);
+      const res = await request(app).post('/attendance/checkout').send(GEO);
+      expect(res.status).toBe(400);
+      expect(res.body.error ?? res.body.message).toMatch(/Selfie is mandatory for check-out/);
+      expect(updatesOf('attendance')).toHaveLength(0);
+    });
+
+    it('selfie_required:false: GPS-only check-out succeeds and stores no selfie', async () => {
+      setRules({ selfie_required: false });
+      setUser(execA);
+      const res = await request(app).post('/attendance/checkout').send(GEO);
+      expect(res.status).toBe(200);
+      expect(updatePayload().status).toBe('checked_out');
+      expect(updatePayload().checkout_selfie_url ?? null).toBeNull();
+    });
+
+    it('unconfigured client B still requires the selfie on check-out', async () => {
+      setUser(execB);
+      expect((await request(app).post('/attendance/checkout').send(GEO)).status).toBe(400);
+    });
   });
 });
 
