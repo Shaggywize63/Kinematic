@@ -379,8 +379,8 @@ export const setScmDispatchConsumeMode = asyncHandler<AuthRequest>(async (req, r
 // ============================================================
 // Attendance rules (per CLIENT — stored in clients.settings.attendance_rules)
 // ============================================================
-// Shift start/end, late grace, weekly off, offline check-in, selfie requirement and
-// form check-in/out for ONE client.
+// Shift start/end, late grace, weekly off, offline check-in, selfie requirement,
+// form check-in/out and mode-of-transport capture for ONE client.
 // Opt-in by data: a client with no `attendance_rules` object is `configured:
 // false` and behaves exactly as before. Pure logic: services/attendanceRules.service.ts.
 
@@ -399,7 +399,7 @@ export const getAttendanceRules = asyncHandler<AuthRequest>(async (req, res) => 
  *
  * Body: any non-empty subset of
  *   { shift_start, shift_end, grace_minutes, weekly_off, allow_offline_checkin,
- *     selfie_required, form_checkin_required }.
+ *     selfie_required, form_checkin_required, track_transport_mode }.
  * Merged into clients.settings.attendance_rules (other settings keys untouched).
  * Any invalid value rejects the WHOLE request with a 400. Responds like the GET.
  */

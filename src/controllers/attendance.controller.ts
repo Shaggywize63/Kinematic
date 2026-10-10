@@ -19,7 +19,14 @@ import {
   fetchClientRow, callerMayUseClient,
 } from '../services/attendanceRules.store';
 import { buildDayTravel } from '../services/travel.service';
-import { dayTravel } from '../services/travel.store';
+import { dayTravel, dbTravelFetchers } from '../services/travel.store';
+import { clampMinHaltMinutes } from '../services/haltDetection';
+import {
+  emptyDailyReport, getDailyReport as assembleDailyReport, getTeamReport, TEAM_REPORT_MAX_USERS,
+  type ReportUser, type TeamReportMember,
+} from '../services/dailyReport.service';
+import { hasTransportModeValue, trackTransportModeOn, validateTransportMode } from '../services/transportMode.service';
+import { annotateTransportLabels, transportModesForUser } from '../services/transportMode.store';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -104,7 +111,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   if (isDemo(user)) return created(res, { id: 'demo-att-id', status: 'checked_in', checkin_at: new Date().toISOString() }, 'Checked in successfully (Demo)');
   
   const { latitude, longitude, selfie_url, activity_id, zone_id, battery_percentage,
-          face_score, face_verified, face_model_id, is_mock, location_accuracy_m } = req.body;
+          face_score, face_verified, face_model_id, is_mock, location_accuracy_m, transport_mode } = req.body;
   const { date: passedDate } = req.query as Record<string, string>;
   const today = isoDate(new Date());
 
@@ -148,6 +155,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     logger.info(`[Attendance] user=${user.id} already has a record for ${attendanceDate}. Returning existing.`);
     const existingRecord = enrichWithHours(existing);
     await annotateLate([existingRecord], user.client_id);
+    await annotateTransportLabels([existingRecord], { orgId: user.org_id, clientId: user.client_id });
     ok(res, existingRecord);
     return;
   }
@@ -188,6 +196,18 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     distanceMetres = dist;
   }
 
+  // Mode of transport (opt-in: the client's `track_transport_mode` rule). The `transport_mode` column is
+  // written ONLY when that rule is on AND the request supplies a mode — never otherwise, so a project
+  // without the column keeps working for every other client. An unknown mode is a 400 (nothing written).
+  // The rule is only looked up when a mode was actually sent.
+  let transportMode: string | undefined;
+  if (hasTransportModeValue(transport_mode) && trackTransportModeOn((await rulesForClient(user.client_id)).rules)) {
+    const { modes, resolved } = await transportModesForUser(user);
+    const check = validateTransportMode(transport_mode, resolved ? modes : null);
+    if ('error' in check) { badRequest(res, check.error); return; }
+    transportMode = check.mode;
+  }
+
   // Offline capture: honour the rep's own punch time only when the client allows it
   // (see decideCapturedAt); otherwise this is server time, exactly as before.
   const capture = await resolveCapture(req, 'checkin', { attendanceDate });
@@ -196,31 +216,40 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   // Race-safe insert: if a parallel request beat us to it, the (user_id, date)
   // unique constraint will trigger the conflict path and we return the
   // existing row instead of throwing.
-  const { data, error } = await supabaseAdmin
+  const checkinRow: Record<string, unknown> = {
+    user_id: user.id,
+    org_id: user.org_id,
+    client_id: user.client_id,
+    zone_id: resolvedZoneId,
+    activity_id,
+    date: attendanceDate,
+    status: 'checked_in',
+    checkin_at: checkinAt.toISOString(),
+    checkin_lat: latitude,
+    checkin_lng: longitude,
+    checkin_selfie_url: selfie_url,
+    checkin_distance_m: distanceMetres,
+    // Face-match result (only sent when the client has face_attendance on).
+    ...(face_verified !== undefined && { checkin_face_verified: face_verified }),
+    ...(face_score !== undefined && { checkin_face_score: face_score }),
+    ...(face_model_id !== undefined && { face_model_id }),
+    // Location-integrity signals (client-reported mock GPS + fix accuracy).
+    ...(is_mock !== undefined && { checkin_is_mock: is_mock }),
+    ...(location_accuracy_m !== undefined && { checkin_accuracy_m: location_accuracy_m }),
+  };
+  const saveCheckin = (row: Record<string, unknown>) => supabaseAdmin
     .from('attendance')
-    .upsert({
-      user_id: user.id,
-      org_id: user.org_id,
-      client_id: user.client_id,
-      zone_id: resolvedZoneId,
-      activity_id,
-      date: attendanceDate,
-      status: 'checked_in',
-      checkin_at: checkinAt.toISOString(),
-      checkin_lat: latitude,
-      checkin_lng: longitude,
-      checkin_selfie_url: selfie_url,
-      checkin_distance_m: distanceMetres,
-      // Face-match result (only sent when the client has face_attendance on).
-      ...(face_verified !== undefined && { checkin_face_verified: face_verified }),
-      ...(face_score !== undefined && { checkin_face_score: face_score }),
-      ...(face_model_id !== undefined && { face_model_id }),
-      // Location-integrity signals (client-reported mock GPS + fix accuracy).
-      ...(is_mock !== undefined && { checkin_is_mock: is_mock }),
-      ...(location_accuracy_m !== undefined && { checkin_accuracy_m: location_accuracy_m }),
-    }, { onConflict: 'user_id,date', ignoreDuplicates: false })
+    .upsert(row, { onConflict: 'user_id,date', ignoreDuplicates: false })
     .select('*, breaks(*)')
     .single();
+
+  let { data, error } = await saveCheckin(transportMode === undefined ? checkinRow : { ...checkinRow, transport_mode: transportMode });
+  if (error && transportMode !== undefined && /transport_mode/i.test(error.message ?? '')) {
+    // The client turned the rule on but this project has no `attendance.transport_mode` column yet
+    // (migrations/attendance_transport_mode.sql not applied here). The punch itself must not fail.
+    logger.warn(`[Attendance] transport_mode column missing; checked user=${user.id} in without it: ${error.message}`);
+    ({ data, error } = await saveCheckin(checkinRow));
+  }
 
   if (error) { badRequest(res, error.message); return; }
 
@@ -230,6 +259,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   // 200-400ms of perceived latency on the mobile check-in flow.
   const checkinRecord = enrichWithHours(data);
   await annotateLate([checkinRecord], user.client_id);
+  await annotateTransportLabels([checkinRecord], { orgId: user.org_id, clientId: user.client_id });
   created(res, checkinRecord, 'Checked in successfully');
 
   // Fire-and-forget telemetry. Errors are logged but never returned.
@@ -339,6 +369,7 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   // Respond first; telemetry follows.
   const checkoutRecord = enrichWithHours(updatedRecord);
   await annotateLate([checkoutRecord], user.client_id);
+  await annotateTransportLabels([checkoutRecord], { orgId: user.org_id, clientId: user.client_id });
   ok(res, checkoutRecord, 'Checked out successfully');
 
   // Fire-and-forget: work_activity log + clear live location.
@@ -403,6 +434,7 @@ export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const { data: updated } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('id', record.id).single();
   const startedRecord = enrichWithHours(updated);
   await annotateLate([startedRecord], user.client_id);
+  await annotateTransportLabels([startedRecord], { orgId: user.org_id, clientId: user.client_id });
   created(res, startedRecord, 'Break started');
 });
 
@@ -454,6 +486,7 @@ export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
   const { data: updated } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('id', record.id).single();
   const endedRecord = enrichWithHours(updated);
   await annotateLate([endedRecord], user.client_id);
+  await annotateTransportLabels([endedRecord], { orgId: user.org_id, clientId: user.client_id });
   ok(res, endedRecord, 'Break ended');
 });
 
@@ -511,6 +544,7 @@ export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
 
   const todayRecord = enrichWithHours(record);
   await annotateLate([todayRecord], user.client_id);
+  await annotateTransportLabels([todayRecord], { orgId: user.org_id, clientId: user.client_id });
   ok(res, todayRecord);
 });
 
@@ -528,6 +562,7 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
   if (error) { badRequest(res, error.message); return; }
   const results = (data || []).map(enrichWithHours);
   await annotateLate(results, user.client_id);
+  await annotateTransportLabels(results, { orgId: user.org_id, clientId: user.client_id });
   ok(res, shapeAttendanceHistory(results, count || 0, page, limit));
 });
 
@@ -648,6 +683,7 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   const rows = (data || []).map(enrichWithHours);
   // `late` per row, using each row's own client's rules (a global view spans clients).
   await annotateLate(rows, pickedClientId);
+  await annotateTransportLabels(rows, { orgId: scopeOrgId, clientId: pickedClientId });
   ok(res, rows);
 });
 
@@ -660,6 +696,12 @@ async function annotateOverrideLate(row: any, adminClientId?: string | null): Pr
   if (!row?.checkin_at) return;
   const fallback = row.client_id ?? adminClientId ?? await clientIdOfUser(row.user_id);
   await annotateLate([row], fallback);
+}
+
+/** `transport_label` for a row an admin override returns (no query unless the row carries a mode). */
+async function annotateOverrideTransport(row: any, admin: { org_id: string; client_id?: string | null }): Promise<void> {
+  if (!row?.transport_mode) return;
+  await annotateTransportLabels([row], { orgId: row.org_id ?? admin.org_id, clientId: row.client_id ?? admin.client_id ?? null });
 }
 
 export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => {
@@ -691,6 +733,7 @@ export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => 
 
   if (error) { badRequest(res, error.message); return; }
   await annotateOverrideLate(data, admin.client_id);
+  await annotateOverrideTransport(data, admin);
   created(res, data, 'Attendance saved');
 });
 
@@ -706,6 +749,7 @@ export const updateAttendanceOverride = asyncHandler<AuthRequest>(async (req, re
 
   if (error) { badRequest(res, error.message); return; }
   await annotateOverrideLate(updated, admin.client_id);
+  await annotateOverrideTransport(updated, admin);
   ok(res, updated, 'Attendance updated');
 });
 
@@ -713,9 +757,70 @@ export const updateAttendanceOverride = asyncHandler<AuthRequest>(async (req, re
 // The resolved attendance rules for the caller's client (read-only, any
 // authenticated user). The apps read this for shift times and to know whether
 // offline check-in is allowed. `configured:false` = legacy behaviour (defaults shown).
+// `transport_modes` is the picker for the mode of transport: the signed-in user's expense-policy
+// vehicles, then public transport and other. It is [] (and costs no policy read) unless the client's
+// `track_transport_mode` rule is on.
 export const getAttendanceRules = asyncHandler<AuthRequest>(async (req, res) => {
   const resolved = await readRulesForViewer(req);
-  ok(res, { configured: resolved.configured, rules: resolved.rules });
+  const transport_modes = trackTransportModeOn(resolved.rules) ? (await transportModesForUser(req.user!)).modes : [];
+  ok(res, { configured: resolved.configured, rules: resolved.rules, transport_modes });
+});
+
+// ── Mode of transport ──────────────────────────────────────────────────────
+
+// PATCH /api/v1/attendance/transport-mode   { mode: "<id>", date?: "YYYY-MM-DD" }
+// Sets (or changes) the mode of transport on the CALLER'S OWN attendance row for an IST day (default
+// today). Opt-in: a client whose `track_transport_mode` rule is off gets a 400 and nothing is written.
+// 400 too for an unknown mode (see transportMode.service.ts) or when there is no attendance row that
+// day. Returns the updated attendance row (with `transport_label`).
+export const setTransportMode = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+
+  let date = istDateOf(Date.now()) as string;
+  if (body.date !== undefined && body.date !== null && body.date !== '') {
+    if (typeof body.date !== 'string' || !isValidYmd(body.date)) { badRequest(res, 'date must be a date in YYYY-MM-DD format'); return; }
+    date = body.date;
+  }
+  if (!hasTransportModeValue(body.mode)) { badRequest(res, 'mode is required'); return; }
+
+  if (isDemo(user)) { ok(res, { id: 'demo-att-id', date, transport_mode: body.mode }, 'Mode of transport updated (Demo)'); return; }
+
+  if (!trackTransportModeOn((await rulesForClient(user.client_id)).rules)) {
+    badRequest(res, 'Mode of transport is not enabled for your organisation', { code: 'TRANSPORT_MODE_DISABLED' });
+    return;
+  }
+  const { modes, resolved } = await transportModesForUser(user);
+  const check = validateTransportMode(body.mode, resolved ? modes : null);
+  if ('error' in check) { badRequest(res, check.error); return; }
+
+  const { data: record, error: findError } = await supabaseAdmin
+    .from('attendance')
+    .select('id')
+    .eq('user_id', user.id)
+    .eq('date', date)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (findError && findError.code !== 'PGRST116') { badRequest(res, findError.message); return; }   // PGRST116 = no such row
+  if (!record) { badRequest(res, `No attendance found for ${date}. Check in first.`); return; }
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('attendance')
+    .update({ transport_mode: check.mode })
+    .eq('id', record.id)
+    .eq('user_id', user.id)
+    .select('*, breaks(*)')
+    .single();
+  if (error) {
+    badRequest(res, /transport_mode/i.test(error.message ?? '') ? 'Mode of transport is not available on this project yet' : error.message);
+    return;
+  }
+
+  const updatedRecord = enrichWithHours(updated);
+  await annotateLate([updatedRecord], user.client_id);
+  await annotateTransportLabels([updatedRecord], { orgId: user.org_id, clientId: user.client_id });
+  ok(res, updatedRecord, 'Mode of transport updated');
 });
 
 // ── Summary ────────────────────────────────────────────────────────────────
@@ -851,10 +956,68 @@ export const getAttendanceSummary = asyncHandler<AuthRequest>(async (req, res) =
 
 // ── Distance travelled ─────────────────────────────────────────────────────
 
-// GET /api/v1/attendance/travel?date=YYYY-MM-DD[&user_id=<uuid>]
+/** `date` (default today IST), `user_id` and `min_halt_minutes` of the travel / daily-report endpoints. */
+type TravelQuery = { date: string; wantedUserId: string | null; minHaltMinutes: number | undefined } | { error: string };
+
+function parseTravelQuery(req: AuthRequest, nowMs: number): TravelQuery {
+  const rawDate = req.query.date;
+  let date = istDateOf(nowMs) as string;
+  if (rawDate !== undefined && rawDate !== '') {
+    if (typeof rawDate !== 'string' || !isValidYmd(rawDate)) return { error: 'date must be a date in YYYY-MM-DD format' };
+    date = rawDate;
+  }
+
+  const rawUserId = req.query.user_id;
+  if (rawUserId !== undefined && rawUserId !== '' && (typeof rawUserId !== 'string' || !isUUID(rawUserId))) {
+    return { error: 'user_id must be a valid UUID' };
+  }
+  const wantedUserId = typeof rawUserId === 'string' && rawUserId ? rawUserId : null;
+
+  // Optional halt length, clamped to 3..120 minutes; a value that is not a number is a mistake, not a default.
+  const rawMin = req.query.min_halt_minutes;
+  let minHaltMinutes: number | undefined;
+  if (rawMin !== undefined && rawMin !== '') {
+    if (typeof rawMin !== 'string' || !Number.isFinite(Number(rawMin))) return { error: 'min_halt_minutes must be a number of minutes' };
+    minHaltMinutes = clampMinHaltMinutes(rawMin);
+  }
+  return { date, wantedUserId, minHaltMinutes };
+}
+
+type VisibleUserFailure = { status: 400 | 403 | 404; error: string };
+type VisibleUser = { row: Record<string, any>; orgId: string } | VisibleUserFailure;
+
+/**
+ * Another person's row (`columns` of `users`) when the caller may look at them: a manager / admin, with
+ * the person inside the caller's org (and picked client, and supervisor subtree when that scoping is on)
+ * — exactly the visibility the team attendance list / summary use. A rep gets 403; someone outside the
+ * scope is 404 (never a hint that they exist).
+ */
+async function findVisibleUser(req: AuthRequest, wantedUserId: string, columns: string, forbiddenMessage: string): Promise<VisibleUser> {
+  const user = req.user!;
+  const isManager = SUPERVISOR_OR_ABOVE_ROLES.includes(((user.role || '').toLowerCase()) as any);
+  if (!isManager) return { status: 403, error: forbiddenMessage };
+  const scope = await resolveTeamAttendanceScope(req, { verifyPickedClient: true });
+  const scopeOrg = scope.isGlobal ? user.org_id : scope.scopeOrgId;
+  let q: any = supabaseAdmin.from('users').select(columns).eq('id', wantedUserId).eq('org_id', scopeOrg).is('deleted_at', null);
+  if (scope.pickedClientId) q = q.eq('client_id', scope.pickedClientId);
+  if (scope.scopeIds) q = q.in('id', scope.scopeIds);
+  const { data: target, error } = await q.maybeSingle();
+  if (error && error.code !== 'PGRST116') return { status: 400, error: error.message };   // PGRST116 = no such row
+  if (!target) return { status: 404, error: 'User not found' };
+  return { row: target as unknown as Record<string, any>, orgId: scopeOrg };
+}
+
+function sendLookupFailure(res: Response, f: VisibleUserFailure): void {
+  if (f.status === 403) forbidden(res, f.error);
+  else if (f.status === 404) notFound(res, f.error);
+  else badRequest(res, f.error);
+}
+
+// GET /api/v1/attendance/travel?date=YYYY-MM-DD[&user_id=<uuid>][&min_halt_minutes=3..120]
 // The kilometres a person travelled on an IST day: the legs between their attendance check-in, each
 // form visit (check-in → check-out) and the attendance check-out (or "now" while the shift is open),
-// measured on the GPS trail and falling back to the straight line when the trail is missing. See
+// measured on the GPS trail and falling back to the straight line when the trail is missing; plus the
+// places they stopped (`halts`, at least `min_halt_minutes` long, default 10). See
 // services/travel.service.ts for the definition. `date` defaults to today (IST); `user_id` to the
 // caller. Someone else's travel needs the visibility the team attendance list uses: managers and
 // admins within their org / client / supervisor scope — a rep gets 403. No attendance that day is
@@ -863,19 +1026,9 @@ export const getTravel = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const nowMs = Date.now();
 
-  const rawDate = req.query.date;
-  let date = istDateOf(nowMs) as string;
-  if (rawDate !== undefined && rawDate !== '') {
-    if (typeof rawDate !== 'string' || !isValidYmd(rawDate)) { badRequest(res, 'date must be a date in YYYY-MM-DD format'); return; }
-    date = rawDate;
-  }
-
-  const rawUserId = req.query.user_id;
-  if (rawUserId !== undefined && rawUserId !== '' && (typeof rawUserId !== 'string' || !isUUID(rawUserId))) {
-    badRequest(res, 'user_id must be a valid UUID');
-    return;
-  }
-  const wantedUserId = typeof rawUserId === 'string' && rawUserId ? rawUserId : null;
+  const q = parseTravelQuery(req, nowMs);
+  if ('error' in q) { badRequest(res, q.error); return; }
+  const { date, wantedUserId, minHaltMinutes } = q;
 
   if (isDemo(user)) {
     ok(res, buildDayTravel({ date, userId: wantedUserId ?? user.id, attendance: null, visits: [], trail: [], nowMs }));
@@ -885,21 +1038,126 @@ export const getTravel = asyncHandler<AuthRequest>(async (req, res) => {
   let targetId: string = user.id;
   let orgId: string = user.org_id;
   if (wantedUserId && wantedUserId !== user.id) {
-    const isManager = SUPERVISOR_OR_ABOVE_ROLES.includes(((user.role || '').toLowerCase()) as any);
-    if (!isManager) { forbidden(res, 'You can only view your own travel'); return; }
-    // Same visibility as the team attendance list / summary: the person must sit inside the
-    // caller's org (and picked client, and supervisor subtree when that scoping is on).
-    const scope = await resolveTeamAttendanceScope(req, { verifyPickedClient: true });
-    const scopeOrg = scope.isGlobal ? user.org_id : scope.scopeOrgId;
-    let q = supabaseAdmin.from('users').select('id').eq('id', wantedUserId).eq('org_id', scopeOrg).is('deleted_at', null);
-    if (scope.pickedClientId) q = q.eq('client_id', scope.pickedClientId);
-    if (scope.scopeIds) q = q.in('id', scope.scopeIds);
-    const { data: target, error } = await q.maybeSingle();
-    if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }   // PGRST116 = no such row
-    if (!target) { notFound(res, 'User not found'); return; }
+    const found = await findVisibleUser(req, wantedUserId, 'id', 'You can only view your own travel');
+    if ('error' in found) { sendLookupFailure(res, found); return; }
     targetId = wantedUserId;
-    orgId = scopeOrg;
+    orgId = found.orgId;
   }
 
-  ok(res, await dayTravel(targetId, date, { orgId, nowMs }));
+  ok(res, await dayTravel(targetId, date, { orgId, nowMs, minHaltMinutes }));
+});
+
+// ── Daily travel report ────────────────────────────────────────────────────
+
+// GET /api/v1/attendance/daily-report?date=YYYY-MM-DD[&user_id=<uuid>][&min_halt_minutes=3..120]
+// One person's day for a manager (or themself) to read: the shift, mode of transport, total km and legs,
+// customer visits (arrival / departure), halts, the route to draw (<= 600 points) and a summary. It is
+// the SAME computation as GET /attendance/travel (services/dailyReport.service.ts only lays it out).
+// Who may see whom is exactly /travel's rule; a day with no attendance is a 200 with empty arrays and
+// `shift.attendance_id: null`.
+export const getDailyReport = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const nowMs = Date.now();
+
+  const q = parseTravelQuery(req, nowMs);
+  if ('error' in q) { badRequest(res, q.error); return; }
+  const { date, wantedUserId, minHaltMinutes } = q;
+
+  if (isDemo(user)) {
+    ok(res, emptyDailyReport(date, { id: wantedUserId ?? user.id, name: user.name ?? null, employee_id: null, role: user.role ?? null }, nowMs));
+    return;
+  }
+
+  const columns = 'id, name, employee_id, role, client_id';
+  let targetId: string = user.id;
+  let orgId: string = user.org_id;
+  let info: Record<string, any> | null = null;
+  if (wantedUserId && wantedUserId !== user.id) {
+    const found = await findVisibleUser(req, wantedUserId, columns, 'You can only view your own travel report');
+    if ('error' in found) { sendLookupFailure(res, found); return; }
+    targetId = wantedUserId;
+    orgId = found.orgId;
+    info = found.row;
+  } else {
+    const { data } = await (supabaseAdmin.from('users').select(columns).eq('id', user.id).maybeSingle() as any);
+    info = (data as Record<string, any> | null) ?? null;
+  }
+  const isSelf = targetId === user.id;
+  const reportUser: ReportUser = {
+    id: targetId,
+    name: info?.name ?? (isSelf ? user.name ?? null : null),
+    employee_id: info?.employee_id ?? null,
+    role: info?.role ?? (isSelf ? user.role ?? null : null),
+  };
+
+  const report = await assembleDailyReport(dbTravelFetchers(orgId, { fullAttendanceRow: true }), {
+    userId: targetId, date, user: reportUser, nowMs, minHaltMinutes,
+  });
+
+  // The mode's label comes from the person's own expense policy (their vehicle names); only looked up
+  // when a vehicle mode is actually recorded.
+  if (report.transport.mode) {
+    const [labelled] = await annotateTransportLabels(
+      [{ user_id: targetId, org_id: orgId, client_id: info?.client_id ?? user.client_id ?? null, transport_mode: report.transport.mode } as { transport_mode: string; transport_label?: unknown }],
+      { orgId, clientId: info?.client_id ?? user.client_id ?? null },
+    );
+    if (typeof labelled?.transport_label === 'string') report.transport.label = labelled.transport_label;
+  }
+  ok(res, report);
+});
+
+// GET /api/v1/attendance/daily-report/team?date=YYYY-MM-DD[&min_halt_minutes=3..120]
+// One row per person with a shift on that day, for the people the caller may see — the team attendance
+// list's scoping (org, picked client, supervisor subtree; a platform caller with no client picked is
+// held to their own org), manager roles only. At most 300 people, computed 5 at a time from the same
+// travel service as the single-person report. People with no attendance that day are not listed.
+export const getDailyReportTeam = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const nowMs = Date.now();
+
+  const q = parseTravelQuery(req, nowMs);
+  if ('error' in q) { badRequest(res, q.error); return; }
+  const { date, minHaltMinutes } = q;
+
+  if (isDemo(user)) { ok(res, { date, rows: [] }); return; }
+
+  const scope = await resolveTeamAttendanceScope(req, { verifyPickedClient: true });
+  const scopeOrg = scope.isGlobal ? user.org_id : scope.scopeOrgId;
+
+  let query: any = supabaseAdmin
+    .from('attendance')
+    .select('*, users:user_id(name, employee_id, role)')
+    .eq('date', date)
+    .not('checkin_at', 'is', null);
+  query = scopeOwnOrg(query, scopeOrg, scope.pickedClientId ?? undefined);
+  if (scope.scopeIds) query = query.in('user_id', scope.scopeIds);
+
+  const { data, error } = await query
+    .order('checkin_at', { ascending: true })
+    .limit(TEAM_REPORT_MAX_USERS);
+  if (error) { badRequest(res, error.message); return; }
+  const attRows = (data ?? []) as Array<Record<string, any>>;
+  if (attRows.length >= TEAM_REPORT_MAX_USERS) {
+    logger.warn(`[Attendance] daily-report/team hit the ${TEAM_REPORT_MAX_USERS}-person cap for ${date}; the list may be truncated`);
+  }
+
+  // One attendance row per person (the table is unique on user + date; this just guards a duplicate).
+  const seen = new Set<string>();
+  const members: TeamReportMember[] = [];
+  for (const r of attRows) {
+    if (!r.user_id || seen.has(r.user_id)) continue;
+    seen.add(r.user_id);
+    const u = Array.isArray(r.users) ? r.users[0] : r.users;
+    members.push({ user_id: r.user_id, name: u?.name ?? null, employee_id: u?.employee_id ?? null, attendance: r as any });
+  }
+
+  // Mode labels from each person's own policy — one policy read per org/client, and only if any row has a mode.
+  await annotateTransportLabels(attRows as any[], { orgId: scopeOrg, clientId: scope.pickedClientId });
+  const labelOf = new Map(attRows.filter((r) => r.transport_label).map((r) => [r.user_id as string, r.transport_label as string] as const));
+
+  const rows = await getTeamReport(dbTravelFetchers(scopeOrg), members, {
+    date, nowMs, minHaltMinutes,
+    modeLabel: (userId) => labelOf.get(userId) ?? null,
+  });
+  ok(res, { date, rows });
 });
