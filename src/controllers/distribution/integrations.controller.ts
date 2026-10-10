@@ -37,9 +37,16 @@ const PROVIDER_LABEL: Record<Provider, string> = {
   marg:        'Marg ERP',
 };
 
-function sanitiseIntegration<T extends Record<string, unknown>>(row: T): Omit<T, 'credentials_encrypted'> {
-  const { credentials_encrypted, ...rest } = row as T & { credentials_encrypted?: unknown };
-  return rest as Omit<T, 'credentials_encrypted'>;
+/**
+ * Strip every secret from an integration row before it leaves the API. Both the
+ * encrypted vault blob AND the bridge-agent secret are removed: the agent secret is
+ * a bearer credential (it authenticates /integrations/tally/jobs/*), so it is only
+ * ever returned by the request that creates it (createIntegration adds it back
+ * explicitly) — never from a read or an update.
+ */
+export function sanitiseIntegration<T extends Record<string, unknown>>(row: T): Omit<T, 'credentials_encrypted' | 'agent_secret'> {
+  const { credentials_encrypted, agent_secret, ...rest } = row as T & { credentials_encrypted?: unknown; agent_secret?: unknown };
+  return rest as Omit<T, 'credentials_encrypted' | 'agent_secret'>;
 }
 
 // ── Admin CRUD ─────────────────────────────────────────────────────────
@@ -57,7 +64,7 @@ export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
 export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
   const { data, error } = await supabaseAdmin.from('distribution_integrations')
-    .select('id, org_id, provider, label, status, config, last_seen_at, last_sync_at, last_error, last_event_count, agent_secret, created_at, updated_at')
+    .select('id, org_id, provider, label, status, config, last_seen_at, last_sync_at, last_error, last_event_count, created_at, updated_at')
     .eq('org_id', org_id).eq('id', req.params.id).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!data) return notFound(res, 'Integration not found');

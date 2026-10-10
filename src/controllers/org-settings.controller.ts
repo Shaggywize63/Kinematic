@@ -9,6 +9,8 @@ import {
   parseScmDispatchConsumeMode,
   ScmDispatchConsumeMode,
 } from '../services/distribution/scmConsume.service';
+import { validateRulesPatch, rulesAdminView } from '../services/attendanceRules.service';
+import { readScopedRules, saveScopedRules } from '../services/attendanceRules.store';
 
 /**
  * Admin-facing org settings controller.
@@ -372,4 +374,35 @@ export const setScmDispatchConsumeMode = asyncHandler<AuthRequest>(async (req, r
           ? 'ADVISORY: dispatch/invoice will compute a FEFO/FIFO plan WITHOUT mutating stock.'
           : 'OFF: the dispatch/invoice consume hook is a no-op.',
   });
+});
+
+// ============================================================
+// Attendance rules (per CLIENT — stored in clients.settings.attendance_rules)
+// ============================================================
+// Shift start/end, late grace, weekly off and offline check-in for ONE client.
+// Opt-in by data: a client with no `attendance_rules` object is `configured:
+// false` and behaves exactly as before. Pure logic: services/attendanceRules.service.ts.
+
+/**
+ * GET /api/v1/org-settings/attendance-rules
+ *
+ * Client scope = JWT client_id, else X-Client-Id (org admins), else 400
+ * "Select a client first".
+ */
+export const getAttendanceRules = asyncHandler<AuthRequest>(async (req, res) => {
+  sendSuccess(res, rulesAdminView(await readScopedRules(req)));
+});
+
+/**
+ * PATCH /api/v1/org-settings/attendance-rules
+ *
+ * Body: any non-empty subset of
+ *   { shift_start, shift_end, grace_minutes, weekly_off, allow_offline_checkin }.
+ * Merged into clients.settings.attendance_rules (other settings keys untouched).
+ * Any invalid value rejects the WHOLE request with a 400. Responds like the GET.
+ */
+export const setAttendanceRules = asyncHandler<AuthRequest>(async (req, res) => {
+  const v = validateRulesPatch(req.body);
+  if ('error' in v) throw new AppError(400, v.error, 'INVALID_VALUE');
+  sendSuccess(res, rulesAdminView(await saveScopedRules(req, v.patch)));
 });

@@ -6,6 +6,9 @@ import { asyncHandler, ok, created, badRequest, notFound, conflict, forbidden, i
 import { audit } from '../../utils/audit';
 import { isOurUploadUrl } from '../../utils/upload-signer';
 import { getDemoPayments } from '../../utils/demoDistribution';
+import {
+  loadOutletInvoiceBalances, openInvoices, allocateFifo, validateManualAllocations, type AllocationEntry, type InvoiceBalance,
+} from '../../services/distribution/collections.service';
 
 const paymentSchema = z.object({
   outlet_id: z.string().uuid(),
@@ -19,8 +22,14 @@ const paymentSchema = z.object({
   upi_qr_id: z.string().optional(),
   applied_to_invoices: z.array(z.object({
     invoice_id: z.string().uuid(),
+    // Accepted for forward/back compatibility but never trusted: the server
+    // always stamps the invoice's real invoice_no on the stored entry.
+    invoice_no: z.string().nullish(),
     amount: z.number().positive(),
   })).optional(),
+  // Opt-in: allocate `amount` oldest-first across the outlet's open invoices
+  // (remainder stays on account). Ignored when applied_to_invoices is supplied.
+  auto_allocate: z.boolean().optional(),
   gps: z.object({ lat: z.number(), lng: z.number() }).optional(),
 });
 
@@ -75,8 +84,41 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     }
   }
 
-  const { data: payNo } = await supabaseAdmin.rpc('gen_payment_no', { p_org: user.org_id });
   const idemKey = (req.headers['idempotency-key'] || req.headers['x-idempotency-key']) as string | undefined;
+
+  // A retry of an already-recorded payment must keep returning the duplicate
+  // response (409) — NOT a fresh allocation/validation failure, because the
+  // first attempt's allocation now counts as "paid" and would make a manual
+  // allocation look over-balance on the retry.
+  if (idemKey && (parsed.data.auto_allocate || parsed.data.applied_to_invoices?.length)) {
+    const { data: dup } = await supabaseAdmin.from('payments')
+      .select('id').eq('org_id', user.org_id).eq('idempotency_key', idemKey).limit(1);
+    if (dup && dup.length) return conflict(res, 'Duplicate payment (idempotency or payment_no)');
+  }
+
+  const { data: payNo } = await supabaseAdmin.rpc('gen_payment_no', { p_org: user.org_id });
+
+  // Invoice allocation. Neither field => legacy behaviour (empty array, nothing read).
+  // Balances are read as late as possible (right before the insert) so a concurrent
+  // collection against the same outlet is seen; exact-duplicate submits are already
+  // blocked by the idempotency key.
+  let applied: AllocationEntry[] = [];
+  const manual = parsed.data.applied_to_invoices;
+  if ((manual && manual.length > 0) || parsed.data.auto_allocate) {
+    let balances: InvoiceBalance[];
+    try {
+      balances = await loadOutletInvoiceBalances(user.org_id, parsed.data.outlet_id);
+    } catch (e: any) {
+      return badRequest(res, `Could not load invoice balances: ${e.message}`);
+    }
+    if (manual && manual.length > 0) {
+      const v = validateManualAllocations(manual, balances, parsed.data.amount);
+      if (!v.ok) return badRequest(res, v.error, v.invoice_ids ? { invoice_ids: v.invoice_ids } : undefined);
+      applied = v.allocations;
+    } else {
+      applied = allocateFifo(openInvoices(balances), parsed.data.amount).allocations;
+    }
+  }
 
   const { data: payment, error } = await supabaseAdmin.from('payments').insert({
     org_id: user.org_id,
@@ -92,7 +134,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     cheque_date: parsed.data.cheque_date ?? null,
     cheque_image_url: parsed.data.cheque_image_url ?? null,
     upi_qr_id: parsed.data.upi_qr_id ?? null,
-    applied_to_invoices: parsed.data.applied_to_invoices ?? [],
+    applied_to_invoices: applied,
     gps_lat: parsed.data.gps?.lat ?? null,
     gps_lng: parsed.data.gps?.lng ?? null,
     status: parsed.data.mode === 'cheque' ? 'pending' : 'cleared',

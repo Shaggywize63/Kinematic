@@ -34,6 +34,19 @@ export async function clientHasFlag(clientId: string | null | undefined, flag: s
   catch { return false; }
 }
 
+/**
+ * The client's `settings` jsonb via the same 60s TTL cache as the flags (never
+ * throws: a lookup failure reads as `{}`). Read-only snapshot — callers that
+ * WRITE settings must read fresh from the DB, not from here.
+ */
+export async function getClientSettings(clientId: string | null | undefined): Promise<Record<string, unknown>> {
+  if (!clientId) return {};
+  try {
+    const s = await loadSettings(clientId);
+    return s && typeof s === 'object' && !Array.isArray(s) ? s : {};
+  } catch { return {}; }
+}
+
 /** Drop a client's cached settings (call after writing clients.settings). */
 export function clearClientFlagCache(clientId?: string | null): void {
   if (!clientId) { cache.clear(); return; }

@@ -9,6 +9,8 @@ import {
   setUserLimit,
   getScmDispatchConsumeMode,
   setScmDispatchConsumeMode,
+  getAttendanceRules,
+  setAttendanceRules,
 } from '../controllers/org-settings.controller';
 
 const router = Router();
@@ -51,6 +53,21 @@ router.patch('/scm-dispatch-consume-mode',
   requireAuth,
   requireRole(...ADMIN_ROLES),
   setScmDispatchConsumeMode,
+);
+
+// Attendance rules (shift times, late grace, weekly off, offline check-in) for
+// the caller's CLIENT — stored in clients.settings.attendance_rules. Same admin
+// gate as the other org-wide toggles; apps read the resolved rules (read-only)
+// from GET /attendance/rules instead.
+router.get('/attendance-rules',
+  requireAuth,
+  requireRole(...ADMIN_ROLES),
+  getAttendanceRules,
+);
+router.patch('/attendance-rules',
+  requireAuth,
+  requireRole(...ADMIN_ROLES),
+  setAttendanceRules,
 );
 
 // UI flags are readable by any authenticated user (drives layout rendering).

@@ -18,6 +18,8 @@ import { AuthRequest } from '../../types';
 import { ok, isoDate, toIST } from '../../utils';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { isDemo } from '../../utils/demoData';
+import { rulesForClients } from '../../services/attendanceRules.store';
+import { classifyPunctuality } from '../../services/attendanceRules.service';
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
@@ -422,24 +424,41 @@ export const offRoute = asyncHandler<AuthRequest>(async (req, res) => {
 
 // ── Discipline ─────────────────────────────────────────────────────────────
 
-/** GET /attendance-punctuality — on-time / late / absent counts per FE (MTD). */
+/**
+ * GET /attendance-punctuality — on-time / late / absent counts per FE (MTD).
+ *
+ * "Late" follows the row's CLIENT attendance rules when that client has
+ * configured them (late = check-in after shift_start + grace, IST). A client
+ * with no rules keeps the legacy cut-off: a check-in before 10:00 IST is on time.
+ */
 export const attendancePunctuality = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, []);
   const fes = await getFEs(user.org_id);
   const { data: att } = await supabaseAdmin
     .from('attendance')
-    .select('user_id, status, checkin_at')
+    .select('user_id, client_id, status, checkin_at')
     .eq('org_id', user.org_id)
     .gte('date', monthStart());
+
+  // An org can hold several clients with different shifts: resolve rules per row's client.
+  const rulesByClient = await rulesForClients(
+    ((att || []) as any[]).filter((a) => a.checkin_at && a.status !== 'absent').map((a) => a.client_id ?? user.client_id),
+  );
 
   const agg = new Map<string, { on: number; late: number; absent: number }>();
   for (const a of (att || []) as any[]) {
     const cur = agg.get(a.user_id) || { on: 0, late: 0, absent: 0 };
     if (a.status === 'absent') cur.absent += 1;
     else if (a.checkin_at) {
-      const h = toIST(new Date(a.checkin_at)).getHours();
-      if (h < 10) cur.on += 1; else cur.late += 1;
+      const rules = rulesByClient.get(a.client_id ?? user.client_id ?? '');
+      if (rules?.configured) {
+        if (classifyPunctuality(a.checkin_at, rules) === 'on_time') cur.on += 1; else cur.late += 1;
+      } else {
+        // Legacy behaviour, unchanged: before 10:00 IST is on time.
+        const h = toIST(new Date(a.checkin_at)).getHours();
+        if (h < 10) cur.on += 1; else cur.late += 1;
+      }
     }
     agg.set(a.user_id, cur);
   }

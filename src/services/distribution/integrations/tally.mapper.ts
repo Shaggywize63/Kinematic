@@ -207,6 +207,53 @@ ${entries.join('\n')}
   return envelope(company, voucher);
 }
 
+// ── Payment bill allocations (pure; exported for tests) ──────────────────────────────────────
+export interface PaymentAllocationEntry {
+  invoice_id?: string;
+  invoice_no?: string | null;
+  amount?: number;
+}
+
+/**
+ * BILLALLOCATIONS.LIST XML for a Receipt voucher.
+ *
+ *   - Each entry becomes an "Agst Ref" row named by its invoice_no; when the entry
+ *     has none, `invoiceNoById` (resolved from invoice_id) supplies it.
+ *   - Entries with no resolvable invoice number, and any part of the payment
+ *     amount not covered by the entries, are emitted as ONE "On Account" row so
+ *     the allocations sum to the voucher amount (an empty <NAME/> is never emitted).
+ *   - No entries at all => a single On Account row for the full amount (legacy).
+ */
+export function buildPaymentBillAllocations(
+  apps: PaymentAllocationEntry[],
+  paymentAmount: number,
+  invoiceNoById: Map<string, string> = new Map(),
+): string {
+  const rows: string[] = [];
+  let allocated = 0;
+  for (const a of apps ?? []) {
+    const amount = Number(a?.amount ?? 0);
+    if (!(amount > 0)) continue;
+    const name = String(a?.invoice_no ?? '').trim() || (a?.invoice_id ? invoiceNoById.get(a.invoice_id) ?? '' : '');
+    if (!name) continue;                       // unresolved -> falls into the On Account remainder
+    allocated += amount;
+    rows.push(`              <BILLALLOCATIONS.LIST>
+                <NAME>${xmlEscape(name)}</NAME>
+                <BILLTYPE>Agst Ref</BILLTYPE>
+                <AMOUNT>${amt(amount)}</AMOUNT>
+              </BILLALLOCATIONS.LIST>`);
+  }
+  const remainder = Math.round((Number(paymentAmount ?? 0) - allocated) * 100) / 100;
+  if (rows.length === 0 || remainder > 0.005) {
+    rows.push(`              <BILLALLOCATIONS.LIST>
+                <NAME>On Account</NAME>
+                <BILLTYPE>On Account</BILLTYPE>
+                <AMOUNT>${amt(rows.length === 0 ? paymentAmount : remainder)}</AMOUNT>
+              </BILLALLOCATIONS.LIST>`);
+  }
+  return rows.join('\n');
+}
+
 // ── Render: payment → Receipt Voucher ─────────────────────────────────────────────────────────
 export async function renderPayment(integration: IntegrationRow, payment_id: string): Promise<string> {
   const cfg = defaults(integration.config ?? {});
@@ -225,23 +272,24 @@ export async function renderPayment(integration: IntegrationRow, payment_id: str
   const debitLedger = p.mode === 'cash' ? cfg.cash : cfg.bank;
 
   // Bill allocations — if the payment row carries `applied_to_invoices`,
-  // emit one BILLALLOCATIONS row per invoice. Otherwise leave the
-  // party credit unallocated (On Account).
-  const apps = (p.applied_to_invoices as Array<{ invoice_no?: string; amount?: number }> | null) ?? [];
-  let billAllocations = '';
-  if (apps.length > 0) {
-    billAllocations = apps.map(a => `              <BILLALLOCATIONS.LIST>
-                <NAME>${xmlEscape(a.invoice_no ?? '')}</NAME>
-                <BILLTYPE>Agst Ref</BILLTYPE>
-                <AMOUNT>${amt(a.amount)}</AMOUNT>
-              </BILLALLOCATIONS.LIST>`).join('\n');
-  } else {
-    billAllocations = `              <BILLALLOCATIONS.LIST>
-                <NAME>On Account</NAME>
-                <BILLTYPE>On Account</BILLTYPE>
-                <AMOUNT>${amt(p.amount)}</AMOUNT>
-              </BILLALLOCATIONS.LIST>`;
+  // emit one BILLALLOCATIONS row per invoice. Older rows (and rows written by
+  // clients that only sent invoice_id) have no `invoice_no` on the entry, so it
+  // is resolved from the invoices table by invoice_id; an entry whose invoice
+  // can't be resolved, plus any unallocated remainder, goes On Account so the
+  // allocations always add up to the party credit.
+  const apps: PaymentAllocationEntry[] = Array.isArray(p.applied_to_invoices) ? (p.applied_to_invoices as PaymentAllocationEntry[]) : [];
+  const missingIds = Array.from(new Set(
+    apps.filter(a => a && a.invoice_id && !String(a.invoice_no ?? '').trim()).map(a => a.invoice_id as string),
+  ));
+  const invoiceNoById = new Map<string, string>();
+  if (missingIds.length > 0) {
+    const { data: invRows } = await supabaseAdmin.from('invoices')
+      .select('id, invoice_no').eq('org_id', integration.org_id).in('id', missingIds);
+    for (const r of (invRows as Array<{ id: string; invoice_no: string | null }> | null) ?? []) {
+      if (r.invoice_no) invoiceNoById.set(r.id, r.invoice_no);
+    }
   }
+  const billAllocations = buildPaymentBillAllocations(apps, Number(p.amount), invoiceNoById);
 
   const voucher = `          <VOUCHER REMOTEID="${xmlEscape(remoteId)}" VCHTYPE="Receipt" ACTION="Create">
             <DATE>${date}</DATE>

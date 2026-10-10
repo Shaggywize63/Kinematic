@@ -578,8 +578,13 @@ export function requireRole(...roles: UserRole[]) {
   };
 }
 
+// Roles that may see a team (not just themselves). Exported so handlers that are
+// open to every authenticated user but widen the scope for managers (e.g. the
+// attendance summary) use the SAME list as requireSupervisorOrAbove.
+export const SUPERVISOR_OR_ABOVE_ROLES: UserRole[] = ['super_admin', 'admin', 'main_admin', 'sub_admin', 'client', 'city_manager', 'supervisor'];
+
 export function requireSupervisorOrAbove(req: AuthRequest, res: Response, next: NextFunction) {
-  return requireRole('super_admin', 'admin', 'main_admin', 'sub_admin', 'client', 'city_manager', 'supervisor')(req, res, next);
+  return requireRole(...SUPERVISOR_OR_ABOVE_ROLES)(req, res, next);
 }
 
 export function requireAdminOrAbove(req: AuthRequest, res: Response, next: NextFunction) {
