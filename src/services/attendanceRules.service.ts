@@ -3,7 +3,7 @@
  *
  * Stored at `clients.settings.attendance_rules` (jsonb):
  *   { shift_start, shift_end, grace_minutes, weekly_off, allow_offline_checkin,
- *     selfie_required, form_checkin_required }
+ *     selfie_required, form_checkin_required, track_transport_mode }
  * Every key is optional; a missing key resolves to ATTENDANCE_RULES_DEFAULTS.
  * A client is `configured` iff it has an `attendance_rules` object at all — an
  * unconfigured client behaves exactly as before this feature existed (no `late`
@@ -14,8 +14,8 @@
  * least one of shift_start / shift_end / grace_minutes / weekly_off to be
  * explicitly stored (see lateTrackingEnabled). A client that only sets the
  * behavioural toggles (selfie_required, form_checkin_required,
- * allow_offline_checkin) therefore gets no `late` key and keeps the legacy
- * "before 10:00 IST" punctuality.
+ * allow_offline_checkin, track_transport_mode) therefore gets no `late` key and
+ * keeps the legacy "before 10:00 IST" punctuality.
  *
  * This module has NO imports from the DB layer so it is unit-testable without a
  * database (see tests/attendanceRules.test.ts). The DB-facing wrapper lives in
@@ -35,6 +35,12 @@ export interface AttendanceRules {
   selfie_required: boolean;
   /** Every form submission records a check-in / check-out (time + GPS). Default false. */
   form_checkin_required: boolean;
+  /**
+   * The rep states their mode of transport (two-wheeler, car, public transport, ...) at check-in. Default
+   * false. Only when true does the check-in / PATCH /attendance/transport-mode touch the `transport_mode`
+   * column (see transportMode.service.ts).
+   */
+  track_transport_mode: boolean;
 }
 
 export interface ResolvedAttendanceRules {
@@ -53,7 +59,7 @@ export interface ResolvedAttendanceRules {
 export const ATTENDANCE_RULES_SETTINGS_KEY = 'attendance_rules';
 export const ATTENDANCE_RULE_KEYS = [
   'shift_start', 'shift_end', 'grace_minutes', 'weekly_off', 'allow_offline_checkin',
-  'selfie_required', 'form_checkin_required',
+  'selfie_required', 'form_checkin_required', 'track_transport_mode',
 ] as const;
 export type AttendanceRuleKey = (typeof ATTENDANCE_RULE_KEYS)[number];
 
@@ -68,6 +74,7 @@ export const ATTENDANCE_RULES_DEFAULTS: Readonly<AttendanceRules> = Object.freez
   allow_offline_checkin: false,
   selfie_required: true,
   form_checkin_required: false,
+  track_transport_mode: false,
 });
 
 export const ATTENDANCE_RULES_BOUNDS = Object.freeze({
@@ -207,6 +214,10 @@ export function validateRulesPatch(body: unknown): RulesPatchResult {
     if (typeof body.form_checkin_required !== 'boolean') return { ok: false, error: 'form_checkin_required must be true or false' };
     patch.form_checkin_required = body.form_checkin_required;
   }
+  if ('track_transport_mode' in body) {
+    if (typeof body.track_transport_mode !== 'boolean') return { ok: false, error: 'track_transport_mode must be true or false' };
+    patch.track_transport_mode = body.track_transport_mode;
+  }
   return { ok: true, patch };
 }
 
@@ -246,6 +257,7 @@ export function resolveAttendanceRules(settings: unknown): ResolvedAttendanceRul
   if (typeof stored.allow_offline_checkin === 'boolean') rules.allow_offline_checkin = stored.allow_offline_checkin;
   if (typeof stored.selfie_required === 'boolean') rules.selfie_required = stored.selfie_required;
   if (typeof stored.form_checkin_required === 'boolean') rules.form_checkin_required = stored.form_checkin_required;
+  if (typeof stored.track_transport_mode === 'boolean') rules.track_transport_mode = stored.track_transport_mode;
   return { configured: true, lateTracking: lateTrackingEnabled(stored), rules };
 }
 

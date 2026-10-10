@@ -89,7 +89,7 @@ describe('GET /attendance/travel', () => {
     const today = istDateOf(Date.now());
     expect(res.body.data).toEqual({
       date: today, user_id: REP, attendance_id: null, started_at: null, ended_at: null, in_progress: false,
-      total_km: 0, method: 'none', legs: [], stops: [], points_used: 0, points_excluded: 0,
+      total_km: 0, method: 'none', legs: [], stops: [], halts: [], points_used: 0, points_excluded: 0,
     });
     expect(chainsOn('attendance')[0].eqs).toMatchObject({ user_id: REP, date: today });
     expect(chainsOn('work_activity')).toHaveLength(0);
@@ -111,7 +111,8 @@ describe('GET /attendance/travel', () => {
       [1, 'form_checkout', 'checkout', 'gps_trail'],
     ]);
     expect(d.legs[0].to).toMatchObject({ label: 'Customer Visit', at: ist('10:00'), lat: 13.03, lng: 80.2 });
-    expect(d.stops).toEqual([{ submission_id: 'sub-f1', label: 'Customer Visit', check_in_at: ist('10:00'), check_out_at: ist('11:00'), minutes: 60 }]);
+    expect(d.stops).toEqual([{ submission_id: 'sub-f1', label: 'Customer Visit', check_in_at: ist('10:00'), check_out_at: ist('11:00'), minutes: 60, lat: 13.03, lng: 80.2 }]);
+    expect(d.halts).toEqual([]);                       // a pinged day with no 10-minute stop: nothing to report
     expect(d.total_km).toBe(Math.round((d.legs[0].km + d.legs[1].km) * 100) / 100);
     expect(d.total_km).toBeGreaterThan(5);
     expect(typeof d.points_used).toBe('number');
@@ -134,7 +135,7 @@ describe('GET /attendance/travel', () => {
       data: [{ id: 'sub-b1', check_in_at: ist('10:00'), check_out_at: ist('11:00'), location_lat: 13.04, location_lng: 80.2, builder_forms: { title: 'Site Audit' } }],
     });
     const res = await request(app).get(`/attendance/travel?date=${DATE}`);
-    expect(res.body.data.stops).toEqual([{ submission_id: 'sub-b1', label: 'Site Audit', check_in_at: ist('10:00'), check_out_at: ist('11:00'), minutes: 60 }]);
+    expect(res.body.data.stops).toEqual([{ submission_id: 'sub-b1', label: 'Site Audit', check_in_at: ist('10:00'), check_out_at: ist('11:00'), minutes: 60, lat: 13.04, lng: 80.2 }]);
   });
 
   it('a failing submissions read does not fail the travel read', async () => {

@@ -6,7 +6,7 @@
  * shared trail maths (expenses/trail.ts) still gives mileageFromTrail its old answer.
  */
 import {
-  buildDayTravel, getDayTravel, normalizeVisit, shiftWindow, OPEN_SHIFT_MAX_MS,
+  buildDayTravel, computeDayTravel, getDayTravel, getDayTravelComputation, normalizeVisit, shiftWindow, OPEN_SHIFT_MAX_MS,
   type RawVisitRow, type TrailRow, type TravelAttendanceRow, type TravelFetchers,
 } from '../src/services/travel.service';
 import { haversineKm, sumTrailKm } from '../src/services/expenses/trail';
@@ -36,18 +36,19 @@ const form = (id: string, inHm: string, outHm: string, inPt: Pt, outPt: Pt, extr
   },
 });
 
-const run = (over: { attendance?: TravelAttendanceRow | null; visits?: RawVisitRow[]; trail?: TrailRow[]; nowMs?: number } = {}) =>
+const run = (over: { attendance?: TravelAttendanceRow | null; visits?: RawVisitRow[]; trail?: TrailRow[]; nowMs?: number; minHaltMinutes?: number } = {}) =>
   buildDayTravel({
     date: DATE, userId: USER,
     attendance: over.attendance === undefined ? att() : over.attendance,
     visits: over.visits ?? [], trail: over.trail ?? [], nowMs: over.nowMs ?? NOW_AFTER,
+    minHaltMinutes: over.minHaltMinutes,
   });
 
 describe('no attendance', () => {
   it('is an empty result, not an error', () => {
     expect(run({ attendance: null })).toEqual({
       date: DATE, user_id: USER, attendance_id: null, started_at: null, ended_at: null, in_progress: false,
-      total_km: 0, method: 'none', legs: [], stops: [], points_used: 0, points_excluded: 0,
+      total_km: 0, method: 'none', legs: [], stops: [], halts: [], points_used: 0, points_excluded: 0,
     });
   });
 
@@ -180,8 +181,8 @@ describe('with forms: travel is the legs between visits, not the visits', () => 
     for (const l of r.legs) expect(Math.abs(l.km - kmBetween(P(0), P(3)))).toBeLessThan(0.011);
     expect(r.total_km).toBe(Math.round(r.legs.reduce((s, l) => s + l.km, 0) * 100) / 100);
     expect(r.stops).toEqual([
-      { submission_id: 'f1', label: 'Customer Visit', check_in_at: t('10:00'), check_out_at: t('10:20'), minutes: 20 },
-      { submission_id: 'f2', label: 'Dealer Visit', check_in_at: t('11:00'), check_out_at: t('11:15'), minutes: 15 },
+      { submission_id: 'f1', label: 'Customer Visit', check_in_at: t('10:00'), check_out_at: t('10:20'), minutes: 20, lat: P(3)[0], lng: P(3)[1] },
+      { submission_id: 'f2', label: 'Dealer Visit', check_in_at: t('11:00'), check_out_at: t('11:15'), minutes: 15, lat: P(6)[0], lng: P(6)[1] },
     ]);
     // 8 fixes lie inside legs; the one during visit 1 is in no leg.
     expect(r.points_used).toBe(8);
@@ -387,5 +388,138 @@ describe('the shared trail maths is still mileageFromTrail\'s', () => {
   it('the same instant twice is not a segment (skipped, no distance)', () => {
     const s = sumTrailKm([{ lat: 13, lng: 80, captured_at: t('10:00') }, { lat: 13, lng: 80, captured_at: t('10:00') }]);
     expect(s).toMatchObject({ km: 0, segments_counted: 0, segments_skipped: 1, points_used: 2 });
+  });
+});
+
+describe('halts in the day travel (EFocus wave 2)', () => {
+  // A rep who rides 0 -> 2 (09:30-09:50), stands at P(2) for 40 minutes, then rides on to P(5).
+  const closing = { checkout_at: t('11:00'), checkout_lat: P(5)[0], checkout_lng: P(5)[1] };
+  const ride = [
+    fix('09:40', P(1)), fix('09:50', P(2)),
+    fix('10:00', P(2)), fix('10:10', P(2)), fix('10:20', P(2)), fix('10:30', P(2)),
+    fix('10:40', P(3)), fix('10:50', P(4)),
+  ];
+
+  it('reports the stop with start, end, minutes and centroid, and does not touch the legs or total_km', () => {
+    const withHalts = run({ attendance: att(closing), trail: ride });
+    expect(withHalts.halts).toHaveLength(1);
+    expect(withHalts.halts[0]).toMatchObject({
+      index: 0, start_at: t('09:50'), end_at: t('10:30'), minutes: 40, lat: P(2)[0], lng: P(2)[1], points: 5,
+    });
+    // Same legs / km as a day where the very same pings are not considered for halts at all (min 120 min = none found).
+    const noHalts = run({ attendance: att(closing), trail: ride, minHaltMinutes: 120 });
+    expect(noHalts.halts).toEqual([]);
+    expect(withHalts.legs).toEqual(noHalts.legs);
+    expect(withHalts.total_km).toBe(noHalts.total_km);
+    expect(withHalts.method).toBe(noHalts.method);
+  });
+
+  it('uses the attendance check-in and check-out points as pings (a stop right at the start of the shift counts)', () => {
+    // Checked in at P(0) at 09:30; the first fix is 09:45 at the same spot; the rep then leaves.
+    const r = run({
+      attendance: att({ checkout_at: t('10:30'), checkout_lat: P(6)[0], checkout_lng: P(6)[1] }),
+      trail: [fix('09:45', P(0)), fix('10:00', [P(0)[0] + 0.0002, P(0)[1]]), fix('10:15', P(3)), fix('10:25', P(5))],
+    });
+    expect(r.halts).toHaveLength(1);
+    expect(r.halts[0]).toMatchObject({ start_at: t('09:30'), end_at: t('10:00'), minutes: 30 });
+  });
+
+  it('the punches stored as CHECK_IN / CHECK_OUT fixes at the same instant are not counted twice', () => {
+    const r = run({
+      attendance: att({ checkout_at: t('10:00'), checkout_lat: P(0)[0], checkout_lng: P(0)[1] }),
+      trail: [
+        fix('09:30', P(0), { activity_type: 'CHECK_IN' }), fix('09:40', P(0)), fix('09:50', P(0)), fix('10:00', P(0), { activity_type: 'CHECK_OUT' }),
+      ],
+    });
+    expect(r.halts).toHaveLength(1);
+    expect(r.halts[0]).toMatchObject({ minutes: 30, points: 4 });
+  });
+
+  it('ignores mock and suspect fixes: a spoofed ping can neither make nor break a halt', () => {
+    const spoofed = run({
+      attendance: att({ checkout_at: t('10:30'), checkout_lat: P(8)[0], checkout_lng: P(8)[1] }),
+      trail: [fix('09:40', P(0)), fix('09:50', P(0)), fix('10:00', P(0)), fix('10:10', P(1), { is_mock: true }), fix('10:20', P(0), { is_suspect: true })],
+    });
+    // 09:30 (check-in) .. 10:00 at P(0): the mock/suspect fixes are not pings, and the next real ping is the far check-out.
+    expect(spoofed.halts).toHaveLength(1);
+    expect(spoofed.halts[0]).toMatchObject({ start_at: t('09:30'), end_at: t('10:00'), points: 4 });
+  });
+
+  it('a halt that is really a customer visit is not reported twice (it is a stop)', () => {
+    const visits = [form('f1', '10:00', '10:30', P(2), P(2))];
+    const r = run({ attendance: att(closing), visits, trail: ride });
+    expect(r.stops).toHaveLength(1);
+    expect(r.halts).toEqual([]);                     // 10:00-10:30 of the 09:50-10:30 halt is inside the visit: 30/40 = 75 %
+  });
+
+  it('a halt only slightly overlapping a visit is kept', () => {
+    const visits = [form('f1', '10:25', '10:45', P(2), P(3))];
+    const r = run({ attendance: att(closing), visits, trail: ride });
+    expect(r.halts).toHaveLength(1);                 // 5 of 40 minutes
+  });
+
+  it('honours min_halt_minutes (clamped 3..120)', () => {
+    const shortStop = [fix('09:40', P(1)), fix('09:50', P(2)), fix('09:54', P(2)), fix('09:58', P(2)), fix('10:20', P(5))];
+    const at = { attendance: att({ checkout_at: t('10:30'), checkout_lat: P(6)[0], checkout_lng: P(6)[1] }), trail: shortStop };
+    expect(run(at).halts).toEqual([]);                                // 8 min < the default 10
+    expect(run({ ...at, minHaltMinutes: 5 }).halts).toHaveLength(1);
+    expect(run({ ...at, minHaltMinutes: 1 }).halts).toHaveLength(1);  // clamped to 3
+    expect(run({ ...at, minHaltMinutes: 9 }).halts).toEqual([]);
+  });
+
+  it('no data is no halt: a long silence around a spot is not a stop', () => {
+    const r = run({
+      attendance: att({ checkout_at: t('12:00'), checkout_lat: P(9)[0], checkout_lng: P(9)[1] }),
+      trail: [fix('09:40', P(1)), fix('11:30', P(1))],          // two fixes at one spot 110 minutes apart, nothing between
+    });
+    expect(r.halts).toEqual([]);
+  });
+
+  it('an open shift: halts run up to the last real fix (never padded to "now")', () => {
+    const now = Date.parse(`${DATE}T12:00:00+05:30`);
+    const r = run({
+      attendance: att({ checkout_at: null, status: 'checked_in' }),
+      trail: [fix('09:40', P(0)), fix('09:50', P(0)), fix('10:00', P(0)), fix('10:10', P(0))],
+      nowMs: now,
+    });
+    expect(r.in_progress).toBe(true);
+    expect(r.halts).toHaveLength(1);
+    expect(r.halts[0]).toMatchObject({ start_at: t('09:30'), end_at: t('10:10'), minutes: 40 });
+  });
+
+  it('a day with no attendance, or with no pings, has no halts', () => {
+    expect(run({ attendance: null }).halts).toEqual([]);
+    expect(run({ trail: [] }).halts).toEqual([]);
+  });
+
+  it('is given the stops\' check-in coordinates', () => {
+    const r = run({ visits: [form('f1', '10:00', '10:20', P(3), P(4))] });
+    expect(r.stops[0]).toMatchObject({ lat: P(3)[0], lng: P(3)[1] });
+  });
+
+  it('computeDayTravel returns the ordered path the halts and the route are read from', () => {
+    const c = computeDayTravel({
+      date: DATE, userId: USER, attendance: att(closing), visits: [], trail: [fix('10:10', P(2)), fix('09:40', P(1), { activity_type: 'HEARTBEAT' }), fix('09:50', P(9), { is_mock: true })],
+      nowMs: NOW_AFTER,
+    });
+    expect(c.path.map((x) => [x.ms, x.activity_type])).toEqual([
+      [Date.parse(t('09:30')), 'CHECK_IN'], [Date.parse(t('09:40')), 'HEARTBEAT'], [Date.parse(t('10:10')), null], [Date.parse(t('11:00')), 'CHECK_OUT'],
+    ]);
+    expect(c.travel.halts).toEqual([]);
+    expect(computeDayTravel({ date: DATE, userId: USER, attendance: null, visits: [], trail: [], nowMs: NOW_AFTER }).path).toEqual([]);
+  });
+
+  it('getDayTravelComputation passes min_halt_minutes through and reads the fetchers once each', async () => {
+    const f = {
+      attendance: jest.fn().mockResolvedValue(att({ checkout_at: t('10:30'), checkout_lat: P(6)[0], checkout_lng: P(6)[1] })),
+      visits: jest.fn().mockResolvedValue([]),
+      trail: jest.fn().mockResolvedValue([fix('09:40', P(1)), fix('09:50', P(2)), fix('09:54', P(2)), fix('09:58', P(2)), fix('10:20', P(5))]),
+    };
+    const base = { userId: USER, date: DATE, nowMs: NOW_AFTER };
+    expect((await getDayTravelComputation(f as unknown as TravelFetchers, base)).travel.halts).toEqual([]);
+    expect((await getDayTravelComputation(f as unknown as TravelFetchers, { ...base, minHaltMinutes: 5 })).travel.halts).toHaveLength(1);
+    expect(f.attendance).toHaveBeenCalledTimes(2);
+    expect(f.visits).toHaveBeenCalledTimes(2);
+    expect(f.trail).toHaveBeenCalledTimes(2);
   });
 });

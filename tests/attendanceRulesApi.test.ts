@@ -59,10 +59,10 @@ const ist = (date: string, hhmm: string) => new Date(Date.parse(`${date}T${hhmm}
 
 const RULES_A = { shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: true };
 // What the API resolves/returns: the stored keys plus the defaults of the keys the client never set.
-const RESOLVED_A = { ...RULES_A, selfie_required: true, form_checkin_required: false };
+const RESOLVED_A = { ...RULES_A, selfie_required: true, form_checkin_required: false, track_transport_mode: false };
 const DEFAULT_RULES = {
   shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false,
-  selfie_required: true, form_checkin_required: false,
+  selfie_required: true, form_checkin_required: false, track_transport_mode: false,
 };
 let CLIENTS: Record<string, { id: string; org_id: string; owner_org_id?: string | null; settings: Record<string, unknown> | null }>;
 
@@ -181,6 +181,19 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
     expect(rules.body.data.rules).toMatchObject({ selfie_required: false, form_checkin_required: true });
   });
 
+  it('PATCH persists track_transport_mode, returns it in rules + defaults and the app endpoint serves the picker', async () => {
+    const res = await request(app).patch('/org-settings/attendance-rules').send({ track_transport_mode: true });
+    expect(res.status).toBe(200);
+    expect(res.body.data.rules).toMatchObject({ track_transport_mode: true, shift_start: '09:30' });
+    expect(res.body.data.defaults).toMatchObject({ track_transport_mode: false });
+    const [upd] = updatesOf('clients');
+    expect(payloadOf(upd, 'update').settings.attendance_rules).toEqual({ ...RULES_A, track_transport_mode: true });
+    setUser(repA);
+    const rules = await request(app).get('/attendance/rules');
+    expect(rules.body.data.rules.track_transport_mode).toBe(true);
+    expect(rules.body.data.transport_modes.map((m: any) => m.id)).toEqual(['two_wheeler', 'car', 'public_transport', 'other']);
+  });
+
   it('PATCH with ONLY the new keys on a legacy client stores just those keys (no shift keys appear)', async () => {
     setUser({ ...adminA, client_id: CB });
     const res = await request(app).patch('/org-settings/attendance-rules').send({ selfie_required: false });
@@ -194,6 +207,7 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
     for (const body of [
       { grace_minutes: 500 }, { shift_start: '9:30' }, { weekly_off: [9] }, { allow_offline_checkin: 'yes' },
       { selfie_required: 'no' }, { form_checkin_required: 1 }, { grace_minutes: 5, selfie_required: null },
+      { track_transport_mode: 'yes' }, { track_transport_mode: 1 }, { selfie_required: false, track_transport_mode: null },
       { shift_start: '10:00', grace_minutes: -3 }, {}, { bogus: 1 },
     ]) {
       const res = await request(app).patch('/org-settings/attendance-rules').send(body);
@@ -258,14 +272,14 @@ describe('GET /attendance/rules (any authenticated user)', () => {
     setUser(repA);
     const res = await request(app).get('/attendance/rules');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ configured: true, rules: RESOLVED_A });
+    expect(res.body.data).toEqual({ configured: true, rules: RESOLVED_A, transport_modes: [] });
   });
 
   it('reports configured:false with defaults for a legacy client', async () => {
     setUser(repB);
     const res = await request(app).get('/attendance/rules');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ configured: false, rules: DEFAULT_RULES });
+    expect(res.body.data).toEqual({ configured: false, rules: DEFAULT_RULES, transport_modes: [] });
   });
 
   it('is not an error for a user with no client in scope (unconfigured defaults)', async () => {
@@ -665,7 +679,7 @@ describe('a client that sets ONLY selfie_required / form_checkin_required gets n
     clearClientFlagCache();
     setUser(repA);
     const res = await request(app).get('/attendance/rules');
-    expect(res.body.data).toEqual({ configured: true, rules: { ...DEFAULT_RULES, selfie_required: false, form_checkin_required: true } });
+    expect(res.body.data).toEqual({ configured: true, rules: { ...DEFAULT_RULES, selfie_required: false, form_checkin_required: true }, transport_modes: [] });
   });
 
   it('GET /today OMITS `late` even though the client is "configured"', async () => {

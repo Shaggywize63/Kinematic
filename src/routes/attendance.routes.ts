@@ -44,6 +44,13 @@ router.get('/summary',       ctrl.getAttendanceSummary);
 // Distance travelled on a day (check-in → forms → check-out legs, GPS trail with a straight-line
 // fallback). Any authenticated user for themself; someone else's needs manager/admin team scope.
 router.get('/travel',        ctrl.getTravel);
+// Daily travel report (shift, mode of transport, km, visits, halts, route) — built from the same
+// travel service. A rep gets only themself; a manager their team (same scope as /team). Static paths,
+// registered before the parameterised `/:id/override` route.
+router.get('/daily-report',      ctrl.getDailyReport);
+router.get('/daily-report/team', requireSupervisorOrAbove, ctrl.getDailyReportTeam);
+// The caller's own mode of transport for a day (opt-in per client: rule track_transport_mode).
+router.patch('/transport-mode',  ctrl.setTransportMode);
 router.post('/override',      requireSupervisorOrAbove, ctrl.overrideAttendance);
 router.patch('/:id/override', requireSupervisorOrAbove, ctrl.updateAttendanceOverride);
 export default router;

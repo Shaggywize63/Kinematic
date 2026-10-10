@@ -25,7 +25,7 @@ describe('defaults and bounds', () => {
   it('match the contract', () => {
     expect(ATTENDANCE_RULES_DEFAULTS).toEqual({
       shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false,
-      selfie_required: true, form_checkin_required: false,
+      selfie_required: true, form_checkin_required: false, track_transport_mode: false,
     });
     expect(ATTENDANCE_RULES_BOUNDS.grace_minutes).toEqual({ min: 0, max: 120 });
   });
@@ -126,6 +126,44 @@ describe('validateRulesPatch', () => {
   });
 });
 
+describe('track_transport_mode (rule validation)', () => {
+  it('accepts a boolean, alone or with other keys', () => {
+    expect(validateRulesPatch({ track_transport_mode: true })).toEqual({ ok: true, patch: { track_transport_mode: true } });
+    expect(validateRulesPatch({ track_transport_mode: false })).toEqual({ ok: true, patch: { track_transport_mode: false } });
+    expect(validateRulesPatch({ track_transport_mode: true, selfie_required: false, grace_minutes: 5 }))
+      .toEqual({ ok: true, patch: { track_transport_mode: true, selfie_required: false, grace_minutes: 5 } });
+  });
+
+  it.each([['"true"', 'true'], ['1', 1], ['0', 0], ['null', null], ['an object', {}], ['an array', [true]]])(
+    'rejects %s and rejects the whole patch with it', (_l, v) => {
+      const r = validateRulesPatch({ track_transport_mode: v });
+      expect(r).toMatchObject({ ok: false });
+      expect((r as { error: string }).error).toMatch(/track_transport_mode must be true or false/);
+      expect(validateRulesPatch({ selfie_required: false, track_transport_mode: v })).toMatchObject({ ok: false });
+    });
+
+  it('defaults to false, resolves the stored boolean, and ignores a hand-edited non-boolean', () => {
+    expect(resolveAttendanceRules(undefined).rules.track_transport_mode).toBe(false);
+    expect(resolveAttendanceRules({ attendance_rules: { shift_start: '10:00' } }).rules.track_transport_mode).toBe(false);
+    expect(resolveAttendanceRules({ attendance_rules: { track_transport_mode: true } }).rules.track_transport_mode).toBe(true);
+    expect(resolveAttendanceRules({ attendance_rules: { track_transport_mode: 'yes' } }).rules.track_transport_mode).toBe(false);
+    expect(resolveAttendanceRules({ attendance_rules: { track_transport_mode: 1 } }).rules.track_transport_mode).toBe(false);
+  });
+
+  it('is in the admin view (rules + defaults) and merges into settings without touching other keys', () => {
+    const v = rulesAdminView(resolveAttendanceRules({ attendance_rules: { track_transport_mode: true } }));
+    expect(v.rules.track_transport_mode).toBe(true);
+    expect(v.defaults.track_transport_mode).toBe(false);
+    expect(mergeRulesIntoSettings({ app_ui: { tabs: ['home'] }, attendance_rules: { grace_minutes: 5 } }, { track_transport_mode: true }))
+      .toEqual({ app_ui: { tabs: ['home'] }, attendance_rules: { grace_minutes: 5, track_transport_mode: true } });
+  });
+
+  it('on its own it does NOT switch on late/shift behaviour (not a late-tracking key)', () => {
+    expect(lateTrackingEnabled({ track_transport_mode: true })).toBe(false);
+    expect(resolveAttendanceRules({ attendance_rules: { track_transport_mode: true } })).toMatchObject({ configured: true, lateTracking: false });
+  });
+});
+
 describe('resolveAttendanceRules', () => {
   it('a client with no attendance_rules is unconfigured and resolves to defaults', () => {
     for (const settings of [undefined, null, {}, { uses_supervisor_scope: true }, 'junk', [], { attendance_rules: null }, { attendance_rules: [] }, { attendance_rules: 'x' }]) {
@@ -142,21 +180,21 @@ describe('resolveAttendanceRules', () => {
     expect(r).toEqual({
       configured: true,
       lateTracking: true,
-      rules: { shift_start: '10:00', shift_end: '18:00', grace_minutes: 15, weekly_off: [0, 6], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false },
+      rules: { shift_start: '10:00', shift_end: '18:00', grace_minutes: 15, weekly_off: [0, 6], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false, track_transport_mode: false },
     });
   });
 
   it('a hand-edited invalid value falls back to its default instead of breaking', () => {
     const r = resolveAttendanceRules({ attendance_rules: { shift_start: '9am', grace_minutes: 999, weekly_off: [9], allow_offline_checkin: 'yes', shift_end: '17:00' } });
     expect(r.configured).toBe(true);
-    expect(r.rules).toEqual({ shift_start: '09:30', shift_end: '17:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false });
+    expect(r.rules).toEqual({ shift_start: '09:30', shift_end: '17:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false, track_transport_mode: false });
   });
 
   it('exposes the admin view with defaults and bounds', () => {
     const v = rulesAdminView(resolveAttendanceRules({ attendance_rules: { grace_minutes: 5 } }));
     expect(v.configured).toBe(true);
     expect(v.rules.grace_minutes).toBe(5);
-    expect(v.defaults).toEqual({ shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false });
+    expect(v.defaults).toEqual({ shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false, track_transport_mode: false });
     expect(v.bounds).toEqual({ grace_minutes: { min: 0, max: 120 } });
   });
 
@@ -176,9 +214,9 @@ describe('resolveAttendanceRules', () => {
     expect(r.rules.form_checkin_required).toBe(false);
   });
 
-  it('the admin view lists the two new keys in both rules and defaults', () => {
+  it('the admin view lists the new keys in both rules and defaults', () => {
     const v = rulesAdminView(resolveAttendanceRules({ attendance_rules: { selfie_required: false } }));
-    expect(Object.keys(v.rules).sort()).toEqual(['allow_offline_checkin', 'form_checkin_required', 'grace_minutes', 'selfie_required', 'shift_end', 'shift_start', 'weekly_off']);
+    expect(Object.keys(v.rules).sort()).toEqual(['allow_offline_checkin', 'form_checkin_required', 'grace_minutes', 'selfie_required', 'shift_end', 'shift_start', 'track_transport_mode', 'weekly_off']);
     expect(Object.keys(v.defaults).sort()).toEqual(Object.keys(v.rules).sort());
     expect(v.rules.selfie_required).toBe(false);
     expect(v.defaults.selfie_required).toBe(true);

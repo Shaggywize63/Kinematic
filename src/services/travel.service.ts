@@ -28,10 +28,17 @@
  *     "in progress", the window is capped at 24 h after check-in, and there is no final leg.
  *   - A coordinate of exactly (0, 0) is the apps' "no fix" placeholder and is treated as missing.
  *   - A visit with no coordinate at all is skipped (the legs around it simply span it).
+ *
+ * Halts (EFocus wave 2). The same pings also yield the places the person STOPPED (haltDetection.ts):
+ * the usable (non-mock, non-suspect) fixes inside the shift plus the attendance check-in / check-out
+ * points, minus halts that are really a customer visit. Halts are reported separately from the legs and
+ * never change `total_km`. The ordered ping sequence they were found in is also returned
+ * (computeDayTravel's `path`) so the daily report can draw the route from the SAME data.
  */
 import { istDateOf } from './attendanceRules.service';
 import { parseVisitTimestamp, parseLatLng, toLatLng, type LatLng } from './formVisit.service';
 import { haversineKm, sumTrailKm, type TrailFix } from './expenses/trail';
+import { detectHalts, type Halt } from './haltDetection';
 
 const DAY_MS = 86_400_000;
 /** An open shift older than this is treated as a forgotten check-out. */
@@ -69,6 +76,9 @@ export interface TravelStop {
   check_in_at: string;
   check_out_at: string;
   minutes: number;
+  /** Where the form was checked in (the visit location). */
+  lat: number;
+  lng: number;
 }
 
 export interface DayTravel {
@@ -82,6 +92,8 @@ export interface DayTravel {
   method: TravelMethod;
   legs: TravelLeg[];
   stops: TravelStop[];
+  /** Places the person stopped (see haltDetection.ts); not part of the legs or of total_km. */
+  halts: Halt[];
   points_used: number;
   points_excluded: number;
 }
@@ -96,6 +108,10 @@ export interface TravelAttendanceRow {
   checkin_lng?: unknown;
   checkout_lat?: unknown;
   checkout_lng?: unknown;
+  // Not read by the travel maths — the daily report reads them off a full `select('*')` row.
+  total_hours?: unknown;
+  break_minutes?: unknown;
+  transport_mode?: unknown;
 }
 
 /** A row of `form_submissions` ('form') or `builder_submissions` ('builder') as the DB returns it. */
@@ -111,6 +127,8 @@ export interface TrailRow {
   captured_at: string | number;
   is_mock?: boolean | null;
   is_suspect?: boolean | null;
+  /** HEARTBEAT / CHECK_IN / ... — only used to collapse repeated heartbeats on the route. */
+  activity_type?: string | null;
 }
 
 /** Data access, injected so the service needs no database in tests. */
@@ -196,7 +214,7 @@ interface Anchor {
   label: string;
 }
 
-interface Fix { ms: number; lat: number; lng: number; is_mock: boolean; is_suspect: boolean }
+interface Fix { ms: number; lat: number; lng: number; is_mock: boolean; is_suspect: boolean; activity_type: string | null }
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
@@ -204,28 +222,58 @@ function anchorOut<K extends string>(a: Anchor, pt: LatLng | null): TravelAnchor
   return { kind: a.kind as K, at: iso(a.at), lat: pt?.lat ?? null, lng: pt?.lng ?? null, label: a.label };
 }
 
-/** Pure: compute a day's travel from already-fetched rows. */
-export function buildDayTravel(input: {
+/** One point of the shift's ordered path: the check-in / check-out points and every usable fix between. */
+export interface PathPing {
+  ms: number;
+  lat: number;
+  lng: number;
+  /** HEARTBEAT / CHECK_IN / CHECK_OUT / FORM_SUBMIT ...; the attendance punches are CHECK_IN / CHECK_OUT. */
+  activity_type: string | null;
+}
+
+export interface DayTravelComputation {
+  travel: DayTravel;
+  /**
+   * The ordered pings the halts were found in: attendance check-in point, the usable (non-mock,
+   * non-suspect) fixes inside the shift, attendance check-out point. Empty when there is no usable shift.
+   */
+  path: PathPing[];
+}
+
+export interface BuildDayTravelInput {
   date: string;
   userId: string;
   attendance: TravelAttendanceRow | null;
   visits: RawVisitRow[];
   trail: TrailRow[];
   nowMs: number;
-}): DayTravel {
+  /** Minimum halt length in minutes (clamped 3..120, default 10). */
+  minHaltMinutes?: number;
+}
+
+/** Pure: compute a day's travel from already-fetched rows. */
+export function buildDayTravel(input: BuildDayTravelInput): DayTravel {
+  return computeDayTravel(input).travel;
+}
+
+/**
+ * Pure: the day's travel AND the ordered path it was measured on. This is the one computation —
+ * `buildDayTravel` and the daily report both read it.
+ */
+export function computeDayTravel(input: BuildDayTravelInput): DayTravelComputation {
   const { date, userId, attendance: att, nowMs } = input;
   const base: DayTravel = {
     date, user_id: userId, attendance_id: att?.id ?? null, started_at: null, ended_at: null, in_progress: false,
-    total_km: 0, method: 'none', legs: [], stops: [], points_used: 0, points_excluded: 0,
+    total_km: 0, method: 'none', legs: [], stops: [], halts: [], points_used: 0, points_excluded: 0,
   };
-  if (!att) return base;
+  if (!att) return { travel: base, path: [] };
 
   const startMs = parseVisitTimestamp(att.checkin_at);
   const outMs = parseVisitTimestamp(att.checkout_at);
   base.started_at = startMs == null ? null : iso(startMs);
   base.ended_at = outMs == null ? null : iso(outMs);
   const win = shiftWindow(att, nowMs);
-  if (!win) return base;
+  if (!win) return { travel: base, path: [] };
   base.in_progress = win.inProgress;
 
   // Fixes inside the shift, oldest first, with usable numbers only.
@@ -234,7 +282,7 @@ export function buildDayTravel(input: {
     const ms = typeof t.captured_at === 'number' ? t.captured_at : Date.parse(String(t.captured_at));
     const pt = toLatLng(t.lat, t.lng);
     if (!Number.isFinite(ms) || !pt || ms < win.startMs || ms > win.endMs) continue;
-    trail.push({ ms, lat: pt.lat, lng: pt.lng, is_mock: !!t.is_mock, is_suspect: !!t.is_suspect });
+    trail.push({ ms, lat: pt.lat, lng: pt.lng, is_mock: !!t.is_mock, is_suspect: !!t.is_suspect, activity_type: typeof t.activity_type === 'string' ? t.activity_type : null });
   }
   trail.sort((a, b) => a.ms - b.ms);
 
@@ -245,7 +293,7 @@ export function buildDayTravel(input: {
     .sort((a, b) => a.inMs - b.inMs || a.outMs - b.outMs);
   base.stops = visits.map((v) => ({
     submission_id: v.id, label: v.label, check_in_at: iso(v.inMs), check_out_at: iso(v.outMs),
-    minutes: Math.round((v.outMs - v.inMs) / 60_000),
+    minutes: Math.round((v.outMs - v.inMs) / 60_000), lat: v.inPt.lat, lng: v.inPt.lng,
   }));
 
   let used = 0;
@@ -312,22 +360,38 @@ export function buildDayTravel(input: {
     : 'mixed';
   base.points_used = used;
   base.points_excluded = excluded;
-  return base;
+
+  // The path: attendance check-in point, the usable fixes, attendance check-out point. The punches are
+  // normally also stored as CHECK_IN / CHECK_OUT fixes at the very same instant — not added twice.
+  const usable = trail.filter((f) => !f.is_mock && !f.is_suspect);
+  const path: PathPing[] = usable.map((f) => ({ ms: f.ms, lat: f.lat, lng: f.lng, activity_type: f.activity_type }));
+  const inPt = toLatLng(att.checkin_lat, att.checkin_lng);
+  if (inPt && path[0]?.ms !== win.startMs) path.unshift({ ms: win.startMs, lat: inPt.lat, lng: inPt.lng, activity_type: 'CHECK_IN' });
+  const outPt = !win.open ? toLatLng(att.checkout_lat, att.checkout_lng) : null;
+  if (outPt && path[path.length - 1]?.ms !== win.endMs) path.push({ ms: win.endMs, lat: outPt.lat, lng: outPt.lng, activity_type: 'CHECK_OUT' });
+
+  base.halts = detectHalts(path, visits, { minMinutes: input.minHaltMinutes });
+  return { travel: base, path };
+}
+
+export interface GetDayTravelParams {
+  userId: string;
+  date: string;
+  nowMs?: number;
+  /** Minimum halt length in minutes (clamped 3..120, default 10). */
+  minHaltMinutes?: number;
 }
 
 /**
- * Fetch what is needed and compute the day's travel for `userId` on the IST day `date`
- * (the attendance row's `date`). `date` must already be a valid 'YYYY-MM-DD'.
+ * Fetch what is needed and compute the day's travel — and the path it was measured on — for `userId`
+ * on the IST day `date` (the attendance row's `date`). `date` must already be a valid 'YYYY-MM-DD'.
  */
-export async function getDayTravel(
-  fetchers: TravelFetchers,
-  p: { userId: string; date: string; nowMs?: number },
-): Promise<DayTravel> {
+export async function getDayTravelComputation(fetchers: TravelFetchers, p: GetDayTravelParams): Promise<DayTravelComputation> {
   const nowMs = p.nowMs ?? Date.now();
   const attendance = await fetchers.attendance(p.userId, p.date);
   const win = attendance ? shiftWindow(attendance, nowMs) : null;
   if (!attendance || !win) {
-    return buildDayTravel({ date: p.date, userId: p.userId, attendance, visits: [], trail: [], nowMs });
+    return computeDayTravel({ date: p.date, userId: p.userId, attendance, visits: [], trail: [], nowMs, minHaltMinutes: p.minHaltMinutes });
   }
   const fromIso = iso(win.startMs);
   const toIso = iso(win.endMs);
@@ -335,5 +399,10 @@ export async function getDayTravel(
     fetchers.visits(p.userId, fromIso, toIso),
     fetchers.trail(p.userId, fromIso, toIso),
   ]);
-  return buildDayTravel({ date: p.date, userId: p.userId, attendance, visits, trail, nowMs });
+  return computeDayTravel({ date: p.date, userId: p.userId, attendance, visits, trail, nowMs, minHaltMinutes: p.minHaltMinutes });
+}
+
+/** The day's travel for `userId` on the IST day `date` (see getDayTravelComputation). */
+export async function getDayTravel(fetchers: TravelFetchers, p: GetDayTravelParams): Promise<DayTravel> {
+  return (await getDayTravelComputation(fetchers, p)).travel;
 }

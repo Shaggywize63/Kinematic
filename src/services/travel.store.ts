@@ -16,18 +16,30 @@ import {
 const VISIT_LIMIT = 500;
 const TRAIL_LIMIT = 10_000;
 
-export function dbTravelFetchers(orgId?: string | null): TravelFetchers {
+/** The attendance columns the travel maths reads. Nothing optional (e.g. transport_mode) is ever listed here. */
+const TRAVEL_ATTENDANCE_COLUMNS = 'id, status, checkin_at, checkout_at, checkin_lat, checkin_lng, checkout_lat, checkout_lng';
+
+export interface DbTravelFetcherOptions {
+  /**
+   * Read the whole attendance row (`select('*')`) instead of just the travel columns, so the daily
+   * report also gets total_hours / break_minutes / transport_mode — and still works on a database that
+   * has no transport_mode column, because `*` only returns what exists.
+   */
+  fullAttendanceRow?: boolean;
+}
+
+export function dbTravelFetchers(orgId?: string | null, opts: DbTravelFetcherOptions = {}): TravelFetchers {
   return {
     async attendance(userId, date): Promise<TravelAttendanceRow | null> {
-      const { data, error } = await supabaseAdmin
+      const { data, error } = await (supabaseAdmin
         .from('attendance')
-        .select('id, status, checkin_at, checkout_at, checkin_lat, checkin_lng, checkout_lat, checkout_lng')
+        .select(opts.fullAttendanceRow ? '*' : TRAVEL_ATTENDANCE_COLUMNS)
         .eq('user_id', userId)
         .eq('date', date)
         .order('created_at', { ascending: false })
-        .limit(1);
+        .limit(1) as unknown as PromiseLike<{ data: TravelAttendanceRow[] | null; error: { message: string } | null }>);
       if (error) throw new AppError(500, error.message, 'DB_ERROR');
-      return ((data as TravelAttendanceRow[] | null) ?? [])[0] ?? null;
+      return (data ?? [])[0] ?? null;
     },
 
     async visits(userId, fromIso, toIso): Promise<RawVisitRow[]> {
@@ -59,7 +71,7 @@ export function dbTravelFetchers(orgId?: string | null): TravelFetchers {
     async trail(userId, fromIso, toIso): Promise<TrailRow[]> {
       let q = supabaseAdmin
         .from('work_activity')
-        .select('lat, lng, captured_at, is_mock, is_suspect')
+        .select('lat, lng, captured_at, is_mock, is_suspect, activity_type')
         .eq('user_id', userId)
         .gte('captured_at', fromIso)
         .lte('captured_at', toIso)
@@ -77,7 +89,7 @@ export function dbTravelFetchers(orgId?: string | null): TravelFetchers {
 export async function dayTravel(
   userId: string,
   date: string,
-  opts: { orgId?: string | null; nowMs?: number } = {},
+  opts: { orgId?: string | null; nowMs?: number; minHaltMinutes?: number } = {},
 ): Promise<DayTravel> {
-  return getDayTravel(dbTravelFetchers(opts.orgId), { userId, date, nowMs: opts.nowMs });
+  return getDayTravel(dbTravelFetchers(opts.orgId), { userId, date, nowMs: opts.nowMs, minHaltMinutes: opts.minHaltMinutes });
 }
