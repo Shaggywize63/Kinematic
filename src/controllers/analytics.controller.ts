@@ -4,6 +4,7 @@ import { AuthRequest } from '../types';
 import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, scopeOwnOrg, formatAppDate, parseAppDate, getISTSearchRange } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
+import { rulesForClients, lateFields } from '../services/attendanceRules.store';
 import { resolveLivePosition } from '../lib/livePosition';
 import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome, getMockBroadcasts, getMockLearningMaterials } from '../utils/demoData';
 
@@ -529,13 +530,15 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
 
   let attQuery = supabaseAdmin
     .from('attendance')
-    .select('user_id, checkin_at, checkout_at, checkin_lat, checkin_lng, checkin_address, total_hours, status, is_regularised')
+    .select('user_id, client_id, checkin_at, checkout_at, checkin_lat, checkin_lng, checkin_address, total_hours, status, is_regularised')
     .eq('org_id', user.org_id).eq('date', today);
   
   if (isUUID(user.client_id)) attQuery = attQuery.eq('client_id', user.client_id);
   const { data: att } = await attQuery;
 
   const attMap = new Map((att || []).map((a) => [a.user_id, a]));
+  // Per-client attendance rules (opt-in): adds `late` to rows of configured clients only.
+  const liveRules = await rulesForClients((att || []).filter((a: any) => a.checkin_at).map((a: any) => a.client_id ?? user.client_id));
 
   // Location-integrity: the most recent heartbeat's mock/teleport signals per
   // rep (populated by the GPS-spoof hardening). Pull the last 24h of pings for
@@ -590,6 +593,7 @@ export const getLiveLocations = asyncHandler<AuthRequest>(async (req, res) => {
       address: rec?.checkin_address || null,
       total_hours: enrichWithHours(rec)?.total_hours || null,
       is_regularised: rec?.is_regularised || false,
+      ...lateFields(rec, liveRules, user.client_id),
       last_location_updated_at: fe.last_location_updated_at || null,
       // Device location state so the map can tell "off" from "app closed" and
       // render the last fix as a clearly-stale point. Null on tenants/builds
@@ -666,6 +670,9 @@ export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => 
     brkMap.get(b.attendance_id)!.push(b);
   });
 
+  // Per-client attendance rules (opt-in): adds `late` to rows of configured clients only.
+  const todayRules = await rulesForClients((att || []).filter((a: any) => a.checkin_at).map((a: any) => a.client_id ?? user.client_id));
+
   const now = new Date().getTime();
   const rows = (execs || []).map((fe) => {
     const rec = attMap.get(fe.id) as any;
@@ -692,6 +699,7 @@ export const getAttendanceToday = asyncHandler<AuthRequest>(async (req, res) => 
       break_minutes: rec?.break_minutes || null, break_count: feBreaks.length,
       checkin_lat: rec?.checkin_lat || null, checkin_lng: rec?.checkin_lng || null,
       checkin_address: rec?.checkin_address || null, is_regularised: rec?.is_regularised || false,
+      ...lateFields(rec, todayRules, user.client_id),
     };
   });
 
@@ -1099,6 +1107,11 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const b = bq as any;
   const alreadyAnswered = Array.isArray(b?.broadcast_answers) && b.broadcast_answers.length > 0;
 
+  // `late` for a configured client's check-in (the key is omitted for everyone else).
+  const homeLate = attRecord?.checkin_at
+    ? lateFields(attRecord, await rulesForClients([(attRecord as any).client_id ?? user.client_id]), user.client_id)
+    : {};
+
   // 7. Explicit mapping for Android stability
   const todayMapped = attRecord ? {
     id: attRecord.id,
@@ -1112,7 +1125,8 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     checkin_lng: attRecord.checkin_lng,
     checkin_selfie_url: attRecord.checkin_selfie_url,
     checkout_selfie_url: attRecord.checkout_selfie_url,
-    breaks: attRecord.breaks || []
+    breaks: attRecord.breaks || [],
+    ...homeLate,
   } : null;
 
   return ok(res, {

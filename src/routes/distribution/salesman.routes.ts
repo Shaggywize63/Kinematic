@@ -20,6 +20,10 @@ router.get('/van-load/today', van.today);
 router.post('/van-load', idempotency, van.create);
 router.post('/van-load/:id/reconcile', idempotency, van.reconcile);
 router.post('/visits/:visitId/checkin', salesman.visitCheckin);
+// Collections: rep outlet picker + per-outlet outstanding. Distinct from the
+// `/outlets/:id/<leaf>` routes below (different path shape), so order is irrelevant.
+router.get('/outlets', salesman.myOutlets);
+router.get('/outlets/:outletId/outstanding', salesman.outletOutstanding);
 router.get('/outlets/:id/cart-suggest', salesman.cartSuggest);
 router.get('/outlets/:id/catalogue', orders.catalogue);
 

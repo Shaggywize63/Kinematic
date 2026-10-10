@@ -32,6 +32,15 @@ router.post('/break/end',    idempotency, ctrl.endBreak);
 router.get('/today',         cacheGet(15), ctrl.getToday);
 router.get('/history',       cacheGet(60), ctrl.getHistory);
 router.get('/team',          requireSupervisorOrAbove, cacheGet(20), ctrl.getTeamToday);
+// Per-client attendance rules (shift times, late grace, weekly off, offline
+// check-in) — read-only for any authenticated user. The admin write lives at
+// PATCH /org-settings/attendance-rules. Registered before the parameterised
+// `/:id/override` route (a different method, but keep fixed paths first).
+router.get('/rules',         ctrl.getAttendanceRules);
+// Per-user present/late/half-day/on-leave/absent counts for a date range.
+// Open to any authenticated user: managers get their team (same scope as /team),
+// a rep only ever gets themself.
+router.get('/summary',       ctrl.getAttendanceSummary);
 router.post('/override',      requireSupervisorOrAbove, ctrl.overrideAttendance);
 router.patch('/:id/override', requireSupervisorOrAbove, ctrl.updateAttendanceOverride);
 export default router;

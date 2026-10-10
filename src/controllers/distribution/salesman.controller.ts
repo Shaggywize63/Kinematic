@@ -1,9 +1,15 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AuthRequest } from '../../types';
-import { asyncHandler, ok, badRequest, isDemo } from '../../utils';
+import { asyncHandler, ok, badRequest, notFound, isDemo, isUUID, dbToday, sanitisePostgrestSearch } from '../../utils';
 import { haversineMeters } from '../../services/order-pricer';
-import { getDemoCartSuggest, getDemoRouteToday, getDemoOrderList } from '../../utils/demoDistribution';
+import {
+  getDemoCartSuggest, getDemoRouteToday, getDemoOrderList, getDemoSalesmanOutlets, getDemoOutletOutstanding,
+} from '../../utils/demoDistribution';
+import { getClientScope } from '../../lib/tenancy';
+import {
+  loadOutletInvoiceBalances, loadLedgerBalance, openInvoices, resolveOutstandingBalance, round2,
+} from '../../services/distribution/collections.service';
 
 // ── GET /api/v1/salesman/route/today ────────────────────────────────────────
 export const routeToday = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -144,4 +150,154 @@ export const myOrders = asyncHandler(async (req: AuthRequest, res: Response) => 
   const { data, error } = await q;
   if (error) return badRequest(res, error.message);
   ok(res, data);
+});
+
+// ── GET /api/v1/salesman/outlets?search=&limit=50 ───────────────────────────
+// The rep's outlet picker for collections: every active outlet in the caller's
+// org + client (strict client scope: JWT client_id, else the X-Client-Id picker),
+// searchable by name / outlet code, with the assigned distributor and the
+// outlet's ledger balance. Outlets on the rep's route plan for TODAY (IST) come
+// first (in visit order), then the rest by name. limit: default 50, max 100.
+//
+// Tables/columns: stores(id,name,store_code,address,phone,city_id,is_active,
+// org_id,client_id) + cities(name) via city_id; outlet_distribution_ext
+// (outlet_id,assigned_distributor_id,current_balance — the ledger mirror kept
+// by post_ledger_entry); distributors(id,name); route_plans(user_id,
+// plan_date) -> route_plan_outlets(store_id,visit_order).
+export const myOutlets = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, getDemoSalesmanOutlets());
+
+  const scope = getClientScope(req);
+  const search = sanitisePostgrestSearch(req.query.search);
+  const rawLimit = parseInt(String(req.query.limit ?? ''), 10);
+  const limit = Math.min(100, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 50));
+
+  const STORE_COLS = 'id, name, store_code, address, phone, city_id, cities!city_id(name)';
+  const scoped = (q: any) => {
+    let r = q.eq('org_id', user.org_id).eq('is_active', true);
+    if (scope.id) r = r.eq('client_id', scope.id);
+    if (search) r = r.or(`name.ilike.%${search}%,store_code.ilike.%${search}%`);
+    return r;
+  };
+
+  // Today's planned outlets for this rep, in visit order (several plans/day are allowed).
+  const { data: plans, error: planErr } = await supabaseAdmin.from('route_plans')
+    .select('id, route_plan_outlets(store_id, visit_order)')
+    // Keyed on the rep (JWT user id) + IST date, exactly like routeToday; the stores query
+    // below is what enforces org/client isolation, so a plan can never widen the result set.
+    .eq('user_id', user.id).eq('plan_date', dbToday());
+  if (planErr) return badRequest(res, planErr.message);
+  const plannedOrder: string[] = [];
+  const seen = new Set<string>();
+  const planned = ((plans as any[]) || [])
+    .flatMap((p) => (p.route_plan_outlets as any[]) || [])
+    .filter((o) => o?.store_id)
+    .sort((a, b) => (a.visit_order ?? 0) - (b.visit_order ?? 0));
+  for (const o of planned) {
+    if (!seen.has(o.store_id)) { seen.add(o.store_id); plannedOrder.push(o.store_id); }
+  }
+
+  let stores: any[] = [];
+  if (plannedOrder.length) {
+    const ids = plannedOrder.slice(0, 300);
+    const { data, error } = await scoped(supabaseAdmin.from('stores').select(STORE_COLS).in('id', ids));
+    if (error) return badRequest(res, error.message);
+    const rank = new Map(ids.map((id, i) => [id, i]));
+    stores = ((data as any[]) || []).sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0)).slice(0, limit);
+  }
+  if (stores.length < limit) {
+    let q = scoped(supabaseAdmin.from('stores').select(STORE_COLS)).order('name', { ascending: true });
+    if (plannedOrder.length) q = q.not('id', 'in', `(${plannedOrder.slice(0, 300).join(',')})`);
+    const { data, error } = await q.limit(limit - stores.length);
+    if (error) return badRequest(res, error.message);
+    const have = new Set(stores.map((x) => x.id));
+    stores = stores.concat(((data as any[]) || []).filter((x) => !have.has(x.id)));
+  }
+
+  const ids = stores.map((s) => s.id);
+  const extMap = new Map<string, any>();
+  const distMap = new Map<string, string>();
+  if (ids.length) {
+    const { data: exts } = await supabaseAdmin.from('outlet_distribution_ext')
+      .select('outlet_id, assigned_distributor_id, current_balance').in('outlet_id', ids);
+    for (const e of (exts as any[]) || []) extMap.set(e.outlet_id, e);
+    const distIds = [...new Set(((exts as any[]) || []).map((e) => e.assigned_distributor_id).filter(Boolean))];
+    if (distIds.length) {
+      const { data: dists } = await supabaseAdmin.from('distributors')
+        .select('id, name').eq('org_id', user.org_id).in('id', distIds as string[]);
+      for (const d of (dists as any[]) || []) distMap.set(d.id, d.name);
+    }
+  }
+
+  ok(res, stores.map((s) => {
+    const e = extMap.get(s.id);
+    const distId: string | null = e?.assigned_distributor_id ?? null;
+    return {
+      id: s.id,
+      name: s.name,
+      code: s.store_code ?? null,
+      address: s.address ?? null,
+      city: (Array.isArray(s.cities) ? s.cities[0]?.name : s.cities?.name) ?? null,
+      phone: s.phone ?? null,
+      distributor_id: distId,
+      distributor_name: distId ? distMap.get(distId) ?? null : null,
+      outstanding_balance: round2(Number(e?.current_balance) || 0),
+    };
+  }));
+});
+
+// ── GET /api/v1/salesman/outlets/:outletId/outstanding ──────────────────────
+// What does this outlet owe, and against which bills. `paid` per invoice is
+// DERIVED from payments.applied_to_invoices (cleared + pending payments only —
+// bounced/cancelled never count); invoices are never mutated. `balance` is the
+// outlet's latest ledger running balance when it has ledger rows, else the sum
+// of the open invoice balances. Only invoices with balance > 0 are listed,
+// oldest first. credit_limit is null when no limit is configured (0 / no row).
+//
+// Tables/columns: stores(id,name,org_id,client_id); invoices(id,invoice_no,
+// outlet_id,distributor_id,grand_total,issued_at,status,org_id);
+// payments(outlet_id,status,applied_to_invoices,org_id);
+// ledger_entries(outlet_id,org_id,running_balance,posted_at);
+// outlet_distribution_ext(credit_limit); distributors(payment_terms_days).
+export const outletOutstanding = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const outletId = String(req.params.outletId || '').trim();
+  if (isDemo(user)) return ok(res, getDemoOutletOutstanding(outletId));
+  if (!isUUID(outletId)) return badRequest(res, 'Invalid outlet id');
+
+  const scope = getClientScope(req);
+  let oq = supabaseAdmin.from('stores').select('id, name').eq('id', outletId).eq('org_id', user.org_id);
+  if (scope.id) oq = oq.eq('client_id', scope.id);
+  const { data: outlet } = await oq.maybeSingle();
+  if (!outlet) return notFound(res, 'Outlet not found');
+
+  let balances;
+  try {
+    balances = await loadOutletInvoiceBalances(user.org_id, outletId);
+  } catch (e: any) {
+    return badRequest(res, e.message);
+  }
+  const open = openInvoices(balances);
+  const [ledgerBalance, { data: ext }] = await Promise.all([
+    loadLedgerBalance(user.org_id, outletId),
+    supabaseAdmin.from('outlet_distribution_ext').select('credit_limit').eq('outlet_id', outletId).maybeSingle(),
+  ]);
+  const limit = ext?.credit_limit != null && Number(ext.credit_limit) > 0 ? Number(ext.credit_limit) : null;
+
+  ok(res, {
+    outlet_id: outlet.id,
+    outlet_name: outlet.name,
+    balance: resolveOutstandingBalance(ledgerBalance, open),
+    credit_limit: limit,
+    open_invoices: open.map((b) => ({
+      invoice_id: b.invoice_id,
+      invoice_no: b.invoice_no,
+      invoice_date: b.invoice_date,
+      due_date: b.due_date,
+      total: b.total,
+      paid: b.paid,
+      balance: b.balance,
+    })),
+  });
 });

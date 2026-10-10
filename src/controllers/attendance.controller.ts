@@ -9,6 +9,15 @@ import { getPagination } from '../utils/pagination';
 import { shapeAttendanceHistory } from '../lib/attendanceHistory';
 import { logger } from '../lib/logger';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
+import { SUPERVISOR_OR_ABOVE_ROLES } from '../middleware/auth';
+import {
+  decideCapturedAt, validateSummaryRange, buildAttendanceSummary, resolveAttendanceRules, istDateOf,
+  type CapturedAtDecision, type AttendanceRules,
+} from '../services/attendanceRules.service';
+import {
+  annotateLate, rulesForClient, rulesForClients, readRulesForViewer, clientIdOfUser,
+  fetchClientRow, callerMayUseClient,
+} from '../services/attendanceRules.store';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -25,6 +34,9 @@ const checkinSchema = z.object({
   // Location integrity (module-independent): client mock-GPS flag + accuracy.
   is_mock: z.boolean().optional(),
   location_accuracy_m: z.number().optional(),
+  // Offline capture (client rule allow_offline_checkin + Idempotency-Key): the
+  // moment the rep actually punched. See decideCapturedAt for when it is honoured.
+  captured_at: z.string().optional(),
 });
 
 const checkoutSchema = z.object({
@@ -36,7 +48,44 @@ const checkoutSchema = z.object({
   face_model_id: z.string().max(128).optional(),
   is_mock: z.boolean().optional(),
   location_accuracy_m: z.number().optional(),
+  captured_at: z.string().optional(),
 });
+
+// ── Offline capture ────────────────────────────────────────────────────────
+
+/** A punch stamped further back than this is "backdated": it must not overwrite the rep's live position. */
+const BACKDATED_PUNCH_MS = 5 * 60_000;
+
+const hasIdempotencyKey = (req: AuthRequest): boolean => {
+  const raw = req.headers['idempotency-key'] ?? req.headers['x-idempotency-key'];
+  const key = Array.isArray(raw) ? raw[0] : raw;
+  return typeof key === 'string' && key.trim().length > 0;
+};
+
+/**
+ * Decide whether the optional body `captured_at` replaces server time for this
+ * punch. The client's `allow_offline_checkin` rule is only looked up when the
+ * request could possibly qualify (captured_at AND Idempotency-Key present), so
+ * ordinary punches cost nothing extra.
+ */
+async function resolveCapture(
+  req: AuthRequest, kind: 'checkin' | 'checkout', extra: { attendanceDate?: string; notBeforeMs?: number | null },
+): Promise<CapturedAtDecision> {
+  const capturedAt = (req.body ?? {}).captured_at;
+  const hasKey = hasIdempotencyKey(req);
+  const present = capturedAt !== undefined && capturedAt !== null && capturedAt !== '';
+  const allowOffline = present && hasKey
+    ? (await rulesForClient(req.user?.client_id)).rules.allow_offline_checkin
+    : false;
+  const decision = decideCapturedAt({ capturedAt, nowMs: Date.now(), allowOffline, hasIdempotencyKey: hasKey, kind, ...extra });
+  if (present && !decision.used) {
+    logger.info(`[Attendance] captured_at ignored for ${kind} user=${req.user?.id}: ${decision.reason}`);
+  }
+  return decision;
+}
+
+const isBackdated = (d: CapturedAtDecision): boolean =>
+  d.used && !!d.at && Date.now() - d.at.getTime() > BACKDATED_PUNCH_MS;
 
 // POST /api/v1/attendance/checkin
 export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
@@ -86,7 +135,9 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (existing) {
     logger.info(`[Attendance] user=${user.id} already has a record for ${attendanceDate}. Returning existing.`);
-    ok(res, enrichWithHours(existing));
+    const existingRecord = enrichWithHours(existing);
+    await annotateLate([existingRecord], user.client_id);
+    ok(res, existingRecord);
     return;
   }
 
@@ -124,6 +175,11 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     distanceMetres = dist;
   }
 
+  // Offline capture: honour the rep's own punch time only when the client allows it
+  // (see decideCapturedAt); otherwise this is server time, exactly as before.
+  const capture = await resolveCapture(req, 'checkin', { attendanceDate });
+  const checkinAt = capture.at ?? new Date();
+
   // Race-safe insert: if a parallel request beat us to it, the (user_id, date)
   // unique constraint will trigger the conflict path and we return the
   // existing row instead of throwing.
@@ -137,7 +193,7 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
       activity_id,
       date: attendanceDate,
       status: 'checked_in',
-      checkin_at: new Date().toISOString(),
+      checkin_at: checkinAt.toISOString(),
       checkin_lat: latitude,
       checkin_lng: longitude,
       checkin_selfie_url: selfie_url,
@@ -159,7 +215,9 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   // (work_activity log + last-known-location for the live tracking map);
   // the FE app doesn't need them in the response. Saves another
   // 200-400ms of perceived latency on the mobile check-in flow.
-  created(res, enrichWithHours(data), 'Checked in successfully');
+  const checkinRecord = enrichWithHours(data);
+  await annotateLate([checkinRecord], user.client_id);
+  created(res, checkinRecord, 'Checked in successfully');
 
   // Fire-and-forget telemetry. Errors are logged but never returned.
   Promise.all([
@@ -173,7 +231,8 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
       lng: longitude,
       captured_at: data.checkin_at,
     }),
-    supabaseAdmin.from('users').update({
+    // A backdated (offline-synced) punch must not overwrite a fresher live position.
+    isBackdated(capture) ? Promise.resolve() : supabaseAdmin.from('users').update({
       last_latitude: latitude,
       last_longitude: longitude,
       battery_percentage: battery_percentage !== undefined ? battery_percentage : undefined,
@@ -232,7 +291,11 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
     return;
   }
 
-  const checkoutTime = new Date();
+  // Offline capture (see decideCapturedAt); a checkout can never precede the shift's check-in.
+  const capture = await resolveCapture(req, 'checkout', {
+    notBeforeMs: record.checkin_at ? Date.parse(record.checkin_at) : null,
+  });
+  const checkoutTime = capture.at ?? new Date();
   const checkinTime = new Date(record.checkin_at!);
   const totalMinutes = Math.round((checkoutTime.getTime() - checkinTime.getTime()) / 60000);
   const workingMinutes = totalMinutes - (record.break_minutes || 0);
@@ -261,7 +324,9 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   if (error) { badRequest(res, error.message); return; }
 
   // Respond first; telemetry follows.
-  ok(res, enrichWithHours(updatedRecord), 'Checked out successfully');
+  const checkoutRecord = enrichWithHours(updatedRecord);
+  await annotateLate([checkoutRecord], user.client_id);
+  ok(res, checkoutRecord, 'Checked out successfully');
 
   // Fire-and-forget: work_activity log + clear live location.
   Promise.all([
@@ -275,7 +340,8 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
       lng: longitude,
       captured_at: updatedRecord.checkout_at,
     }),
-    supabaseAdmin.from('users').update({
+    // A backdated (offline-synced) checkout must not blank the rep's current live position.
+    isBackdated(capture) ? Promise.resolve() : supabaseAdmin.from('users').update({
       last_latitude: null,
       last_longitude: null,
       last_location_updated_at: updatedRecord.checkout_at,
@@ -322,7 +388,9 @@ export const startBreak = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (error) { badRequest(res, error.message); return; }
   const { data: updated } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('id', record.id).single();
-  created(res, enrichWithHours(updated), 'Break started');
+  const startedRecord = enrichWithHours(updated);
+  await annotateLate([startedRecord], user.client_id);
+  created(res, startedRecord, 'Break started');
 });
 
 // POST /api/v1/attendance/break/end
@@ -371,7 +439,9 @@ export const endBreak = asyncHandler<AuthRequest>(async (req, res) => {
   }).eq('id', record.id);
 
   const { data: updated } = await supabaseAdmin.from('attendance').select('*, breaks(*)').eq('id', record.id).single();
-  ok(res, enrichWithHours(updated), 'Break ended');
+  const endedRecord = enrichWithHours(updated);
+  await annotateLate([endedRecord], user.client_id);
+  ok(res, endedRecord, 'Break ended');
 });
 
 const enrichWithHours = (r: any) => {
@@ -426,7 +496,9 @@ export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
     supabaseAdmin.from('attendance').delete().in('id', toDelete);
   }
 
-  ok(res, enrichWithHours(record));
+  const todayRecord = enrichWithHours(record);
+  await annotateLate([todayRecord], user.client_id);
+  ok(res, todayRecord);
 });
 
 export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
@@ -442,16 +514,38 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (error) { badRequest(res, error.message); return; }
   const results = (data || []).map(enrichWithHours);
+  await annotateLate(results, user.client_id);
   ok(res, shapeAttendanceHistory(results, count || 0, page, limit));
 });
 
-export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
+/**
+ * Who a manager's team-attendance view covers — shared by the team list and the
+ * summary so both apply the SAME visibility rules.
+ *
+ *  - client-bound callers (client_id pinned in the JWT) are NEVER cross-org;
+ *  - otherwise the picked client comes from X-Client-Id, then ?client_id=;
+ *  - `isGlobal` = a platform caller with no client picked (cross-org view);
+ *  - `scopeOrgId` is the picked client's org (so acting-as-ClientA never shows
+ *    ClientB's rows), else the caller's own org;
+ *  - `scopeIds` = supervisor-hierarchy restriction (opt-in per client), null = none.
+ *
+ * `verifyPickedClient` (new endpoints only) additionally requires a header /
+ * query-picked client to belong to the caller's org — the legacy team list keeps
+ * its historical behaviour unchanged.
+ */
+interface TeamAttendanceScope {
+  isGlobal: boolean;
+  isClientBound: boolean;
+  pickedClientId: string | null;
+  scopeOrgId: string;
+  scopeIds: string[] | null;
+}
+
+async function resolveTeamAttendanceScope(
+  req: AuthRequest, opts: { verifyPickedClient?: boolean } = {},
+): Promise<TeamAttendanceScope> {
   const user = req.user!;
-  if (isDemo(user)) return ok(res, getMockAttendanceToday(isoDate(new Date())).executives);
-  // Accept both `f`/`t` and `from`/`to` as aliases for the date range
-  const { f, t, from, to, client_id, zone_id, user_id, fe_id } = req.query as Record<string, string>;
-  const rangeFrom = f || from;
-  const rangeTo   = t || to;
+  const { client_id } = req.query as Record<string, string>;
 
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const role = (user.role || '').toLowerCase();
@@ -473,6 +567,42 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
     : null;
   const isGlobal = !isClientBound && (isSagar || isSuper) && !pickedClientId;
 
+  let scopeOrgId = user.org_id;
+  if (!isGlobal) {
+    // Scope to the picked client's org (super-admin acting as a client) or the
+    // caller's own org, plus the client itself. Resolving the picked client's
+    // org is what isolates a Trent view from a ByteBack view, etc.
+    if (!isClientBound && pickedClientId) {
+      if (opts.verifyPickedClient) {
+        const row = await fetchClientRow(pickedClientId);
+        if (!row || !callerMayUseClient(req, row)) throw new AppError(404, 'Client not found', 'NOT_FOUND');
+        if (row.org_id) scopeOrgId = row.org_id;
+      } else {
+        const { data: pc } = await supabaseAdmin
+          .from('clients').select('org_id').eq('id', pickedClientId).maybeSingle();
+        const pcOrg = (pc as { org_id?: string } | null)?.org_id;
+        if (pcOrg) scopeOrgId = pcOrg;
+      }
+    }
+  }
+
+  // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
+  // attendance for the field reps in their supervisor subtree. null = no
+  // restriction (every other tenant, the master, and data_scope='all').
+  const scopeIds = await fieldForceScopeIds(req);
+  return { isGlobal, isClientBound, pickedClientId, scopeOrgId, scopeIds };
+}
+
+export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, getMockAttendanceToday(isoDate(new Date())).executives);
+  // Accept both `f`/`t` and `from`/`to` as aliases for the date range
+  const { f, t, from, to, zone_id, user_id, fe_id } = req.query as Record<string, string>;
+  const rangeFrom = f || from;
+  const rangeTo   = t || to;
+
+  const { isGlobal, pickedClientId, scopeOrgId, scopeIds } = await resolveTeamAttendanceScope(req);
+
   let query = supabaseAdmin
     .from('attendance')
     .select(`
@@ -484,24 +614,8 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
   query = query.gte('date', parseAppDate(rangeFrom)).lte('date', parseAppDate(rangeTo));
 
   // Auth / Org Filtering
-  if (!isGlobal) {
-    // Scope to the picked client's org (super-admin acting as a client) or the
-    // caller's own org, plus the client itself. Resolving the picked client's
-    // org is what isolates a Trent view from a ByteBack view, etc.
-    let scopeOrgId = user.org_id;
-    if (!isClientBound && pickedClientId) {
-      const { data: pc } = await supabaseAdmin
-        .from('clients').select('org_id').eq('id', pickedClientId).maybeSingle();
-      const pcOrg = (pc as { org_id?: string } | null)?.org_id;
-      if (pcOrg) scopeOrgId = pcOrg;
-    }
-    query = scopeOwnOrg(query, scopeOrgId, pickedClientId ?? undefined);
-  }
+  if (!isGlobal) query = scopeOwnOrg(query, scopeOrgId, pickedClientId ?? undefined);
 
-  // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
-  // attendance for the field reps in their supervisor subtree. null = no
-  // restriction (every other tenant, the master, and data_scope='all').
-  const scopeIds = await fieldForceScopeIds(req);
   if (scopeIds) query = query.in('user_id', scopeIds);
 
   // Additional Property Filters
@@ -518,8 +632,22 @@ export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
     .limit(2000);
 
   if (error) { badRequest(res, error.message); return; }
-  ok(res, (data || []).map(enrichWithHours));
+  const rows = (data || []).map(enrichWithHours);
+  // `late` per row, using each row's own client's rules (a global view spans clients).
+  await annotateLate(rows, pickedClientId);
+  ok(res, rows);
 });
+
+/**
+ * Add `late` to a row an admin override returns. Override rows can carry no
+ * client_id (the upsert doesn't stamp one), so fall back to the admin's client,
+ * then to the row owner's client.
+ */
+async function annotateOverrideLate(row: any, adminClientId?: string | null): Promise<void> {
+  if (!row?.checkin_at) return;
+  const fallback = row.client_id ?? adminClientId ?? await clientIdOfUser(row.user_id);
+  await annotateLate([row], fallback);
+}
 
 export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => {
   const admin = req.user!;
@@ -549,6 +677,7 @@ export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => 
   }, { onConflict: 'user_id,date' }).select().single();
 
   if (error) { badRequest(res, error.message); return; }
+  await annotateOverrideLate(data, admin.client_id);
   created(res, data, 'Attendance saved');
 });
 
@@ -563,5 +692,146 @@ export const updateAttendanceOverride = asyncHandler<AuthRequest>(async (req, re
     .select().single();
 
   if (error) { badRequest(res, error.message); return; }
+  await annotateOverrideLate(updated, admin.client_id);
   ok(res, updated, 'Attendance updated');
+});
+
+// GET /api/v1/attendance/rules
+// The resolved attendance rules for the caller's client (read-only, any
+// authenticated user). The apps read this for shift times and to know whether
+// offline check-in is allowed. `configured:false` = legacy behaviour (defaults shown).
+export const getAttendanceRules = asyncHandler<AuthRequest>(async (req, res) => {
+  const resolved = await readRulesForViewer(req);
+  ok(res, { configured: resolved.configured, rules: resolved.rules });
+});
+
+// ── Summary ────────────────────────────────────────────────────────────────
+
+const PAGE = 1000;                       // PostgREST returns at most 1000 rows per request
+const ID_CHUNK = 100;                    // keeps `in.(…)` URLs short
+const MAX_ROSTER = 1000;
+const MAX_PAGES_PER_CHUNK = 40;
+
+function chunk<T>(xs: T[], n: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n));
+  return out;
+}
+
+/** Read every page of a ranged query (a plain `.limit()` would silently stop at 1000 rows). */
+async function fetchAllPages<T>(build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
+  const out: T[] = [];
+  for (let page = 0; page < MAX_PAGES_PER_CHUNK; page++) {
+    const { data, error } = await build(page * PAGE, page * PAGE + PAGE - 1);
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    const rows = data ?? [];
+    out.push(...rows);
+    if (rows.length < PAGE) return out;
+  }
+  logger.warn(`[Attendance] summary read hit the ${MAX_PAGES_PER_CHUNK}-page cap; result may be truncated`);
+  return out;
+}
+
+interface RosterUser {
+  id: string; name: string | null; role?: string | null; created_at?: string | null; client_id?: string | null;
+  org_role?: { data_scope?: string | null } | Array<{ data_scope?: string | null }> | null;
+}
+
+const FIELD_ROLES = new Set(['executive', 'field_executive']);
+const isFieldRep = (u: RosterUser): boolean => {
+  const scope = Array.isArray(u.org_role) ? u.org_role[0]?.data_scope : u.org_role?.data_scope;
+  return FIELD_ROLES.has(String(u.role ?? '').toLowerCase()) || scope === 'own';
+};
+
+// GET /api/v1/attendance/summary?from=YYYY-MM-DD&to=YYYY-MM-DD[&user_id=]
+// Per-user present / late / half-day / on-leave / absent counts over a range
+// (≤62 days). Visibility mirrors the team attendance list: managers and admins
+// see their team (same client / org / supervisor-subtree scope), a rep only
+// ever gets themself. See buildAttendanceSummary for the counting rules.
+export const getAttendanceSummary = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const range = validateSummaryRange(req.query.from, req.query.to);
+  if ('error' in range) { badRequest(res, range.error); return; }
+  const { from, to } = range;
+
+  const rawUserId = req.query.user_id;
+  if (rawUserId !== undefined && rawUserId !== '' && (typeof rawUserId !== 'string' || !isUUID(rawUserId))) {
+    badRequest(res, 'user_id must be a valid UUID');
+    return;
+  }
+  const wantedUserId = typeof rawUserId === 'string' && rawUserId ? rawUserId : null;
+
+  const todayIst = istDateOf(Date.now()) as string;      // IST calendar day, not the server's
+  if (isDemo(user)) {
+    const demo = buildAttendanceSummary({ from, to, todayIst, rules: resolveAttendanceRules(null).rules, users: [], attendance: [], leaves: [] });
+    ok(res, demo);
+    return;
+  }
+
+  const isManager = SUPERVISOR_OR_ABOVE_ROLES.includes(((user.role || '').toLowerCase()) as any);
+  if (!isManager && wantedUserId && wantedUserId !== user.id) { forbidden(res, 'You can only view your own attendance summary'); return; }
+
+  // ── roster: who the caller may see ──
+  let userQ = supabaseAdmin
+    .from('users')
+    .select('id, name, role, created_at, client_id, org_role:org_roles!org_role_id(data_scope)')
+    .eq('is_active', true)
+    .is('deleted_at', null);
+  let scopeClientId: string | null = user.client_id ?? null;
+  if (isManager) {
+    const scope = await resolveTeamAttendanceScope(req, { verifyPickedClient: true });
+    // A platform caller with no client picked is held to their own org — a
+    // cross-org roster x 62 days is never what a summary wants.
+    userQ = userQ.eq('org_id', scope.isGlobal ? user.org_id : scope.scopeOrgId);
+    if (scope.pickedClientId) userQ = userQ.eq('client_id', scope.pickedClientId);
+    if (scope.scopeIds) userQ = userQ.in('id', scope.scopeIds);
+    if (wantedUserId) userQ = userQ.eq('id', wantedUserId);
+    scopeClientId = scope.pickedClientId;
+  } else {
+    userQ = userQ.eq('id', user.id);
+  }
+  const { data: userRows, error: userErr } = await userQ.limit(MAX_ROSTER);
+  if (userErr) { badRequest(res, userErr.message); return; }
+  const candidates = (userRows ?? []) as unknown as RosterUser[];
+  if (candidates.length >= MAX_ROSTER) logger.warn(`[Attendance] summary roster hit the ${MAX_ROSTER}-user cap`);
+
+  // ── attendance + approved leave for the roster, over the capped range ──
+  const effectiveTo = to < todayIst ? to : todayIst;
+  const ids = candidates.map((u) => u.id);
+  type AttRow = { user_id: string; date: string; status: string | null; checkin_at: string | null };
+  type LeaveRow = { user_id: string; from_date: string; to_date: string; half_day_start: boolean | null; half_day_end: boolean | null };
+  const attendance: AttRow[] = [];
+  const leaves: LeaveRow[] = [];
+  if (effectiveTo >= from) {
+    for (const part of chunk(ids, ID_CHUNK)) {
+      attendance.push(...await fetchAllPages<AttRow>((a, b) =>
+        supabaseAdmin.from('attendance').select('user_id, date, status, checkin_at')
+          .in('user_id', part).gte('date', from).lte('date', effectiveTo)
+          .order('date', { ascending: true }).order('user_id', { ascending: true }).range(a, b) as any));
+      leaves.push(...await fetchAllPages<LeaveRow>((a, b) =>
+        supabaseAdmin.from('leave_requests').select('user_id, from_date, to_date, half_day_start, half_day_end')
+          .in('user_id', part).eq('status', 'approved').lte('from_date', effectiveTo).gte('to_date', from)
+          .order('from_date', { ascending: true }).order('user_id', { ascending: true }).range(a, b) as any));
+    }
+  }
+
+  // A manager with no punches in the range isn't a rep; keep field reps, plus anyone who actually punched.
+  const punched = new Set(attendance.map((r) => r.user_id));
+  const roster = isManager ? candidates.filter((u) => isFieldRep(u) || punched.has(u.id) || u.id === wantedUserId) : candidates;
+
+  // ── rules: each user's own client, falling back to the scope's client ──
+  const clientRules = await rulesForClients([scopeClientId, ...roster.map((u) => u.client_id)]);
+  const defaults = resolveAttendanceRules(null);
+  const rulesOf = (clientId: string | null | undefined): AttendanceRules =>
+    ((clientId && clientRules.get(clientId)) || (scopeClientId && clientRules.get(scopeClientId)) || defaults).rules;
+  const clientOfUser = new Map(roster.map((u) => [u.id, u.client_id ?? null] as const));
+
+  ok(res, buildAttendanceSummary({
+    from, to, todayIst,
+    rules: rulesOf(scopeClientId),
+    rulesForUser: (id) => rulesOf(clientOfUser.get(id) ?? scopeClientId),
+    users: roster.map((u) => ({ id: u.id, name: u.name, created_at: u.created_at })),
+    attendance,
+    leaves,
+  }));
 });

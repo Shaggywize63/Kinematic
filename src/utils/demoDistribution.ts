@@ -76,6 +76,21 @@ export const getDemoRouteToday = () => ({
   ],
 });
 
+export const getDemoSalesmanOutlets = () => ([
+  { id: DEMO_OUTLET_ID, name: 'Sharma Kirana Store', code: 'SKS-001', address: 'Andheri West, Mumbai', city: 'Mumbai', phone: '9876500001', distributor_id: DEMO_DIST_ID, distributor_name: 'Demo Distributors', outstanding_balance: 12500 },
+  { id: 'demo-outlet-0002', name: 'Patel Provision Mart', code: 'PPM-002', address: 'Bandra East, Mumbai', city: 'Mumbai', phone: null, distributor_id: DEMO_DIST_ID, distributor_name: 'Demo Distributors', outstanding_balance: 0 },
+]);
+
+export const getDemoOutletOutstanding = (outletId: string) => ({
+  outlet_id: outletId || DEMO_OUTLET_ID,
+  outlet_name: 'Sharma Kirana Store',
+  balance: 12500,
+  credit_limit: 50000,
+  open_invoices: [
+    { invoice_id: 'demo-inv-0001', invoice_no: '020526-DIST-00012', invoice_date: new Date(Date.now() - 86400000).toISOString().slice(0, 10), due_date: null, total: 12500, paid: 0, balance: 12500 },
+  ],
+});
+
 export const getDemoInvoice = () => ({
   id: 'demo-inv-0001',
   invoice_no: '020526-DIST-00012',
