@@ -26,6 +26,9 @@ import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
 import { AIService } from '../ai.service';
 import { mileageFromTrail } from './mileage.service';
+import { reconcileGpsKm } from './gpsDistance';
+import { dayTravel } from '../travel.store';
+import { isValidYmd } from '../attendanceRules.service';
 import { notifyUsers } from '../notify';
 import { Actor, isApprover } from './access';
 import {
@@ -34,12 +37,15 @@ import {
 } from './policy.service';
 import { assertReceiptsOwned, signReceipt } from './receipts.service';
 import {
-  ODOMETER_KEYS, ODOMETER_PHOTO_KEYS, assertOdometerOrder, assertOdometerStorable, hasOdometerInput, priceVehicleLine, vehicleFlowOn,
+  ODOMETER_KEYS, ODOMETER_PHOTO_KEYS, assertOdometerOrder, assertOdometerStorable, hasOdometerData, hasOdometerInput,
+  isGpsDistanceLine, priceGpsLine, priceVehicleLine, vehicleFlowOn, withSoleVehicle,
 } from './vehicleAllowance';
 
 export type { Actor } from './access';
 
 const MAX_APPROVAL_LEVELS = 5; // hard stop so escalation can never loop up the tree forever
+/** A rejection remark is truncated to this many characters in a notification's data / body. */
+const REJECT_REASON_MAX = 500;
 
 /** Submission blocked by a "block"-enforcement policy; carries the reasons. */
 export class PolicyBlockedError extends AppError {
@@ -230,9 +236,94 @@ function priceMileage<T extends { category?: string | null; amount?: number | nu
  */
 function priceItems<T extends ClaimItemInput>(items: T[], rules: ExpensePolicy['rules']): T[] {
   if (vehicleFlowOn(rules)) {
-    return items.map((i) => (i.category === 'mileage' ? priceVehicleLine(i as any, rules.vehicle_rates!) as T : i));
+    // A GPS-distance line (policy rule gps_distance, no odometer data) is left as sent: applyGpsDistance
+    // fixes its distance and amount against the GPS travel service, which priceVehicleLine would wipe.
+    return items.map((i) => (i.category === 'mileage' && !isGpsDistanceLine(i, rules) ? priceVehicleLine(i as any, rules.vehicle_rates!) as T : i));
   }
   return priceMileage(items, rules.mileage_rate);
+}
+
+/**
+ * Which date (if any) already has a GPS-distance line from this person in a claim that is still live
+ * (not cancelled, not rejected)? Returns date -> claim number. A GPS-distance line in the database is a
+ * mileage line with a vehicle and no odometer data. `excludeClaimId` leaves out the claim being edited.
+ */
+async function claimedGpsTravel(actor: Actor, dates: string[], excludeClaimId?: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!dates.length) return out;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let q: any = supabaseAdmin.from('expense_claim_items')
+    .select('id, claim_id, item_date, vehicle_type, odometer_start, odometer_end, odometer_start_photo_url, odometer_end_photo_url, '
+      + 'claim:expense_claims!inner(claim_no, status, user_id, org_id)')
+    .eq('org_id', actor.org_id)
+    .eq('claim.org_id', actor.org_id)
+    .eq('claim.user_id', actor.id)
+    .eq('category', 'mileage')
+    .in('item_date', dates)
+    .neq('claim.status', 'cancelled')
+    .neq('claim.status', 'rejected');
+  if (excludeClaimId) q = q.neq('claim_id', excludeClaimId);
+  const { data, error } = await q.limit(500);
+  if (error) throw new AppError(500, error.message, 'DB');
+  for (const r of (data as any[]) ?? []) {
+    const claim = Array.isArray(r.claim) ? r.claim[0] : r.claim;
+    if (!claim || claim.user_id !== actor.id || ['cancelled', 'rejected'].includes(claim.status)) continue;
+    if (excludeClaimId && r.claim_id === excludeClaimId) continue;
+    if (!r.vehicle_type || hasOdometerData(r)) continue;                 // an odometer line, not a GPS one
+    const date = String(r.item_date ?? '').slice(0, 10);
+    if (date && !out.has(date)) out.set(date, claim.claim_no || 'another claim');
+  }
+  return out;
+}
+
+/**
+ * GPS-distance lines (policy rule `gps_distance`: a mileage line with a vehicle, a distance and no
+ * odometer data). The server recomputes the person's travel for the line's date and keeps the rep's
+ * figure only when it is within allowed = serverKm × 1.10 + 0.5, else stores the measured distance;
+ * the amount is distance × the vehicle's rate (never typed by the client). A second GPS line for a
+ * date that already has one in a live claim is refused (409). Anything else — every line under a
+ * policy without `gps_distance`, every odometer line — is returned untouched.
+ */
+async function applyGpsDistance<T extends ClaimItemInput>(
+  actor: Actor, rules: ExpensePolicy['rules'], items: T[], opts: { claimId?: string } = {},
+): Promise<T[]> {
+  const gpsAt = items.map((i, n) => (isGpsDistanceLine(i, rules) ? n : -1)).filter((n) => n >= 0);
+  if (!gpsAt.length) return items;
+  const rates = rules.vehicle_rates!;
+
+  const dates = gpsAt.map((n) => String(items[n].item_date ?? '').slice(0, 10));
+  if (dates.some((d) => !isValidYmd(d))) {
+    throw new AppError(400, 'Add the date of the trip to claim its GPS distance', 'VALIDATION');
+  }
+  const seen = new Set<string>();
+  for (const d of dates) {
+    if (seen.has(d)) throw new AppError(409, `Travel for ${d} is already claimed on this claim`, 'TRAVEL_ALREADY_CLAIMED');
+    seen.add(d);
+  }
+
+  // The vehicle column lives in the odometer migration: refuse early, like any vehicle line would.
+  const priced = gpsAt.map((n) => priceGpsLine(items[n], rates, Number(items[n].distance_km)));
+  await assertOdometerStorable(priced);
+
+  const taken = await claimedGpsTravel(actor, dates, opts.claimId);
+  for (const d of dates) {
+    if (taken.has(d)) throw new AppError(409, `Travel for ${d} is already claimed on ${taken.get(d)}`, 'TRAVEL_ALREADY_CLAIMED');
+  }
+
+  const out = [...items];
+  for (let k = 0; k < gpsAt.length; k++) {
+    const n = gpsAt[k];
+    let serverKm: number;
+    try {
+      serverKm = (await dayTravel(actor.id, dates[k], { orgId: actor.org_id })).total_km;
+    } catch (e: any) {
+      logger.warn(`[expenses] GPS travel for ${actor.id} on ${dates[k]} failed: ${e?.message || e}`);
+      throw new AppError(503, 'Could not check your GPS travel right now. Please try again in a moment.', 'TRAVEL_UNAVAILABLE');
+    }
+    const { km } = reconcileGpsKm(Number(items[n].distance_km), serverKm, dates[k]);
+    out[n] = priceGpsLine(items[n], rates, km);
+  }
+  return out;
 }
 
 const itemRow = (claim_id: string, org_id: string, i: ClaimItemInput) => {
@@ -289,7 +380,7 @@ export async function getClaim(actor: Actor, id: string) {
 /** Create a draft claim with its lines. Totals are computed from the lines. */
 export async function createClaim(actor: Actor, body: { title?: string | null; items?: ClaimItemInput[] }) {
   const policy = await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
-  const items = priceItems(validItems(body.items), policy.rules);
+  const items = await applyGpsDistance(actor, policy.rules, priceItems(validItems(body.items), policy.rules));
   assertReceiptsOwned(actor, items);
   assertOdometerOrder(items);
   await assertOdometerStorable(items);
@@ -352,7 +443,10 @@ async function analyze(org_id: string, claimUserId: string, claimId: string, ite
 export async function checkClaim(actor: Actor, body: { items?: ClaimItemInput[]; claim_id?: string }) {
   const policy = await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
   // Unsaved lines are identified by their position, so a warning can point at a row.
-  const items = priceItems(validItems(body.items), policy.rules).map((i, idx) => ({ ...i, id: String(idx) }));
+  // (A GPS-distance line is only previewed here at the distance sent; the server measures it when the line is saved.)
+  const items = priceItems(validItems(body.items), policy.rules)
+    .map((i) => (isGpsDistanceLine(i, policy.rules) ? priceGpsLine(i, policy.rules.vehicle_rates!, Number(i.distance_km)) : i))
+    .map((i, idx) => ({ ...i, id: String(idx) }));
   const a = await analyze(actor.org_id, actor.id, body.claim_id ?? '00000000-0000-0000-0000-000000000000', items, policy, null);
   return {
     policy: toClientShape(policy),
@@ -412,7 +506,7 @@ export async function updateClaim(actor: Actor, id: string, body: { title?: stri
     throw new AppError(400, 'This claim has already been approved and can no longer be edited', 'BAD_STATE');
   }
   const policy = c.policy_snapshot?.rules ? (c.policy_snapshot as ExpensePolicy) : await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
-  const items = priceItems(validItems(body.items), policy.rules);
+  const items = await applyGpsDistance(actor, policy.rules, priceItems(validItems(body.items), policy.rules), { claimId: id });
   if (!items.length) throw new AppError(400, 'Add at least one line', 'EMPTY');
   assertReceiptsOwned(actor, items);
   assertOdometerOrder(items);
@@ -495,6 +589,18 @@ export async function submitClaim(actor: Actor, id: string) {
   if (vehicleFlowOn(policy.rules)) {
     for (const it of items) {
       if (it.category !== 'mileage') continue;
+      if (isGpsDistanceLine(it, policy.rules)) {
+        // A GPS-distance line: its distance was measured against the GPS when it was saved, so it is only
+        // re-priced here (the vehicle's rate may have changed since) — never wiped like an odometer-less line.
+        const vehicle = withSoleVehicle(it, policy.rules.vehicle_rates).vehicle_type;
+        const rate = policy.rules.vehicle_rates!.find((r) => r.id === vehicle);
+        const amount = rate ? round2(Number(it.distance_km) * rate.rate_per_km) : 0;
+        if (amount !== Number(it.amount)) {
+          await supabaseAdmin.from('expense_claim_items').update({ amount }).eq('id', it.id);
+          it.amount = amount;
+        }
+        continue;
+      }
       const priced = priceVehicleLine(it as any, policy.rules.vehicle_rates!) as any;
       const patch: Record<string, unknown> = {};
       if (Number(priced.amount) !== Number(it.amount) || Number(priced.distance_km ?? 0) !== Number(it.distance_km ?? 0)) {
@@ -703,8 +809,10 @@ export async function decide(actor: Actor, id: string, input: DecisionInput) {
     const patch: any = { status: 'rejected', reviewed_by: actor.id, reviewed_at: now, review_note: note, approver_id: null, updated_at: now };
     if (v2) patch.approved_amount = null;
     await supabaseAdmin.from('expense_claims').update(patch).eq('id', id);
+    // `reason` / `claim_no` ride along in data so the apps can show the remark and open the claim for
+    // editing straight from the notification (the reason is also in the body, as before).
     await notify(actor.org_id, c.user_id, 'Expense claim rejected', `${c.claim_no || 'Your claim'} was rejected: ${note}`,
-      { type: 'expense_decision', claim_id: id, decision: 'rejected' });
+      { type: 'expense_decision', claim_id: id, decision: 'rejected', claim_no: String(c.claim_no ?? ''), reason: note.slice(0, REJECT_REASON_MAX) });
     return { ok: true, status: 'rejected' };
   }
 
@@ -734,10 +842,11 @@ export async function decide(actor: Actor, id: string, input: DecisionInput) {
   await supabaseAdmin.from('expense_claims').update(patch).eq('id', id);
 
   const partial = rejectedLines.length > 0;
-  const firstRemark = rejectedLines.find((l) => line.get(l.id)?.note)?.id;
+  // Every distinct remark on a rejected line, so the claimant knows what to fix (body only).
+  const lineReasons = Array.from(new Set(rejectedLines.map((l) => line.get(l.id)?.note).filter((n): n is string => !!n))).join('; ');
   await notify(actor.org_id, c.user_id, partial ? 'Expense claim partly approved' : 'Expense claim approved',
     partial
-      ? `${c.claim_no || 'Your claim'}: ${fmt(c, approvedAmount)} of ${fmt(c, c.total_amount)} approved. ${rejectedLines.length} line(s) rejected${firstRemark ? ` — ${line.get(firstRemark)!.note}` : ''}.`
+      ? `${c.claim_no || 'Your claim'}: ${fmt(c, approvedAmount)} of ${fmt(c, c.total_amount)} approved. ${rejectedLines.length} line(s) rejected${lineReasons ? ` — ${lineReasons.slice(0, REJECT_REASON_MAX)}` : ''}.`
       : `${c.claim_no || 'Your claim'} for ${fmt(c, approvedAmount)} was approved.`,
     { type: 'expense_decision', claim_id: id, decision: 'approved' });
   return { ok: true, status: 'approved', approved_amount: approvedAmount, rejected_lines: rejectedLines.length };

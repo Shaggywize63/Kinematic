@@ -11,13 +11,15 @@ import { logger } from '../lib/logger';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { SUPERVISOR_OR_ABOVE_ROLES } from '../middleware/auth';
 import {
-  decideCapturedAt, validateSummaryRange, buildAttendanceSummary, resolveAttendanceRules, istDateOf,
+  decideCapturedAt, validateSummaryRange, buildAttendanceSummary, resolveAttendanceRules, istDateOf, isValidYmd,
   type CapturedAtDecision, type AttendanceRules,
 } from '../services/attendanceRules.service';
 import {
   annotateLate, rulesForClient, rulesForClients, readRulesForViewer, clientIdOfUser,
   fetchClientRow, callerMayUseClient,
 } from '../services/attendanceRules.store';
+import { buildDayTravel } from '../services/travel.service';
+import { dayTravel } from '../services/travel.store';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -84,6 +86,15 @@ async function resolveCapture(
   return decision;
 }
 
+/**
+ * Is a selfie mandatory for this client's executives? True unless the client's
+ * `attendance_rules.selfie_required` is explicitly false. Unconfigured clients,
+ * a missing client and any lookup failure all read as TRUE (today's behaviour).
+ */
+async function selfieRequiredFor(clientId: string | null | undefined): Promise<boolean> {
+  return (await rulesForClient(clientId)).rules.selfie_required !== false;
+}
+
 const isBackdated = (d: CapturedAtDecision): boolean =>
   d.used && !!d.at && Date.now() - d.at.getTime() > BACKDATED_PUNCH_MS;
 
@@ -141,8 +152,10 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     return;
   }
 
-  // Enforce selfie for field executives
-  if (user.role === 'executive' && !selfie_url) {
+  // Enforce selfie for field executives — unless the client opted out with the
+  // attendance rule `selfie_required:false` (a GPS-only punch; the selfie columns
+  // are nullable). The rule is only looked up when a selfie is actually missing.
+  if (user.role === 'executive' && !selfie_url && await selfieRequiredFor(user.client_id)) {
     badRequest(res, 'Selfie is mandatory for check-in');
     return;
   }
@@ -285,8 +298,8 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   if (!record) { badRequest(res, 'No check-in found. Please check in first.'); return; }
   if (record.status === 'checked_out') { conflict(res, 'Already checked out for this shift'); return; }
 
-  // Enforce selfie for field executives
-  if (user.role === 'executive' && !selfie_url) {
+  // Enforce selfie for field executives (see selfieRequiredFor — opt-out per client).
+  if (user.role === 'executive' && !selfie_url && await selfieRequiredFor(user.client_id)) {
     badRequest(res, 'Selfie is mandatory for check-out');
     return;
   }
@@ -834,4 +847,59 @@ export const getAttendanceSummary = asyncHandler<AuthRequest>(async (req, res) =
     attendance,
     leaves,
   }));
+});
+
+// ── Distance travelled ─────────────────────────────────────────────────────
+
+// GET /api/v1/attendance/travel?date=YYYY-MM-DD[&user_id=<uuid>]
+// The kilometres a person travelled on an IST day: the legs between their attendance check-in, each
+// form visit (check-in → check-out) and the attendance check-out (or "now" while the shift is open),
+// measured on the GPS trail and falling back to the straight line when the trail is missing. See
+// services/travel.service.ts for the definition. `date` defaults to today (IST); `user_id` to the
+// caller. Someone else's travel needs the visibility the team attendance list uses: managers and
+// admins within their org / client / supervisor scope — a rep gets 403. No attendance that day is
+// a 200 with attendance_id null and zero km.
+export const getTravel = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const nowMs = Date.now();
+
+  const rawDate = req.query.date;
+  let date = istDateOf(nowMs) as string;
+  if (rawDate !== undefined && rawDate !== '') {
+    if (typeof rawDate !== 'string' || !isValidYmd(rawDate)) { badRequest(res, 'date must be a date in YYYY-MM-DD format'); return; }
+    date = rawDate;
+  }
+
+  const rawUserId = req.query.user_id;
+  if (rawUserId !== undefined && rawUserId !== '' && (typeof rawUserId !== 'string' || !isUUID(rawUserId))) {
+    badRequest(res, 'user_id must be a valid UUID');
+    return;
+  }
+  const wantedUserId = typeof rawUserId === 'string' && rawUserId ? rawUserId : null;
+
+  if (isDemo(user)) {
+    ok(res, buildDayTravel({ date, userId: wantedUserId ?? user.id, attendance: null, visits: [], trail: [], nowMs }));
+    return;
+  }
+
+  let targetId: string = user.id;
+  let orgId: string = user.org_id;
+  if (wantedUserId && wantedUserId !== user.id) {
+    const isManager = SUPERVISOR_OR_ABOVE_ROLES.includes(((user.role || '').toLowerCase()) as any);
+    if (!isManager) { forbidden(res, 'You can only view your own travel'); return; }
+    // Same visibility as the team attendance list / summary: the person must sit inside the
+    // caller's org (and picked client, and supervisor subtree when that scoping is on).
+    const scope = await resolveTeamAttendanceScope(req, { verifyPickedClient: true });
+    const scopeOrg = scope.isGlobal ? user.org_id : scope.scopeOrgId;
+    let q = supabaseAdmin.from('users').select('id').eq('id', wantedUserId).eq('org_id', scopeOrg).is('deleted_at', null);
+    if (scope.pickedClientId) q = q.eq('client_id', scope.pickedClientId);
+    if (scope.scopeIds) q = q.in('id', scope.scopeIds);
+    const { data: target, error } = await q.maybeSingle();
+    if (error && error.code !== 'PGRST116') { badRequest(res, error.message); return; }   // PGRST116 = no such row
+    if (!target) { notFound(res, 'User not found'); return; }
+    targetId = wantedUserId;
+    orgId = scopeOrg;
+  }
+
+  ok(res, await dayTravel(targetId, date, { orgId, nowMs }));
 });

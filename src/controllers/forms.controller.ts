@@ -8,6 +8,8 @@ import { DEMO_ORG_ID, isDemo, getMockFormTemplates, getMockSubmissions, getMockS
 import { logger } from '../lib/logger';
 import { mirrorCheckinToRoutePlan } from '../services/routePlanCheckin.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
+import { withVisitFields } from '../services/formVisit.service';
+import { resolveVisitTimes } from '../services/formVisit.store';
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
 function parseGps(s: unknown): { lat: number; lng: number } | null {
@@ -213,21 +215,22 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
-  const durationMinutes = (check_in_at && check_out_at)
-    ? Math.round((new Date(check_out_at).getTime() - new Date(check_in_at).getTime()) / 60000)
-    : null;
-
   // Stamp the submitter's client_id so the per-client picker on the
   // dashboard scopes correctly. Org-level admins (no JWT client_id) fall
   // back to NULL which keeps the row visible to every picker selection.
   const submitterClientId = (user as { client_id?: string | null }).client_id ?? null;
 
+  // Visit times are sanitised, never rejected (old app builds keep working): a bad timestamp becomes
+  // null, a future one is clamped to server time, and a check-in with no check-out is closed at
+  // server time for clients whose `form_checkin_required` rule is on. See formVisit.service.ts.
+  const visit = await resolveVisitTimes(submitterClientId, { check_in_at, check_out_at });
+
   const { data: sub, error: subErr } = await supabaseAdmin.from('form_submissions').insert({
     user_id: user.id, org_id: user.org_id, client_id: submitterClientId,
     template_id, activity_id, outlet_id, outlet_name,
     latitude, longitude, submitted_at: new Date().toISOString(),
-    check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address,
-    duration_minutes: durationMinutes
+    check_in_at: visit.check_in_at, check_out_at: visit.check_out_at, check_in_gps, check_out_gps, gps, address,
+    duration_minutes: visit.duration_minutes
   }).select().single();
   if (subErr) return badRequest(res, subErr.message);
   const respRows = (responses || []).map((r: any) => {
@@ -463,7 +466,9 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
 
   const { data: bData, count: bCount, error: bErr } = await q2.order('submitted_at', { ascending: false }).range(from, to);
 
-  const normalizedF = ((fData as any[]) || []).map(f => ({
+  // Every row exposes check_in_at / check_out_at / check_in_gps / check_out_gps / duration_minutes
+  // (null when absent); old rows with both times but no stored duration get one computed.
+  const normalizedF = ((fData as any[]) || []).map(f => withVisitFields({
       ...f, 
       type: 'traditional',
       outlet_name: f.outlet_name || f.store_name || 'Individual Submission',
@@ -471,7 +476,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       activities: f.activities || { name: f.builder_forms?.title || 'Form' }
   }));
 
-  const normalizedB = ((bData as any[]) || []).map(b => ({
+  const normalizedB = ((bData as any[]) || []).map(b => withVisitFields({
       ...b, 
       type: 'builder',
       outlet_name: b.outlet_name || 'Individual Submission',
@@ -492,8 +497,8 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   if (isGlobal && merged.length === 0 && !uId && !cId && !zId && !search) {
       const { data: panicF } = await supabaseAdmin.from('form_submissions').select('*, users:user_id(name), activities:activity_id(name)').order('submitted_at', { ascending: false }).limit(20);
       const { data: panicB } = await supabaseAdmin.from('builder_submissions').select('*, users:user_id(name), builder_forms:form_id(title)').order('submitted_at', { ascending: false }).limit(20);
-      const pF = (panicF || []).map(f => ({ ...f, type: 'traditional', activities: f.activities || { name: 'Log' } }));
-      const pB = (panicB || []).map(b => ({ ...b, type: 'builder', activities: { name: b.builder_forms?.title || 'Builder' } }));
+      const pF = (panicF || []).map(f => withVisitFields({ ...f, type: 'traditional', activities: f.activities || { name: 'Log' } }));
+      const pB = (panicB || []).map(b => withVisitFields({ ...b, type: 'builder', activities: { name: b.builder_forms?.title || 'Builder' } }));
       merged = [...pF, ...pB].sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime());
   }
   

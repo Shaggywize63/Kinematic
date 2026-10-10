@@ -19,7 +19,7 @@ import { ok, isoDate, toIST } from '../../utils';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { isDemo } from '../../utils/demoData';
 import { rulesForClients } from '../../services/attendanceRules.store';
-import { classifyPunctuality } from '../../services/attendanceRules.service';
+import { classifyPunctuality, lateTrackingOn } from '../../services/attendanceRules.service';
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
@@ -452,7 +452,7 @@ export const attendancePunctuality = asyncHandler<AuthRequest>(async (req, res) 
     if (a.status === 'absent') cur.absent += 1;
     else if (a.checkin_at) {
       const rules = rulesByClient.get(a.client_id ?? user.client_id ?? '');
-      if (rules?.configured) {
+      if (lateTrackingOn(rules)) {
         if (classifyPunctuality(a.checkin_at, rules) === 'on_time') cur.on += 1; else cur.late += 1;
       } else {
         // Legacy behaviour, unchanged: before 10:00 IST is on time.

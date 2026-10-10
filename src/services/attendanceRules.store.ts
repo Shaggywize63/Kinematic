@@ -18,7 +18,7 @@ import { logger } from '../lib/logger';
 import { AppError } from '../utils';
 import { AuthRequest } from '../types';
 import {
-  applyLate, computeLate, mergeRulesIntoSettings, resolveAttendanceRules,
+  applyLate, computeLate, lateTrackingOn, mergeRulesIntoSettings, resolveAttendanceRules,
   type AttendanceRules, type LateInfo, type ResolvedAttendanceRules,
 } from './attendanceRules.service';
 
@@ -68,7 +68,7 @@ export async function annotateLate<T extends { checkin_at?: unknown; client_id?:
 
 /**
  * `{ late }` for a record under an already-loaded rules map, or `{}` when the
- * record has no check-in or its client is unconfigured — spread it into a
+ * record has no check-in or its client has no shift rules — spread it into a
  * hand-built response object so legacy clients get no new key.
  */
 export function lateFields(
@@ -79,8 +79,8 @@ export function lateFields(
   if (!rec?.checkin_at) return {};
   const cid = rec.client_id ?? fallbackClientId;
   const resolved = cid ? rules.get(cid) : undefined;
-  if (!resolved?.configured) return {};
-  const late = computeLate(rec.checkin_at as string | number | Date, resolved.rules);
+  if (!lateTrackingOn(resolved)) return {};
+  const late = computeLate(rec.checkin_at as string | number | Date, resolved!.rules);
   return late ? { late } : {};
 }
 
