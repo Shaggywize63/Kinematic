@@ -198,14 +198,19 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
 
   // Mode of transport (opt-in: the client's `track_transport_mode` rule). The `transport_mode` column is
   // written ONLY when that rule is on AND the request supplies a mode — never otherwise, so a project
-  // without the column keeps working for every other client. An unknown mode is a 400 (nothing written).
-  // The rule is only looked up when a mode was actually sent.
+  // without the column keeps working for every other client. The rule is only looked up when a mode was
+  // actually sent. A mode this client no longer offers (an admin changed the policy's vehicles while a punch
+  // sat in the phone's offline queue) must NEVER cost the rep their punch: the check-in goes through and the
+  // mode is simply not stored (PATCH /attendance/transport-mode, which answers 400, is how it is set later).
   let transportMode: string | undefined;
   if (hasTransportModeValue(transport_mode) && trackTransportModeOn((await rulesForClient(user.client_id)).rules)) {
     const { modes, resolved } = await transportModesForUser(user);
     const check = validateTransportMode(transport_mode, resolved ? modes : null);
-    if ('error' in check) { badRequest(res, check.error); return; }
-    transportMode = check.mode;
+    if ('error' in check) {
+      logger.warn(`[Attendance] ignoring transport_mode on check-in for user=${user.id}: ${check.error}`);
+    } else {
+      transportMode = check.mode;
+    }
   }
 
   // Offline capture: honour the rep's own punch time only when the client allows it

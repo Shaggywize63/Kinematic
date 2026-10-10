@@ -173,23 +173,28 @@ describe('POST /attendance/checkin with transport_mode', () => {
     expect(res.body.data).toMatchObject({ transport_mode: id, transport_label: label });
   });
 
-  it('rule ON + an id the policy does not offer: 400 and NOTHING is written', async () => {
+  // A mode the client no longer offers must never cost the rep their punch (an offline-queued check-in can carry
+  // an id an admin has since removed from the policy): the check-in succeeds and the mode is simply not stored.
+  it('rule ON + an id the policy does not offer: the check-in still works and NO mode is stored', async () => {
     const res = await request(app).post('/attendance/checkin').send({ ...GEO, transport_mode: 'helicopter' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Unknown transport_mode "helicopter"/);
-    expect(upserts()).toHaveLength(0);
+    expect(res.status).toBe(201);
+    expect(upserts()).toHaveLength(1);
+    expect('transport_mode' in payload(upserts()[0], 'upsert')).toBe(false);
+    expect('transport_label' in res.body.data).toBe(false);
   });
 
-  it('the defaults (two_wheeler) are not accepted when the policy lists its own vehicles', async () => {
-    expect((await request(app).post('/attendance/checkin').send({ ...GEO, transport_mode: 'two_wheeler' })).status).toBe(400);
-    expect(upserts()).toHaveLength(0);
+  it('the defaults (two_wheeler) are not stored when the policy lists its own vehicles, but the check-in works', async () => {
+    const res = await request(app).post('/attendance/checkin').send({ ...GEO, transport_mode: 'two_wheeler' });
+    expect(res.status).toBe(201);
+    expect('transport_mode' in payload(upserts()[0], 'upsert')).toBe(false);
   });
 
   it.each([['upper case', 'Own_Bike'], ['spaces', 'own bike'], ['41 chars', 'a'.repeat(41)], ['a number', 7], ['an object', { id: 'car' }], ['an array', ['car']]])(
-    'rule ON + a malformed value (%s): 400, nothing written', async (_l, v) => {
+    'rule ON + a malformed value (%s): the check-in works, nothing about the mode is stored', async (_l, v) => {
       const res = await request(app).post('/attendance/checkin').send({ ...GEO, transport_mode: v });
-      expect(res.status).toBe(400);
-      expect(upserts()).toHaveLength(0);
+      expect(res.status).toBe(201);
+      expect(upserts()).toHaveLength(1);
+      expect('transport_mode' in payload(upserts()[0], 'upsert')).toBe(false);
     });
 
   it('rule ON + no transport_mode (older app build, or the rep skipped it): the check-in works and the column is not touched', async () => {
@@ -431,6 +436,18 @@ describe('transport_label on the records the controller already annotates', () =
     const res = await request(app).get('/attendance/history');
     const items: any[] = res.body.data.items ?? res.body.data;
     expect(items.map((i) => i.transport_label ?? null)).toEqual(['Own Car', 'Other', null]);
+  });
+
+  it('GET /team with hundreds of people looks policies up in chunks of at most 100 ids (a long `in (...)` would overflow the URL)', async () => {
+    setUser({ id: ADMIN, org_id: ORG, role: 'admin', client_id: CA, name: 'Admin', email: 'admin@client.test' });
+    const uid = (i: number) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+    __mock.setDefault('attendance', { data: Array.from({ length: 250 }, (_v, i) => row({ id: `a${i}`, user_id: uid(i), transport_mode: 'own_bike' })) });
+    const res = await request(app).get('/attendance/team?f=2026-10-01&t=2026-10-31');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(250);
+    expect(res.body.data.every((r: any) => r.transport_label === 'Own Bike')).toBe(true);
+    const idLists = chainsOn('users').map((c) => c.ops.find((o) => o.method === 'in' && o.args[0] === 'id')).filter(Boolean).map((o) => (o!.args[1] as string[]).length);
+    expect(idLists.sort((a, b) => a - b)).toEqual([50, 100, 100]);
   });
 
   it('GET /team labels each person from their own client\'s policy lookup, once per client', async () => {

@@ -58,8 +58,9 @@ describe('a halt: pings that stay within 100 m of the run\'s first ping', () => 
   it('a ping 101 m away ends the run, 99 m does not', () => {
     expect(haversineKm(BASE.lat, BASE.lng, north(99), BASE.lng) * 1000).toBeLessThan(HALT_RADIUS_M);
     expect(haversineKm(BASE.lat, BASE.lng, north(101), BASE.lng) * 1000).toBeGreaterThan(HALT_RADIUS_M);
-    expect(detectHalts([p(0, 0), p(5, 99), p(10, 0)])).toHaveLength(1);
-    expect(detectHalts([p(0, 0), p(5, 101), p(10, 0)])).toHaveLength(0);
+    // 99 m away: still the same stay (one 20-minute halt); 101 m away: the run ends at the last ping inside the circle.
+    expect(detectHalts([p(0, 0), p(5, 0), p(10, 0), p(15, 99), p(20, 99)]).map((h) => h.minutes)).toEqual([20]);
+    expect(detectHalts([p(0, 0), p(5, 0), p(10, 0), p(15, 101), p(20, 101)]).map((h) => [h.start_at, h.end_at])).toEqual([[iso(0), iso(10)]]);
   });
 
   it('a rep who keeps moving never halts, however many pings', () => {
@@ -150,8 +151,9 @@ describe('merging runs at the same place less than 5 minutes apart', () => {
   });
 
   it('does NOT merge when the separation is 5 minutes or more', () => {
-    const halts = detectHalts([p(0), p(5), p(10), p(12, 200), p(15), p(20), p(25)]);
-    expect(halts.map((h) => [h.start_at, h.end_at])).toEqual([[iso(0), iso(10)], [iso(15), iso(25)]]);
+    // X 0,5,10 · a real move away (two pings, so not a stray fix) · X again 16,21,26: the runs at X are 6 minutes apart
+    const halts = detectHalts([p(0), p(5), p(10), p(12, 200), p(13, 200), p(16), p(21), p(26)]);
+    expect(halts.map((h) => [h.start_at, h.end_at])).toEqual([[iso(0), iso(10)], [iso(16), iso(26)]]);
   });
 
   it('does NOT merge runs at different places, however close in time', () => {
@@ -202,5 +204,30 @@ describe('visit suppression: time already reported as a customer visit is not al
 
   it('tolerates a visit given backwards', () => {
     expect(detectHalts(halt30, [{ inMs: T0 + 40 * 60_000, outMs: T0 + 10 * 60_000 }])).toEqual([]);
+  });
+});
+
+
+describe('a stray fix does not cut a long stay in two (10-minute heartbeats)', () => {
+  it('one drifted fix in a 70-minute stay leaves ONE 70-minute halt', () => {
+    const halts = detectHalts([p(0), p(10), p(20, 300), p(30), p(40), p(50), p(60), p(70)]);
+    expect(halts.map((h) => [h.start_at, h.end_at, h.minutes, h.points])).toEqual([[iso(0), iso(70), 70, 7]]);
+  });
+
+  it('a real excursion (two pings away) is NOT treated as a stray fix', () => {
+    // X 0,10 · away 20,30 (two pings, same place Y) · X again 40,50 - Y is its own stop and nothing is merged over it
+    const halts = detectHalts([p(0), p(10), p(20, 500), p(30, 505), p(40), p(50)]);
+    expect(halts.map((h) => [h.start_at, h.end_at])).toEqual([[iso(0), iso(10)], [iso(20), iso(30)], [iso(40), iso(50)]]);
+  });
+
+  it('a stray fix whose neighbours are far apart is kept (the rep really moved)', () => {
+    expect(detectHalts([p(0), p(10), p(20, 500), p(30, 1000), p(40, 1000)]).map((h) => [h.start_at, h.end_at]))
+      .toEqual([[iso(0), iso(10)], [iso(30), iso(40)]]);
+  });
+
+  it('a stray fix is kept when dropping it would open a hole over 20 minutes', () => {
+    // 0,10 | stray at 25 | 45,55: removing the stray would leave a 35-minute hole, which the gap rule refuses
+    const halts = detectHalts([p(0), p(10), p(25, 300), p(45), p(55)]);
+    expect(halts.map((h) => [h.start_at, h.end_at])).toEqual([[iso(0), iso(10)], [iso(45), iso(55)]]);
   });
 });

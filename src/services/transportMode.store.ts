@@ -14,6 +14,9 @@ import {
   buildTransportModes, isFixedTransportMode, labelForTransportMode, type TransportMode,
 } from './transportMode.service';
 
+/** People per policy lookup (keeps the `id in (...)` URL short). */
+const POLICY_LOOKUP_CHUNK = 100;
+
 export interface TransportModeUser {
   id: string;
   org_id: string;
@@ -77,9 +80,14 @@ export async function annotateTransportLabels<T extends LabelledRow>(
   }
 
   await Promise.all(Array.from(needPolicy.values()).map(async (g) => {
-    let policies: Awaited<ReturnType<typeof resolvePoliciesForUsers>> | null = null;
+    // Distinct people, in chunks: the lookup is an `id in (...)` filter and a long list overflows the URL.
+    const people = Array.from(new Set(g.rows.map((r) => String(r.user_id))));
+    let policies: Map<string, Awaited<ReturnType<typeof resolvePolicyForUserId>>> | null = null;
     try {
-      policies = await resolvePoliciesForUsers(g.orgId, g.clientId, g.rows.map((r) => String(r.user_id)));
+      const chunks: string[][] = [];
+      for (let i = 0; i < people.length; i += POLICY_LOOKUP_CHUNK) chunks.push(people.slice(i, i + POLICY_LOOKUP_CHUNK));
+      const maps = await Promise.all(chunks.map((ids) => resolvePoliciesForUsers(g.orgId, g.clientId, ids)));
+      policies = new Map(maps.flatMap((m) => Array.from(m.entries())));
     } catch (e) {
       logger.warn(`[transport-mode] could not resolve policies to label modes: ${(e as Error)?.message ?? e}`);
     }

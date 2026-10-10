@@ -99,6 +99,29 @@ function candidateOf(pings: HaltPing[]): Candidate {
   return { pings, firstMs: pings[0].ms, lastMs: pings[pings.length - 1].ms, lat: lat / pings.length, lng: lng / pings.length };
 }
 
+/**
+ * Drop an isolated stray fix: a ping that is outside HALT_RADIUS_M of BOTH its neighbours while those two are
+ * within HALT_RADIUS_M of each other (and no more than HALT_MAX_GAP_MS apart, so dropping it opens no hole the
+ * gap rule would refuse). One drifted GPS fix then no longer cuts a long stay in two - with 10-minute
+ * heartbeats that cut used to leave a 20-minute hole between the halves. Only isolated single fixes go: a
+ * real move (two or more pings away) is never touched, so nothing is hidden between two stays.
+ */
+function dropStrayFixes(pings: HaltPing[]): HaltPing[] {
+  const kept: HaltPing[] = [];
+  for (let i = 0; i < pings.length; i++) {
+    const prev = kept[kept.length - 1];
+    const cur = pings[i];
+    const next = pings[i + 1];
+    if (prev && next
+      && next.ms - prev.ms <= HALT_MAX_GAP_MS
+      && distM(prev, next) <= HALT_RADIUS_M
+      && distM(prev, cur) > HALT_RADIUS_M
+      && distM(cur, next) > HALT_RADIUS_M) continue;
+    kept.push(cur);
+  }
+  return kept;
+}
+
 /** Consecutive runs within HALT_RADIUS_M of their first ping, cut at gaps over HALT_MAX_GAP_MS. */
 function splitRuns(pings: HaltPing[]): HaltPing[][] {
   const runs: HaltPing[][] = [];
@@ -152,7 +175,7 @@ export function detectHalts(
   if (sorted.length < 2) return [];
 
   // Runs with at least two pings are the only ones that can have a duration.
-  const stationary = splitRuns(sorted).filter((r) => r.length >= 2).map(candidateOf);
+  const stationary = splitRuns(dropStrayFixes(sorted)).filter((r) => r.length >= 2).map(candidateOf);
 
   // Merge a run into an earlier one at the same place that ended less than HALT_MERGE_GAP_MS before it began.
   const merged: Candidate[] = [];
