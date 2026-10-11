@@ -5,6 +5,7 @@ import { ok, badRequest, todayDate, dbToday, toIST, isoDate, isUUID, scopeOwnOrg
 import { asyncHandler } from '../utils/asyncHandler';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { rulesForClients, lateFields } from '../services/attendanceRules.store';
+import { annotateTransportLabels } from '../services/transportMode.store';
 import { resolveLivePosition } from '../lib/livePosition';
 import { logger } from '../lib/logger';
 import { UNKNOWN_STORE_FALLBACK, buildFeedTitle, customerNamesBySubmission } from '../services/activityFeedTitle.service';
@@ -1033,6 +1034,8 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   if (attRecord) {
     enrichWithHours(attRecord);
     (attRecord as any).tff_count = orgTffCount || 0;
+    // Mode of transport (clients that ask for it at clock-in): the label for the id. No query unless the row carries a mode.
+    await annotateTransportLabels([attRecord as any], { orgId: user.org_id, clientId: user.client_id });
   }
 
   // 3. Today's Route Plans (depends on userEmail from profile)
@@ -1170,6 +1173,12 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     checkout_selfie_url: attRecord.checkout_selfie_url,
     breaks: attRecord.breaks || [],
     ...homeLate,
+    // Without these the apps' Home refresh replaced the record they hold (which had the mode) with one that
+    // did not, so "Travel mode not set" came back after every refresh even though the mode was saved.
+    // Only present when a mode was recorded, so clients that never use it get the same payload as before.
+    ...((attRecord as any).transport_mode
+      ? { transport_mode: (attRecord as any).transport_mode, transport_label: (attRecord as any).transport_label ?? null }
+      : {}),
   } : null;
 
   return ok(res, {

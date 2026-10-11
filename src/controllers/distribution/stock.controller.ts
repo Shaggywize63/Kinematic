@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../../lib/supabase';
+import { fetchRelated } from '../../lib/relations';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
@@ -57,15 +58,21 @@ export const list = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!distributorId) return badRequest(res, 'distributor_id is required');
 
   const { data, error } = await supabaseAdmin.from('distribution_distributor_stock')
-    .select('id, distributor_id, sku_id, qty, reserved, updated_at, skus:sku_id(name, sku_code, category)')
+    .select('id, distributor_id, sku_id, qty, reserved, updated_at')
     .eq('org_id', user.org_id).eq('distributor_id', distributorId)
     .order('qty', { ascending: true });
   if (error) return badRequest(res, error.message);
+  // SKU details by id, not a `skus:sku_id(...)` embed: this table carries TWO foreign keys to skus on some
+  // databases (the Kinematic one), which made the embed fail with "more than one relationship was found".
+  const skuById = await fetchRelated('skus', (data || []).map((r: any) => r.sku_id), 'name, sku_code, category');
   const lowOnly = req.query.low === '1';
-  const rows = (data || []).map((r: any) => ({
-    ...r, available: (r.qty ?? 0) - (r.reserved ?? 0),
-    sku_name: r.skus?.name ?? null, sku_code: r.skus?.sku_code ?? null, category: r.skus?.category ?? null,
-  }));
+  const rows = (data || []).map((r: any) => {
+    const sku = skuById.get(String(r.sku_id)) as { name?: string; sku_code?: string; category?: string } | undefined;
+    return {
+      ...r, skus: sku ?? null, available: (r.qty ?? 0) - (r.reserved ?? 0),
+      sku_name: sku?.name ?? null, sku_code: sku?.sku_code ?? null, category: sku?.category ?? null,
+    };
+  });
   ok(res, lowOnly ? rows.filter((r) => r.available <= 0) : rows);
 });
 

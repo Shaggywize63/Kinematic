@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../../lib/supabase';
+import { fetchRelated } from '../../lib/relations';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound, conflict, forbidden, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
@@ -58,13 +59,17 @@ export const get = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getDemoOrder());
   const { data, error } = await supabaseAdmin.from('orders')
-    // Embed the seller (distributor) so the mobile "Print Bill" receipt can show
-    // the company name + GSTIN on the header, not just the outlet.
-    .select('*, order_items(*), distributor:distributor_id(name, gstin, address, state_code, place_of_supply)')
+    .select('*, order_items(*)')
     .eq('id', req.params.id).eq('org_id', user.org_id).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!data) return notFound(res, 'Order not found');
-  ok(res, data);
+  // The seller (distributor), so the mobile "Print Bill" receipt can show the company name + GSTIN on the
+  // header, not just the outlet. Looked up by id rather than embedded through a foreign key: not every
+  // tenant database has a constraint from orders.distributor_id, and a missing one used to fail the whole
+  // order detail with "Could not find a relationship ...". Same shape as the embed (null when absent).
+  const sellers = await fetchRelated('distributors', [(data as { distributor_id?: unknown }).distributor_id],
+    'name, gstin, address, state_code, place_of_supply');
+  ok(res, { ...data, distributor: sellers.get(String((data as { distributor_id?: unknown }).distributor_id)) ?? null });
 });
 
 // ── Approve ─────────────────────────────────────────────────────────────────

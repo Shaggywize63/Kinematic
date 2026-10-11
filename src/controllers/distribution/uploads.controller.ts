@@ -4,8 +4,14 @@ import { AuthRequest } from '../../types';
 import { asyncHandler, ok, badRequest, isDemo } from '../../utils';
 import { signUpload, UploadKind } from '../../utils/upload-signer';
 
+// The Android app has always asked for "distribution/cheque" / "distribution/return" (its own bucket-prefix
+// wording), which the strict enum refused with a 400 - so a cheque payment's photo could never be uploaded.
+// Accept that prefix too; the stored path is unchanged (`org/<id>/distribution/<kind>/...`).
 const signSchema = z.object({
-  kind: z.enum(['cheque', 'pod', 'return', 'signature', 'kyc']),
+  kind: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().toLowerCase().replace(/^distribution\//, '') : v),
+    z.enum(['cheque', 'pod', 'return', 'signature', 'kyc']),
+  ),
   ext: z.string().regex(/^[a-z0-9]{1,8}$/i).optional(),
 });
 
