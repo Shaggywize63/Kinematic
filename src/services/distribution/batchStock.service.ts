@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '../../lib/supabase';
+import { fetchRelated } from '../../lib/relations';
 import { applyStockDelta } from '../../controllers/distribution/stock.controller';
 
 /**
@@ -167,7 +168,7 @@ export async function listBatches(opts: {
   status?: BatchStatus | 'all'; nearDays?: number; includeEmpty?: boolean;
 }): Promise<Array<BatchRow & { status: BatchStatus; days_to_expiry?: number; sku_name: string | null; sku_code: string | null }>> {
   let q = supabaseAdmin.from('distribution_stock_batches')
-    .select('*, skus:sku_id(name, sku_code, category, expiry_alert_days)')
+    .select('*')
     .eq('org_id', opts.orgId)
     .order('expiry_date', { ascending: true, nullsFirst: false })
     .order('received_at', { ascending: true });
@@ -179,8 +180,16 @@ export async function listBatches(opts: {
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const near = opts.nearDays ?? 30;
+  // SKU details by id rather than a foreign-key embed (see lib/relations): a tenant database without the
+  // batches -> skus constraint used to fail the whole listing. `skus` keeps the embed's shape (null if absent).
+  const skuById = await fetchRelated('skus',
+    (data || []).map((r: unknown) => (r as { sku_id?: unknown }).sku_id),
+    'name, sku_code, category, expiry_alert_days');
   const rows = (data || []).map((raw: unknown) => {
-    const b = raw as BatchRow & { skus?: { name?: string; sku_code?: string; expiry_alert_days?: number | null } };
+    const b = {
+      ...(raw as BatchRow),
+      skus: skuById.get(String((raw as { sku_id?: unknown }).sku_id)) ?? null,
+    } as unknown as BatchRow & { skus?: { name?: string; sku_code?: string; expiry_alert_days?: number | null } | null };
     let status: BatchStatus = 'active';
     let days_to_expiry: number | undefined;
     if (b.expiry_date) {

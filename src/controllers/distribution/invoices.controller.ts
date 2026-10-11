@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../../lib/supabase';
+import { fetchRelated } from '../../lib/relations';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound, conflict, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
@@ -54,15 +55,28 @@ export const invoiceForOrder = asyncHandler(async (req: AuthRequest, res: Respon
   const user = req.user!;
   if (isDemo(user)) return ok(res, { ...getDemoInvoice(), invoice_items: [] });
   const { data: invoice, error } = await supabaseAdmin.from('invoices')
-    .select('*, invoice_items(*), distributor:distributor_id(name, gstin, address, state_code, place_of_supply), outlet:outlet_id(name, address)')
+    .select('*, invoice_items(*)')
     .eq('order_id', req.params.id).eq('org_id', user.org_id)
     .order('issued_at', { ascending: false }).limit(1).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!invoice) return notFound(res, 'No invoice for this order yet');
+  // Seller and buyer by id, not through foreign-key embeds (see lib/relations: a tenant database without the
+  // constraint used to fail this whole request). Same shape as before: null when the row is not there.
+  const inv = invoice as { distributor_id?: unknown; outlet_id?: unknown };
+  const [sellers, outlets] = await Promise.all([
+    fetchRelated('distributors', [inv.distributor_id], 'name, gstin, address, state_code, place_of_supply'),
+    fetchRelated('stores', [inv.outlet_id], 'name, address'),
+  ]);
   // Buyer GSTIN lives on outlet_distribution_ext (not embeddable via FK here).
   const { data: buyerExt } = await supabaseAdmin.from('outlet_distribution_ext')
     .select('gstin, state_code').eq('outlet_id', (invoice as any).outlet_id).maybeSingle();
-  ok(res, { ...invoice, buyer_gstin: buyerExt?.gstin ?? null, buyer_state_code: buyerExt?.state_code ?? null });
+  ok(res, {
+    ...invoice,
+    distributor: sellers.get(String(inv.distributor_id)) ?? null,
+    outlet: outlets.get(String(inv.outlet_id)) ?? null,
+    buyer_gstin: buyerExt?.gstin ?? null,
+    buyer_state_code: buyerExt?.state_code ?? null,
+  });
 });
 
 // ── Issue invoice from approved order ───────────────────────────────────────

@@ -284,7 +284,7 @@ export const getMySubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, buildPaginatedResult(getMockSubmissions(new Date().toISOString().split('T')[0]).data, 5, 1, 20));
   const { page, limit, from, to } = getPagination(req.query.page as any, req.query.limit as any);
-  const { data, error, count } = await supabaseAdmin.from('form_submissions').select('*, builder_forms!left(title), houses!left(name)', { count: 'exact' }).eq('user_id', user.id).order('submitted_at', { ascending: false }).range(from, to);
+  const { data, error, count } = await supabaseAdmin.from('form_submissions').select('*, builder_forms:template_id(title)', { count: 'exact' }).eq('user_id', user.id).order('submitted_at', { ascending: false }).range(from, to);
   if (error) return badRequest(res, error.message);
   return ok(res, buildPaginatedResult(data || [], count || 0, page, limit));
 });
