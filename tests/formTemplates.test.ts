@@ -50,3 +50,116 @@ describe('GET /forms/templates', () => {
     expect(statusFilters()).toEqual(['neq:published']);
   });
 });
+
+/**
+ * The Android/iOS shape built by getTemplates used to drop the builder's per-question `validation`
+ * (a rating's "Max Stars" = validation.max, min/max length, …). It is now passed through — additively.
+ */
+describe('GET /forms/templates — per-question validation', () => {
+  const question = (over: Record<string, unknown>) => ({
+    id: 'q-x',
+    label: 'Q',
+    qtype: 'text',
+    q_order: 1,
+    is_required: false,
+    options: null,
+    ...over,
+  });
+
+  const formWith = (questions: unknown[]) => ({
+    id: 'f-1',
+    title: 'Customer Feedback',
+    description: null,
+    activity_id: null,
+    builder_questions: questions,
+  });
+
+  // asyncHandler does not hand its promise back, so wait for the response itself (or an error to `next`).
+  function fields(): Promise<any[]> {
+    return new Promise((resolve, reject) => {
+      const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn((body) => resolve(body.data[0].form_fields)) };
+      (getTemplates as any)({ user: USER, query: {} }, res, (err: unknown) => reject(err ?? new Error('next() called')));
+    });
+  }
+
+  it('passes validation (e.g. a rating\'s Max Stars) through to each form_field', async () => {
+    __mock.setDefault('builder_forms', {
+      data: [
+        formWith([
+          question({ id: 'q-rating', label: 'Rate us', qtype: 'rating', q_order: 1, validation: { max: 7 } }),
+          question({ id: 'q-text', label: 'Comment', qtype: 'text', q_order: 2, validation: { minLength: 3, maxLength: 120 } }),
+        ]),
+      ],
+    });
+
+    const f = await fields();
+
+    expect(f.find((x) => x.id === 'q-rating').validation).toEqual({ max: 7 });
+    expect(f.find((x) => x.id === 'q-text').validation).toEqual({ minLength: 3, maxLength: 120 });
+  });
+
+  it('is an empty object when the question has no validation (null or missing)', async () => {
+    __mock.setDefault('builder_forms', {
+      data: [
+        formWith([
+          question({ id: 'q-null', q_order: 1, validation: null }),
+          question({ id: 'q-missing', q_order: 2 }),
+        ]),
+      ],
+    });
+
+    const f = await fields();
+
+    expect(f.find((x) => x.id === 'q-null').validation).toEqual({});
+    expect(f.find((x) => x.id === 'q-missing').validation).toEqual({});
+  });
+
+  it('only ADDS the key: every field the apps already read is unchanged', async () => {
+    __mock.setDefault('builder_forms', {
+      data: [
+        formWith([
+          question({
+            id: 'q-1',
+            label: 'Rate us',
+            qtype: 'rating',
+            placeholder: 'tap',
+            helper_text: 'help',
+            is_required: true,
+            q_order: 3,
+            keyboard_type: 'number',
+            image_count: 2,
+            camera_only: true,
+            is_consent: false,
+            depends_on_id: 'q-0',
+            depends_on_value: 'yes',
+            options: ['a', 'b'],
+            validation: { max: 5 },
+          }),
+        ]),
+      ],
+    });
+
+    const f = await fields();
+
+    expect(f).toEqual([
+      {
+        id: 'q-1',
+        label: 'Rate us',
+        field_key: 'q-1',
+        field_type: 'rating',
+        placeholder: 'tap',
+        help_text: 'help',
+        is_required: true,
+        sort_order: 3,
+        keyboard_type: 'number',
+        image_count: 2,
+        camera_only: true,
+        is_consent: false,
+        depends_on_id: 'q-0',
+        depends_on_value: 'yes',
+        options: ['a', 'b'],
+        validation: { max: 5 },
+      },
+    ]);
+  });
+});

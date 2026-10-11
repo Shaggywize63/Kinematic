@@ -21,3 +21,12 @@ ALTER TABLE public.attendance ADD COLUMN IF NOT EXISTS transport_mode text;
 
 COMMENT ON COLUMN public.attendance.transport_mode IS
   'Mode of transport for the day (e.g. two_wheeler, car, public_transport, other, or a vehicle id from the user''s expense policy). Written only when the client''s attendance_rules.track_transport_mode is true.';
+
+-- ── Reload the data layer's schema cache ────────────────────────────────────
+-- The data layer (PostgREST) caches the schema it introspected at startup and only refreshes it from its
+-- own DDL event trigger. A DDL statement applied outside that trigger (a hand-run script, the SQL editor on
+-- a self-hosted stack, a migration runner) is INVISIBLE to the API until the cache is reloaded: the new
+-- column exists in Postgres but writes that name it are silently dropped / rejected. That is exactly what
+-- made check-ins lose `transport_mode` for a day after this migration was first applied. NOTIFY is
+-- delivered when the transaction commits, is a no-op if nothing is listening, and is safe to re-run.
+NOTIFY pgrst, 'reload schema';

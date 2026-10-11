@@ -94,7 +94,10 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
       is_consent: q.is_consent,
       depends_on_id: q.depends_on_id,
       depends_on_value: q.depends_on_value,
-      options: q.options || []
+      options: q.options || [],
+      // Builder validation rules (e.g. a rating's "Max Stars" = validation.max, min/max length).
+      // Additive: older app builds ignore the unknown key.
+      validation: q.validation || {}
     })).sort((a: any, b: any) => a.sort_order - b.sort_order)
   }));
 
