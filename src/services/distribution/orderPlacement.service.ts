@@ -12,6 +12,7 @@
 // order (no salesman, no geofence, no caps).
 // ═══════════════════════════════════════════════════════════
 import { supabaseAdmin } from '../../lib/supabase';
+import { insertOrderWithFreeNo } from './orderNumber';
 import { buildPriceContext } from '../../controllers/distribution/orders.controller';
 import { priceCart, CartLineInput } from '../../services/order-pricer';
 import { applySchemes, SCHEME_ENGINE_VERSION } from '../../services/scheme-engine';
@@ -115,7 +116,7 @@ export async function placeDraftOrder(
     created_by: user.id,
   };
 
-  const { data: order, error } = await supabaseAdmin.from('orders').insert(orderRow).select().single();
+  const { data: order, error } = await insertOrderWithFreeNo(orderRow, user.org_id);
   if (error) throw new Error(error.message);
 
   const itemRows = priced.lines.map((l: any) => ({

@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../../lib/supabase';
 import { fetchRelated } from '../../lib/relations';
+import { insertOrderWithFreeNo } from '../../services/distribution/orderNumber';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound, conflict, forbidden, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
@@ -403,7 +404,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     created_by: user.id,
   };
 
-  const { data: order, error } = await supabaseAdmin.from('orders').insert(orderRow).select().single();
+  const { data: order, error } = await insertOrderWithFreeNo(orderRow, user.org_id);
   if (error) {
     if (error.code === '23505') return conflict(res, 'Duplicate order (idempotency or order_no)');
     return badRequest(res, error.message);
