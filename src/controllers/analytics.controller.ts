@@ -6,6 +6,8 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { rulesForClients, lateFields } from '../services/attendanceRules.store';
 import { resolveLivePosition } from '../lib/livePosition';
+import { logger } from '../lib/logger';
+import { UNKNOWN_STORE_FALLBACK, buildFeedTitle, customerNamesBySubmission } from '../services/activityFeedTitle.service';
 import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome, getMockBroadcasts, getMockLearningMaterials } from '../utils/demoData';
 
 /* ─────────────────────────────────────────────────────────────
@@ -259,12 +261,16 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
 
   const { data: submissions } = await submissionQuery;
 
+  // Customer name for the card title (additive; best-effort — see feedCustomerNames). `null` means
+  // the lookup failed, in which case the items carry no customer_name / title / subtitle at all.
+  const customerNames = await feedCustomerNames((submissions || []).map((s) => s.id), limit);
+
   const feed = (submissions || []).map((s) => {
     const u = s.users as unknown as { name: string; city: string | null } | null;
     const f = s.builder_forms as unknown as { title: string } | null;
-    return { 
-      id: s.id, 
-      outlet_name: s.outlet_name || 'Unknown Store',
+    const item = {
+      id: s.id,
+      outlet_name: s.outlet_name || UNKNOWN_STORE_FALLBACK,
       submitted_at: s.submitted_at,
       is_converted: s.is_converted,
       user: { name: u?.name || 'Unknown', zones: { city: u?.city || '', name: '' } },
@@ -272,10 +278,47 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
       description: `${u?.name || 'Unknown'} submitted ${f?.title || 'Form'}`,
       form_name: f?.title || 'General Form',
     };
+    if (!customerNames) return item;
+    const customer_name = customerNames.get(s.id) ?? null;
+    const { title, subtitle } = buildFeedTitle({ customerName: customer_name, outletName: s.outlet_name, formName: f?.title });
+    return { ...item, customer_name, title, subtitle };
   }).sort((a, b) => new Date(b.submitted_at!).getTime() - new Date(a.submitted_at!).getTime());
 
   return ok(res, feed);
 });
+
+/** Hard ceiling on the extra query's IN list: the feed's own max `limit`. */
+const FEED_MAX_LIMIT = 50;
+
+/**
+ * ONE extra read for the page's submissions: their answers (form_responses) with each question's label
+ * (builder_questions), reduced to a customer name per submission id. The ids come from the already
+ * scoped submissions query, so no further org/client scoping is needed; they are re-validated as UUIDs
+ * and capped to the feed's limit (default 20, max 50) before going into the IN list.
+ *
+ * Returns null when the lookup could not be done (an error, or an exception) so the caller leaves the
+ * new fields off — the feed itself must never fail because of this. Returns an empty map when there is
+ * nothing to look up (no valid ids, no query issued).
+ */
+async function feedCustomerNames(ids: ReadonlyArray<unknown>, limit: number): Promise<Map<string, string | null> | null> {
+  const cap = Number.isFinite(limit) && limit > 0 ? Math.min(limit, FEED_MAX_LIMIT) : FEED_MAX_LIMIT;
+  const validIds = Array.from(new Set(ids.filter((id): id is string => typeof id === 'string' && isUUID(id)))).slice(0, cap);
+  if (!validIds.length) return new Map();
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('form_responses')
+      .select('submission_id, value_text, builder_questions(label)')
+      .in('submission_id', validIds);
+    if (error) {
+      logger.warn(`[Analytics] activity-feed customer-name lookup failed: ${error.message}`);
+      return null;
+    }
+    return customerNamesBySubmission(data as any[] | null);
+  } catch (e: any) {
+    logger.warn(`[Analytics] activity-feed customer-name lookup threw: ${e?.message || e}`);
+    return null;
+  }
+}
 
 /* ── GET /api/v1/analytics/hourly ────────────────────────── */
 export const getHourly = asyncHandler<AuthRequest>(async (req, res) => {

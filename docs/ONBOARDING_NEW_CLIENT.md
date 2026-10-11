@@ -86,5 +86,11 @@ setup; steps 1–6 should eventually be wrapped in a script.
 ## Schema / code changes across the fleet
 - DB migrations: apply to **every** project (staging org first, then prod) — the
   schemas must stay identical for promotion to be meaningful.
+- Every DDL migration must end with `NOTIFY pgrst, 'reload schema';`. The data
+  layer (PostgREST) caches the schema and a DDL applied outside its event trigger
+  stays invisible to the API until it is reloaded (a new column is silently
+  dropped from writes, a new table fails with "not found in the schema cache"). See `migrations/attendance_transport_mode.sql`,
+  where this once made check-ins lose `transport_mode` for a day. It is
+  idempotent, so re-running it is always safe.
 - Code: the `staging` branch → Vercel/Railway staging env (pointed at staging
   orgs); merge to `main` → production.
