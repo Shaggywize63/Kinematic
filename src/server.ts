@@ -16,6 +16,7 @@ import { dispatchPendingPushes } from './services/notifications.service';
 import { runRouteDeviationScan } from './services/routeDeviation.service';
 import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './services/alertScans.service';
 import { dispatchInvoiceRenewalReminders } from './services/finance/recurringReminders.service';
+import { runScheduledTasks, runProactiveNudges } from './services/crm/ai/kiniScheduler.service';
 import { knownProjectKeys, runWithProject } from './lib/projects';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -205,6 +206,42 @@ if (String(process.env.CRM_ACTIVITY_REMINDER_ENABLED ?? 'true').toLowerCase() !=
       .catch((e) => logger.warn(`[activity-reminders] tick failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[activity-reminders] scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// KINI scheduled reminders. Drains kini_scheduled_tasks whose run_at has passed —
+// the reminders a rep sets from the Kini copilot via `kini_schedule_reminder` —
+// into notification rows; delivery is left to the push-dispatch tick above. `once`
+// tasks complete, daily/weekly advance to their next run. Idempotent and safe on
+// empty. Runs across ALL tenant projects: without this tick the drainer was only
+// reachable via the unused /cron/kini-scheduled route, which additionally ran the
+// DEFAULT (Tata) project only — so Kini reminders set on the Kinematic tenant were
+// never delivered at all. Toggle with KINI_SCHEDULED_ENABLED=false; tune with
+// KINI_SCHEDULED_INTERVAL_SEC (default 60s).
+if (String(process.env.KINI_SCHEDULED_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(30, Number(process.env.KINI_SCHEDULED_INTERVAL_SEC ?? 60)) * 1000;
+  setInterval(() => {
+    forEachProject('kini-scheduled', () => runScheduledTasks(200))
+      .catch((e) => logger.warn(`[kini-scheduled] tick failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[kini-scheduled] scheduler enabled (every ${everyMs / 1000}s, all projects)`);
+}
+
+// KINI proactive nudges. Once a day at the configured UTC hour, per org (gated
+// behind the kini_agentic_v2 flag), scan a few high-signal conditions — cold deals
+// and reps with no check-in today — and push a concise nudge via the same
+// notifications path. Bounded, idempotent (same-day dedup) and self-gating, across
+// all tenant projects. Like the scheduled-reminders drainer it was previously only
+// reachable via the unused /cron/kini-proactive route. Toggle with
+// KINI_PROACTIVE_ENABLED=false; set the hour with KINI_PROACTIVE_HOUR_UTC (0-23,
+// default 5 ≈ 10:30 IST).
+if (String(process.env.KINI_PROACTIVE_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const hour = Math.min(23, Math.max(0, Number(process.env.KINI_PROACTIVE_HOUR_UTC ?? 5)));
+  setInterval(() => {
+    if (new Date().getUTCHours() !== hour) return;
+    forEachProject('kini-proactive', () => runProactiveNudges())
+      .catch((e) => logger.warn(`[kini-proactive] tick failed: ${e?.message ?? e}`));
+  }, 3600 * 1000).unref();
+  logger.info(`[kini-proactive] scheduler enabled (fires at ${hour}:00 UTC, all projects)`);
 }
 
 // Tracking watchdog. Phones kill the background location service; every few minutes find reps who are
