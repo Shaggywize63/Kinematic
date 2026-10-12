@@ -2,6 +2,7 @@ import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../types';
 import { forbidden, unauthorized } from '../utils/response';
 import { isDemo } from '../utils/demoData';
+import { supabaseAdmin } from '../lib/supabase';
 
 /**
  * Middleware to check for module-level access.
@@ -219,15 +220,36 @@ export function requireAnyModuleAccess(moduleNames: string[]) {
   };
 }
 
+// Per-org cache of "does this tenant use the city system at all?" — i.e. does
+// it have any rows in `cities`. A client with ZERO cities configured (e.g.
+// Agrisynx) does not scope anything by city, so a city_manager there must NOT
+// be blocked for lacking a city assignment. Cached briefly so the check costs
+// at most one small query per org every few minutes.
+const orgHasCitiesCache = new Map<string, { value: boolean; at: number }>();
+const ORG_CITIES_TTL_MS = 5 * 60 * 1000;
+
+async function orgHasCities(orgId: string): Promise<boolean> {
+  const hit = orgHasCitiesCache.get(orgId);
+  if (hit && Date.now() - hit.at < ORG_CITIES_TTL_MS) return hit.value;
+  const { count, error } = await supabaseAdmin
+    .from('cities')
+    .select('id', { count: 'exact', head: true })
+    .eq('org_id', orgId);
+  if (error) throw error;
+  const value = (count ?? 0) > 0;
+  orgHasCitiesCache.set(orgId, { value, at: Date.now() });
+  return value;
+}
+
 /**
  * Middleware to enforce city-level data restriction.
  * City Managers only see data for their assigned cities.
  */
-export function enforceCityScope(req: AuthRequest, res: Response, next: NextFunction) {
+export async function enforceCityScope(req: AuthRequest, res: Response, next: NextFunction) {
   if (!req.user) return unauthorized(res);
   if (isDemo(req.user)) return next();
 
-  const { role, assigned_cities } = req.user;
+  const { role, assigned_cities, org_id } = req.user;
 
   // Only City Managers are restricted by assigned_cities (per requirements)
   // Admins and Sub-Admins have global access unless specified otherwise
@@ -235,12 +257,26 @@ export function enforceCityScope(req: AuthRequest, res: Response, next: NextFunc
     return next();
   }
 
-  if (!assigned_cities || assigned_cities.length === 0) {
-    // If a City Manager has no city assigned → no data access
-    return forbidden(res, 'Access denied: No cities assigned to your account.');
+  // A City Manager with cities assigned is scoped to them downstream (getCityFilter).
+  if (assigned_cities && assigned_cities.length > 0) {
+    return next();
   }
 
-  next();
+  // No cities assigned. Block ONLY when the tenant actually USES the city
+  // system (has cities configured). A client with no cities at all does not
+  // scope by city, so its city_manager is simply unrestricted (parity with an
+  // admin) rather than locked out. This keeps the hard block unchanged for
+  // city-using tenants (e.g. Tata) while letting no-city clients (e.g.
+  // Agrisynx) work without anyone assigning cities. On a lookup failure we
+  // keep the previous, safe behaviour and block.
+  try {
+    if (org_id && (await orgHasCities(org_id))) {
+      return forbidden(res, 'Access denied: No cities assigned to your account.');
+    }
+  } catch {
+    return forbidden(res, 'Access denied: No cities assigned to your account.');
+  }
+  return next();
 }
 
 /**
