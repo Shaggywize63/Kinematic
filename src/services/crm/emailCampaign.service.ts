@@ -319,16 +319,147 @@ async function loadCampaign(scope: Scope, id: string) {
   return data as any;
 }
 
-export async function listRecipients(scope: Scope, id: string, query: Record<string, unknown> = {}) {
-  await loadCampaign(scope, id);
-  let q = supabaseAdmin.from(RECIPIENTS).select('*').eq('campaign_id', id);
-  if (query.status) q = q.eq('status', String(query.status));
-  const limit = Math.min(Number(query.limit ?? 100), 500);
-  const page = Math.max(Number(query.page ?? 1), 1);
+// Engagement a recipient picked up from its linked crm_email_logs row. These
+// are derived from the log's open_count / click_count / status so the recipient
+// list and the Performance tiles tell the same story.
+export interface RecipientEngagement {
+  opened: boolean;              // log.open_count > 0
+  clicked: boolean;             // log.click_count > 0
+  open_count: number;
+  click_count: number;
+  engagement_status: string | null;  // log.status (e.g. 'bounced'/'unsubscribed'), else null
+  opened_at: string | null;          // first open time, if tracked
+  clicked_at: string | null;         // first click time, if tracked
+}
+
+const EMPTY_ENGAGEMENT: RecipientEngagement = {
+  opened: false, clicked: false, open_count: 0, click_count: 0,
+  engagement_status: null, opened_at: null, clicked_at: null,
+};
+
+interface LogEngagementRow {
+  id: string;
+  status: string | null;
+  open_count: number | null;
+  click_count: number | null;
+  opened_at: string | null;
+  first_clicked_at: string | null;
+}
+
+const ID_CHUNK = 500; // keep `.in(...)` URLs short enough for a 50k-row CSV
+
+const engagementFromLog = (l: LogEngagementRow | undefined): RecipientEngagement => {
+  if (!l) return { ...EMPTY_ENGAGEMENT };
+  const openCount = l.open_count ?? 0;
+  const clickCount = l.click_count ?? 0;
+  return {
+    opened: openCount > 0,
+    clicked: clickCount > 0,
+    open_count: openCount,
+    click_count: clickCount,
+    engagement_status: l.status ?? null,
+    opened_at: l.opened_at ?? null,
+    clicked_at: l.first_clicked_at ?? null,
+  };
+};
+
+/** Fetch the engagement logs for a set of log ids (chunked), keyed by log id. */
+async function fetchLogsByIds(scope: Scope, ids: string[]): Promise<Map<string, LogEngagementRow>> {
+  const map = new Map<string, LogEngagementRow>();
+  const unique = Array.from(new Set(ids.filter((x): x is string => !!x)));
+  for (let i = 0; i < unique.length; i += ID_CHUNK) {
+    const chunk = unique.slice(i, i + ID_CHUNK);
+    const { data, error } = await supabaseAdmin.from(LOGS)
+      .select('id, status, open_count, click_count, opened_at, first_clicked_at')
+      .eq('org_id', scope.orgId).in('id', chunk);
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    for (const l of (data || []) as LogEngagementRow[]) map.set(l.id, l);
+  }
+  return map;
+}
+
+/** Attach engagement (from the linked log) to each delivery-list recipient row. */
+async function enrichWithEngagement(scope: Scope, rows: any[]): Promise<any[]> {
+  const logs = await fetchLogsByIds(scope, rows.map((r) => r.email_log_id).filter(Boolean));
+  return rows.map((r) => ({ ...r, ...engagementFromLog(r.email_log_id ? logs.get(r.email_log_id) : undefined) }));
+}
+
+/**
+ * Engagement-driven list: who OPENED / CLICKED / UNSUBSCRIBED / BOUNCED. These
+ * tiles are computed from crm_email_logs in getAnalytics(), so we drive the list
+ * from the same table with the same predicate to guarantee the drill-down count
+ * matches the tile. Rows are shaped like the recipient list (email, first_name,
+ * delivery status joined back from RECIPIENTS by email_log_id), plus engagement.
+ */
+async function listRecipientsByEngagement(
+  scope: Scope, campaignId: string, engagement: string, limit: number, page: number,
+): Promise<any[]> {
+  let q = supabaseAdmin.from(LOGS)
+    .select('id, to_email, status, open_count, click_count, opened_at, first_clicked_at, created_at')
+    .eq('org_id', scope.orgId).eq('campaign_id', campaignId);
+  switch (engagement) {
+    case 'opened': q = q.gt('open_count', 0); break;
+    case 'clicked': q = q.gt('click_count', 0); break;
+    case 'unsubscribed': q = q.eq('status', 'unsubscribed'); break;
+    case 'bounced': q = q.eq('status', 'bounced'); break;
+    default: return []; // unknown filter → empty, never an unfiltered dump
+  }
   q = q.order('created_at', { ascending: true }).range((page - 1) * limit, page * limit - 1);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return data ?? [];
+  const logs = (data || []) as Array<LogEngagementRow & { to_email: string | null; created_at: string }>;
+
+  // Join first_name + delivery status back from the recipient rows (by log id).
+  const recByLog = new Map<string, { first_name: string | null; status: string | null; lead_id: string | null; email: string | null }>();
+  const logIds = logs.map((l) => l.id);
+  for (let i = 0; i < logIds.length; i += ID_CHUNK) {
+    const chunk = logIds.slice(i, i + ID_CHUNK);
+    const { data: recs } = await supabaseAdmin.from(RECIPIENTS)
+      .select('email_log_id, first_name, status, lead_id, email')
+      .eq('campaign_id', campaignId).in('email_log_id', chunk);
+    for (const rr of (recs || []) as any[]) if (rr.email_log_id) recByLog.set(rr.email_log_id, rr);
+  }
+
+  return logs.map((l) => {
+    const rec = recByLog.get(l.id);
+    return {
+      id: l.id,                 // log id doubles as a stable list key
+      campaign_id: campaignId,
+      email_log_id: l.id,
+      lead_id: rec?.lead_id ?? null,
+      email: rec?.email ?? l.to_email ?? '',
+      first_name: rec?.first_name ?? null,
+      status: rec?.status ?? null,   // delivery status (sent/skipped/…) when known
+      skip_reason: null,
+      error: null,
+      sent_at: null,
+      created_at: l.created_at,
+      ...engagementFromLog(l),
+    };
+  });
+}
+
+/** Shared fetch for the recipients list and its CSV export (same filters). */
+async function fetchRecipientRows(
+  scope: Scope, campaignId: string, query: Record<string, unknown>, limit: number, page: number,
+): Promise<any[]> {
+  // `engagement` and `status` are mutually exclusive; engagement wins.
+  const engagement = query.engagement ? String(query.engagement) : '';
+  if (engagement) return listRecipientsByEngagement(scope, campaignId, engagement, limit, page);
+
+  let q = supabaseAdmin.from(RECIPIENTS).select('*').eq('campaign_id', campaignId);
+  if (query.status) q = q.eq('status', String(query.status));
+  q = q.order('created_at', { ascending: true }).range((page - 1) * limit, page * limit - 1);
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return enrichWithEngagement(scope, (data || []) as any[]);
+}
+
+export async function listRecipients(scope: Scope, id: string, query: Record<string, unknown> = {}) {
+  await loadCampaign(scope, id);
+  const limit = Math.min(Number(query.limit ?? 100), 500);
+  const page = Math.max(Number(query.page ?? 1), 1);
+  return fetchRecipientRows(scope, id, query, limit, page);
 }
 
 export async function createCampaign(
@@ -784,19 +915,18 @@ export async function getUsage(scope: Scope) {
   return { campaigns: campaigns.count ?? 0, emails_this_month: sent30.count ?? 0 };
 }
 
-export async function recipientsCsv(scope: Scope, id: string): Promise<string> {
+export async function recipientsCsv(scope: Scope, id: string, query: Record<string, unknown> = {}): Promise<string> {
   await loadCampaign(scope, id);
-  const { data } = await supabaseAdmin.from(RECIPIENTS)
-    .select('email, first_name, status, skip_reason, error, sent_at')
-    .eq('campaign_id', id).order('created_at', { ascending: true }).limit(MAX_AUDIENCE);
-  const header = ['email', 'first_name', 'status', 'skip_reason', 'error', 'sent_at'];
+  // Same filter (status / engagement) as the list, for parity — just unpaginated.
+  const rows = await fetchRecipientRows(scope, id, query, MAX_AUDIENCE, 1);
+  const header = ['email', 'first_name', 'status', 'skip_reason', 'error', 'sent_at', 'opened', 'clicked', 'open_count', 'click_count'];
   const esc = (v: unknown) => {
     const s = v == null ? '' : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = [header.join(',')];
-  for (const r of (data || []) as any[]) {
-    lines.push([r.email, r.first_name, r.status, r.skip_reason, r.error, r.sent_at].map(esc).join(','));
+  for (const r of rows as any[]) {
+    lines.push([r.email, r.first_name, r.status, r.skip_reason, r.error, r.sent_at, r.opened, r.clicked, r.open_count, r.click_count].map(esc).join(','));
   }
   return lines.join('\n');
 }

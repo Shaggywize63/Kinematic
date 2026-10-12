@@ -5094,7 +5094,7 @@ emailCampaigns.get('/:id', wrap(async (req, res) => res.json({ success: true, da
 emailCampaigns.get('/:id/recipients', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.listRecipients(ecScope(req), req.params.id, req.query) })));
 emailCampaigns.get('/:id/analytics', wrap(async (req, res) => res.json({ success: true, data: await emailCampaignSvc.getAnalytics(ecScope(req), req.params.id) })));
 emailCampaigns.get('/:id/recipients.csv', wrap(async (req, res) => {
-  const csv = await emailCampaignSvc.recipientsCsv(ecScope(req), req.params.id);
+  const csv = await emailCampaignSvc.recipientsCsv(ecScope(req), req.params.id, req.query);
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="email-campaign-${req.params.id}.csv"`);
   res.send(csv);
