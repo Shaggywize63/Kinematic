@@ -37,6 +37,7 @@ import * as policies from '../services/expenses/policy.service';
 import * as reports from '../services/expenses/claimReports.service';
 import { uploadReceipt } from '../services/expenses/receipts.service';
 import { odometerHistory } from '../services/expenses/odometerHistory.service';
+import * as odometerTrip from '../services/expenses/odometerTrip.service';
 import { scanReceipt, ReceiptMediaType } from '../services/expenses/receiptScan.service';
 
 const router = Router();
@@ -181,6 +182,8 @@ const policySchema = z.object({
     odometer_camera_only: z.boolean().optional(),
     // Claim the day's distance from the rep's GPS instead of odometer readings (needs vehicle_rates).
     gps_distance: z.boolean().optional(),
+    // Two-step daily odometer trip (start in the morning, end in the evening) on the Expenses tab (needs vehicle_rates).
+    odometer_daily_trip: z.boolean().optional(),
   }).optional(),
 });
 const policyPatchSchema = policySchema.partial();
@@ -192,6 +195,18 @@ const odometerHistorySchema = z.object({
   all: z.enum(['1', 'true', '0', 'false']).optional(),
 });
 const scanSchema = z.object({ image: z.string().min(16), media_type: z.enum(['image/jpeg', 'image/png', 'image/webp']).optional() });
+// Daily odometer trip (opt-in policy flag `odometer_daily_trip`): the morning start and the evening end.
+const tripStartSchema = z.object({
+  odometer_start: num(100_000_000),
+  vehicle_type: z.string().max(40).optional().nullable(),
+  start_photo_url: photoRef.optional().nullable(),
+  date: dateStr.optional(),
+});
+const tripEndSchema = z.object({
+  odometer_end: num(100_000_000),
+  end_photo_url: photoRef.optional().nullable(),
+  date: dateStr.optional(),
+});
 const idParam = (req: Request) => {
   const id = req.params.id;
   if (!uuid.safeParse(id).success) throw new AppError(400, 'Invalid id', 'VALIDATION');
@@ -250,6 +265,19 @@ router.get('/odometer-history', asyncHandler<AuthRequest>(async (req, res) => {
   const s = (k: string) => (req.query[k] ? String(req.query[k]) : undefined);
   const q = parse(odometerHistorySchema, { from: s('from'), to: s('to'), user_id: s('user_id'), all: s('all') });
   res.json({ success: true, data: await odometerHistory(actor(req), { ...q, all: q.all === '1' || q.all === 'true', limit: Number(req.query.limit) || undefined }) });
+}));
+
+// ── daily odometer trip (two-step start/end — opt-in via policy `odometer_daily_trip`) ──
+// Declared before /claims/:id. GET reports whether the flow is on; start/end refuse when it is off.
+router.get('/odometer-trip', asyncHandler<AuthRequest>(async (req, res) => {
+  const date = req.query.date ? String(req.query.date) : undefined;
+  res.json({ success: true, data: await odometerTrip.getTrip(actor(req), date) });
+}));
+router.post('/odometer-trip/start', asyncHandler<AuthRequest>(async (req, res) => {
+  res.status(201).json({ success: true, data: await odometerTrip.startTrip(actor(req), parse(tripStartSchema, req.body)) });
+}));
+router.post('/odometer-trip/end', asyncHandler<AuthRequest>(async (req, res) => {
+  res.json({ success: true, data: await odometerTrip.endTrip(actor(req), parse(tripEndSchema, req.body)) });
 }));
 
 // ── receipts ────────────────────────────────────────────────────────────────
