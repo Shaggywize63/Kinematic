@@ -72,6 +72,15 @@ export interface PolicyRules {
    * distance is checked against the GPS travel service when the line is saved (see expenses.service.ts).
    */
   gps_distance?: boolean;
+  /**
+   * true = with `vehicle_rates`, the apps capture the odometer as a two-step DAILY trip — the starting
+   * reading in the morning, the ending reading in the evening — on a dedicated Expenses-tab surface, and
+   * the server auto-builds (and prices) the mileage line on the day's draft claim (default false). The
+   * combined before/after editor still works for everyone; this only adds the split flow for clients that
+   * opt in. Gated server-side: the /expenses/odometer-trip endpoints are a no-op unless this is on (see
+   * odometerTrip.service.ts).
+   */
+  odometer_daily_trip?: boolean;
 }
 
 /** The presentation-only rule keys (no server-side enforcement). */
@@ -80,7 +89,7 @@ export const UI_RULE_KEYS = ['category_labels', 'route_fields', 'single_line', '
  * The rule keys an editor that predates them must not silently reset: the presentation-only ones plus
  * `gps_distance` (which does have server-side effect, but is just as easy for an old editor to lose).
  */
-export const PRESERVED_RULE_KEYS = [...UI_RULE_KEYS, 'gps_distance'] as const;
+export const PRESERVED_RULE_KEYS = [...UI_RULE_KEYS, 'gps_distance', 'odometer_daily_trip'] as const;
 export const CATEGORY_LABEL_MAX = 30;
 
 export interface AppliesTo {
@@ -204,6 +213,7 @@ export function normalizeRules(raw: any, legacy?: any): PolicyRules {
     single_line: r.single_line === true,
     odometer_camera_only: r.odometer_camera_only === true,
     gps_distance: r.gps_distance === true,
+    odometer_daily_trip: r.odometer_daily_trip === true,
   };
 }
 
