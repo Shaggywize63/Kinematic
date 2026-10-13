@@ -107,11 +107,23 @@ async function readUserCaps(clients: Array<{ id: string; org_id?: string; data_p
 export const getClients = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockClients());
-  const { data, error } = await supabaseAdmin
+
+  // Platform super-admins operate the whole control plane: they can already
+  // "Login as" ANY org (maybeImpersonate has no allow-list), so the client list
+  // must surface EVERY live client across all orgs — not only the ones their own
+  // home org owns. Without this a super-admin whose home org owns a single tenant
+  // (e.g. sagar@…, owner_org of SRS only) could never see or switch into the
+  // other tenants they manage (BMW, PASA), whose owner_org_id is the Kinematic
+  // parent org. This mirrors misc.controller.getClients, which already returns
+  // all clients to a super-admin. NON-super_admin admins stay scoped to the
+  // clients their own org owns, so per-tenant isolation is unchanged for them.
+  const isSuperAdmin = (user.role || '').toLowerCase() === 'super_admin';
+  let query = supabaseAdmin
     .from('clients')
     .select('*')
-    .eq(ownerColumn(), user.org_id)
     .order('name');
+  if (!isSuperAdmin) query = query.eq(ownerColumn(), user.org_id);
+  const { data, error } = await query;
 
   if (error) {
     badRequest(res, error.message);
