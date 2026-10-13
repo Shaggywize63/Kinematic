@@ -5318,6 +5318,12 @@ analytics.get('/team-performance', wrap(async (req, res) => res.json(
 analytics.get('/telecaller-performance', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'telecaller-performance'), ANALYTICS_TTL,
     () => analyticsSvc.telecallerPerformance(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
+// Campaign Insights — per-campaign (General / App & DigiGold / After-Sales)
+// roll-up of the telecaller's leads + logged calls (DigiGold enrolment, app
+// ratings, after-sales satisfaction, complaints, referral/next-purchase).
+analytics.get('/campaign-insights', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'campaign-insights'), ANALYTICS_TTL,
+    () => analyticsSvc.campaignInsights(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 // Lead Tracker — monthly new-lead counts (default 6 months) + today /
 // week / month summary roll-ups for the caller's subtree. Drives the
 // bar-chart report and the period cards underneath it.
