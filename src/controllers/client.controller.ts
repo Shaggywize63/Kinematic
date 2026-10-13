@@ -53,6 +53,25 @@ function orgSlug(name: string): string {
   return `${base}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Normalise a trial-period input ({ start_date, days }) into the record stored
+ * on clients.settings.trial, with a SERVER-computed end_date (start date plus
+ * `days` calendar days) so the UI's auto-calculated end can't be spoofed.
+ * Returns null for a missing / invalid / non-positive input, which the caller
+ * uses to clear an existing trial record.
+ */
+function computeTrial(input: unknown): { start_date: string; days: number; end_date: string } | null {
+  if (!input || typeof input !== 'object') return null;
+  const o = input as { start_date?: unknown; days?: unknown };
+  const start = typeof o.start_date === 'string' ? o.start_date.slice(0, 10) : '';
+  const days = Math.round(Number(o.days));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !Number.isFinite(days) || days <= 0) return null;
+  const d = new Date(`${start}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() + days);
+  return { start_date: start, days, end_date: d.toISOString().slice(0, 10) };
+}
+
 // ── Per-org active-user cap, settable from Client Management ───────────────
 // The cap must land on the org that actually HOLDS this client's users, and be
 // enforced there. For a same-project client that's its own org in the current
@@ -223,12 +242,16 @@ async function syncClientUserModulePermissions(clientId: string, moduleIds: stri
  */
 export const createClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id, max_active_users } = req.body;
+  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id, max_active_users, trial } = req.body;
 
   if (!name) {
     badRequest(res, 'Client name is required');
     return;
   }
+
+  // Optional trial-period record set at creation time ({ start_date, days });
+  // end_date is computed server-side. Stored under clients.settings.trial.
+  const trialRec = computeTrial(trial);
 
   // Parent-owns-sub-orgs (non-default projects): spin up a dedicated org for
   // this client so its data is isolated; the creating admin's org owns it.
@@ -258,6 +281,8 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
       ...(orgPerClient() && typeof data_client_id === 'string' && isUUID(data_client_id) ? { data_client_id } : {}),
       // Encrypted account password used by the "Login as client" button.
       ...(orgPerClient() && password ? { login_password_enc: encryptSecret(password) } : {}),
+      // Trial-period record (optional), stored on settings so no schema change.
+      ...(trialRec ? { settings: { trial: trialRec } } : {}),
       name,
       contact_person,
       email,
@@ -601,7 +626,7 @@ async function syncCeilingToLinkedProject(opts: {
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users, app_ui } = req.body;
+  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users, app_ui, trial } = req.body;
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
@@ -722,39 +747,52 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     }
   }
 
-  // 6. Per-client APP-UI customization (which side-menu items / bottom tabs /
-  //    CRM-More destinations are shown in the mobile apps). Merge into
-  //    clients.settings.app_ui — the same per-client store the apps read on
-  //    /auth/me — only when the field was sent. Kept SEPARATE from client_modules:
-  //    that table is the licensing ceiling; this is UI visibility, so an admin can
-  //    hide an entitled item without revoking the entitlement.
+  // 6. Per-client settings extras stored on clients.settings:
+  //    - app_ui: which mobile nav items are shown (read on /auth/me).
+  //    - trial:  the client's trial-period record ({ start_date, days, end_date }),
+  //              control-plane metadata for Client Management. end_date is
+  //              recomputed server-side so the UI's auto-calc can't be spoofed.
+  //    Both live in the SAME jsonb, so they're merged in ONE write — two separate
+  //    settings updates would each read the pre-update row and clobber the other.
   let appUiOut: any = ((client as { settings?: any }).settings || {})?.app_ui ?? null;
-  if (app_ui !== undefined && app_ui !== null && typeof app_ui === 'object' && !Array.isArray(app_ui)) {
+  let trialOut: any = ((client as { settings?: any }).settings || {})?.trial ?? null;
+  const hasAppUi = app_ui !== undefined && app_ui !== null && typeof app_ui === 'object' && !Array.isArray(app_ui);
+  const settingsExtras: Record<string, unknown> = {};
+  if (hasAppUi) settingsExtras.app_ui = app_ui;
+  if (trial !== undefined) {
+    // Sent → set or clear (null when invalid/empty, which removes the record).
+    trialOut = computeTrial(trial);
+    settingsExtras.trial = trialOut;
+  }
+  if (Object.keys(settingsExtras).length > 0) {
     const curSettings = ((client as { settings?: any }).settings && typeof (client as any).settings === 'object' && !Array.isArray((client as any).settings))
       ? (client as any).settings : {};
-    const mergedSettings = { ...curSettings, app_ui };
+    const mergedSettings = { ...curSettings, ...settingsExtras };
     let sUpd = supabaseAdmin.from('clients')
       .update({ settings: mergedSettings }).eq('id', id);
     if (!seesAllClients(user)) sUpd = sUpd.eq(ownerColumn(), user.org_id);
     const { error: sErr } = await sUpd;
-    if (sErr) logger.warn(`[Clients] app_ui settings write failed for ${id}: ${sErr.message}`);
-    else { appUiOut = app_ui; clearClientFlagCache(id); }
+    if (sErr) logger.warn(`[Clients] settings write failed for ${id}: ${sErr.message}`);
+    else { if (hasAppUi) appUiOut = app_ui; clearClientFlagCache(id); }
 
-    // Mirror to the linked data project (same idea as the module-ceiling sync)
-    // so a client whose /auth/me is served from another project sees it too.
-    const dataProject = (client as { data_project_key?: string }).data_project_key;
-    const dataClientId = (client as { data_client_id?: string }).data_client_id;
-    if (dataProject && isKnownProject(dataProject) && dataProject !== currentProjectKey()
-        && dataClientId && isUUID(dataClientId)) {
-      try {
-        const remote = adminClientFor(dataProject);
-        const { data: tc } = await remote.from('clients').select('settings').eq('id', dataClientId).maybeSingle();
-        const cur = ((tc as any)?.settings && typeof (tc as any).settings === 'object' && !Array.isArray((tc as any).settings)) ? (tc as any).settings : {};
-        await remote.from('clients').update({ settings: { ...cur, app_ui } }).eq('id', dataClientId);
-        clearClientFlagCache(dataClientId);
-        logger.info(`[Clients] synced app_ui ${id} -> ${dataProject}/${dataClientId}`);
-      } catch (e: any) {
-        logger.error(`[Clients] app_ui cross-project mirror failed for ${id} -> ${dataProject}/${dataClientId}: ${e?.message || e}`);
+    // Mirror app_ui ONLY to the linked data project (same idea as the
+    // module-ceiling sync) so a client whose /auth/me is served from another
+    // project sees it too. Trial is control-plane-only and not mirrored.
+    if (hasAppUi) {
+      const dataProject = (client as { data_project_key?: string }).data_project_key;
+      const dataClientId = (client as { data_client_id?: string }).data_client_id;
+      if (dataProject && isKnownProject(dataProject) && dataProject !== currentProjectKey()
+          && dataClientId && isUUID(dataClientId)) {
+        try {
+          const remote = adminClientFor(dataProject);
+          const { data: tc } = await remote.from('clients').select('settings').eq('id', dataClientId).maybeSingle();
+          const cur = ((tc as any)?.settings && typeof (tc as any).settings === 'object' && !Array.isArray((tc as any).settings)) ? (tc as any).settings : {};
+          await remote.from('clients').update({ settings: { ...cur, app_ui } }).eq('id', dataClientId);
+          clearClientFlagCache(dataClientId);
+          logger.info(`[Clients] synced app_ui ${id} -> ${dataProject}/${dataClientId}`);
+        } catch (e: any) {
+          logger.error(`[Clients] app_ui cross-project mirror failed for ${id} -> ${dataProject}/${dataClientId}: ${e?.message || e}`);
+        }
       }
     }
   }
@@ -767,7 +805,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     catch (e: any) { logger.warn(`[Clients] user-cap write failed for ${id}: ${e?.message || e}`); }
   }
 
-  ok(res, { ...client, modules: modules || [], max_active_users: capOut, app_ui: appUiOut });
+  ok(res, { ...client, modules: modules || [], max_active_users: capOut, app_ui: appUiOut, trial: trialOut });
 });
 
 /**
