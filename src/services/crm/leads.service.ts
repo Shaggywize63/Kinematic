@@ -565,6 +565,12 @@ export async function listLeadsWithCount(
   // only applied when the param is present, so existing callers are unchanged).
   if (filters.is_b2c !== undefined) q = q.eq('is_b2c', String(filters.is_b2c) === 'true');
   if (filters.industry) q = q.eq('industry', String(filters.industry));
+  // Campaign section filter (telecaller phase 3). Leads are tagged with their
+  // calling campaign in custom_fields.campaign; this powers the per-campaign
+  // sections (General Calls / App & DigiGold / After-Sales) on the apps +
+  // dashboard. Value is one of the campaign custom-field options. Only applied
+  // when present, so every other caller/tenant is unchanged.
+  if (filters.campaign) q = q.eq('custom_fields->>campaign', String(filters.campaign));
   if (filters.score_lte !== undefined && filters.score_lte !== '') q = q.lte('score', Number(filters.score_lte));
   if (filters.status_in) {
     const vals = String(filters.status_in).split(',').map((s) => s.trim()).filter(Boolean);
