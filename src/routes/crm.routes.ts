@@ -2284,7 +2284,11 @@ activities.get('/summary', wrap(async (req, res) => {
   const scope = clientScope(req);
   let subtreeIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
   const meAct = (req as AuthRequest).user;
-  if (isFrontlineChampion(meAct) && meAct?.id) {
+  // Own-scope callers see only their own counts, matching the activities LIST
+  // (which applies activityVisibilityScope). A frontline champion and a
+  // telecaller are both strictly own-scoped — without this a telecaller's
+  // "Calls this month" tile would sum the whole team's calls.
+  if ((isFrontlineChampion(meAct) || telecaller.isTelecaller(meAct)) && meAct?.id) {
     subtreeIds = [meAct.id];
   }
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
