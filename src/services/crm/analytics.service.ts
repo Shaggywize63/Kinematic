@@ -1855,3 +1855,159 @@ export async function telecallerPerformance(
 function blankTelecallerTotals(): Omit<TelecallerRow, 'user_id' | 'user_name'> {
   return { calls: 0, connected: 0, interested: 0, not_interested: 0, follow_ups: 0, scheme_amount: 0, leads_assigned: 0 };
 }
+
+// ── Campaign Insights (telecaller phase 2) ───────────────────────────────
+// Per-campaign roll-up of the telecaller's leads + logged calls. The campaign
+// of a call is taken from its lead's `campaign` custom field (falling back to
+// the activity's own metadata.campaign for calls logged before that lead tag
+// existed). Powers the "Campaign Insights" dashboard report — DigiGold
+// enrolment, app ratings, after-sales satisfaction, complaints, etc.
+export const TELECALLER_CAMPAIGNS = ['General Calls', 'App & DigiGold', 'After-Sales'] as const;
+export type CampaignName = typeof TELECALLER_CAMPAIGNS[number];
+
+export interface CampaignMetric { label: string; value: string }
+export interface CampaignBucket { label: string; count: number }
+export interface CampaignBlock {
+  campaign: CampaignName;
+  leads: number;
+  calls: number;
+  connected: number;
+  connect_rate: number;              // 0..1
+  status_breakdown: CampaignBucket[]; // lead queue by status
+  metrics: CampaignMetric[];          // campaign-specific KPIs (label/value)
+}
+export interface CampaignInsights { campaigns: CampaignBlock[]; from: string; to: string }
+
+function canonCampaign(raw: unknown): CampaignName | null {
+  const s = String(raw ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (s === 'app&digigold' || s === 'appdigigold') return 'App & DigiGold';
+  if (s === 'aftersales') return 'After-Sales';
+  if (s === 'generalcalls' || s === 'general' || s === '') return 'General Calls';
+  return null;
+}
+const cfStr = (cf: any, k: string): string => (cf && cf[k] != null ? String(cf[k]).trim() : '');
+const pct = (n: number, d: number): string => (d > 0 ? Math.round((n / d) * 100) + '%' : '—');
+
+export async function campaignInsights(
+  org_id: string,
+  range?: DateRange,
+  client_id: string | null = null,
+  scope?: AnalyticsScope,
+): Promise<CampaignInsights> {
+  const fromIso = range?.from ?? new Date(Date.now() - 30 * 86400000).toISOString();
+  const toIso = range?.to ?? new Date().toISOString();
+
+  // Resolve telecaller users in scope (same rule as telecallerPerformance).
+  const subtree = scope?.visibleOwnerIds ?? null;
+  let userQ = supabaseAdmin.from('users')
+    .select('id, role, org_role:org_roles!org_role_id(name)')
+    .eq('org_id', org_id).is('deleted_at', null);
+  if (client_id) userQ = userQ.eq('client_id', client_id);
+  if (subtree && subtree.length > 0) userQ = userQ.in('id', subtree);
+  else if (subtree && subtree.length === 0) return { campaigns: [], from: fromIso, to: toIso };
+  const { data: allUsers } = await userQ;
+  const ids = (allUsers ?? []).filter((u: any) => {
+    const role = String(u.role ?? '').toLowerCase();
+    const desig = String(u.org_role?.name ?? '').toLowerCase().replace(/[\s_-]+/g, '');
+    return role === 'telecaller' || desig.includes('telecaller');
+  }).map((u: any) => u.id);
+  if (ids.length === 0) return { campaigns: [], from: fromIso, to: toIso };
+
+  const [leadsRes, callsRes] = await Promise.all([
+    supabaseAdmin.from('crm_leads')
+      .select('id, status, custom_fields')
+      .eq('org_id', org_id).is('deleted_at', null).in('owner_id', ids).limit(50000),
+    supabaseAdmin.from('crm_activities')
+      .select('owner_id, assigned_to, outcome, custom_fields, metadata, lead_id')
+      .eq('org_id', org_id).is('deleted_at', null).eq('type', 'call')
+      .or(`owner_id.in.(${ids.join(',')}),assigned_to.in.(${ids.join(',')})`)
+      .gte('activity_date', fromIso).lte('activity_date', toIso).limit(50000),
+  ]);
+
+  const leadCampaign = new Map<string, CampaignName>();
+  // Per-campaign accumulators
+  type Acc = {
+    leads: number; status: Map<string, number>;
+    calls: number; connected: number;
+    appDownloads: number; digiEnrolled: number; goldEnrolled: number;
+    ratingSum: number; ratingN: number; bugs: number; features: number;
+    custRatingSum: number; custRatingN: number; complaints: number;
+    complaintPri: Map<string, number>; resolution: number;
+    nextPurchase: Map<string, number>; referral: Map<string, number>;
+    interested: number; notInterested: number;
+  };
+  const blank = (): Acc => ({
+    leads: 0, status: new Map(), calls: 0, connected: 0,
+    appDownloads: 0, digiEnrolled: 0, goldEnrolled: 0, ratingSum: 0, ratingN: 0, bugs: 0, features: 0,
+    custRatingSum: 0, custRatingN: 0, complaints: 0, complaintPri: new Map(), resolution: 0,
+    nextPurchase: new Map(), referral: new Map(), interested: 0, notInterested: 0,
+  });
+  const acc = new Map<CampaignName, Acc>(TELECALLER_CAMPAIGNS.map((c) => [c, blank()]));
+  const inc = (m: Map<string, number>, k: string) => { if (k) m.set(k, (m.get(k) ?? 0) + 1); };
+
+  for (const l of (leadsRes.data ?? []) as any[]) {
+    const camp = canonCampaign(l.custom_fields?.campaign) ?? 'General Calls';
+    leadCampaign.set(l.id, camp);
+    const a = acc.get(camp)!;
+    a.leads += 1;
+    inc(a.status, String(l.status ?? 'new'));
+  }
+
+  for (const c of (callsRes.data ?? []) as any[]) {
+    const camp = (c.lead_id && leadCampaign.get(c.lead_id)) || canonCampaign(c.metadata?.campaign) || 'General Calls';
+    const a = acc.get(camp)!;
+    const cf = c.custom_fields || {};
+    a.calls += 1;
+    const disp = normDisp(c.outcome);
+    if (disp.startsWith('connected')) a.connected += 1;
+    if (disp.includes('not interested')) a.notInterested += 1;
+    else if (disp.includes('interested')) a.interested += 1;
+    if (camp === 'App & DigiGold') {
+      if (cfStr(cf, 'app_download_date')) a.appDownloads += 1;
+      if (cfStr(cf, 'digigold_explained') === 'Yes - Enrolled') a.digiEnrolled += 1;
+      if (cfStr(cf, 'gold_scheme_explained') === 'Yes - Enrolled') a.goldEnrolled += 1;
+      const r = parseFloat(cfStr(cf, 'app_rating')); if (!isNaN(r)) { a.ratingSum += r; a.ratingN += 1; }
+      if (cfStr(cf, 'bugs_reported')) a.bugs += 1;
+      if (cfStr(cf, 'feature_requests')) a.features += 1;
+    } else if (camp === 'After-Sales') {
+      const r = parseFloat(cfStr(cf, 'customer_rating')); if (!isNaN(r)) { a.custRatingSum += r; a.custRatingN += 1; }
+      if (cfStr(cf, 'complaint')) { a.complaints += 1; inc(a.complaintPri, cfStr(cf, 'complaint_priority') || 'Unspecified'); }
+      const rr = cf.resolution_required; if (rr === true || String(rr).toLowerCase() === 'yes') a.resolution += 1;
+      const np = cfStr(cf, 'next_purchase_interest'); if (np) inc(a.nextPurchase, np);
+      const rf = cfStr(cf, 'referral_potential'); if (rf) inc(a.referral, rf);
+    }
+  }
+
+  const bucketList = (m: Map<string, number>): CampaignBucket[] =>
+    Array.from(m.entries()).map(([label, count]) => ({ label, count })).sort((x, y) => y.count - x.count);
+
+  const campaigns: CampaignBlock[] = TELECALLER_CAMPAIGNS.map((camp) => {
+    const a = acc.get(camp)!;
+    const metrics: CampaignMetric[] = [];
+    if (camp === 'App & DigiGold') {
+      metrics.push({ label: 'App downloads logged', value: String(a.appDownloads) });
+      metrics.push({ label: 'DigiGold enrolled', value: `${a.digiEnrolled} (${pct(a.digiEnrolled, a.calls)})` });
+      metrics.push({ label: 'Gold scheme enrolled', value: `${a.goldEnrolled} (${pct(a.goldEnrolled, a.calls)})` });
+      metrics.push({ label: 'Avg app rating', value: a.ratingN ? (a.ratingSum / a.ratingN).toFixed(1) + ' / 5' : '—' });
+      metrics.push({ label: 'Bugs reported', value: String(a.bugs) });
+      metrics.push({ label: 'Feature requests', value: String(a.features) });
+    } else if (camp === 'After-Sales') {
+      metrics.push({ label: 'Avg customer rating', value: a.custRatingN ? (a.custRatingSum / a.custRatingN).toFixed(1) + ' / 5' : '—' });
+      metrics.push({ label: 'Complaints raised', value: String(a.complaints) });
+      for (const b of bucketList(a.complaintPri)) metrics.push({ label: `  • ${b.label} priority`, value: String(b.count) });
+      metrics.push({ label: 'Resolution required', value: String(a.resolution) });
+      for (const b of bucketList(a.nextPurchase)) metrics.push({ label: `Next purchase: ${b.label}`, value: String(b.count) });
+      for (const b of bucketList(a.referral)) metrics.push({ label: `Referral: ${b.label}`, value: String(b.count) });
+    } else {
+      metrics.push({ label: 'Interested', value: String(a.interested) });
+      metrics.push({ label: 'Not interested', value: String(a.notInterested) });
+    }
+    return {
+      campaign: camp, leads: a.leads, calls: a.calls, connected: a.connected,
+      connect_rate: a.calls > 0 ? a.connected / a.calls : 0,
+      status_breakdown: bucketList(a.status), metrics,
+    };
+  });
+
+  return { campaigns, from: fromIso, to: toIso };
+}
