@@ -605,7 +605,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
-  const { data: client, error } = await supabaseAdmin
+  let updateQ = supabaseAdmin
     .from('clients')
     .update({
       name,
@@ -630,10 +630,14 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
       ...(orgPerClient() && password ? { login_password_enc: encryptSecret(password) } : {}),
       updated_at: new Date().toISOString()
     })
-    .eq('id', id)
-    .eq(ownerColumn(), user.org_id)
-    .select()
-    .single();
+    .eq('id', id);
+  // Allow-listed cross-org super-admins (seesAllClients) may edit a client their
+  // own org does not own — e.g. sagar editing PASA / BMW. Everyone else stays
+  // scoped to owner_org. Without this exemption the owner-scoped UPDATE matched
+  // 0 rows and `.single()` threw "JSON object requested, multiple (or no) rows
+  // returned" — the Edit Client save error for a cross-org tenant.
+  if (!seesAllClients(user)) updateQ = updateQ.eq(ownerColumn(), user.org_id);
+  const { data: client, error } = await updateQ.select().single();
 
   if (error) {
     badRequest(res, `Client update failed: ${error.message}`);
@@ -729,8 +733,10 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     const curSettings = ((client as { settings?: any }).settings && typeof (client as any).settings === 'object' && !Array.isArray((client as any).settings))
       ? (client as any).settings : {};
     const mergedSettings = { ...curSettings, app_ui };
-    const { error: sErr } = await supabaseAdmin.from('clients')
-      .update({ settings: mergedSettings }).eq('id', id).eq(ownerColumn(), user.org_id);
+    let sUpd = supabaseAdmin.from('clients')
+      .update({ settings: mergedSettings }).eq('id', id);
+    if (!seesAllClients(user)) sUpd = sUpd.eq(ownerColumn(), user.org_id);
+    const { error: sErr } = await sUpd;
     if (sErr) logger.warn(`[Clients] app_ui settings write failed for ${id}: ${sErr.message}`);
     else { appUiOut = app_ui; clearClientFlagCache(id); }
 
@@ -785,12 +791,12 @@ export const deleteClient = asyncHandler(async (req: AuthRequest, res: Response)
   // and deactivate it; getClients() filters these out so it disappears from the
   // Client Management list, while all data is preserved and recoverable. A true
   // purge is a separate, deliberate operation.
-  const { data: existing, error: readErr } = await supabaseAdmin
+  let readQ = supabaseAdmin
     .from('clients')
     .select('settings')
-    .eq('id', id)
-    .eq(ownerColumn(), user.org_id)
-    .maybeSingle();
+    .eq('id', id);
+  if (!seesAllClients(user)) readQ = readQ.eq(ownerColumn(), user.org_id);
+  const { data: existing, error: readErr } = await readQ.maybeSingle();
   if (readErr) { badRequest(res, readErr.message); return; }
   if (!existing) { notFound(res, 'Client not found'); return; }
 
@@ -799,11 +805,12 @@ export const deleteClient = asyncHandler(async (req: AuthRequest, res: Response)
     deleted_at: new Date().toISOString(),
     deleted_by: user.id,
   };
-  const { error } = await supabaseAdmin
+  let delQ = supabaseAdmin
     .from('clients')
     .update({ settings, is_active: false })
-    .eq('id', id)
-    .eq(ownerColumn(), user.org_id);
+    .eq('id', id);
+  if (!seesAllClients(user)) delQ = delQ.eq(ownerColumn(), user.org_id);
+  const { error } = await delQ;
 
   if (error) {
     badRequest(res, error.message);
