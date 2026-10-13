@@ -570,7 +570,17 @@ export async function listLeadsWithCount(
   // sections (General Calls / App & DigiGold / After-Sales) on the apps +
   // dashboard. Value is one of the campaign custom-field options. Only applied
   // when present, so every other caller/tenant is unchanged.
-  if (filters.campaign) q = q.eq('custom_fields->>campaign', String(filters.campaign));
+  // "General Calls" is the catch-all: it ALSO sweeps up untagged leads (no /
+  // null campaign key), mirroring the app/dashboard classification where a
+  // blank campaign ⇒ General. The other two campaigns stay exact-match.
+  if (filters.campaign) {
+    const camp = String(filters.campaign);
+    if (camp === 'General Calls') {
+      q = q.or('custom_fields->>campaign.eq."General Calls",custom_fields->>campaign.is.null');
+    } else {
+      q = q.eq('custom_fields->>campaign', camp);
+    }
+  }
   if (filters.score_lte !== undefined && filters.score_lte !== '') q = q.lte('score', Number(filters.score_lte));
   if (filters.status_in) {
     const vals = String(filters.status_in).split(',').map((s) => s.trim()).filter(Boolean);
