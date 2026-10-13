@@ -173,6 +173,44 @@ export interface FindOrCreateResult {
   merged_into?: string;
 }
 
+// Names a form or bot stamps when the person gave none ("Inquiry" from the
+// website forms, "WhatsApp lead" from the KINI WhatsApp bot). A real name on a
+// later touch replaces them; any other existing name is kept.
+const PLACEHOLDER_NAMES = new Set(['inquiry', 'whatsapp lead']);
+const FILLABLE = ['email', 'phone', 'company', 'title', 'industry', 'country', 'city', 'state'] as const;
+const MAX_NOTES = 4000;
+
+type LeadSnapshot = Partial<Record<(typeof FILLABLE)[number] | 'first_name' | 'last_name' | 'notes', string | null>>;
+
+/**
+ * What a repeat touch (same phone/email) should add to the existing lead:
+ * fields that are still blank, a real name over a placeholder one, and notes
+ * that aren't already there. Never overwrites a value someone has set.
+ */
+export function blankFieldPatch(current: LeadSnapshot, n: NormalizedLead): Record<string, string | null> {
+  const patch: Record<string, string | null> = {};
+  const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+
+  const currentName = `${text(current.first_name)} ${text(current.last_name)}`.trim().toLowerCase();
+  const newName = `${text(n.first_name)} ${text(n.last_name)}`.trim();
+  if (newName && !PLACEHOLDER_NAMES.has(newName.toLowerCase()) && (!currentName || PLACEHOLDER_NAMES.has(currentName))) {
+    patch.first_name = text(n.first_name) || null;
+    patch.last_name = text(n.last_name) || null;
+  }
+
+  for (const key of FILLABLE) {
+    const incoming = text((n as Record<string, unknown>)[key]);
+    if (incoming && !text(current[key])) patch[key] = incoming;
+  }
+
+  const newNotes = text(n.notes);
+  const oldNotes = text(current.notes);
+  if (newNotes && !oldNotes.includes(newNotes)) {
+    patch.notes = (oldNotes ? `${oldNotes}\n\n${newNotes}` : newNotes).slice(0, MAX_NOTES);
+  }
+  return patch;
+}
+
 export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOrCreateResult> {
   const { org_id, source_id, normalized, integration_id, raw_event_id, user_id, owner_id, client_id } = input;
 
@@ -199,11 +237,23 @@ export async function findOrCreateLead(input: FindOrCreateInput): Promise<FindOr
     // owner_email column), reassign on merge. Lets a rep correct the
     // owner mapping by re-importing without having to manually re-
     // assign every row.
-    const updatePayload: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    // Fill fields the lead is still missing (e.g. a WhatsApp chat created it
+    // with just a phone, and the bot later learnt the email and company).
+    const { data: current } = await supabaseAdmin.from('crm_leads')
+      .select('first_name, last_name, email, phone, company, title, industry, country, city, state, notes')
+      .eq('id', existing.id).eq('org_id', org_id).maybeSingle();
+    const fill = current ? blankFieldPatch(current as LeadSnapshot, normalized) : {};
+    const updatePayload: Record<string, unknown> = { ...fill, updated_at: new Date().toISOString() };
     if (owner_id) updatePayload.owner_id = owner_id;
-    await supabaseAdmin.from('crm_leads')
+    const { error: mergeError } = await supabaseAdmin.from('crm_leads')
       .update(updatePayload)
       .eq('id', existing.id).eq('org_id', org_id);
+    if (mergeError && (fill.phone || fill.email)) {
+      // A filled phone/email can collide with another open lead's unique hash —
+      // keep the merge, just without those two.
+      const { phone: _p, email: _e, ...rest } = updatePayload;
+      await supabaseAdmin.from('crm_leads').update(rest).eq('id', existing.id).eq('org_id', org_id);
+    }
 
     return { lead_id: existing.id, was_new: false, merged_into: existing.id };
   }
