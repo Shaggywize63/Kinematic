@@ -29,6 +29,25 @@ const SINGLE_ORG_PROJECTS = new Set(
 const orgPerClient = () => !SINGLE_ORG_PROJECTS.has(currentProjectKey());
 const ownerColumn = () => (orgPerClient() ? 'owner_org_id' : 'org_id');
 
+// Cross-org control-plane allow-list. By DEFAULT the Client Management list is
+// org-scoped for EVERY role (a super-admin sees only the clients their own home
+// org owns), which preserves per-tenant isolation. A short allow-list of named
+// platform super-admins is exempt: their list surfaces every live client across
+// all orgs so one login can see and "Login as" every tenant they manage (e.g.
+// sagar@… manages SRS + PASA + BMW, which sit under three different orgs). This
+// is an explicit allow-list — NOT "any super_admin" — so adding a client-tenant
+// super-admin never leaks other tenants' clients to them. Override the default
+// membership with the CROSS_ORG_SUPERADMIN_EMAILS env var (comma-separated,
+// case-insensitive); the built-in default covers the current platform admins so
+// the feature works without an env change.
+const CROSS_ORG_SUPERADMIN_EMAILS = new Set(
+  (process.env.CROSS_ORG_SUPERADMIN_EMAILS || 's@kinematicapp.com,sagar@horizontechstudio.com')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+);
+const seesAllClients = (user: { role?: string | null; email?: string | null }): boolean =>
+  (user.role || '').toLowerCase() === 'super_admin'
+  && CROSS_ORG_SUPERADMIN_EMAILS.has((user.email || '').trim().toLowerCase());
+
 function orgSlug(name: string): string {
   const base = (name || 'client').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'client';
   return `${base}-${Math.random().toString(36).slice(2, 8)}`;
@@ -108,21 +127,20 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockClients());
 
-  // Platform super-admins operate the whole control plane: they can already
-  // "Login as" ANY org (maybeImpersonate has no allow-list), so the client list
-  // must surface EVERY live client across all orgs — not only the ones their own
-  // home org owns. Without this a super-admin whose home org owns a single tenant
-  // (e.g. sagar@…, owner_org of SRS only) could never see or switch into the
-  // other tenants they manage (BMW, PASA), whose owner_org_id is the Kinematic
-  // parent org. This mirrors misc.controller.getClients, which already returns
-  // all clients to a super-admin. NON-super_admin admins stay scoped to the
-  // clients their own org owns, so per-tenant isolation is unchanged for them.
-  const isSuperAdmin = (user.role || '').toLowerCase() === 'super_admin';
+  // Allow-listed platform super-admins (see CROSS_ORG_SUPERADMIN_EMAILS) operate
+  // the whole control plane: they can already "Login as" ANY org (maybeImpersonate
+  // has no allow-list), so their client list surfaces EVERY live client across all
+  // orgs — not only the ones their own home org owns. Without this a super-admin
+  // whose home org owns a single tenant (e.g. sagar@…, owner_org of SRS only)
+  // could never see or switch into the other tenants they manage (BMW, PASA),
+  // whose owner_org_id is the Kinematic parent org. EVERYONE else — including
+  // non-allow-listed super-admins — stays scoped to the clients their own org
+  // owns, so per-tenant isolation is unchanged for them.
   let query = supabaseAdmin
     .from('clients')
     .select('*')
     .order('name');
-  if (!isSuperAdmin) query = query.eq(ownerColumn(), user.org_id);
+  if (!seesAllClients(user)) query = query.eq(ownerColumn(), user.org_id);
   const { data, error } = await query;
 
   if (error) {
