@@ -7,6 +7,7 @@ import { getPagination } from '../utils/pagination';
 import { DEMO_ORG_ID, isDemo, getMockFormTemplates, getMockSubmissions, getMockSubmissionDetails } from '../utils/demoData';
 import { logger } from '../lib/logger';
 import { mirrorCheckinToRoutePlan } from '../services/routePlanCheckin.service';
+import * as crud from '../services/crm/crud.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { withVisitFields } from '../services/formVisit.service';
 import { resolveVisitTimes } from '../services/formVisit.store';
@@ -17,6 +18,12 @@ function parseGps(s: unknown): { lat: number; lng: number } | null {
   const [a, b] = s.split(',').map((p) => Number(p.trim()));
   return Number.isFinite(a) && Number.isFinite(b) ? { lat: a, lng: b } : null;
 }
+
+/** Rajkamal Jewellers client id — mirrors the apps/dashboard isRajkamal gate. */
+const RAJKAMAL_CLIENT_ID = '0490f34d-d9a3-4f39-99e2-8f3adba8c583';
+
+/** A form date field counts as a follow-up date when its label reads like one. */
+const FOLLOWUP_LABEL_RE = /follow[\s-]?up|preferred\s+date/i;
 
 export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
@@ -275,6 +282,56 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     : (parseGps(check_in_gps) ?? parseGps(gps));
   if (outlet_id && ci) {
     await mirrorCheckinToRoutePlan({ userId: user.id, storeId: outlet_id, lat: ci.lat, lng: ci.lng });
+  }
+
+  // Rajkamal: a form with a "follow-up date" field schedules a reminder for the
+  // rep on that day. We materialise it as a planned crm_activities row with
+  // due_at = 09:00 IST on the chosen date; the activityReminders cron then pushes
+  // the submitter (FCM/APNs + in-app bell) the morning it comes due — the same
+  // mechanism Schedule-Visit and the marketing-visit follow-up already use.
+  // form_submissions has no lead_id, so the reminder is addressed to the
+  // submitting rep (assigned_to). Best-effort: a failure never fails the submit.
+  if (submitterClientId === RAJKAMAL_CLIENT_ID && template_id && Array.isArray(responses) && responses.length) {
+    try {
+      const { data: dateQs } = await supabaseAdmin
+        .from('builder_questions')
+        .select('id, label')
+        .eq('form_id', template_id)
+        .eq('qtype', 'date');
+      const followupField = (dateQs || []).find((q: any) => FOLLOWUP_LABEL_RE.test(String(q.label || '')));
+      if (followupField) {
+        const ans = (responses as any[]).find(
+          (r) => String(r.field_id ?? r.question_id ?? '') === String(followupField.id),
+        );
+        const raw = ans?.value ?? ans?.response;
+        const dateStr = typeof raw === 'string' ? raw.trim().slice(0, 10) : '';
+        // Only a real yyyy-MM-dd on or after today (IST) becomes a reminder — a
+        // blank or past date is ignored so we don't create stale/overdue nags.
+        const todayIST = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr) && dateStr >= todayIST) {
+          const due = new Date(`${dateStr}T09:00:00+05:30`);
+          if (!Number.isNaN(due.getTime())) {
+            const { data: tmpl } = await supabaseAdmin
+              .from('builder_forms').select('title').eq('id', template_id).single();
+            const subject = `Follow-up: ${(tmpl?.title as string) || outlet_name || 'contact'}`;
+            // crud.create injects org_id + created_by; 'planned' keeps it open so
+            // activityReminders picks it up (it skips done/cancelled).
+            await crud.create('crm_activities', user.org_id, {
+              client_id: submitterClientId,
+              type: 'task',
+              subject,
+              status: 'planned',
+              owner_id: user.id,
+              assigned_to: user.id,
+              due_at: due.toISOString(),
+              metadata: { kind: 'form_followup', source_submission_id: sub.id, field_label: followupField.label ?? null },
+            }, user.id);
+          }
+        }
+      }
+    } catch (e: any) {
+      logger.warn(`[forms.submit] follow-up reminder skipped: ${e?.message || e}`);
+    }
   }
 
   return created(res, sub, 'Submission successful');
