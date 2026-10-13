@@ -34,6 +34,7 @@ import { fireActivityLifecycle } from '../services/crm/activityTriggers';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
+import * as telecaller from '../services/crm/telecaller.service';
 import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
 import * as activityImportSvc from '../services/crm/activityImport.service';
@@ -639,7 +640,15 @@ leads.get('/', wrap(async (req, res) => {
   // unchanged.
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
-  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
+  // Telecaller: a phone agent works ONLY their personal queue — the leads admin
+  // assigned to them — regardless of whether the client opted into hierarchy
+  // RBAC. Force the owner scope to self so they never see another agent's or a
+  // field rep's leads. (Existing own/team/admin users are unaffected.)
+  const isTelecaller = telecaller.isTelecaller(me);
+  if (isTelecaller) {
+    visibleOwnerIds = selfOwnerId ? [selfOwnerId] : [];
+  }
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn || isTelecaller;
   // Consumer Champion is strictly own-only: they see ONLY leads where
   // owner_id = self (plus their hierarchy subtree if applicable). Their
   // city allocation does NOT broaden visibility — a new Champion lands
@@ -841,7 +850,15 @@ leads.get('/export', wrap(async (req, res) => {
   // tenant-wide admins or whenever hierarchy RBAC bounds exposure by owner.
   const me = (req as AuthRequest).user;
   const selfOwnerId = me?.id ?? null;
-  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn;
+  // Telecaller: a phone agent works ONLY their personal queue — the leads admin
+  // assigned to them — regardless of whether the client opted into hierarchy
+  // RBAC. Force the owner scope to self so they never see another agent's or a
+  // field rep's leads. (Existing own/team/admin users are unaffected.)
+  const isTelecaller = telecaller.isTelecaller(me);
+  if (isTelecaller) {
+    visibleOwnerIds = selfOwnerId ? [selfOwnerId] : [];
+  }
+  const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn || isTelecaller;
   const ownOnly = isFrontlineChampion(me);
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
@@ -1101,8 +1118,10 @@ async function fetchScopedReportLeads(req: Request): Promise<any[]> {
   const selfOwnerId = me?.id ?? null;
   const dataScope = me?.org_role_data_scope ?? 'all';
   // ASO (own) → only their leads; CRM Admin (all) → everything.
-  const ownOnly = dataScope === 'own';
-  const includeNullCity = dataScope === 'all' || hierOn;
+  const isTelecaller = telecaller.isTelecaller(me);
+  if (isTelecaller) visibleOwnerIds = selfOwnerId ? [selfOwnerId] : [];
+  const ownOnly = dataScope === 'own' || isTelecaller;
+  const includeNullCity = dataScope === 'all' || hierOn || isTelecaller;
   const PAGE = 200;
   const MAX = 10000;
   const rows: any[] = [];
@@ -5288,6 +5307,13 @@ analytics.get('/win-rate', wrap(async (req, res) => res.json(
 analytics.get('/team-performance', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, 'team-performance'), ANALYTICS_TTL,
     () => analyticsSvc.teamPerformance(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
+// Telecaller Performance — phase-1 "Call Tracker" roll-up: per telecaller,
+// calls made / connected / interested / follow-ups + scheme ₹, with a daily
+// series. Owner-scoped to each telecaller; the caller's analytics subtree
+// bounds which telecallers appear (admin → whole client).
+analytics.get('/telecaller-performance', wrap(async (req, res) => res.json(
+  await cachedAnalytics(cacheKey(req, 'telecaller-performance'), ANALYTICS_TTL,
+    () => analyticsSvc.telecallerPerformance(orgId(req), dateRange(req), clientId(req), (req as AuthRequest).analyticsScope)))));
 // Lead Tracker — monthly new-lead counts (default 6 months) + today /
 // week / month summary roll-ups for the caller's subtree. Drives the
 // bar-chart report and the period cards underneath it.

@@ -1716,3 +1716,142 @@ export async function dashboardComplete(
     unit,
   };
 }
+
+// ── Telecaller performance ────────────────────────────────────────────────
+// Phase-1 "Call Tracker" roll-up for the web dashboard. For each telecaller
+// (a user whose org-role designation contains "telecaller", or legacy
+// role='telecaller') it returns, over the requested date range:
+//   • calls          — # call activities logged (type='call')
+//   • connected      — calls whose disposition (crm_activities.outcome) begins "connected"
+//   • interested     — disposition "connected – interested"
+//   • notInterested  — disposition contains "not interested"
+//   • followUps      — open follow-up activities (status open/planned) with a due date
+//   • schemeAmount   — ₹ logged via crm_target_entries (kind='sales') in range
+//   • leadsAssigned  — leads currently owned by the telecaller (lifetime, snapshot)
+// Plus a per-day series (calls/connected/interested/schemeAmount) that mirrors
+// the old "Monthly Performance" sheet. All figures are owner-scoped to the
+// telecaller; the caller's own analytics scope still bounds which telecallers
+// are visible (a manager sees their subtree, an admin the whole client).
+export interface TelecallerRow {
+  user_id: string;
+  user_name: string;
+  calls: number;
+  connected: number;
+  interested: number;
+  not_interested: number;
+  follow_ups: number;
+  scheme_amount: number;
+  leads_assigned: number;
+}
+export interface TelecallerDaily { date: string; calls: number; connected: number; interested: number; scheme_amount: number }
+
+const normDisp = (s: unknown): string => String(s ?? '').toLowerCase().replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim();
+
+export async function telecallerPerformance(
+  org_id: string,
+  range?: DateRange,
+  client_id: string | null = null,
+  scope?: AnalyticsScope,
+): Promise<{ rows: TelecallerRow[]; daily: TelecallerDaily[]; totals: Omit<TelecallerRow, 'user_id' | 'user_name'>; from: string; to: string }> {
+  const fromIso = range?.from ?? new Date(Date.now() - 30 * 86400000).toISOString();
+  const toIso = range?.to ?? new Date().toISOString();
+
+  // 1) Resolve the telecaller users in scope (org + client + visible subtree).
+  const subtree = scope?.visibleOwnerIds ?? null;
+  let userQ = supabaseAdmin.from('users')
+    .select('id, name, role, org_role:org_roles!org_role_id(name)')
+    .eq('org_id', org_id).is('deleted_at', null);
+  if (client_id) userQ = userQ.eq('client_id', client_id);
+  if (subtree && subtree.length > 0) userQ = userQ.in('id', subtree);
+  else if (subtree && subtree.length === 0) return { rows: [], daily: [], totals: blankTelecallerTotals(), from: fromIso, to: toIso };
+  const { data: allUsers } = await userQ;
+  const telecallers = (allUsers ?? []).filter((u: any) => {
+    const role = String(u.role ?? '').toLowerCase();
+    const desig = String(u.org_role?.name ?? '').toLowerCase().replace(/[\s_-]+/g, '');
+    return role === 'telecaller' || desig.includes('telecaller');
+  });
+  const ids = telecallers.map((u: any) => u.id);
+  if (ids.length === 0) return { rows: [], daily: [], totals: blankTelecallerTotals(), from: fromIso, to: toIso };
+  const nameById = new Map<string, string>(telecallers.map((u: any) => [u.id, u.name as string]));
+
+  // 2) Call activities + open follow-ups + scheme entries + assigned-lead counts.
+  const [callsRes, followRes, schemeRes, leadsRes] = await Promise.all([
+    supabaseAdmin.from('crm_activities')
+      .select('owner_id, assigned_to, outcome, activity_date')
+      .eq('org_id', org_id).is('deleted_at', null).eq('type', 'call')
+      .or(`owner_id.in.(${ids.join(',')}),assigned_to.in.(${ids.join(',')})`)
+      .gte('activity_date', fromIso).lte('activity_date', toIso)
+      .limit(20000),
+    supabaseAdmin.from('crm_activities')
+      .select('owner_id, assigned_to, status, due_at')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .or(`owner_id.in.(${ids.join(',')}),assigned_to.in.(${ids.join(',')})`)
+      .in('status', ['open', 'planned', 'in_progress'])
+      .not('due_at', 'is', null)
+      .limit(20000),
+    supabaseAdmin.from('crm_target_entries')
+      .select('user_id, amount, entry_date')
+      .eq('org_id', org_id).is('deleted_at', null).eq('kind', 'sales')
+      .in('user_id', ids)
+      .gte('entry_date', fromIso.slice(0, 10)).lte('entry_date', toIso.slice(0, 10))
+      .limit(20000),
+    supabaseAdmin.from('crm_leads')
+      .select('owner_id')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .in('owner_id', ids)
+      .limit(50000),
+  ]);
+
+  const blankRow = (id: string): TelecallerRow => ({
+    user_id: id, user_name: nameById.get(id) ?? 'Telecaller',
+    calls: 0, connected: 0, interested: 0, not_interested: 0, follow_ups: 0, scheme_amount: 0, leads_assigned: 0,
+  });
+  const byUser = new Map<string, TelecallerRow>(ids.map((id: string) => [id, blankRow(id)]));
+  const dayMap = new Map<string, TelecallerDaily>();
+  const dayOf = (iso: unknown): string => String(iso ?? '').slice(0, 10) || toIso.slice(0, 10);
+
+  for (const a of (callsRes.data ?? []) as any[]) {
+    const uid = ids.includes(a.assigned_to) ? a.assigned_to : (ids.includes(a.owner_id) ? a.owner_id : null);
+    if (!uid) continue;
+    const row = byUser.get(uid)!;
+    const disp = normDisp(a.outcome);
+    row.calls += 1;
+    const connected = disp.startsWith('connected');
+    if (connected) row.connected += 1;
+    if (disp.includes('not interested')) row.not_interested += 1;
+    else if (disp.includes('interested')) row.interested += 1;
+    const d = dayOf(a.activity_date);
+    const day = dayMap.get(d) ?? { date: d, calls: 0, connected: 0, interested: 0, scheme_amount: 0 };
+    day.calls += 1; if (connected) day.connected += 1;
+    if (disp.includes('interested') && !disp.includes('not interested')) day.interested += 1;
+    dayMap.set(d, day);
+  }
+  for (const f of (followRes.data ?? []) as any[]) {
+    const uid = ids.includes(f.assigned_to) ? f.assigned_to : (ids.includes(f.owner_id) ? f.owner_id : null);
+    if (uid) byUser.get(uid)!.follow_ups += 1;
+  }
+  for (const s of (schemeRes.data ?? []) as any[]) {
+    if (!byUser.has(s.user_id)) continue;
+    const amt = Number(s.amount) || 0;
+    byUser.get(s.user_id)!.scheme_amount += amt;
+    const d = dayOf(s.entry_date);
+    const day = dayMap.get(d) ?? { date: d, calls: 0, connected: 0, interested: 0, scheme_amount: 0 };
+    day.scheme_amount += amt; dayMap.set(d, day);
+  }
+  for (const l of (leadsRes.data ?? []) as any[]) {
+    if (byUser.has(l.owner_id)) byUser.get(l.owner_id)!.leads_assigned += 1;
+  }
+
+  const rows = Array.from(byUser.values()).sort((a, b) => b.calls - a.calls || a.user_name.localeCompare(b.user_name));
+  const daily = Array.from(dayMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+  const totals = rows.reduce((t, r) => ({
+    calls: t.calls + r.calls, connected: t.connected + r.connected, interested: t.interested + r.interested,
+    not_interested: t.not_interested + r.not_interested, follow_ups: t.follow_ups + r.follow_ups,
+    scheme_amount: t.scheme_amount + r.scheme_amount, leads_assigned: t.leads_assigned + r.leads_assigned,
+  }), blankTelecallerTotals());
+  return { rows, daily, totals, from: fromIso, to: toIso };
+}
+
+function blankTelecallerTotals(): Omit<TelecallerRow, 'user_id' | 'user_name'> {
+  return { calls: 0, connected: 0, interested: 0, not_interested: 0, follow_ups: 0, scheme_amount: 0, leads_assigned: 0 };
+}
