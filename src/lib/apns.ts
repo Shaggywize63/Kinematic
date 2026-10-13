@@ -32,6 +32,13 @@ const HOST = process.env.APNS_PRODUCTION === 'true'
 /** True only when every required APNs setting is present. */
 export const apnsEnabled: boolean = Boolean(KEY_P8 && KEY_ID && TEAM_ID && BUNDLE_ID);
 
+/**
+ * The alert sound played for an iOS push. This is the filename of a sound file
+ * bundled in the iOS app (see Kinematic-iOS `Kinematic/kinematic_notification.wav`).
+ * Overridable via APNS_SOUND for future retuning without an app release.
+ */
+const APNS_SOUND = process.env.APNS_SOUND || 'kinematic_notification.wav';
+
 if (!apnsEnabled) {
   logger.warn(
     'APNs not configured (APNS_AUTH_KEY_P8 / APNS_KEY_ID / APNS_TEAM_ID / APNS_BUNDLE_ID missing). iOS push is disabled until set.'
@@ -110,7 +117,12 @@ export async function sendApns(
   }
 
   const payload = JSON.stringify({
-    aps: { alert: { title: msg.title, body: msg.body }, sound: 'default' },
+    // Custom branded alert tone — the file `kinematic_notification.wav` is
+    // bundled in the iOS app (Kinematic-iOS). It must match the bundled
+    // filename exactly; iOS falls back to silence (not the system default) if
+    // the installed build predates the bundled sound, so it takes effect once
+    // users update to the build that carries the file.
+    aps: { alert: { title: msg.title, body: msg.body }, sound: APNS_SOUND },
     ...(msg.data || {}),
   });
 
