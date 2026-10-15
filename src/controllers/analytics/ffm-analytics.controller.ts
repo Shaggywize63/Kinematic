@@ -349,26 +349,25 @@ export const visitDuration = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, rows);
 });
 
-/** GET /distance-travelled — km/day across the force + CO₂ equivalent. */
+/** GET /distance-travelled — km/day across the force. */
 export const distanceTravelled = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, []);
   const { data: plans } = await supabaseAdmin
     .from('route_plans')
-    .select('plan_date, total_distance_km, actual_distance_km, co2_kg_planned, co2_kg_actual')
+    .select('plan_date, total_distance_km, actual_distance_km')
     .eq('org_id', user.org_id)
     .gte('plan_date', dayAgo(14));
 
-  const agg = new Map<string, { km: number; co2: number }>();
+  const agg = new Map<string, { km: number }>();
   for (const p of (plans || []) as any[]) {
-    const cur = agg.get(p.plan_date) || { km: 0, co2: 0 };
+    const cur = agg.get(p.plan_date) || { km: 0 };
     cur.km += Number(p.actual_distance_km ?? p.total_distance_km) || 0;
-    cur.co2 += Number(p.co2_kg_actual ?? p.co2_kg_planned) || 0;
     agg.set(p.plan_date, cur);
   }
   const rows = Array.from(agg.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([day, a]) => ({ day, km_total: Math.round(a.km * 10) / 10, co2_kg: Math.round(a.co2 * 100) / 100 }));
+    .map(([day, a]) => ({ day, km_total: Math.round(a.km * 10) / 10 }));
   return ok(res, rows);
 });
 

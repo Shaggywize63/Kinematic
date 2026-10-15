@@ -1,6 +1,6 @@
 import { supabaseAdmin as supabase } from '../lib/supabase';
 import { optimizeRoute, haversineKm, GeoPoint, OutletPoint } from './route-optimizer.service';
-import { resolveFactor, normalizeVehicleType, DEFAULT_VEHICLE_TYPE } from './carbon.service';
+import { DEFAULT_VEHICLE_TYPE } from './carbon.service';
 
 /**
  * Smart route suggestion — builds an optimized, priority-weighted visit order
@@ -58,7 +58,6 @@ export interface PlanSuggestion {
   original_km: number;
   optimized_km: number;
   saved_km: number;
-  saved_co2_kg: number;
 }
 export interface NearbyLead {
   id: string;
@@ -175,7 +174,7 @@ export async function buildRouteSuggestion(opts: SuggestOptions): Promise<RouteS
     const vt = plan.vehicle_type || DEFAULT_VEHICLE_TYPE;
 
     if (usable.length === 0) {
-      planSuggestions.push({ plan_id: plan.id, vehicle_type: vt, ordered: [], original_km: 0, optimized_km: 0, saved_km: 0, saved_co2_kg: 0 });
+      planSuggestions.push({ plan_id: plan.id, vehicle_type: vt, ordered: [], original_km: 0, optimized_km: 0, saved_km: 0 });
       continue;
     }
 
@@ -216,7 +215,6 @@ export async function buildRouteSuggestion(opts: SuggestOptions): Promise<RouteS
     const originalKm = pathKm(planStart, originalPts);
     const optimizedKm = pathKm(planStart, optimizedPts);
     const savedKm = Math.max(0, originalKm - optimizedKm);
-    const factor = await resolveFactor(orgId, normalizeVehicleType(vt));
 
     orderedOutlets.forEach((o) => allStops.push({ lat: o.lat, lng: o.lng }));
 
@@ -227,7 +225,6 @@ export async function buildRouteSuggestion(opts: SuggestOptions): Promise<RouteS
       original_km: round(originalKm, 2),
       optimized_km: round(optimizedKm, 2),
       saved_km: round(savedKm, 2),
-      saved_co2_kg: round(savedKm * factor, 3),
     });
   }
 

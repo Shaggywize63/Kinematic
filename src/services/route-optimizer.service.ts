@@ -1,5 +1,3 @@
-import { resolveFactor, normalizeVehicleType } from './carbon.service';
-
 export interface GeoPoint {
   lat: number;
   lng: number;
@@ -14,7 +12,6 @@ export interface OptimizeResult {
   original_km: number;
   optimized_km: number;
   saved_km: number;
-  saved_co2_kg: number;
   method: 'nearest_neighbour_2opt_haversine';
 }
 
@@ -103,7 +100,6 @@ export async function optimizeRoute(
       original_km: 0,
       optimized_km: 0,
       saved_km: 0,
-      saved_co2_kg: 0,
       method: 'nearest_neighbour_2opt_haversine',
     };
   }
@@ -118,15 +114,11 @@ export async function optimizeRoute(
   const optimizedKm = totalDistance(origin, final);
   const savedKm = Math.max(0, originalKm - optimizedKm);
 
-  const factor = await resolveFactor(orgId, normalizeVehicleType(vehicleType));
-  const savedCo2 = savedKm * factor;
-
   return {
     ordered: final.map((o) => o.id),
     original_km: round(originalKm, 2),
     optimized_km: round(optimizedKm, 2),
     saved_km: round(savedKm, 2),
-    saved_co2_kg: round(savedCo2, 3),
     method: 'nearest_neighbour_2opt_haversine',
   };
 }

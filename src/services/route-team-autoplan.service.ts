@@ -1,6 +1,6 @@
 import { supabaseAdmin as supabase } from '../lib/supabase';
 import { optimizeRoute, haversineKm, GeoPoint, OutletPoint } from './route-optimizer.service';
-import { resolveFactor, normalizeVehicleType, DEFAULT_VEHICLE_TYPE } from './carbon.service';
+import { normalizeVehicleType, DEFAULT_VEHICLE_TYPE } from './carbon.service';
 
 /**
  * TEAM auto-assignment — the engine behind the dashboard's "Automated Route
@@ -183,7 +183,6 @@ export interface FeDraft {
   user_name: string;
   stops: FeDraftStop[];
   total_km: number;
-  est_co2_kg: number;
   start_source: FieldExec['start_source'] | 'first_outlet';
   start: GeoPoint | null;
 }
@@ -643,7 +642,6 @@ export async function buildTeamAutoPlan(opts: TeamAutoPlanOptions): Promise<Team
   const unassigned = enforceCaps(assigned, fes, cap);
 
   // 3. sequence each FE's stops shortest-path from their start
-  const factor = await resolveFactor(orgId, vehicleType);
   const feDrafts: FeDraft[] = [];
   let assignedCount = 0;
   for (const fe of fes) {
@@ -667,7 +665,6 @@ export async function buildTeamAutoPlan(opts: TeamAutoPlanOptions): Promise<Team
       user_name: fe.name,
       stops,
       total_km: round(seq.optimized_km, 2),
-      est_co2_kg: round(seq.optimized_km * factor, 3),
       start_source: fe.start ? fe.start_source : 'first_outlet',
       start: fe.start,
     });
