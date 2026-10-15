@@ -1,6 +1,6 @@
 import { supabaseAdmin as supabase } from '../lib/supabase';
 import { optimizeRoute, GeoPoint, OutletPoint } from './route-optimizer.service';
-import { resolveFactor, normalizeVehicleType, DEFAULT_VEHICLE_TYPE } from './carbon.service';
+import { normalizeVehicleType, DEFAULT_VEHICLE_TYPE } from './carbon.service';
 
 /**
  * Auto-plan GENERATION — designs a brand-new route plan for an FE's day from
@@ -53,7 +53,6 @@ export interface AutoPlanDraft {
   vehicle_type: string;
   stops: AutoPlanStop[];
   total_km: number;
-  est_co2_kg: number;
   start_source: 'live_location' | 'base_location' | 'first_outlet';
   start: GeoPoint | null;
   /** Cadence/priority rows considered for this org. */
@@ -206,7 +205,6 @@ export async function buildAutoPlanDraft(opts: AutoPlanOptions): Promise<AutoPla
     });
     totalKm = res.optimized_km;
   }
-  const factor = await resolveFactor(orgId, vehicleType);
 
   return {
     user_id: userId,
@@ -214,7 +212,6 @@ export async function buildAutoPlanDraft(opts: AutoPlanOptions): Promise<AutoPla
     vehicle_type: vehicleType,
     stops,
     total_km: round(totalKm, 2),
-    est_co2_kg: round(totalKm * factor, 3),
     start_source: startSource,
     start: start ?? null,
     considered: active.length,

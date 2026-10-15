@@ -273,11 +273,8 @@ export const getMockRoutePlans = (today: string) => [
     zone_name: 'Mumbai West Branch',
     city_name: 'Mumbai',
     vehicle_type: '2w_petrol',
-    emission_factor_kg_per_km: 0.072,
     total_distance_km: 18.4,
     actual_distance_km: 8.2,
-    co2_kg_planned: 1.32,
-    co2_kg_actual: 0.59,
     outlets: [
       { id: 'o1', store_id: 'st1', store_name: 'Rakesh Sharma (Policyholder) – Andheri', visit_order: 1, status: 'completed', store_address: 'Lokhandwala, Andheri West', target_type: 'renewal', visited_at: `${today}T10:00:00Z`, checkin_at: `${today}T10:00:00Z`, checkout_at: `${today}T10:30:00Z`, planned_duration_min: 30, actual_duration_min: 30, activities: [{ name: 'Premium Collection', status: 'completed' }] },
       { id: 'o2', store_id: 'st2', store_name: 'Aviva Branch – Bandra Kurla', visit_order: 2, status: 'completed', store_address: 'BKC, Bandra East', target_type: 'kyc', visited_at: `${today}T11:15:00Z`, checkin_at: `${today}T11:15:00Z`, checkout_at: `${today}T11:50:00Z`, planned_duration_min: 30, actual_duration_min: 35, activities: [{ name: 'KYC Document Collection', status: 'completed' }] },
