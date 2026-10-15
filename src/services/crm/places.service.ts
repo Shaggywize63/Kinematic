@@ -98,3 +98,38 @@ export async function details(placeId: string): Promise<PlaceDetail | null> {
     longitude: p.location?.longitude,
   };
 }
+
+// Reverse-geocode a GPS fix to a human-readable address. Used to stamp WHERE a
+// form was submitted (and other geo-stamped records) when the client app only
+// sent coordinates. Best-effort by design: returns null and NEVER throws when
+// there is no key, the fix is implausible (null-island / NaN), or Google returns
+// nothing usable — so the caller simply stores a null address, never a failed
+// write. Uses the classic Geocoding API with the same server key as autocomplete;
+// that key must have the Geocoding API enabled (a REQUEST_DENIED is logged once so
+// ops can enable it, then degrades to null).
+let reverseGeocodeDenied = false;
+export async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
+  if (!PLACES_KEY) return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  // (0,0) and anything hugging it means "no fix", not a real location.
+  if (Math.abs(lat) < 0.5 && Math.abs(lng) < 0.5) return null;
+  try {
+    const res = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${encodeURIComponent(PLACES_KEY)}`,
+    );
+    if (!res.ok) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await res.json();
+    if (data.status === 'REQUEST_DENIED') {
+      if (!reverseGeocodeDenied) {
+        reverseGeocodeDenied = true;
+        console.warn('[places] reverseGeocode REQUEST_DENIED — enable the Geocoding API on the Google key:', data.error_message || '');
+      }
+      return null;
+    }
+    if (data.status !== 'OK' || !Array.isArray(data.results) || !data.results.length) return null;
+    return (data.results[0].formatted_address as string) || null;
+  } catch {
+    return null; // best-effort — never fail the caller's write
+  }
+}

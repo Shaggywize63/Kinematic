@@ -10,6 +10,7 @@ import { mirrorCheckinToRoutePlan } from '../services/routePlanCheckin.service';
 import * as crud from '../services/crm/crud.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { withVisitFields } from '../services/formVisit.service';
+import { reverseGeocode } from '../services/crm/places.service';
 import { resolveVisitTimes } from '../services/formVisit.store';
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
@@ -235,11 +236,22 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   // server time for clients whose `form_checkin_required` rule is on. See formVisit.service.ts.
   const visit = await resolveVisitTimes(submitterClientId, { check_in_at, check_out_at });
 
+  // Stamp WHERE the form was submitted. The apps send coordinates but usually
+  // not a resolved address, so when a fix is present and no address was supplied
+  // we reverse-geocode server-side — every submission then carries a place name
+  // for all clients with no app update. Best-effort: a lookup miss (no key /
+  // Geocoding API off / no result) just leaves the address null, never fails the
+  // submission.
+  let resolvedAddress: string | null = (typeof address === 'string' && address.trim()) ? address.trim() : null;
+  if (!resolvedAddress && latitude != null && longitude != null) {
+    resolvedAddress = await reverseGeocode(Number(latitude), Number(longitude));
+  }
+
   const { data: sub, error: subErr } = await supabaseAdmin.from('form_submissions').insert({
     user_id: user.id, org_id: user.org_id, client_id: submitterClientId,
     template_id, activity_id, outlet_id, outlet_name,
     latitude, longitude, submitted_at: new Date().toISOString(),
-    check_in_at: visit.check_in_at, check_out_at: visit.check_out_at, check_in_gps, check_out_gps, gps, address,
+    check_in_at: visit.check_in_at, check_out_at: visit.check_out_at, check_in_gps, check_out_gps, gps, address: resolvedAddress,
     duration_minutes: visit.duration_minutes
   }).select().single();
   if (subErr) return badRequest(res, subErr.message);
