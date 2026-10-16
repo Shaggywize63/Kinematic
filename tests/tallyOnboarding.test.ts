@@ -7,7 +7,7 @@ jest.mock('../src/lib/supabase', () => {
 
 import {
   generatePairingCode, hashPairingCode, normalisePairingCode, computeHealth, missingLedgers,
-  buildCreateLedgersXml, sanitiseMaster, matchParty, matchStockItem, partyCode,
+  buildCreateLedgersXml, publicApiBase, sanitiseMaster, matchParty, matchStockItem, partyCode,
 } from '../src/services/distribution/integrations/tally.onboarding';
 import { agentPair, agentMasters } from '../src/controllers/distribution/tally-onboarding.controller';
 
@@ -99,6 +99,25 @@ describe('health checklist', () => {
     expect(xml).toContain('A &amp; B');
     expect(xml).toContain('Tax &quot;&lt;5%&gt;&quot;');
     expect(xml).toContain('<GSTDUTYHEAD>Central Tax</GSTDUTYHEAD>');
+  });
+});
+
+describe('publicApiBase', () => {
+  const old = process.env.API_PUBLIC_URL;
+  afterEach(() => { if (old === undefined) delete process.env.API_PUBLIC_URL; else process.env.API_PUBLIC_URL = old; });
+  it('is always absolute: env (trailing slash stripped) or the production API', () => {
+    delete process.env.API_PUBLIC_URL;
+    expect(publicApiBase()).toBe('https://api.kinematicapp.com');
+    process.env.API_PUBLIC_URL = 'https://api.example.com//';
+    expect(publicApiBase()).toBe('https://api.example.com');
+  });
+  it('agentPair hands the connector absolute endpoints even with API_PUBLIC_URL unset', async () => {
+    delete process.env.API_PUBLIC_URL;
+    supa().reset();
+    supa().queue('distribution_integrations', { data: { id: INT, agent_secret: 'sek', config: {} }, error: null });
+    const r = await call(agentPair, { body: { code: 'K7F-29X' } });
+    expect(r.body.config.polling_endpoint).toMatch(/^https:\/\/api\.kinematicapp\.com\/api\/v1\/integrations\/tally\/jobs\//);
+    expect(r.body.config.report_endpoint).toMatch(/^https:\/\//);
   });
 });
 
