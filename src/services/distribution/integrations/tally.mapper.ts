@@ -21,8 +21,10 @@
  *   • Multi-currency / multi-company
  */
 import { supabaseAdmin } from '../../../lib/supabase';
+import { xmlEscape, tallyDate, amt, envelope } from './tally.xml';
+import { buildInventoryLines, unresolvedLines, buildDistributorLedger, buildStockItem, type StockName, type LineItem } from './tally.inventory';
 
-export type EventKind = 'invoice' | 'payment' | 'return' | 'credit_note';
+export type EventKind = 'invoice' | 'payment' | 'return' | 'credit_note' | 'order' | 'master_ledger' | 'master_stock_item';
 
 export interface TallyIntegrationConfig {
   company_name?: string;                  // Tally company name (SVCURRENTCOMPANY)
@@ -35,6 +37,10 @@ export interface TallyIntegrationConfig {
   cess_ledger_name?: string;              // default 'Cess'
   credit_note_ledger_name?: string;       // default 'Sales Returns'
   round_off_ledger_name?: string;         // default 'Round Off'
+  // Opt-in outbound features (all default off; set from the dashboard's Set up & sync screen).
+  sync_orders?: boolean;                  // push approved orders as Sales Orders
+  auto_create_ledgers?: boolean;          // push new distributors as Sundry Debtor ledgers
+  auto_create_stock_items?: boolean;      // push new products as stock items
 }
 
 interface IntegrationRow {
@@ -42,28 +48,6 @@ interface IntegrationRow {
   org_id: string;
   config: TallyIntegrationConfig;
 }
-
-// ── String helpers ────────────────────────────────────────────────────────────────────────
-const xmlEscape = (s: unknown): string =>
-  String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-
-/** Tally prefers YYYYMMDD date strings (no separators). */
-const tallyDate = (iso: string | Date | null | undefined): string => {
-  if (!iso) return '';
-  const d = iso instanceof Date ? iso : new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}${m}${day}`;
-};
-
-/** Tally amount format: 2 decimals, no thousand separators. */
-const amt = (n: unknown): string => Number(n ?? 0).toFixed(2);
 
 // ── Ledger-name resolution ─────────────────────────────────────────────────────────────
 
@@ -122,29 +106,27 @@ export function defaults(cfg: TallyIntegrationConfig) {
   };
 }
 
-// ── Envelope ────────────────────────────────────────────────────────────────────────────────────
-function envelope(companyName: string, innerVoucherXml: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER>
-    <TALLYREQUEST>Import Data</TALLYREQUEST>
-  </HEADER>
-  <BODY>
-    <IMPORTDATA>
-      <REQUESTDESC>
-        <REPORTNAME>Vouchers</REPORTNAME>
-        <STATICVARIABLES>
-          <SVCURRENTCOMPANY>${xmlEscape(companyName)}</SVCURRENTCOMPANY>
-        </STATICVARIABLES>
-      </REQUESTDESC>
-      <REQUESTDATA>
-        <TALLYMESSAGE xmlns:UDF="TallyUDF">
-${innerVoucherXml}
-        </TALLYMESSAGE>
-      </REQUESTDATA>
-    </IMPORTDATA>
-  </BODY>
-</ENVELOPE>`;
+// ── Stock item resolution ────────────────────────────────────────────────────────────────────
+/**
+ * Map sku_id -> the exact Tally stock item name + unit, for products linked through "Pull from
+ * Tally" (distribution_tally_masters, status matched/imported). Products without a pulled link
+ * are deliberately absent: we never guess a stock item name Tally may not have.
+ */
+export async function resolveStockNames(integration_id: string, skuIds: string[]): Promise<Map<string, StockName>> {
+  const out = new Map<string, StockName>();
+  if (skuIds.length === 0) return out;
+  const { data } = await supabaseAdmin
+    .from('distribution_tally_masters')
+    .select('name, data, matched_ref_id')
+    .eq('integration_id', integration_id)
+    .eq('kind', 'stock_item')
+    .in('status', ['matched', 'imported'])
+    .in('matched_ref_id', skuIds);
+  for (const m of (data as Array<{ name: string; data: Record<string, unknown> | null; matched_ref_id: string }> | null) ?? []) {
+    const unit = String(m.data?.unit ?? '').trim();
+    if (m.matched_ref_id && unit) out.set(m.matched_ref_id, { name: m.name, unit });
+  }
+  return out;
 }
 
 // ── Render: invoice → Sales Voucher ─────────────────────────────────────────────────────────
@@ -166,6 +148,15 @@ export async function renderInvoice(integration: IntegrationRow, invoice_id: str
   //   Sales:                  CR — ISDEEMEDPOSITIVE=No,  AMOUNT=positive-taxable
   //   CGST/SGST/IGST/Cess:    CR — ISDEEMEDPOSITIVE=No,  AMOUNT=positive
   //   Round off:              CR — sign depends on direction
+  // Item invoice: when every line resolves to a stock item pulled from Tally (and the lines add up),
+  // the sales amount rides on the inventory lines (their accounting allocation) so stock moves in Tally.
+  // Otherwise the voucher stays ledger-only exactly as before.
+  const { data: itemRows } = await supabaseAdmin.from('invoice_items')
+    .select('sku_id, qty, unit_price, taxable_value, is_free_good, uom').eq('invoice_id', invoice_id).order('line_no');
+  const lineItems = (itemRows as LineItem[] | null) ?? [];
+  const stockNames = await resolveStockNames(integration.id, Array.from(new Set(lineItems.map(i => i.sku_id))));
+  const inventory = buildInventoryLines(lineItems, stockNames, cfg.sales, Number(inv.taxable_value));
+
   const entries: string[] = [];
 
   // Party
@@ -175,8 +166,8 @@ export async function renderInvoice(integration: IntegrationRow, invoice_id: str
             <AMOUNT>-${amt(inv.grand_total)}</AMOUNT>
           </ALLLEDGERENTRIES.LIST>`);
 
-  // Sales
-  if (Number(inv.taxable_value) > 0) {
+  // Sales (ledger-only mode)
+  if (!inventory && Number(inv.taxable_value) > 0) {
     entries.push(`          <ALLLEDGERENTRIES.LIST>
             <LEDGERNAME>${xmlEscape(cfg.sales)}</LEDGERNAME>
             <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
@@ -213,8 +204,9 @@ export async function renderInvoice(integration: IntegrationRow, invoice_id: str
             <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
             <VOUCHERNUMBER>${xmlEscape(inv.invoice_no)}</VOUCHERNUMBER>
             <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
-            <REFERENCE>${xmlEscape(inv.invoice_no)}</REFERENCE>
-${entries.join('\n')}
+            <REFERENCE>${xmlEscape(inv.invoice_no)}</REFERENCE>${inventory ? `
+            <ISINVOICE>Yes</ISINVOICE>` : ''}
+${entries.join('\n')}${inventory ? `\n${inventory.xml}` : ''}
           </VOUCHER>`;
 
   return envelope(company, voucher);
@@ -408,6 +400,82 @@ ${entries.join('\n')}
   return envelope(company, voucher);
 }
 
+// ── Render: order → Sales Order ──────────────────────────────────────────────────────────────
+/**
+ * Sales Order voucher (no accounting impact in Tally; it books the order and its items). Needs every
+ * line linked to a pulled Tally stock item, so a clear error says which products to link first.
+ * Taxes are not carried: they belong on the invoice that later fulfils the order.
+ */
+export async function renderOrder(integration: IntegrationRow, order_id: string): Promise<string> {
+  const cfg = defaults(integration.config ?? {});
+  const company = integration.config?.company_name ?? 'Default Company';
+
+  const { data: o } = await supabaseAdmin.from('orders')
+    .select('id, order_no, distributor_id, placed_at, taxable_value, notes')
+    .eq('id', order_id).maybeSingle();
+  if (!o) throw new Error(`order ${order_id} not found`);
+
+  const { data: itemRows } = await supabaseAdmin.from('order_items')
+    .select('sku_id, sku_name, sku_code, qty, unit_price, taxable_value, is_free_good, uom').eq('order_id', order_id).order('line_no');
+  const items = (itemRows as Array<LineItem & { sku_name?: string | null; sku_code?: string | null }> | null) ?? [];
+  const names = await resolveStockNames(integration.id, Array.from(new Set(items.map(i => i.sku_id))));
+  const date = tallyDate(o.placed_at as string);
+  const lines = buildInventoryLines(items, names, cfg.sales, Number(o.taxable_value), () => `
+            <BATCHALLOCATIONS.LIST>
+              <GODOWNNAME>Main Location</GODOWNNAME>
+              <BATCHNAME>Primary Batch</BATCHNAME>
+              <ORDERNO>${xmlEscape(o.order_no)}</ORDERNO>
+              <TRACKINGNUMBER>Not Applicable</TRACKINGNUMBER>
+              <ORDERDUEDATE>${date}</ORDERDUEDATE>
+            </BATCHALLOCATIONS.LIST>`);
+  if (!lines) {
+    const missing = unresolvedLines(items as Array<LineItem & { sku_name?: string | null; sku_code?: string | null }>, names);
+    throw new Error(missing.length
+      ? `Sales order not sent: these products are not linked to Tally stock items: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}. Use "Pull from Tally" in Set up & sync.`
+      : 'Sales order not sent: its lines do not add up to the order total.');
+  }
+
+  const party = await partyLedger(integration.id, o.distributor_id as string);
+  const voucher = `          <VOUCHER REMOTEID="${xmlEscape(`KIN-ORD-${o.id}`)}" VCHTYPE="Sales Order" ACTION="Create">
+            <DATE>${date}</DATE>
+            <NARRATION>Order ${xmlEscape(o.order_no)}${o.notes ? ` · ${xmlEscape(o.notes)}` : ''}</NARRATION>
+            <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>${xmlEscape(o.order_no)}</VOUCHERNUMBER>
+            <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
+            <REFERENCE>${xmlEscape(o.order_no)}</REFERENCE>
+            <ISINVOICE>No</ISINVOICE>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>${xmlEscape(party)}</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-${amt(lines.total)}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+${lines.xml}
+          </VOUCHER>`;
+  return envelope(company, voucher);
+}
+
+// ── Render: new dealer → Sundry Debtor ledger ─────────────────────────────────────────────────
+export async function renderMasterLedger(integration: IntegrationRow, distributor_id: string): Promise<string> {
+  const company = integration.config?.company_name ?? 'Default Company';
+  const { data: d } = await supabaseAdmin.from('distributors')
+    .select('name, legal_name, gstin, state_code, address, contact_mobile, email, credit_limit, payment_terms_days')
+    .eq('id', distributor_id).maybeSingle();
+  if (!d) throw new Error(`distributor ${distributor_id} not found`);
+  // Same name the vouchers will use for this dealer, so invoices find the ledger we create.
+  const ledgerName = await partyLedger(integration.id, distributor_id);
+  return envelope(company, buildDistributorLedger(d as never, ledgerName), 'All Masters');
+}
+
+// ── Render: new product → stock item ──────────────────────────────────────────────────────────
+export async function renderMasterStockItem(integration: IntegrationRow, sku_id: string): Promise<string> {
+  const company = integration.config?.company_name ?? 'Default Company';
+  const { data: k } = await supabaseAdmin.from('skus')
+    .select('name, sku_code, category, unit, tally_stock_item_name').eq('id', sku_id).maybeSingle();
+  if (!k) throw new Error(`sku ${sku_id} not found`);
+  const itemName = ((k.tally_stock_item_name as string | null) || (k.name as string)).trim();
+  return envelope(company, buildStockItem(k as never, itemName), 'All Masters');
+}
+
 // ── Dispatcher ────────────────────────────────────────────────────────────────────────────────
 export async function renderTallyXml(
   integration: IntegrationRow,
@@ -417,5 +485,8 @@ export async function renderTallyXml(
   if (kind === 'invoice')  return renderInvoice(integration, ref_id);
   if (kind === 'payment')  return renderPayment(integration, ref_id);
   if (kind === 'return' || kind === 'credit_note') return renderReturn(integration, ref_id);
+  if (kind === 'order')              return renderOrder(integration, ref_id);
+  if (kind === 'master_ledger')      return renderMasterLedger(integration, ref_id);
+  if (kind === 'master_stock_item')  return renderMasterStockItem(integration, ref_id);
   throw new Error(`Unsupported Tally event kind: ${kind}`);
 }

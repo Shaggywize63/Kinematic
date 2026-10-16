@@ -84,7 +84,8 @@ async function handleCommand(ctx, cmd, serverCompany) {
 async function handleJob(ctx, job) {
   const start = Date.now();
   let result;
-  try { result = T.parseImportResponse(await T.tallyPost(ctx.cfg.tally_url, job.xml_payload)); }
+  const isMaster = String(job.kind || '').startsWith('master_');
+  try { result = T.parseImportResponse(await T.tallyPost(ctx.cfg.tally_url, job.xml_payload), { tolerateExisting: isMaster }); }
   catch (e) { result = { ok: false, error: e.message }; }
   ctx.log(`  ${result.ok ? '✓' : '✗'} ${job.kind} ${job.ref_id} → ${result.ok ? 'Tally voucher ' + (result.tally_voucher_id || '(no id)') : result.error} (${Date.now() - start}ms)`);
   try {
