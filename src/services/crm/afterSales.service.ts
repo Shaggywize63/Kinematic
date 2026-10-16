@@ -19,19 +19,18 @@ import ExcelJS from 'exceljs';
 import { parse as csvParse } from 'csv-parse/sync';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
-import { isTelecaller } from './telecaller.service';
+import { listTelecallers } from './telecaller.service';
 import * as leadsSvc from './leads.service';
 import type { Lead } from '../../types/crm.types';
 
 export const AFTER_SALES_CAMPAIGN = 'After-Sales';
 
-// ── Types ────────────────────────────────────────────────────────────────
-export interface Telecaller {
-  id: string;
-  name: string;
-  email: string | null;
-}
+// The telecaller directory lives in telecaller.service (shared with the
+// marketing hand-off). Re-exported so callers of afterSales.listTelecallers
+// keep working.
+export { listTelecallers } from './telecaller.service';
 
+// ── Types ────────────────────────────────────────────────────────────────
 export interface AfterSalesConfig {
   /** The single telecaller all After-Sales records are assigned to. */
   telecaller_id: string | null;
@@ -77,19 +76,6 @@ export interface ImportResult {
   failed: number;
   errors: ImportRowError[];
   unassigned: boolean; // true when no telecaller was configured, so records are owner-less
-}
-
-// ── Telecaller directory (for the admin assignment picker) ─────────────────
-export async function listTelecallers(org_id: string, client_id: string | null): Promise<Telecaller[]> {
-  let q = supabaseAdmin.from('users')
-    .select('id, name, email, role, org_role:org_roles!org_role_id(name)')
-    .eq('org_id', org_id).is('deleted_at', null);
-  if (client_id) q = q.eq('client_id', client_id);
-  const { data, error } = await q;
-  if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  return (data ?? [])
-    .filter((u: any) => isTelecaller({ role: u.role, org_role_name: u.org_role?.name }))
-    .map((u: any) => ({ id: u.id as string, name: (u.name as string) ?? 'Telecaller', email: (u.email as string) ?? null }));
 }
 
 // ── Assignment config (crm_settings.config.after_sales, client-scoped) ─────

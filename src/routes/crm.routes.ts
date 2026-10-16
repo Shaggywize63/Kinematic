@@ -1503,6 +1503,18 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
   await ownerAssign.assertMayChooseOwner(crmActor(req));
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
 }));
+// Marketing hand-off: assign/reassign a lead to a TELECALLER (+ optional calling
+// category). Unlike /bulk-assign this is intentionally NOT behind the admin-only
+// owner gate — marketing employees must be able to route leads to telecallers —
+// because the operation is constrained to a validated telecaller owner and a
+// known campaign (see telecaller.assignLeadToTelecaller). Client scope enforced.
+leads.post('/:id/assign-telecaller', wrap(async (req, res) => {
+  const body = parse(v.assignTelecallerSchema, req.body ?? {});
+  const updated = await telecaller.assignLeadToTelecaller(
+    orgId(req), clientScope(req), req.params.id, body.telecaller_id, body.campaign ?? null,
+  );
+  res.json(await stampOwnerName(updated));
+}));
 // Recompute the score for every non-terminal lead in scope — powers the
 // "Update all scores" button on the dashboard leads screen. Admin-tier only
 // (a full-tenant sweep is heavy). Runs DETACHED and returns 202 so the request
@@ -1760,6 +1772,23 @@ router.use('/after-sales',
   requireRole('super_admin', 'admin', 'main_admin', 'sub_admin', 'client'),
   rbac.requireModuleAccess('crm_leads'),
   afterSalesRouter);
+
+// Telecaller directory — the marketing assign-to-telecaller picker (and any
+// other lead-capable caller) reads this. Client-scoped; lists only telecallers
+// in the active tenant. Lead-module gated (marketing employees have it).
+router.get('/telecallers', rbac.requireModuleAccess('crm_leads'), wrap(async (req, res) => {
+  res.json(await telecaller.listTelecallers(orgId(req), clientId(req)));
+}));
+
+// Telecaller "Follow-ups" tab — the caller's own pending follow-up calls
+// (open call activities with a due date), soonest first, enriched with the
+// linked lead's name + phone. Own-scoped inside the service.
+router.get('/telecaller/followups', rbac.requireModuleAccess('crm_activities'), wrap(async (req, res) => {
+  const uid = userId(req);
+  if (!uid) throw new AppError(401, 'Auth required', 'AUTH_REQUIRED');
+  const rows = await telecaller.listFollowupRows(orgId(req), uid);
+  res.json(await enrichActivities(rows as Record<string, any>[]));
+}));
 
 // ---------- CONVERSATION INTELLIGENCE (recording pipeline + dashboard) ------
 // Kick off processing after the client PUT the audio to the signed URL.

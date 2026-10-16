@@ -557,6 +557,13 @@ export const afterSalesConfigSchema = z.object({
   round_robin_pool: z.array(uuid).optional().nullable(),
 });
 
+// Marketing hand-off: assign a lead to a telecaller, optionally tagging its
+// calling category (Gold Scheme / Gold Order / After-Sales / App & DigiGold).
+export const assignTelecallerSchema = z.object({
+  telecaller_id: uuid,
+  campaign: z.string().max(60).optional().nullable(),
+});
+
 export const territorySchema = z.object({
   name: z.string().min(1).max(120),
   criteria: z.record(z.unknown()).default({}),
