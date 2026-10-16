@@ -27,6 +27,7 @@ import * as flowsSvc from '../services/crm/flows.service';
 import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as customObjectsSvc from '../services/crm/customObjects.service';
+import * as upsellsSvc from '../services/crm/upsells.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
 import * as ownerAssign from '../services/crm/ownerAssignment';
@@ -2224,6 +2225,31 @@ deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc
 deals.post('/:id/line-items', wrap(async (req, res) =>
   res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req)))));
 router.use('/deals', rbac.requireModuleAccess('crm_deals'), deals);
+
+// ── Upsells ─────────────────────────────────────────────────────────────────
+// Additional revenue logged against an existing deal and/or lead. Rendered as
+// the "Upsells" section on both the deal- and lead-detail pages. Gated on
+// crm_leads (present for every CRM tenant); the record itself links to a deal,
+// a lead, or both. See services/crm/upsells.service.ts.
+const upsells = express.Router();
+upsells.use(rbac.requireModuleAccess('crm_leads'));
+// GET /crm/upsells?deal_id=&lead_id= → the upsells for that deal or lead, newest first.
+upsells.get('/', wrap(async (req, res) => {
+  res.json(await upsellsSvc.listUpsells(orgId(req), {
+    deal_id: (req.query.deal_id as string) ?? null,
+    lead_id: (req.query.lead_id as string) ?? null,
+  }));
+}));
+// POST /crm/upsells → log an upsell. client_id + created_by come from the request scope, not the body.
+upsells.post('/', wrap(async (req, res) => {
+  res.status(201).json(await upsellsSvc.createUpsell(orgId(req), clientId(req), userId(req) ?? null, (req.body ?? {})));
+}));
+// DELETE /crm/upsells/:id → remove an upsell (within the caller's org).
+upsells.delete('/:id', wrap(async (req, res) => {
+  await upsellsSvc.deleteUpsell(orgId(req), req.params.id);
+  res.json({ ok: true });
+}));
+router.use('/upsells', upsells);
 
 const lineItems = express.Router();
 lineItems.patch('/:id', wrap(async (req, res) =>
