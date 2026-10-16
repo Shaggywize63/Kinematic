@@ -79,6 +79,25 @@ async function orgGrantsDistribution(orgId: string | null | undefined, distIds: 
 }
 
 /**
+ * The modules a client was explicitly granted (client_modules: enabled and not expired) — NOT the always-on
+ * universal ones. This is the set the Clients page assigns, and what a new user under the client should
+ * start with (see modulePermissionsForNewUser). Any failure returns [] so the caller falls back to its
+ * previous behaviour instead of blocking user creation.
+ */
+export async function clientGrantedModuleIds(clientId: string): Promise<string[]> {
+  const { data, error } = await supabaseAdmin
+    .from('client_modules')
+    .select('module_id, expires_at')
+    .eq('client_id', clientId)
+    .eq('enabled', true);
+  if (error || !data) return [];
+  const now = Date.now();
+  return data
+    .filter((r) => !r.expires_at || new Date(r.expires_at as string).getTime() > now)
+    .map((r) => r.module_id as string);
+}
+
+/**
  * Resolve entitlements for a given user.
  *
  * @param opts.role         User's role (super_admin bypass)

@@ -12,7 +12,8 @@ import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlert
 import * as hierarchy from '../services/crm/hierarchy.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { normalizeMobile, newUserContactProblem } from '../lib/userContact';
-import { userAccessRows } from '../lib/userAccessRows';
+import { userAccessRows, modulePermissionsForNewUser } from '../lib/userAccessRows';
+import { clientGrantedModuleIds } from '../lib/entitlements';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -670,7 +671,15 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   // by PostgREST; with the result never checked, the user was created without the modules and
   // cities the admin picked. Write the real columns, and if either insert fails undo the whole
   // creation (the profile delete cascades to any rows already written) and say what failed.
-  const { permissionRows, cityRows } = userAccessRows(authId, permissions, assigned_cities)
+  // A client-bound user created with neither a designation nor a module list starts on the client's own
+  // granted modules, not on "no list" (which the dashboard reads as the client's whole entitlement,
+  // including every always-on universal module). Derived from the client's grants, so it comes after the
+  // escalation guard above, which only checks what the caller chose. See modulePermissionsForNewUser.
+  const hasOrgRole = isUUID(org_role_id as string)
+  const clientGrants = pickedClientId && !hasOrgRole ? await clientGrantedModuleIds(pickedClientId) : []
+  const startingModules = modulePermissionsForNewUser(permissions, { hasOrgRole, clientGrants })
+
+  const { permissionRows, cityRows } = userAccessRows(authId, startingModules, assigned_cities)
   const writes = [
     permissionRows.length ? { what: 'module permissions', run: supabaseAdmin.from('user_module_permissions').insert(permissionRows) } : null,
     cityRows.length ? { what: 'city assignments', run: supabaseAdmin.from('user_city_assignments').insert(cityRows) } : null,
@@ -685,7 +694,8 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
     throw new AppError(badRef ? 400 : 500, `Could not save the user's ${writes[failedAt].what}: ${err.message}`, badRef ? 'VALIDATION_ERROR' : 'DB_ERROR')
   }
 
-  sendSuccess(res, { ...data, permissions: permissions || [], assigned_cities: assigned_cities || [] }, 'User created', 201)
+  // Report what was actually saved (the caller's list, or the client's modules when none was given).
+  sendSuccess(res, { ...data, permissions: permissionRows.map((r) => r.module_id), assigned_cities: assigned_cities || [] }, 'User created', 201)
 })
 
 export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
