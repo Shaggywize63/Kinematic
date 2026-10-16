@@ -1,0 +1,31 @@
+name: Tally connector (Windows .exe)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['tally-agent-v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tally-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Test
+        run: npm test
+      - name: Build Windows exe
+        run: npm run build:exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kinematic-tally-agent-exe
+          path: tally-agent/dist/kinematic-tally-agent.exe
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tally-agent/dist/kinematic-tally-agent.exe

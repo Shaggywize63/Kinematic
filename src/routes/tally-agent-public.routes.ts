@@ -22,6 +22,13 @@ const limit = perRouteLimit({ windowMs: 60_000, max: 120 });
 // Pairing is unauthenticated by nature (the code IS the credential), so it gets a
 // much tighter limit: 6 chars of a 31-letter alphabet, single use, 24h life.
 const pairLimit = perRouteLimit({ windowMs: 60_000, max: 10 });
+// Where the dashboard's "Download for Windows" button points. The build is produced by
+// .github/workflows/tally-agent-build.yml; set TALLY_AGENT_DOWNLOAD_URL to wherever it is hosted.
+router.get('/agent/download', limit, (_req, res) => {
+  const target = process.env.TALLY_AGENT_DOWNLOAD_URL;
+  if (!target || !/^https:\/\//.test(target)) { res.status(404).json({ ok: false, error: 'The connector download is not configured yet.' }); return; }
+  res.redirect(302, target);
+});
 router.post('/pair',                   pairLimit, agentPair);
 router.post('/jobs/:id/profile',        limit, agentProfile);
 router.post('/jobs/:id/masters',        limit, agentMasters);

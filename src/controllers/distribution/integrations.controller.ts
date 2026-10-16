@@ -269,7 +269,8 @@ export const agentFetchJobs = asyncHandler<Request>(async (req, res) => {
   const { data: cmdRow } = await supabaseAdmin.from('distribution_integrations')
     .select('pending_commands').eq('id', integration_id).maybeSingle();
   const commands = (cmdRow?.pending_commands as unknown[] | null) ?? [];
-  if (!events || events.length === 0) { res.status(200).json({ ok: true, jobs: [], commands }); return; }
+  const company_name = ((integration.config as Record<string, unknown> | null)?.company_name as string | undefined) ?? null;
+  if (!events || events.length === 0) { res.status(200).json({ ok: true, jobs: [], commands, company_name }); return; }
 
   // Render XML lazily, mark in_flight as we go.
   const jobs: Array<{ event_id: string; kind: string; ref_id: string; xml_payload: string; attempts: number }> = [];
@@ -305,7 +306,7 @@ export const agentFetchJobs = asyncHandler<Request>(async (req, res) => {
     }
   }
 
-  res.status(200).json({ ok: true, jobs, commands });
+  res.status(200).json({ ok: true, jobs, commands, company_name });
 });
 
 export const agentReportResult = asyncHandler<Request>(async (req, res) => {
