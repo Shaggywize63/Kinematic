@@ -42,7 +42,7 @@ export function stopTallyEnqueuePoller(): void {
 async function runOnce(): Promise<void> {
   const { data: integrations, error } = await supabaseAdmin
     .from('distribution_integrations')
-    .select('id, org_id, last_sync_at')
+    .select('id, org_id, last_sync_at, config')
     .eq('provider', 'tally')
     .eq('status', 'active');
   if (error) {
@@ -53,14 +53,24 @@ async function runOnce(): Promise<void> {
 
   for (const integration of integrations) {
     try {
-      await enqueueForIntegration(integration as { id: string; org_id: string; last_sync_at: string | null });
+      await enqueueForIntegration(integration as IntegrationLite);
     } catch (e) {
       logger.error({ integration_id: integration.id, err: (e as Error).message }, 'tally poller: per-integration enqueue failed');
     }
   }
 }
 
-async function enqueueForIntegration(integration: { id: string; org_id: string; last_sync_at: string | null }) {
+export interface IntegrationLite { id: string; org_id: string; last_sync_at: string | null; config?: Record<string, unknown> | null }
+
+/** Ids of Kinematic records already linked to a Tally master (so we never push a duplicate). */
+async function linkedRefIds(integration_id: string, kind: 'party' | 'stock_item'): Promise<Set<string>> {
+  const { data } = await supabaseAdmin.from('distribution_tally_masters')
+    .select('matched_ref_id').eq('integration_id', integration_id).eq('kind', kind)
+    .in('status', ['matched', 'imported']).not('matched_ref_id', 'is', null).limit(20000);
+  return new Set(((data ?? []) as Array<{ matched_ref_id: string }>).map(r => r.matched_ref_id));
+}
+
+export async function enqueueForIntegration(integration: IntegrationLite) {
   const since = integration.last_sync_at
     ? new Date(integration.last_sync_at)
     : new Date(Date.now() - COLD_START_LOOKBACK_HOURS * 3_600_000);
@@ -99,6 +109,37 @@ async function enqueueForIntegration(integration: { id: string; org_id: string; 
     .gte('created_at', sinceIso)
     .limit(500);
   enqueued += await insertEvents(integration.id, integration.org_id, 'credit_note', 'returns', (returns ?? []).map(r => r.id as string));
+
+  // ── Opt-in outbound features (off unless switched on in Set up & sync) ──────────────────────
+  const cfg = (integration.config ?? {}) as Record<string, unknown>;
+
+  // Sales Orders — approved orders only. Needs the 'order' event kind (see migrations/tally_event_kind_order.sql).
+  if (cfg.sync_orders === true) {
+    const { data: orders } = await supabaseAdmin.from('orders')
+      .select('id').eq('org_id', integration.org_id).eq('status', 'approved')
+      .gte('approved_at', sinceIso).limit(500);
+    enqueued += await insertEvents(integration.id, integration.org_id, 'order', 'orders', (orders ?? []).map(r => r.id as string));
+  }
+
+  // New dealers -> Sundry Debtor ledgers (skipping dealers already linked to a Tally ledger).
+  if (cfg.auto_create_ledgers === true) {
+    const { data: dists } = await supabaseAdmin.from('distributors')
+      .select('id').eq('org_id', integration.org_id).eq('is_active', true)
+      .gte('created_at', sinceIso).limit(500);
+    const linked = await linkedRefIds(integration.id, 'party');
+    enqueued += await insertEvents(integration.id, integration.org_id, 'master_ledger', 'distributors',
+      (dists ?? []).map(r => r.id as string).filter(id => !linked.has(id)));
+  }
+
+  // New products -> stock items (skipping products already linked to a Tally stock item).
+  if (cfg.auto_create_stock_items === true) {
+    const { data: skus } = await supabaseAdmin.from('skus')
+      .select('id').eq('org_id', integration.org_id).eq('is_active', true)
+      .gte('created_at', sinceIso).limit(500);
+    const linked = await linkedRefIds(integration.id, 'stock_item');
+    enqueued += await insertEvents(integration.id, integration.org_id, 'master_stock_item', 'skus',
+      (skus ?? []).map(r => r.id as string).filter(id => !linked.has(id)));
+  }
 
   // Move the watermark forward so we don't re-scan the same window every tick.
   await supabaseAdmin.from('distribution_integrations')

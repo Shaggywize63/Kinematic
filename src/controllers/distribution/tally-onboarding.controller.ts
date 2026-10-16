@@ -194,6 +194,7 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
         org_id: user.org_id, client_id: user.client_id ?? null,
         sku_code: (d.part_number as string) || `TLY-${(it.tally_guid as string).slice(-8).toUpperCase()}`,
         name: it.name, unit: (d.unit as string) || 'PCS', category: (d.category as string) || null,
+        tally_stock_item_name: it.name,       // exact Tally spelling, used by vouchers
       }).select('id').single();
       refId = row?.id ?? null; errMsg = e?.message ?? null;
       if (refId) {

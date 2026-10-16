@@ -114,3 +114,15 @@ test('parseImportResponse surfaces Tally line errors', () => {
     { ok: false, error: "Ledger 'X' does not exist" });
   assert.strictEqual(T.parseImportResponse('<RESPONSE><CREATED>1</CREATED><LASTVCHID>5</LASTVCHID></RESPONSE>').ok, true);
 });
+
+test('master pushes treat "already exists" as done; vouchers still fail on it', () => {
+  const exists = "<RESPONSE><CREATED>0</CREATED><ERRORS>1</ERRORS><LINEERROR>Ledger 'Sharma' already exists!</LINEERROR></RESPONSE>";
+  assert.strictEqual(T.parseImportResponse(exists, { tolerateExisting: true }).ok, true);
+  assert.strictEqual(T.parseImportResponse(exists).ok, false);
+  // unit already exists but the stock item itself was created: still success for masters
+  const partial = "<RESPONSE><CREATED>1</CREATED><ERRORS>1</ERRORS><LINEERROR>Unit 'Kgs' already exists!</LINEERROR></RESPONSE>";
+  assert.strictEqual(T.parseImportResponse(partial, { tolerateExisting: true }).ok, true);
+  // a real master error is still an error
+  const bad = "<RESPONSE><CREATED>0</CREATED><ERRORS>1</ERRORS><LINEERROR>Group 'Foo' does not exist</LINEERROR></RESPONSE>";
+  assert.strictEqual(T.parseImportResponse(bad, { tolerateExisting: true }).ok, false);
+});

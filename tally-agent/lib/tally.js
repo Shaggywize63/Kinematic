@@ -93,14 +93,21 @@ function partiesFrom(ledgers, groups) {
   return ledgers.filter(l => l.tally_guid && isDebtor(l.parent));
 }
 
-/** Parse a Tally import response. */
-function parseImportResponse(xml) {
+/**
+ * Parse a Tally import response.
+ * `tolerateExisting` is for master pushes (ledgers / stock items / units): Tally reports
+ * "already exists" as an error, but for a master that means the goal is met, so it is success
+ * (otherwise the job would retry and fail forever).
+ */
+function parseImportResponse(xml, opts = {}) {
   const tag = n => { const m = new RegExp(`<${n}>([^<]*)</${n}>`, 'i').exec(xml); return m ? m[1].trim() : null; };
   const created = parseInt(tag('CREATED') || '0', 10);
   const altered = parseInt(tag('ALTERED') || '0', 10);
   const errors = parseInt(tag('ERRORS') || '0', 10);
   const lineError = tag('LINEERROR') || tag('DESC');
   const lastVchId = tag('LASTVCHID');
+  const exists = !!(opts.tolerateExisting && lineError && /already exists/i.test(lineError));
+  if (exists && (created + altered > 0 || errors > 0)) return { ok: true, note: lineError };
   if (errors > 0 || ((created + altered) === 0 && lineError)) return { ok: false, error: lineError || 'Tally rejected the request' };
   if (created + altered < 1 && !lastVchId) return { ok: false, error: 'Tally accepted the request but created nothing' };
   return { ok: true, tally_voucher_id: lastVchId || undefined };

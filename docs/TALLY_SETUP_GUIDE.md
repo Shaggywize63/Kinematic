@@ -106,16 +106,23 @@ If you are happy, delete or cancel the test vouchers in Tally as per your normal
 
 ---
 
-## What the connection does today
+## What the connection does
 
 | In Kinematic | Appears in Tally as |
 |---|---|
-| Invoice (issued) | Sales voucher, with GST ledger entries and round-off |
+| Invoice (issued) | Sales voucher with GST and round-off. If the invoice's products are linked to Tally stock items (Step 6), it is an **item invoice** and stock moves in Tally; otherwise it posts to the Sales ledger only. |
 | Payment (cleared) | Receipt voucher, allocated to the invoice |
 | Return (credited/approved) | Credit Note |
-| — | Products and dealers are **pulled from Tally** into Kinematic (Step 6) |
+| Products and dealers in Tally | **Pulled into Kinematic** (Step 6) |
 
-**Not included yet** (planned next): stock-item quantity lines on invoices, Sales Orders, creating new dealers/products in Tally from Kinematic, and pulling invoices raised in Tally back into Kinematic.
+**Optional automatic sending** — in **Set up & sync → Automatic sending** the admin can switch on, each independently (all are off by default):
+- **Send approved orders to Tally** — approved orders appear as Sales Orders. Products on the order must be linked (Step 6) or the order is held with a clear message. Tally's order is not closed automatically when the invoice is raised.
+- **Create new dealers in Tally** — a dealer added in Kinematic becomes a Sundry Debtor ledger.
+- **Create new products in Tally** — a product added in Kinematic becomes a stock item.
+
+Only items created *after* a switch is turned on are sent. Existing dealers and products are not pushed automatically.
+
+**Not included yet:** pulling invoices raised in Tally back into Kinematic, outstanding balances and stock levels from Tally.
 
 ## Day-to-day
 

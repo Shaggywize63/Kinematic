@@ -52,15 +52,22 @@ the task stopped: `schtasks /Run /TN "Kinematic Tally Connector"`.
 
 ## What gets pushed to Tally
 
-| Kinematic event | Tally voucher type | Notes |
+| Kinematic event | Tally object | Notes |
 |---|---|---|
-| Invoice (status=issued) | Sales | Includes CGST/SGST/IGST/Cess as separate ledger entries; party is debited by the grand total. Round-off included if non-zero. |
-| Payment (status=cleared) | Receipt | Bill allocations link the payment back to the original invoice (Agst Ref) so Tally's outstanding tracking stays correct. Cash mode debits Cash ledger; everything else debits Bank ledger. |
-| Return (status=credited / supervisor_approved) | Credit Note | Sales returns ledger debited; party credited with the full amount. |
+| Invoice (status=issued) | Sales voucher | GST as separate ledger entries; round-off included. **Item invoice** (stock items, quantities, rates) when every line is linked to a Tally stock item through *Pull from Tally* and the lines add up to the invoice; otherwise the same ledger-only voucher as before. |
+| Payment (status=cleared) | Receipt voucher | Bill allocations link it to the invoice (Agst Ref). Cash debits the Cash ledger, everything else the Bank ledger. |
+| Return (credited / approved) | Credit Note | Sales-returns ledger debited; party credited. |
+| Approved order *(opt-in: `sync_orders`)* | Sales Order | Items and order due date; no taxes (they belong on the invoice). Refused with a clear message if a line's product is not linked. Orders are not auto-closed by the later invoice. |
+| New dealer *(opt-in: `auto_create_ledgers`)* | Sundry Debtor ledger | GSTIN, state, address, credit limit and period. Dealers already linked to a Tally ledger are skipped. |
+| New product *(opt-in: `auto_create_stock_items`)* | Stock item (+ unit) | No stock group is set, so a missing group cannot fail the import. |
 
-Inventory lines on sales vouchers and Sales Orders are not sent yet. The
-ledgers above must exist in the Tally company; the dashboard checklist
-finds the missing ones and can create them with one click.
+The three opt-in switches live in the integration's `config` and are toggled in the dashboard under
+**Set up & sync → Automatic sending**. They are all off by default. Only records created after a switch
+is turned on (within the poller's window) are sent.
+
+Master pushes treat Tally's "already exists" as success (connector 0.3.0+), so a re-send is harmless.
+The ledgers named in the integration must exist in the Tally company; the dashboard checklist finds
+missing ones and can create them with one click.
 
 ## Privacy
 
