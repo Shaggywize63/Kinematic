@@ -141,7 +141,7 @@ describe('the bridge agent still authenticates with its own key (public routes, 
     supa().setDefault('distribution_integration_events', { data: [] });
     const r = await request(app).get(`/api/v1/integrations/tally/jobs/${INT}?key=${SECRET}`);
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ ok: true, jobs: [] });
+    expect(r.body).toEqual({ ok: true, jobs: [], commands: [], company_name: null });   // commands is additive; v1 agents ignore it
   });
 
   it('result reporting is key-authenticated too', async () => {

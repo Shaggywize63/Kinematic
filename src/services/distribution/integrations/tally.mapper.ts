@@ -70,8 +70,9 @@ const amt = (n: unknown): string => Number(n ?? 0).toFixed(2);
 /**
  * Look up the Tally ledger name for a distributor. Priority:
  *   1. distribution_external_party_map.external_name (admin override)
- *   2. distributors.tally_ledger_name (admin override on distributor row)
- *   3. distributors.legal_name (sensible default)
+ *   2. distribution_tally_masters (ledger matched/imported via master pull)
+ *   3. distributors.tally_ledger_name (admin override on distributor row)
+ *   4. distributors.legal_name (sensible default)
  */
 async function partyLedger(integration_id: string, distributor_id: string): Promise<string> {
   const { data: mapping } = await supabaseAdmin
@@ -82,6 +83,18 @@ async function partyLedger(integration_id: string, distributor_id: string): Prom
     .eq('ref_id', distributor_id)
     .maybeSingle();
   if (mapping?.external_name) return mapping.external_name as string;
+
+  // Ledger matched/imported through the Tally master-pull (exact Tally spelling).
+  const { data: pulled } = await supabaseAdmin
+    .from('distribution_tally_masters')
+    .select('name')
+    .eq('integration_id', integration_id)
+    .eq('kind', 'party')
+    .eq('matched_ref_id', distributor_id)
+    .in('status', ['matched', 'imported'])
+    .limit(1)
+    .maybeSingle();
+  if (pulled?.name) return pulled.name as string;
 
   const { data: dist } = await supabaseAdmin
     .from('distributors')
@@ -95,7 +108,7 @@ async function partyLedger(integration_id: string, distributor_id: string): Prom
 }
 
 /** Default ledger-name resolver with per-integration config override. */
-function defaults(cfg: TallyIntegrationConfig) {
+export function defaults(cfg: TallyIntegrationConfig) {
   return {
     sales:        cfg.sales_ledger_name        ?? 'Sales Account',
     cash:         cfg.cash_ledger_name         ?? 'Cash',

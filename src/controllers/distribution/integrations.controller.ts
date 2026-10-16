@@ -222,7 +222,7 @@ export const getEventXml = asyncHandler<AuthRequest>(async (req, res) => {
 //     → marks event as 'synced' (with tally_voucher_id) or 'failed' (with
 //        error + exponential backoff next_attempt_at).
 
-function verifyAgentSecret(req: Request, integrationSecret: string | null): boolean {
+export function verifyAgentSecret(req: Request, integrationSecret: string | null): boolean {
   const provided = (req.query.key as string | undefined) ?? '';
   if (!provided || !integrationSecret) return false;
   // Use crypto.timingSafeEqual. Buffer.from + the !== length check
@@ -265,7 +265,12 @@ export const agentFetchJobs = asyncHandler<Request>(async (req, res) => {
     .order('created_at', { ascending: true })
     .limit(25);
 
-  if (!events || events.length === 0) { res.status(200).json({ ok: true, jobs: [] }); return; }
+  // Separate query so a not-yet-applied onboarding migration cannot break job polling.
+  const { data: cmdRow } = await supabaseAdmin.from('distribution_integrations')
+    .select('pending_commands').eq('id', integration_id).maybeSingle();
+  const commands = (cmdRow?.pending_commands as unknown[] | null) ?? [];
+  const company_name = ((integration.config as Record<string, unknown> | null)?.company_name as string | undefined) ?? null;
+  if (!events || events.length === 0) { res.status(200).json({ ok: true, jobs: [], commands, company_name }); return; }
 
   // Render XML lazily, mark in_flight as we go.
   const jobs: Array<{ event_id: string; kind: string; ref_id: string; xml_payload: string; attempts: number }> = [];
@@ -301,7 +306,7 @@ export const agentFetchJobs = asyncHandler<Request>(async (req, res) => {
     }
   }
 
-  res.status(200).json({ ok: true, jobs });
+  res.status(200).json({ ok: true, jobs, commands, company_name });
 });
 
 export const agentReportResult = asyncHandler<Request>(async (req, res) => {
