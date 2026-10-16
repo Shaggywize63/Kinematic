@@ -1862,7 +1862,7 @@ function blankTelecallerTotals(): Omit<TelecallerRow, 'user_id' | 'user_name'> {
 // the activity's own metadata.campaign for calls logged before that lead tag
 // existed). Powers the "Campaign Insights" dashboard report — DigiGold
 // enrolment, app ratings, after-sales satisfaction, complaints, etc.
-export const TELECALLER_CAMPAIGNS = ['General Calls', 'App & DigiGold', 'After-Sales'] as const;
+export const TELECALLER_CAMPAIGNS = ['General Calls', 'Gold Scheme', 'Gold Order', 'App & DigiGold', 'After-Sales'] as const;
 export type CampaignName = typeof TELECALLER_CAMPAIGNS[number];
 
 export interface CampaignMetric { label: string; value: string }
@@ -1882,6 +1882,8 @@ function canonCampaign(raw: unknown): CampaignName | null {
   const s = String(raw ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
   if (s === 'app&digigold' || s === 'appdigigold') return 'App & DigiGold';
   if (s === 'aftersales') return 'After-Sales';
+  if (s === 'goldscheme') return 'Gold Scheme';
+  if (s === 'goldorder') return 'Gold Order';
   if (s === 'generalcalls' || s === 'general' || s === '') return 'General Calls';
   return null;
 }

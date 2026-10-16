@@ -517,6 +517,46 @@ export const assignmentRuleSchema = z.object({
   pipeline_id: optionalUuid,
 });
 
+// ── After-Sales Feedback module (telecaller Phase 1) ──────────────────────
+// One after-sales customer record as entered by an admin (manual) or parsed
+// from a CSV/XLSX row. Name + phone are the only meaningful required fields
+// (enforced in the service so import rows report a clean per-row error rather
+// than a 400 on the whole batch). Everything else is optional context that
+// rides on the lead's custom_fields.
+export const afterSalesRecordSchema = z.object({
+  name: z.string().max(200).optional().nullable(),
+  first_name: z.string().max(120).optional().nullable(),
+  last_name: z.string().max(120).optional().nullable(),
+  phone: z.string().max(40).optional().nullable(),
+  email: z.string().max(200).optional().nullable(),
+  city: z.string().max(120).optional().nullable(),
+  state: z.string().max(120).optional().nullable(),
+  product: z.string().max(200).optional().nullable(),
+  purchase_date: z.string().max(40).optional().nullable(),
+  invoice_no: z.string().max(80).optional().nullable(),
+  purchase_amount: z.union([z.number(), z.string()]).optional().nullable(),
+  product_satisfaction: z.string().max(80).optional().nullable(),
+  staff_behaviour: z.string().max(80).optional().nullable(),
+  billing_experience: z.string().max(80).optional().nullable(),
+  after_sales_service: z.string().max(80).optional().nullable(),
+  customer_rating: z.string().max(40).optional().nullable(),
+  complaint: z.string().max(2000).optional().nullable(),
+  complaint_priority: z.string().max(40).optional().nullable(),
+  resolution_required: z.union([z.boolean(), z.string()]).optional().nullable(),
+  next_purchase_interest: z.string().max(80).optional().nullable(),
+  referral_potential: z.string().max(80).optional().nullable(),
+  notes: z.string().max(2000).optional().nullable(),
+});
+
+// Admin config: which telecaller(s) after-sales records auto-assign to.
+// A single telecaller_id covers the current ("one telecaller") setup; the
+// optional pool future-proofs round-robin across several. Either may be null
+// to leave records unassigned until configured.
+export const afterSalesConfigSchema = z.object({
+  telecaller_id: optionalUuid,
+  round_robin_pool: z.array(uuid).optional().nullable(),
+});
+
 export const territorySchema = z.object({
   name: z.string().min(1).max(120),
   criteria: z.record(z.unknown()).default({}),
