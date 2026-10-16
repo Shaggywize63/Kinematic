@@ -26,6 +26,7 @@ import { asyncHandler, ok, created, badRequest, notFound } from '../../utils';
 import { storeCredentials } from '../../services/distribution/integrations/credentialsVault';
 import { renderTallyXml, type EventKind } from '../../services/distribution/integrations/tally.mapper';
 import { logger } from '../../lib/logger';
+import { publicApiBase } from '../../services/distribution/integrations/tally.onboarding';
 
 type Provider = 'tally' | 'quickbooks' | 'zoho_books' | 'busy' | 'marg';
 
@@ -118,7 +119,7 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   integration.status = 'active';
 
   // Bridge-agent setup payload, shown ONCE in the create response.
-  const base = process.env.API_PUBLIC_URL ?? '';
+  const base = publicApiBase();
   const agent_config = {
     integration_id: integration.id,
     agent_secret,

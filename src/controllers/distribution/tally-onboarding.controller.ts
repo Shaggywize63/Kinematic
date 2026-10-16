@@ -15,7 +15,7 @@ import { asyncHandler, ok, badRequest, notFound } from '../../utils';
 import { logger } from '../../lib/logger';
 import { verifyAgentSecret } from './integrations.controller';
 import {
-  PAIRING_TTL_MS, generatePairingCode, hashPairingCode, normalisePairingCode,
+  PAIRING_TTL_MS, publicApiBase, generatePairingCode, hashPairingCode, normalisePairingCode,
   computeHealth, missingLedgers, buildCreateLedgersXml,
   sanitiseMaster, matchParty, matchStockItem, cleanGstin, partyCode,
   type TallyProfile, type MasterKind, type MatchCandidate,
@@ -56,7 +56,7 @@ export const createPairingCode = asyncHandler<AuthRequest>(async (req, res) => {
   const { error } = await supabaseAdmin.from('distribution_integrations')
     .update({ pairing_code_hash: hashPairingCode(code), pairing_expires_at: expires }).eq('id', integ.id);
   if (error) return badRequest(res, error.message);
-  return ok(res, { code, expires_at: expires, server_url: process.env.API_PUBLIC_URL ?? 'https://api.kinematicapp.com' });
+  return ok(res, { code, expires_at: expires, server_url: publicApiBase() });
 });
 
 export const getHealth = asyncHandler<AuthRequest>(async (req, res) => {
@@ -228,7 +228,7 @@ export const agentPair = asyncHandler<Request>(async (req, res) => {
     .eq('pairing_code_hash', hash).gt('pairing_expires_at', new Date().toISOString()).eq('provider', 'tally')
     .select('id, agent_secret, config').maybeSingle();
   if (!integ) { res.status(404).json({ ok: false, error: 'That code is invalid or has expired. Generate a new one in the dashboard.' }); return; }
-  const base = process.env.API_PUBLIC_URL ?? '';
+  const base = publicApiBase();
   res.status(200).json({
     ok: true,
     config: {

@@ -7,6 +7,12 @@
 import crypto from 'crypto';
 import { defaults, type TallyIntegrationConfig } from './tally.mapper';
 
+/** Absolute base URL the connector should call. API_PUBLIC_URL is not set on the prod task,
+ *  and a relative URL in the agent config breaks the connector, so fall back to prod. */
+export function publicApiBase(): string {
+  return (process.env.API_PUBLIC_URL || 'https://api.kinematicapp.com').replace(/\/+$/, '');
+}
+
 // ── Pairing code ────────────────────────────────────────────────────────────
 // No 0/O/1/I/L so a code read over the phone is not mistyped. 6 chars of a
 // 30-letter alphabet; single-use, short-lived, and hashed at rest.
