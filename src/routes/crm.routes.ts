@@ -35,6 +35,7 @@ import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
+import * as afterSales from '../services/crm/afterSales.service';
 import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
 import * as activityImportSvc from '../services/crm/activityImport.service';
@@ -1502,6 +1503,18 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
   await ownerAssign.assertMayChooseOwner(crmActor(req));
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
 }));
+// Marketing hand-off: assign/reassign a lead to a TELECALLER (+ optional calling
+// category). Unlike /bulk-assign this is intentionally NOT behind the admin-only
+// owner gate — marketing employees must be able to route leads to telecallers —
+// because the operation is constrained to a validated telecaller owner and a
+// known campaign (see telecaller.assignLeadToTelecaller). Client scope enforced.
+leads.post('/:id/assign-telecaller', wrap(async (req, res) => {
+  const body = parse(v.assignTelecallerSchema, req.body ?? {});
+  const updated = await telecaller.assignLeadToTelecaller(
+    orgId(req), clientScope(req), req.params.id, body.telecaller_id, body.campaign ?? null,
+  );
+  res.json(await stampOwnerName(updated));
+}));
 // Recompute the score for every non-terminal lead in scope — powers the
 // "Update all scores" button on the dashboard leads screen. Admin-tier only
 // (a full-tenant sweep is heavy). Runs DETACHED and returns 202 so the request
@@ -1691,6 +1704,91 @@ marketingVisits.get('/', wrap(async (req, res) => {
   res.json(await enrichActivities(rows as Record<string, any>[]));
 }));
 router.use('/marketing-visits', rbac.requireModuleAccess('crm_activities'), marketingVisits);
+
+// ---------- AFTER-SALES FEEDBACK (admin data entry + bulk import) -----------
+// Admin-only. Each record becomes a crm_leads row tagged
+// custom_fields.campaign='After-Sales' and auto-assigned to the client's
+// configured telecaller, so it appears in that telecaller's "My Calls" queue.
+// Reuses the shared lead pipeline (createLead) — no new tables. Client-scoped
+// to the active tenant (Rajkamal). Additive + admin-gated, so no other flow
+// changes.
+const afterSalesRouter = express.Router();
+
+// Telecaller directory for the assignment picker.
+afterSalesRouter.get('/telecallers', wrap(async (req, res) => {
+  res.json(await afterSales.listTelecallers(orgId(req), clientId(req)));
+}));
+
+// Current assignment config + the telecaller directory (one round-trip for the
+// admin settings card).
+afterSalesRouter.get('/assignment', wrap(async (req, res) => {
+  const [cfg, telecallers] = await Promise.all([
+    afterSales.getAfterSalesConfig(orgId(req), clientId(req)),
+    afterSales.listTelecallers(orgId(req), clientId(req)),
+  ]);
+  res.json({ ...cfg, telecallers });
+}));
+
+// Set the assignment target (single telecaller and/or round-robin pool). Only
+// the keys actually present in the body are changed, so a partial PUT can set
+// the pool without clearing the single telecaller and vice-versa.
+afterSalesRouter.put('/assignment', wrap(async (req, res) => {
+  const raw = (req.body ?? {}) as Record<string, unknown>;
+  const body = parse(v.afterSalesConfigSchema, raw);
+  const saved = await afterSales.setAfterSalesConfig(orgId(req), clientId(req), {
+    telecaller_id: Object.prototype.hasOwnProperty.call(raw, 'telecaller_id') ? (body.telecaller_id ?? null) : undefined,
+    round_robin_pool: Object.prototype.hasOwnProperty.call(raw, 'round_robin_pool') ? (body.round_robin_pool ?? []) : undefined,
+  });
+  res.json(saved);
+}));
+
+// Manual single-record create. 409 DUPLICATE_LEAD if the phone already exists.
+afterSalesRouter.post('/records', wrap(async (req, res) => {
+  const body = parse(v.afterSalesRecordSchema, req.body ?? {});
+  const out = await afterSales.createRecord(orgId(req), clientId(req), userId(req), body);
+  res.status(201).json(out);
+}));
+
+// Bulk CSV / Excel upload (multipart, field name "file"). Returns a per-row
+// summary: created / skipped (duplicates) / failed with reasons.
+afterSalesRouter.post('/import', upload.single('file'), wrap(async (req, res) => {
+  const file = (req as unknown as { file?: { buffer: Buffer; originalname: string; mimetype: string } }).file;
+  if (!file) throw new AppError(400, 'No file uploaded (field "file")', 'NO_FILE');
+  const out = await afterSales.importRecords(orgId(req), clientId(req), userId(req), file);
+  res.json(out);
+}));
+
+// Admin list of after-sales records (newest first), owner names stamped.
+afterSalesRouter.get('/records', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const rows = await afterSales.listRecords(orgId(req), scope.id, scope.strict, {
+    limit: req.query.limit ? Number(req.query.limit) : undefined,
+    search: typeof req.query.search === 'string' ? req.query.search : undefined,
+  });
+  res.json(await stampOwnerNames(rows as any[]));
+}));
+
+router.use('/after-sales',
+  requireRole('super_admin', 'admin', 'main_admin', 'sub_admin', 'client'),
+  rbac.requireModuleAccess('crm_leads'),
+  afterSalesRouter);
+
+// Telecaller directory — the marketing assign-to-telecaller picker (and any
+// other lead-capable caller) reads this. Client-scoped; lists only telecallers
+// in the active tenant. Lead-module gated (marketing employees have it).
+router.get('/telecallers', rbac.requireModuleAccess('crm_leads'), wrap(async (req, res) => {
+  res.json(await telecaller.listTelecallers(orgId(req), clientId(req)));
+}));
+
+// Telecaller "Follow-ups" tab — the caller's own pending follow-up calls
+// (open call activities with a due date), soonest first, enriched with the
+// linked lead's name + phone. Own-scoped inside the service.
+router.get('/telecaller/followups', rbac.requireModuleAccess('crm_activities'), wrap(async (req, res) => {
+  const uid = userId(req);
+  if (!uid) throw new AppError(401, 'Auth required', 'AUTH_REQUIRED');
+  const rows = await telecaller.listFollowupRows(orgId(req), uid);
+  res.json(await enrichActivities(rows as Record<string, any>[]));
+}));
 
 // ---------- CONVERSATION INTELLIGENCE (recording pipeline + dashboard) ------
 // Kick off processing after the client PUT the audio to the signed URL.

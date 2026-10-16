@@ -1742,6 +1742,7 @@ export interface TelecallerRow {
   follow_ups: number;
   scheme_amount: number;
   leads_assigned: number;
+  conversions: number;
 }
 export interface TelecallerDaily { date: string; calls: number; connected: number; interested: number; scheme_amount: number }
 
@@ -1796,7 +1797,7 @@ export async function telecallerPerformance(
       .gte('entry_date', fromIso.slice(0, 10)).lte('entry_date', toIso.slice(0, 10))
       .limit(20000),
     supabaseAdmin.from('crm_leads')
-      .select('owner_id')
+      .select('owner_id, is_converted, converted_at')
       .eq('org_id', org_id).is('deleted_at', null)
       .in('owner_id', ids)
       .limit(50000),
@@ -1804,7 +1805,7 @@ export async function telecallerPerformance(
 
   const blankRow = (id: string): TelecallerRow => ({
     user_id: id, user_name: nameById.get(id) ?? 'Telecaller',
-    calls: 0, connected: 0, interested: 0, not_interested: 0, follow_ups: 0, scheme_amount: 0, leads_assigned: 0,
+    calls: 0, connected: 0, interested: 0, not_interested: 0, follow_ups: 0, scheme_amount: 0, leads_assigned: 0, conversions: 0,
   });
   const byUser = new Map<string, TelecallerRow>(ids.map((id: string) => [id, blankRow(id)]));
   const dayMap = new Map<string, TelecallerDaily>();
@@ -1839,7 +1840,16 @@ export async function telecallerPerformance(
     day.scheme_amount += amt; dayMap.set(d, day);
   }
   for (const l of (leadsRes.data ?? []) as any[]) {
-    if (byUser.has(l.owner_id)) byUser.get(l.owner_id)!.leads_assigned += 1;
+    if (!byUser.has(l.owner_id)) continue;
+    const row = byUser.get(l.owner_id)!;
+    row.leads_assigned += 1;
+    // Conversions in-window: a converted owned lead whose converted_at falls in
+    // the range (or any converted lead missing a timestamp, so legacy rows still
+    // count). leads_assigned stays lifetime, matching its existing meaning.
+    if (l.is_converted === true) {
+      const ca = l.converted_at ? String(l.converted_at) : null;
+      if (!ca || (ca >= fromIso && ca <= toIso)) row.conversions += 1;
+    }
   }
 
   const rows = Array.from(byUser.values()).sort((a, b) => b.calls - a.calls || a.user_name.localeCompare(b.user_name));
@@ -1848,12 +1858,13 @@ export async function telecallerPerformance(
     calls: t.calls + r.calls, connected: t.connected + r.connected, interested: t.interested + r.interested,
     not_interested: t.not_interested + r.not_interested, follow_ups: t.follow_ups + r.follow_ups,
     scheme_amount: t.scheme_amount + r.scheme_amount, leads_assigned: t.leads_assigned + r.leads_assigned,
+    conversions: t.conversions + r.conversions,
   }), blankTelecallerTotals());
   return { rows, daily, totals, from: fromIso, to: toIso };
 }
 
 function blankTelecallerTotals(): Omit<TelecallerRow, 'user_id' | 'user_name'> {
-  return { calls: 0, connected: 0, interested: 0, not_interested: 0, follow_ups: 0, scheme_amount: 0, leads_assigned: 0 };
+  return { calls: 0, connected: 0, interested: 0, not_interested: 0, follow_ups: 0, scheme_amount: 0, leads_assigned: 0, conversions: 0 };
 }
 
 // ── Campaign Insights (telecaller phase 2) ───────────────────────────────
@@ -1862,7 +1873,7 @@ function blankTelecallerTotals(): Omit<TelecallerRow, 'user_id' | 'user_name'> {
 // the activity's own metadata.campaign for calls logged before that lead tag
 // existed). Powers the "Campaign Insights" dashboard report — DigiGold
 // enrolment, app ratings, after-sales satisfaction, complaints, etc.
-export const TELECALLER_CAMPAIGNS = ['General Calls', 'App & DigiGold', 'After-Sales'] as const;
+export const TELECALLER_CAMPAIGNS = ['General Calls', 'Gold Scheme', 'Gold Order', 'App & DigiGold', 'After-Sales'] as const;
 export type CampaignName = typeof TELECALLER_CAMPAIGNS[number];
 
 export interface CampaignMetric { label: string; value: string }
@@ -1882,6 +1893,8 @@ function canonCampaign(raw: unknown): CampaignName | null {
   const s = String(raw ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
   if (s === 'app&digigold' || s === 'appdigigold') return 'App & DigiGold';
   if (s === 'aftersales') return 'After-Sales';
+  if (s === 'goldscheme') return 'Gold Scheme';
+  if (s === 'goldorder') return 'Gold Order';
   if (s === 'generalcalls' || s === 'general' || s === '') return 'General Calls';
   return null;
 }
