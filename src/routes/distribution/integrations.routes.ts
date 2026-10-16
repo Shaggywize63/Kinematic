@@ -13,6 +13,9 @@ import {
   listIntegrationEvents,
   getEventXml,
 } from '../../controllers/distribution/integrations.controller';
+import {
+  createPairingCode, getHealth, createMissingLedgers, requestMasterPull, listMasters, actOnMasters,
+} from '../../controllers/distribution/tally-onboarding.controller';
 
 const router = Router();
 
@@ -27,6 +30,12 @@ router.post('/',                      createIntegration);
 router.get('/:id',                    getIntegration);
 router.patch('/:id',                  updateIntegration);
 router.delete('/:id',                 deleteIntegration);
+router.post('/:id/pairing-code',      createPairingCode);
+router.get('/:id/health',             getHealth);
+router.post('/:id/create-ledgers',    createMissingLedgers);
+router.post('/:id/pull-masters',      requestMasterPull);
+router.get('/:id/masters',            listMasters);
+router.post('/:id/masters/act',       actOnMasters);
 router.get('/:id/events',             listIntegrationEvents);
 // Manual XML download (admin fallback when the bridge agent isn't running).
 router.get('/events/:eventId/xml',    getEventXml);

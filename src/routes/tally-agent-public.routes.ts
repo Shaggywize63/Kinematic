@@ -10,6 +10,7 @@
 import { Router } from 'express';
 import { perRouteLimit } from '../middleware/security';
 import { agentFetchJobs, agentReportResult } from '../controllers/distribution/integrations.controller';
+import { agentPair, agentProfile, agentMasters, agentCommandResult } from '../controllers/distribution/tally-onboarding.controller';
 
 const router = Router();
 
@@ -18,6 +19,13 @@ const router = Router();
 // stop a runaway agent from DDoS'ing the API.
 const limit = perRouteLimit({ windowMs: 60_000, max: 120 });
 
+// Pairing is unauthenticated by nature (the code IS the credential), so it gets a
+// much tighter limit: 6 chars of a 31-letter alphabet, single use, 24h life.
+const pairLimit = perRouteLimit({ windowMs: 60_000, max: 10 });
+router.post('/pair',                   pairLimit, agentPair);
+router.post('/jobs/:id/profile',        limit, agentProfile);
+router.post('/jobs/:id/masters',        limit, agentMasters);
+router.post('/jobs/:id/command-result', limit, agentCommandResult);
 router.get('/jobs/:id',          limit, agentFetchJobs);
 router.post('/jobs/:id/result',  limit, agentReportResult);
 
