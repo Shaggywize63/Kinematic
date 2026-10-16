@@ -13,12 +13,20 @@ import { AppError } from '../../utils';
 import { supabaseAdmin } from '../../lib/supabase';
 
 export interface TelephonyConfig {
-  provider?: string;            // 'exotel' (default). knowlarity / twilio can follow.
+  provider?: string;            // 'exotel' (default). 'callerdesk'. knowlarity / twilio can follow.
   exotel_sid?: string;
   exotel_api_key?: string;
   exotel_api_token?: string;
   exotel_subdomain?: string;    // default 'api.exotel.com'
-  caller_id?: string;           // your ExoPhone / virtual number the customer sees
+  // CallerDesk (IVR click-to-call). All of these are read from the org's
+  // call_recording integration config — never hardcoded, never shipped in the app.
+  callerdesk_authcode?: string;        // CallerDesk API Key (the "authcode")
+  callerdesk_secret?: string;          // CallerDesk Secret Key (HTTP Basic password)
+  callerdesk_integration_key?: string; // optional Integration Key, if the account needs it
+  callerdesk_deskphone?: string;       // the account's virtual / DID number the call rides on (REQUIRED)
+  callerdesk_base_url?: string;        // default 'https://api.callerdesk.io'
+  callerdesk_path?: string;            // default '/v1/click_to_call_v2'
+  caller_id?: string;           // your ExoPhone / virtual number the customer sees (Exotel); CallerDesk falls back to this for deskphone
   recording_callback_url?: string; // point at the call_recording webhook so the
                                     // recording is delivered back for analysis
   [k: string]: unknown;
@@ -41,7 +49,74 @@ export async function placeClickToCall(
 ): Promise<ClickToCallResult> {
   const provider = (cfg.provider || 'exotel').toLowerCase();
   if (provider === 'exotel') return exotelConnect(cfg, from, to, opts);
+  if (provider === 'callerdesk') return callerDeskConnect(cfg, from, to, opts);
   throw new AppError(400, `Telephony provider '${provider}' is not supported yet`, 'PROVIDER_UNSUPPORTED');
+}
+
+/** CallerDesk wants Indian mobiles as the bare 10-digit subscriber number (no +91 / 0 prefix). */
+function toCallerDeskNumber(raw: string): string {
+  let d = String(raw).replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2);   // 91XXXXXXXXXX
+  else if (d.length === 11 && d.startsWith('0')) d = d.slice(1); // 0XXXXXXXXXX
+  return d;
+}
+
+/**
+ * CallerDesk "IVR click-to-call": places two calls — first to the agent
+ * (`calling_party_a`), then to the customer (`calling_party_b`) — and bridges
+ * them on the account's virtual number (`deskphone`), recording the call. The
+ * recording + report are delivered back through CallerDesk's Call Report webhook
+ * (point it at our call_recording webhook URL), which feeds Conversation Analysis.
+ *
+ * NOTE: the exact endpoint/param contract is isolated here on purpose — this
+ * environment cannot reach api.callerdesk.io to verify it, so it is implemented
+ * from CallerDesk's published click_to_call_v2 shape and is overridable via
+ * config (callerdesk_base_url / callerdesk_path) without a code change. Auth is
+ * sent both ways CallerDesk documents: HTTP Basic (API key : secret) AND the
+ * `authcode` field, so whichever the account enforces is satisfied.
+ */
+async function callerDeskConnect(
+  cfg: TelephonyConfig,
+  from: string,
+  to: string,
+  opts?: { callerId?: string },
+): Promise<ClickToCallResult> {
+  const authcode = cfg.callerdesk_authcode;
+  const secret = cfg.callerdesk_secret;
+  const deskphone = toCallerDeskNumber(opts?.callerId || cfg.callerdesk_deskphone || cfg.caller_id || '');
+  if (!authcode || !secret || !deskphone) {
+    throw new AppError(400, 'CallerDesk is not fully configured (need callerdesk_authcode, callerdesk_secret and callerdesk_deskphone in the Call Recording integration config)', 'TELEPHONY_NOT_CONFIGURED');
+  }
+
+  const base = (cfg.callerdesk_base_url || 'https://api.callerdesk.io').replace(/\/+$/, '');
+  const path = cfg.callerdesk_path || '/v1/click_to_call_v2';
+  const url = base + (path.startsWith('/') ? path : '/' + path);
+
+  const body = new URLSearchParams();
+  body.set('calling_party_a', toCallerDeskNumber(from)); // ring the agent first
+  body.set('calling_party_b', toCallerDeskNumber(to));   // then bridge the customer
+  body.set('deskphone', deskphone);
+  body.set('call_from_did', '1');
+  body.set('authcode', authcode);
+  if (cfg.callerdesk_integration_key) body.set('integration_key', String(cfg.callerdesk_integration_key));
+
+  const auth = 'Basic ' + Buffer.from(`${authcode}:${secret}`).toString('base64');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: auth, 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: body.toString(),
+  });
+  const text = await res.text();
+  let json: any = {};
+  try { json = JSON.parse(text); } catch { /* CallerDesk sometimes replies text/plain */ }
+  if (!res.ok) {
+    const msg = json?.message || json?.error || json?.msg || text.slice(0, 200) || res.statusText;
+    throw new AppError(502, `CallerDesk click-to-call failed [${res.status}]: ${msg}`, 'TELEPHONY_FAILED');
+  }
+  // CallerDesk returns the request/campaign id under one of these keys.
+  const callId = json?.callid ?? json?.campid ?? json?.request_id ?? json?.data?.callid ?? null;
+  const status = json?.status ?? json?.message ?? 'queued';
+  return { ok: true, provider: 'callerdesk', call_id: callId ? String(callId) : null, status: status ? String(status) : null };
 }
 
 /**

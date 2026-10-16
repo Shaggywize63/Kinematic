@@ -1578,9 +1578,15 @@ const convActor = (req: Request): convIntel.Actor => {
 // Remove this email gate to roll it out org-wide.
 const TELEPHONY_TRIAL_EMAIL = 's@kinematicapp.com';
 router.post('/telephony/click-to-call', wrap(async (req, res) => {
-  const me = (req as AuthRequest).user as { email?: string } | undefined;
-  if (String(me?.email ?? '').toLowerCase() !== TELEPHONY_TRIAL_EMAIL) {
-    throw new AppError(403, 'Recorded calling is in limited trial', 'FORBIDDEN');
+  const me = (req as AuthRequest).user as { email?: string; enabled_modules?: string[] } | undefined;
+  // Available to the original recorded-calling trial account OR any user whose
+  // client holds the `ivr_call` module (the per-client IVR / click-to-call gate
+  // the apps surface the "IVR Call" button on). Keeps the trial working while
+  // rolling out per client.
+  const isTrial = String(me?.email ?? '').toLowerCase() === TELEPHONY_TRIAL_EMAIL;
+  const hasIvrCall = Array.isArray(me?.enabled_modules) && me!.enabled_modules!.includes('ivr_call');
+  if (!isTrial && !hasIvrCall) {
+    throw new AppError(403, 'IVR calling is not enabled for your account', 'FORBIDDEN');
   }
   const b = (req.body ?? {}) as { lead_id?: string; to?: string; from?: string };
   res.json(await telephony.clickToCallForLead({

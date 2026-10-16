@@ -21,9 +21,13 @@ import { logger } from '../../../lib/logger';
 import { findOrCreateLead } from '../integrations/dedup.orchestrator';
 import { ingestExternalRecording } from './conversationIntel.service';
 
-const CALLER_ALIASES = ['CallFrom', 'From', 'from', 'caller_id', 'caller', 'caller_number', 'source', 'src', 'phone', 'mobile', 'customer_number', 'A_PARTY'];
-const RECORDING_ALIASES = ['RecordingUrl', 'recording_url', 'RecordingURL', 'recordingUrl', 'recording', 'MediaUrl', 'media_url', 'file_url', 'file', 'url', 'conversation_recording'];
-const DURATION_ALIASES = ['RecordingDuration', 'CallDuration', 'ConversationDuration', 'conversation_duration', 'duration', 'call_duration', 'Duration'];
+// Field-name aliases across the telephony providers we accept. CallerDesk's Call
+// Report webhook uses sourcenumber / callrecordingurl / callduration|talkduration
+// / status (see docs.callerdesk.io sample payload), so its fields are included
+// here and need no separate endpoint.
+const CALLER_ALIASES = ['CallFrom', 'From', 'from', 'caller_id', 'caller', 'caller_number', 'source', 'src', 'phone', 'mobile', 'customer_number', 'A_PARTY', 'sourcenumber', 'SourceNumber'];
+const RECORDING_ALIASES = ['RecordingUrl', 'recording_url', 'RecordingURL', 'recordingUrl', 'recording', 'MediaUrl', 'media_url', 'file_url', 'file', 'url', 'conversation_recording', 'callrecordingurl', 'CallRecordingUrl', 'call_recording_url'];
+const DURATION_ALIASES = ['RecordingDuration', 'CallDuration', 'ConversationDuration', 'conversation_duration', 'duration', 'call_duration', 'Duration', 'callduration', 'talkduration', 'TalkDuration'];
 const STATUS_ALIASES = ['CallStatus', 'call_status', 'status', 'DialCallStatus', 'Status'];
 
 const MAX_AUDIO_BYTES = 40 * 1024 * 1024; // 40MB — headroom for a long call at phone bitrate
