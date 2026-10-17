@@ -1,3 +1,6 @@
+import { supabaseAdmin } from '../lib/supabase';
+import { currentProjectKey } from '../lib/projects';
+
 // Outlet approval policy. A field rep can propose an outlet; it is usable (order / collection pickers) only once a
 // manager approves it. Pure functions — the controllers apply them.
 
@@ -92,4 +95,41 @@ export function newOutletCode(random: () => number = Math.random): string {
   let s = '';
   for (let i = 0; i < 6; i++) s += alphabet[Math.floor(random() * alphabet.length)];
   return `OUT-${s}`;
+}
+
+
+// ── Is outlet approval set up in THIS project's database? ────────────────────────────────────────────────
+// The backend serves several tenants from one codebase, and a tenant's database only gets the approval columns
+// once its migration is applied. Until then every outlet query must behave exactly as before, so each approval
+// code path first asks this. "Yes" is remembered; "No" is re-checked after a minute so a migration applied later
+// is picked up without a restart.
+const NOT_READY_RECHECK_MS = 60_000;
+const probes = new Map<string, { ready: boolean; at: number }>();
+
+export async function approvalColumnsAvailable(): Promise<boolean> {
+  const key = currentProjectKey();
+  const hit = probes.get(key);
+  if (hit && (hit.ready || Date.now() - hit.at < NOT_READY_RECHECK_MS)) return hit.ready;
+  let ready = false;
+  try {
+    const { error } = await supabaseAdmin.from('stores').select('approval_status').limit(1);
+    ready = !error;
+  } catch {
+    ready = false;
+  }
+  probes.set(key, { ready, at: Date.now() });
+  return ready;
+}
+
+/** Test hook: forget what was learned about each project. */
+export function resetApprovalProbe(): void {
+  probes.clear();
+}
+
+/** A trade_type value can only be written once the column exists. */
+export function withoutApprovalColumns<T extends Record<string, unknown>>(body: T): Omit<T, typeof APPROVAL_FIELDS[number] | 'trade_type'> {
+  const out: Record<string, unknown> = { ...body };
+  for (const f of APPROVAL_FIELDS) delete out[f];
+  delete out.trade_type;
+  return out as Omit<T, typeof APPROVAL_FIELDS[number] | 'trade_type'>;
 }

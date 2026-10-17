@@ -19,7 +19,9 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { DEMO_ORG_ID, isDemo, getMockCities, getMockStores, getMockActivities } from '../utils/demoData';
 import { outletClientIds } from '../lib/tenancy';
-import { needsApproval, canApprove, stripApprovalFields, APPROVAL_STATUSES, ApprovalStatus } from '../services/outletApproval';
+import {
+  needsApproval, canApprove, stripApprovalFields, withoutApprovalColumns, approvalColumnsAvailable, APPROVAL_STATUSES, ApprovalStatus,
+} from '../services/outletApproval';
 
 interface CrudOpts {
   /**
@@ -85,7 +87,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
 
     // Outlets still waiting for approval (or refused) stay out of the default list: it shows approved outlets plus
     // the caller's own proposals. `?approval_status=pending|rejected|all` lets an approver review the rest.
-    if (tableName === 'stores') {
+    if (tableName === 'stores' && await approvalColumnsAvailable()) {
       const want = String(req.query.approval_status || '').toLowerCase();
       if (want === 'all' && canApprove(user.role)) {
         // no filter
@@ -153,13 +155,14 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       : isUUID(headerClientId)          ? headerClientId
       : (isUUID(user.client_id) ? user.client_id : null);
 
+    const approvalReady = tableName === 'stores' ? await approvalColumnsAvailable() : false;
     const payload: Record<string, unknown> = {
-      ...(tableName === 'stores' ? stripApprovalFields(body) : body),
+      ...(tableName !== 'stores' ? body : approvalReady ? stripApprovalFields(body) : withoutApprovalColumns(body)),
       org_id: user.org_id,
       client_id: pickedClientId,
     };
-    // A rep's outlet waits for a manager; anyone else's is approved at once.
-    if (tableName === 'stores') {
+    // A rep's outlet waits for a manager; anyone else's is approved at once. (Only where approval is set up.)
+    if (approvalReady) {
       payload.created_by = user.id;
       payload.approval_status = needsApproval(user.role) ? 'pending' : 'approved';
     }
@@ -175,7 +178,7 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
     const { org_id, client_id: _, ...restRaw } = req.body; // strip sensitive IDs
     // Approval is decided only through the approval endpoint, never by a plain edit.
-    const rest = tableName === 'stores' ? stripApprovalFields(restRaw) : restRaw;
+    const rest = tableName !== 'stores' ? restRaw : (await approvalColumnsAvailable()) ? stripApprovalFields(restRaw) : withoutApprovalColumns(restRaw);
     let q = supabaseAdmin
       .from(tableName).update({ ...rest, updated_at: new Date().toISOString() })
       .eq('id', id).eq('org_id', user.org_id);
@@ -251,6 +254,7 @@ export const setStoreApproval = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   const { id } = req.params;
   if (!canApprove(user.role)) { res.status(403).json({ success: false, error: 'Only a manager can approve outlets' }); return; }
+  if (!(await approvalColumnsAvailable())) { res.status(409).json({ success: false, error: 'Outlet approval is not set up for this account yet' }); return; }
   if (!isUUID(id)) { notFound(res, 'stores record not found'); return; }
   const status = String(req.body?.status || '').toLowerCase() as ApprovalStatus;
   if (status !== 'approved' && status !== 'rejected') { badRequest(res, "status must be 'approved' or 'rejected'"); return; }

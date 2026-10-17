@@ -7,6 +7,7 @@ jest.mock('../src/lib/supabase', () => {
 
 import { createOutlet, myOutlets } from '../src/controllers/distribution/salesman.controller';
 import { setStoreApproval, storesCtrl } from '../src/controllers/management.controller';
+import { approvalColumnsAvailable, resetApprovalProbe } from '../src/services/outletApproval';
 
 const supa = () => (global as any).__supa;
 const ORG = '11111111-1111-4111-8111-111111111111';
@@ -32,7 +33,13 @@ const reqFor = (role: string, over: Record<string, unknown> = {}) => ({
 });
 const insertOf = (table = 'stores') => supa().chainsFor(table).flatMap((c: any) => c.ops).find((o: any) => o.method === 'insert')?.args[0];
 
-beforeEach(() => supa().reset());
+// Approval is on for the project unless a test says otherwise: prime the "is it set up?" probe once.
+beforeEach(async () => {
+  supa().reset();
+  resetApprovalProbe();
+  await approvalColumnsAvailable();
+  supa().chains.length = 0;
+});
 
 describe('POST /salesman/outlets', () => {
   const body = { name: 'Mapusa Mini Mart', phone: '9822012345', lat: 15.59, lng: 73.81, store_type: 'Grocery', trade_type: 'off_trade' };
@@ -142,5 +149,58 @@ describe('plain edits cannot change approval', () => {
     expect(upd.approval_status).toBeUndefined();
     expect(upd.approved_by).toBeUndefined();
     expect(upd.created_by).toBeUndefined();
+  });
+});
+
+
+describe('a project whose database has no approval columns yet (e.g. another tenant)', () => {
+  const notReady = async () => {
+    supa().reset();
+    resetApprovalProbe();
+    supa().queue('stores', { data: null, error: { message: 'column stores.approval_status does not exist', code: '42703' } });
+    expect(await approvalColumnsAvailable()).toBe(false);
+    supa().chains.length = 0;
+  };
+
+  it('behaves exactly as before: list has no approval filter, the picker has no approved filter', async () => {
+    await notReady();
+    supa().queue('stores', { data: [], error: null });
+    await call(storesCtrl.list, reqFor('executive'));
+    const list = supa().chainsFor('stores')[0];
+    expect(list.ors.join(' ')).not.toContain('approval_status');
+    expect(list.eqs.approval_status).toBeUndefined();
+
+    supa().queue('route_plans', { data: [], error: null });
+    supa().queue('stores', { data: [], error: null });
+    await call(myOutlets, reqFor('executive'));
+    expect(supa().chainsFor('stores')[1].eqs.approval_status).toBeUndefined();
+  });
+
+  it('a plain create writes none of the new columns', async () => {
+    await notReady();
+    supa().queue('stores', { data: { id: STORE }, error: null });
+    await call(storesCtrl.create, reqFor('executive', { body: { name: 'X', trade_type: 'on_trade', approval_status: 'approved', created_by: OTHER } }));
+    const row = insertOf();
+    expect(row.name).toBe('X');
+    for (const k of ['approval_status', 'created_by', 'trade_type', 'approved_by']) expect(row[k]).toBeUndefined();
+  });
+
+  it('the approval and add-outlet endpoints say it is not set up, and write nothing', async () => {
+    await notReady();
+    expect((await call(setStoreApproval, reqFor('admin', { params: { id: STORE }, body: { status: 'approved' } }))).status).toBe(409);
+    expect((await call(createOutlet, reqFor('executive', { body: { name: 'A' } }))).status).toBe(409);
+    expect(supa().chains).toHaveLength(0);
+  });
+
+  it('notices once the migration has been applied (re-checks after a minute)', async () => {
+    await notReady();
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 61_000;
+      supa().queue('stores', { data: [], error: null });
+      expect(await approvalColumnsAvailable()).toBe(true);
+    } finally {
+      Date.now = realNow;
+    }
   });
 });

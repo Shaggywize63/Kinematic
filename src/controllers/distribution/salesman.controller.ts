@@ -7,7 +7,7 @@ import {
   getDemoCartSuggest, getDemoRouteToday, getDemoOrderList, getDemoSalesmanOutlets, getDemoOutletOutstanding,
 } from '../../utils/demoDistribution';
 import { getClientScope, outletClientIds } from '../../lib/tenancy';
-import { needsApproval, parseNewOutlet, newOutletCode } from '../../services/outletApproval';
+import { needsApproval, parseNewOutlet, newOutletCode, approvalColumnsAvailable } from '../../services/outletApproval';
 import {
   loadOutletInvoiceBalances, loadLedgerBalance, openInvoices, resolveOutstandingBalance, round2,
 } from '../../services/distribution/collections.service';
@@ -171,6 +171,7 @@ export const myOutlets = asyncHandler(async (req: AuthRequest, res: Response) =>
 
   const scope = getClientScope(req);
   const companyIds = outletClientIds(req);
+  const approvalReady = await approvalColumnsAvailable();
   const search = sanitisePostgrestSearch(req.query.search);
   const rawLimit = parseInt(String(req.query.limit ?? ''), 10);
   const limit = Math.min(100, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 50));
@@ -178,7 +179,8 @@ export const myOutlets = asyncHandler(async (req: AuthRequest, res: Response) =>
   const STORE_COLS = 'id, name, store_code, address, phone, city_id, cities!city_id(name)';
   const scoped = (q: any) => {
     // Only approved outlets can take orders or collections; a rep's own proposals wait for a manager.
-    let r = q.eq('org_id', user.org_id).eq('is_active', true).eq('approval_status', 'approved');
+    let r = q.eq('org_id', user.org_id).eq('is_active', true);
+    if (approvalReady) r = r.eq('approval_status', 'approved');
     if (companyIds) r = r.in('client_id', companyIds);
     else if (scope.id) r = r.eq('client_id', scope.id);
     if (search) r = r.or(`name.ilike.%${search}%,store_code.ilike.%${search}%`);
@@ -317,6 +319,9 @@ export const createOutlet = asyncHandler(async (req: AuthRequest, res: Response)
   const user = req.user!;
   if (isDemo(user)) return ok(res, { id: 'demo-outlet', name: String(req.body?.name || 'New outlet'), approval_status: 'pending' });
 
+  if (!(await approvalColumnsAvailable())) {
+    return res.status(409).json({ success: false, error: 'Adding outlets from the app is not set up for this account yet' });
+  }
   const parsed = parseNewOutlet(req.body);
   if ('error' in parsed) return badRequest(res, parsed.error);
   const scope = getClientScope(req);
@@ -344,6 +349,7 @@ export const createOutlet = asyncHandler(async (req: AuthRequest, res: Response)
 export const myProposedOutlets = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, []);
+  if (!(await approvalColumnsAvailable())) return ok(res, []);
   const { data, error } = await supabaseAdmin.from('stores')
     .select('id, name, store_code, approval_status, rejection_reason, address, phone, created_at')
     .eq('org_id', user.org_id).eq('created_by', user.id).neq('approval_status', 'approved')
