@@ -39,29 +39,29 @@ In Tally Prime:
 ## Step 3 — Download the Kinematic connector (person at the Tally PC)
 
 1. On the Tally PC, open this link in a browser:
-   `https://api.kinematicapp.com/api/v1/integrations/tally/agent/download`
-   (or click **download the Kinematic connector** in the dashboard's pairing panel).
-2. Save **kinematic-tally-agent.exe** to a folder, for example `C:\Kinematic`.
-3. Windows may warn about an *unknown publisher* because the file is new. This is expected:
-   - Right-click the file → **Properties** → tick **Unblock** → **OK**, **or**
-   - In the SmartScreen warning click **More info → Run anyway**.
+   https://api.kinematicapp.com/api/v1/integrations/tally/agent/download
+2. Save `kinematic-tally-agent.exe` to a folder, for example `C:\Kinematic`.
 
 ## Step 4 — Pair the connector (person at the Tally PC)
 
-1. Click **Start**, type `cmd`, right-click **Command Prompt** → **Run as administrator**.
-2. Go to the folder and run the pairing command with **your** code:
+1. **Double-click `kinematic-tally-agent.exe`.**
+   - If Windows shows a blue **"Windows protected your PC"** box, click **More info → Run anyway**. (It appears because the file is new and not yet publisher-signed.)
+   - If Windows then asks *"Do you want to allow this app to make changes?"*, click **Yes**. This lets the connector start automatically with Windows.
+2. A black window opens and asks for the **pairing code**. Type the code from Step 1 (for example `K7F-29X`) and press **Enter**.
+3. You should see "Paired…", "Done. The connector will start automatically…" and whether Tally was found. Press **Enter** to close the window.
 
-   ```
-   cd C:\Kinematic
-   kinematic-tally-agent.exe pair K7F-29X
-   ```
+You do not need to keep anything open afterwards; the connector runs in the background.
 
-3. You should see messages like:
-   - `Paired. Config saved to C:\ProgramData\Kinematic\TallyConnector\config.json`
-   - `Installed. "Kinematic Tally Connector" starts automatically with Windows and is running now.`
-   - `Tally is reachable. Companies: <your company>`
+**Alternative (Command Prompt):** open Command Prompt **as administrator**, then:
+```
+cd C:\Kinematic
+kinematic-tally-agent.exe pair K7F-29X
+```
 
-The connector now starts by itself every time the PC starts. You can close the window.
+**If double-clicking seems to do nothing**
+- Look for the Windows blue box (it can open behind other windows) or for a notice from your antivirus. Some antivirus programs quarantine new, unsigned programs: ask your IT person to allow `kinematic-tally-agent.exe`.
+- Run it from Command Prompt as shown above, which prints a message for every problem.
+- In file **Properties**, an **Unblock** tick-box appears only on some PCs. If you do not see it, you can ignore it.
 
 > If it says *Tally is not reachable*, check Step 2 (Tally open, setting on, port 9000), then run `kinematic-tally-agent.exe check`.
 
