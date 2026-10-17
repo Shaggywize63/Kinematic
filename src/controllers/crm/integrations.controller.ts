@@ -303,16 +303,25 @@ async function bumpIntegrationCounters(integration_id: string, errored: boolean,
   }).eq('id', integration_id);
 }
 
-/** Constant-time compare of the `?key=` / `x-webhook-key` secret against the
- *  integration's webhook_secret. Used for providers (e.g. call_recording) that
- *  don't ship their own verifyWebhook. */
+/** Constant-time compare of the webhook secret against the integration's
+ *  webhook_secret. Used for providers (e.g. call_recording) that don't ship
+ *  their own verifyWebhook. Providers transmit the shared secret differently:
+ *  most honour the `?key=` query param or an `x-webhook-key` header, but some
+ *  (e.g. CallerDesk) fold the URL's query param into the POST body as
+ *  `key`/`secret`. Accept any of those transports so a provider that can't send
+ *  a custom header or preserve the query string still authenticates. */
 function verifyKeySecret(req: Request, integration: IntegrationRow): boolean {
-  const provided = (req.query.key as string | undefined) ?? (req.headers['x-webhook-key'] as string | undefined);
-  if (!provided || !integration.webhook_secret) return false;
-  if (provided.length !== integration.webhook_secret.length) return false;
-  let diff = 0;
-  for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ integration.webhook_secret.charCodeAt(i);
-  return diff === 0;
+  const secret = integration.webhook_secret;
+  if (!secret) return false;
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+  const candidates: unknown[] = [req.query.key, req.headers['x-webhook-key'], body.key, body.secret];
+  const matches = (provided: unknown): boolean => {
+    if (typeof provided !== 'string' || provided.length !== secret.length) return false;
+    let diff = 0;
+    for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ secret.charCodeAt(i);
+    return diff === 0;
+  };
+  return candidates.some(matches);
 }
 
 export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
