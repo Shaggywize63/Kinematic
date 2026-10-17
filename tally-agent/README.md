@@ -76,3 +76,11 @@ missing ones and can create them with one click.
 The connector talks only to the Kinematic API (the URLs in `config.json`) and to your
 local Tally. No telemetry. `config.json` holds the agent secret; the installer restricts
 the folder to SYSTEM and Administrators.
+
+## Several companies on one PC
+
+Each Kinematic company (e.g. Gomant Traders LLP, Royal Spirits North, Royal Spirits South) has its own
+Tally connection with its own pairing code. Run the connector again and enter the next code: it is
+**added** to `config.json` beside the existing ones, and the one background task polls all of them,
+each posting vouchers to the Tally company named on its connection. Pairing a code for a connection
+that is already there replaces it. (Older single-connection `config.json` files keep working.)

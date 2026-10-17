@@ -87,6 +87,17 @@ async function runOnceForProject(projectKey: string): Promise<void> {
   }
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * An integration pinned to one company (config.client_id) only syncs that company's documents, so
+ * several Tally companies in one org each receive just their own. Unpinned = whole org, as before.
+ */
+export function pinnedCompany(cfg: Record<string, unknown> | null | undefined): string | null {
+  const id = cfg?.client_id;
+  return typeof id === 'string' && UUID_RE.test(id) ? id : null;
+}
+
 interface IntegrationLite { id: string; org_id: string; last_sync_at: string | null; config?: Record<string, unknown> | null }
 
 /** Ids of Kinematic records already linked to a Tally master (so we never push a duplicate). */
@@ -104,6 +115,8 @@ export async function enqueueForIntegration(integration: IntegrationLite) {
   const sinceIso = since.toISOString();
 
   let enqueued = 0;
+  const pinned = pinnedCompany(integration.config);
+  const scope: Record<string, string> = pinned ? { client_id: pinned } : {};   // .match({}) adds no filter
 
   // Invoices — trigger on issued_at (the moment Kinematic locks the
   // invoice as final; pre-issue drafts are intentionally not synced).
@@ -111,6 +124,7 @@ export async function enqueueForIntegration(integration: IntegrationLite) {
     .from('invoices')
     .select('id')
     .eq('org_id', integration.org_id)
+    .match(scope)
     .eq('status', 'issued')
     .gte('issued_at', sinceIso)
     .limit(500);
@@ -122,6 +136,7 @@ export async function enqueueForIntegration(integration: IntegrationLite) {
     .from('payments')
     .select('id')
     .eq('org_id', integration.org_id)
+    .match(scope)
     .eq('status', 'cleared')
     .gte('received_at', sinceIso)
     .limit(500);
@@ -132,6 +147,7 @@ export async function enqueueForIntegration(integration: IntegrationLite) {
     .from('returns')
     .select('id')
     .eq('org_id', integration.org_id)
+    .match(scope)
     .in('status', ['credited', 'supervisor_approved'])
     .gte('created_at', sinceIso)
     .limit(500);
@@ -143,7 +159,7 @@ export async function enqueueForIntegration(integration: IntegrationLite) {
   // Sales Orders — approved orders only. Needs the 'order' event kind (see migrations/tally_event_kind_order.sql).
   if (cfg.sync_orders === true) {
     const { data: orders } = await supabaseAdmin.from('orders')
-      .select('id').eq('org_id', integration.org_id).eq('status', 'approved')
+      .select('id').eq('org_id', integration.org_id).match(scope).eq('status', 'approved')
       .gte('approved_at', sinceIso).limit(500);
     enqueued += await insertEvents(integration.id, integration.org_id, 'order', 'orders', (orders ?? []).map(r => r.id as string));
   }
@@ -151,7 +167,7 @@ export async function enqueueForIntegration(integration: IntegrationLite) {
   // New dealers -> Sundry Debtor ledgers (skipping dealers already linked to a Tally ledger).
   if (cfg.auto_create_ledgers === true) {
     const { data: dists } = await supabaseAdmin.from('distributors')
-      .select('id').eq('org_id', integration.org_id).eq('is_active', true)
+      .select('id').eq('org_id', integration.org_id).match(scope).eq('is_active', true)
       .gte('created_at', sinceIso).limit(500);
     const linked = await linkedRefIds(integration.id, 'party');
     enqueued += await insertEvents(integration.id, integration.org_id, 'master_ledger', 'distributors',
@@ -161,7 +177,7 @@ export async function enqueueForIntegration(integration: IntegrationLite) {
   // New products -> stock items (skipping products already linked to a Tally stock item).
   if (cfg.auto_create_stock_items === true) {
     const { data: skus } = await supabaseAdmin.from('skus')
-      .select('id').eq('org_id', integration.org_id).eq('is_active', true)
+      .select('id').eq('org_id', integration.org_id).match(scope).eq('is_active', true)
       .gte('created_at', sinceIso).limit(500);
     const linked = await linkedRefIds(integration.id, 'stock_item');
     enqueued += await insertEvents(integration.id, integration.org_id, 'master_stock_item', 'skus',

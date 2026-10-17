@@ -85,6 +85,15 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
     return badRequest(res, `Invalid provider. Must be one of: ${Object.keys(PROVIDER_LABEL).join(', ')}`);
   }
 
+  // A connection can be pinned to one company (config.client_id); it must be one of this org's.
+  if (config && config.client_id != null && config.client_id !== '') {
+    const cid = String(config.client_id);
+    const { data: co } = /^[0-9a-f-]{36}$/i.test(cid)
+      ? await supabaseAdmin.from('clients').select('id').eq('id', cid).eq('org_id', org_id).maybeSingle()
+      : { data: null };
+    if (!co) return badRequest(res, 'That company is not in your organisation');
+  }
+
   const agent_secret = crypto.randomBytes(24).toString('base64url');
 
   const { data: integration, error: intErr } = await supabaseAdmin.from('distribution_integrations')

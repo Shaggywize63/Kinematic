@@ -14,6 +14,7 @@ import { AuthRequest } from '../../types';
 import { asyncHandler, ok, badRequest, notFound } from '../../utils';
 import { logger } from '../../lib/logger';
 import { verifyAgentSecret } from './integrations.controller';
+import { pinnedCompany } from '../../services/distribution/integrations/enqueue.poller';
 import {
   PAIRING_TTL_MS, publicApiBase, generatePairingCode, hashPairingCode, normalisePairingCode,
   computeHealth, missingLedgers, buildCreateLedgersXml,
@@ -169,7 +170,8 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
     return ok(res, { updated: 1 });
   }
 
-  // import
+  // import — records land under the Tally connection's own company when it is pinned to one
+  const companyId = pinnedCompany(integ.config as Record<string, unknown> | null) ?? user.client_id ?? null;
   const results = { created: 0, failed: [] as Array<{ name: string; error: string }> };
   for (const it of items) {
     if (it.status === 'imported' || it.status === 'matched') continue;
@@ -179,7 +181,7 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
       const gstin = cleanGstin(d.gstin);
       const days = Number(d.credit_period_days);
       const { data: row, error: e } = await supabaseAdmin.from('distributors').insert({
-        org_id: user.org_id, client_id: user.client_id ?? null, created_by: user.id,
+        org_id: user.org_id, client_id: companyId, created_by: user.id,
         name: it.name, code: partyCode(it.tally_guid as string), legal_name: it.name,
         gstin, pan: gstin ? gstin.slice(2, 12) : null, state_code: gstin ? gstin.slice(0, 2) : null,
         contact_name: (d.contact as string) || null, contact_mobile: (d.phone as string) || null, email: (d.email as string) || null,
@@ -191,7 +193,7 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
       refId = row?.id ?? null; errMsg = e?.message ?? null;
     } else {
       const { data: row, error: e } = await supabaseAdmin.from('skus').insert({
-        org_id: user.org_id, client_id: user.client_id ?? null,
+        org_id: user.org_id, client_id: companyId,
         sku_code: (d.part_number as string) || `TLY-${(it.tally_guid as string).slice(-8).toUpperCase()}`,
         name: it.name, unit: (d.unit as string) || 'PCS', category: (d.category as string) || null,
         tally_stock_item_name: it.name,       // exact Tally spelling, used by vouchers
@@ -199,7 +201,7 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
       refId = row?.id ?? null; errMsg = e?.message ?? null;
       if (refId) {
         const { error: e2 } = await supabaseAdmin.from('product_distribution_ext').insert({
-          sku_id: refId, org_id: user.org_id, client_id: user.client_id ?? null,
+          sku_id: refId, org_id: user.org_id, client_id: companyId,
           hsn_code: (d.hsn_code as string) || null, gst_rate: Number(d.gst_rate) || 0,
           uom: (d.unit as string) || 'PCS', mrp: Number(d.mrp) || Number(d.rate) || 0, is_active: true,
         });

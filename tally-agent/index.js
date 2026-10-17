@@ -51,7 +51,7 @@ async function setup() {
   const ask = (q) => new Promise(res => rl.question(q, res));
   const say = (m) => console.log(m);
   try {
-    const existing = C.loadConfig().cfg || null;
+    const existing = C.loadAll().connections || null;
     await S.interactive({ ask, say, log, existingConfig: existing });
   } finally {
     await ask('\nPress Enter to close this window… ');   // keep the window readable after a double-click
@@ -69,15 +69,21 @@ async function check() {
 }
 
 async function run() {
-  const l = C.loadConfig();
+  const l = C.loadAll();
   if (l.error) { console.error(`[FATAL] ${l.error}`); return 1; }
-  const ctx = A.newContext(l.cfg, log);
-  log(`Kinematic Tally Connector ${A.VERSION}  integration=${l.cfg.integration_id}  tally=${l.cfg.tally_url}  every ${l.cfg.poll_interval_seconds}s`);
-  if (args.includes('--once')) { await A.cycle(ctx); return 0; }
-  let busy = false;
-  const tick = async () => { if (busy) return; busy = true; try { await A.cycle(ctx); } catch (e) { log(`[ERROR] ${e.stack || e.message}`); } finally { busy = false; } };
-  await tick();
-  setInterval(tick, l.cfg.poll_interval_seconds * 1000);
+  // One connection per Kinematic company; each polls on its own and posts to the same local Tally.
+  const ctxs = l.connections.map(cfg => {
+    const prefix = l.connections.length > 1 ? `[${cfg.company_name || cfg.integration_id.slice(0, 8)}] ` : '';
+    return A.newContext(cfg, (m) => log(prefix + m));
+  });
+  for (const ctx of ctxs) log(`Kinematic Tally Connector ${A.VERSION}  integration=${ctx.cfg.integration_id}  company=${ctx.cfg.company_name || '-'}  tally=${ctx.cfg.tally_url}  every ${ctx.cfg.poll_interval_seconds}s`);
+  if (args.includes('--once')) { for (const ctx of ctxs) await A.cycle(ctx); return 0; }
+  for (const ctx of ctxs) {
+    let busy = false;
+    const tick = async () => { if (busy) return; busy = true; try { await A.cycle(ctx); } catch (e) { ctx.log(`[ERROR] ${e.stack || e.message}`); } finally { busy = false; } };
+    await tick();
+    setInterval(tick, ctx.cfg.poll_interval_seconds * 1000);
+  }
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { log(`Received ${sig}, shutting down`); process.exit(0); });
   return new Promise(() => {}); // run forever
 }
