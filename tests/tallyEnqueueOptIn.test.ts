@@ -50,3 +50,21 @@ describe('Tally enqueue: outbound masters and orders are opt-in', () => {
     expect(insertedKinds().length).toBe(3);
   });
 });
+
+describe('Tally enqueue: a connection pinned to a company only syncs that company', () => {
+  const CO = '22222222-2222-4222-8222-222222222222';
+  const matches = (table: string) => supa().chainsFor(table).flatMap((c: any) => c.ops.filter((o: any) => o.method === 'match').map((o: any) => o.args[0]));
+
+  it('filters invoices, payments and returns (and opt-in sources) by client_id', async () => {
+    await enqueueForIntegration({ ...base, config: { client_id: CO, sync_orders: true, auto_create_ledgers: true, auto_create_stock_items: true } });
+    for (const t of ['invoices', 'payments', 'returns', 'orders', 'distributors', 'skus']) {
+      expect(matches(t)).toEqual([{ client_id: CO }]);
+    }
+  });
+
+  it('an unpinned or malformed client_id leaves the whole org in scope, as before', async () => {
+    await enqueueForIntegration({ ...base, config: {} });
+    await enqueueForIntegration({ ...base, config: { client_id: 'not-a-uuid' } });
+    expect(matches('invoices')).toEqual([{}, {}]);
+  });
+});

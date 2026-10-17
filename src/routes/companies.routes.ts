@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
+import { buildCompanyReport } from '../services/companyReport';
 
 const router = Router();
 router.use(requireAuth);
@@ -75,6 +76,53 @@ router.put('/users/:userId', requireRole('super_admin', 'admin', 'main_admin'), 
     if (ins.error) return res.status(500).json({ success: false, error: ins.error.message });
   }
   res.json({ success: true, data: { user_id: userId, client_ids: [...new Set(clientIds)] } });
+});
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const PAGE = 1000;
+
+// Reads every row of a query, a page at a time (PostgREST caps a single response).
+async function allRows<T>(build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await build(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    out.push(...(data || []));
+    if (!data || data.length < PAGE) break;
+  }
+  return out;
+}
+
+// GET /companies/report?from=YYYY-MM-DD&to=YYYY-MM-DD — orders, invoices, collections and
+// returns for each company in the caller's org, plus the all-company total. Admins only.
+router.get('/report', requireRole('super_admin', 'admin', 'main_admin'), async (req: AuthRequest, res: Response) => {
+  const orgId = req.user!.org_id;
+  const today = new Date().toISOString().slice(0, 10);
+  const from = String(req.query.from || today.slice(0, 8) + '01');
+  const to = String(req.query.to || today);
+  if (!DATE_RE.test(from) || !DATE_RE.test(to) || from > to) {
+    return res.status(400).json({ success: false, error: 'from and to must be YYYY-MM-DD dates, from <= to' });
+  }
+  const start = `${from}T00:00:00.000Z`;
+  const end = new Date(new Date(`${to}T00:00:00.000Z`).getTime() + 86400000).toISOString();
+  try {
+    const cos = await supabaseAdmin.from('clients').select('id, name').eq('org_id', orgId).order('name');
+    if (cos.error) throw new Error(cos.error.message);
+    const [orders, invoices, payments, returns] = await Promise.all([
+      allRows((a, b) => supabaseAdmin.from('orders').select('client_id, grand_total').eq('org_id', orgId)
+        .neq('status', 'cancelled').gte('placed_at', start).lt('placed_at', end).range(a, b)),
+      allRows((a, b) => supabaseAdmin.from('invoices').select('client_id, grand_total').eq('org_id', orgId)
+        .neq('status', 'cancelled').gte('issued_at', start).lt('issued_at', end).range(a, b)),
+      allRows((a, b) => supabaseAdmin.from('payments').select('client_id, amount, mode').eq('org_id', orgId)
+        .neq('status', 'bounced').gte('received_at', start).lt('received_at', end).range(a, b)),
+      allRows((a, b) => supabaseAdmin.from('returns').select('client_id, total_value').eq('org_id', orgId)
+        .not('status', 'in', '(rejected,cancelled)').gte('created_at', start).lt('created_at', end).range(a, b)),
+    ]);
+    const report = buildCompanyReport(cos.data || [], { orders, invoices, payments, returns } as any);
+    res.json({ success: true, data: { from, to, ...report } });
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 export default router;

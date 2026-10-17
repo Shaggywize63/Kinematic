@@ -62,10 +62,11 @@ async function interactive({ ask, say, log, deps = {}, existingConfig, platform 
   say('==============================================');
 
   if (existingConfig) {
-    say('This PC is already paired with Kinematic.');
+    const have = Array.isArray(existingConfig) ? existingConfig : [existingConfig];
+    say(`This PC is already paired with Kinematic (${have.map(c => c.company_name || 'a company').join(', ')}).`);
     say('The connector runs in the background and starts with Windows - nothing more to do here.');
-    say('To pair it again with a new code, type the code now; otherwise just press Enter.');
-    const again = (await ask('New pairing code (or Enter to skip): ')).trim();
+    say('To connect another company, type its pairing code now (it is added beside the existing ones); otherwise just press Enter.');
+    const again = (await ask('Pairing code for another company (or Enter to skip): ')).trim();
     if (!again) return { ok: true, skipped: true };
     return pairLoop({ first: again, ask, say, log, deps, platform });
   }

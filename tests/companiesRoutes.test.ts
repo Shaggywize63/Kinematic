@@ -96,3 +96,43 @@ describe('PUT /companies/users/:userId', () => {
     expect(ops).not.toContain('insert');
   });
 });
+
+describe('GET /companies/report', () => {
+  const q = { from: '2026-10-01', to: '2026-10-17' };
+  it('totals each company and all of them together', async () => {
+    supa().queue('clients', { data: [{ id: A, name: 'Gomant Traders LLP' }, { id: B, name: 'Royal Spirits North' }], error: null });
+    supa().queue('orders', { data: [{ client_id: A, grand_total: 100 }, { client_id: A, grand_total: 50.5 }, { client_id: B, grand_total: 200 }], error: null });
+    supa().queue('invoices', { data: [{ client_id: B, grand_total: 180 }], error: null });
+    supa().queue('payments', { data: [{ client_id: A, amount: 60, mode: 'cash' }, { client_id: A, amount: 40, mode: 'upi' }, { client_id: B, amount: 10, mode: 'cash' }], error: null });
+    supa().queue('returns', { data: [{ client_id: A, total_value: 25 }], error: null });
+    const r = await hit('get', '/report', admin({ query: q }));
+    expect(r.status).toBe(200);
+    const [a, b] = r.body.data.companies;
+    expect(a).toMatchObject({ client_id: A, orders: 2, order_value: 150.5, collected: 100, returns: 1, return_value: 25 });
+    expect(a.collected_by_mode).toEqual({ cash: 60, upi: 40 });
+    expect(b).toMatchObject({ client_id: B, orders: 1, invoices: 1, invoice_value: 180 });
+    expect(r.body.data.total).toMatchObject({ orders: 3, order_value: 350.5, collected: 110, invoice_value: 180 });
+    expect(r.body.data.total.collected_by_mode).toEqual({ cash: 70, upi: 40 });
+  });
+  it('scopes every query to the caller\'s org and the date window', async () => {
+    await hit('get', '/report', admin({ query: q }));
+    for (const t of ['clients', 'orders', 'invoices', 'payments', 'returns']) {
+      expect(supa().chainsFor(t)[0].eqs.org_id).toBe(ORG);
+    }
+    const ops = supa().chainsFor('orders')[0].ops;
+    expect(ops.find((o: any) => o.method === 'gte').args[1]).toBe('2026-10-01T00:00:00.000Z');
+    expect(ops.find((o: any) => o.method === 'lt').args[1]).toBe('2026-10-18T00:00:00.000Z');
+  });
+  it('keeps rows without a company visible instead of dropping them', async () => {
+    supa().queue('clients', { data: [{ id: A, name: 'Gomant Traders LLP' }], error: null });
+    supa().queue('orders', { data: [{ client_id: null, grand_total: 70 }], error: null });
+    const r = await hit('get', '/report', admin({ query: q }));
+    expect(r.body.data.companies.map((c: any) => c.name)).toEqual(['Gomant Traders LLP', 'No company']);
+    expect(r.body.data.total.order_value).toBe(70);
+  });
+  it('rejects a bad date range and non-admins', async () => {
+    expect((await hit('get', '/report', admin({ query: { from: '2026-10-17', to: '2026-10-01' } }))).status).toBe(400);
+    expect((await hit('get', '/report', admin({ query: { from: 'x' } }))).status).toBe(400);
+    expect((await hit('get', '/report', { user: { id: 'r', org_id: ORG, role: 'executive' }, query: q })).status).toBe(403);
+  });
+});
