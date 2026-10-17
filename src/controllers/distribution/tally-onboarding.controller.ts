@@ -15,6 +15,7 @@ import { asyncHandler, ok, badRequest, notFound } from '../../utils';
 import { logger } from '../../lib/logger';
 import { verifyAgentSecret } from './integrations.controller';
 import { scopeIntegrations } from '../../lib/companyVisibility';
+import { ensureCompanyPriceList, tallyPrice } from '../../services/distribution/companyPriceList';
 import { pinnedCompany } from '../../services/distribution/integrations/enqueue.poller';
 import {
   PAIRING_TTL_MS, publicApiBase, generatePairingCode, hashPairingCode, normalisePairingCode,
@@ -172,8 +173,11 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
   }
 
   // import — records land under the Tally connection's own company when it is pinned to one
-  const companyId = pinnedCompany(integ.config as Record<string, unknown> | null) ?? user.client_id ?? null;
-  const results = { created: 0, failed: [] as Array<{ name: string; error: string }> };
+  const pinned = pinnedCompany(integ.config as Record<string, unknown> | null);
+  const companyId = pinned ?? user.client_id ?? null;
+  // Only a connection pinned to a company feeds that company's price list (other imports are unchanged).
+  const priceListId = pinned && kind === 'stock_item' ? await ensureCompanyPriceList(user.org_id, pinned, user.id) : null;
+  const results = { created: 0, unpriced: 0, failed: [] as Array<{ name: string; error: string }> };
   for (const it of items) {
     if (it.status === 'imported' || it.status === 'matched') continue;
     const d = (it.data ?? {}) as Record<string, unknown>;
@@ -207,6 +211,14 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
           uom: (d.unit as string) || 'PCS', mrp: Number(d.mrp) || Number(d.rate) || 0, is_active: true,
         });
         if (e2) errMsg = `Created the product but not its tax details: ${e2.message}`;
+        if (priceListId) {
+          const price = tallyPrice(d);
+          if (price === null) results.unpriced++;
+          else {
+            const { error: e3 } = await supabaseAdmin.from('price_list_items').insert({ price_list_id: priceListId, sku_id: refId, base_price: price });
+            if (e3 && !errMsg) errMsg = `Created the product but not its price: ${e3.message}`;
+          }
+        }
       }
     }
     if (refId) {
