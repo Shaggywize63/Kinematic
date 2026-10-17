@@ -19,6 +19,7 @@ import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { DEMO_ORG_ID, isDemo, getMockCities, getMockStores, getMockActivities } from '../utils/demoData';
 import { outletClientIds } from '../lib/tenancy';
+import { needsApproval, canApprove, stripApprovalFields, APPROVAL_STATUSES, ApprovalStatus } from '../services/outletApproval';
 
 interface CrudOpts {
   /**
@@ -82,6 +83,21 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
         : q.eq('client_id', targetCid);
     }
 
+    // Outlets still waiting for approval (or refused) stay out of the default list: it shows approved outlets plus
+    // the caller's own proposals. `?approval_status=pending|rejected|all` lets an approver review the rest.
+    if (tableName === 'stores') {
+      const want = String(req.query.approval_status || '').toLowerCase();
+      if (want === 'all' && canApprove(user.role)) {
+        // no filter
+      } else if ((APPROVAL_STATUSES as string[]).includes(want) && canApprove(user.role)) {
+        q = q.eq('approval_status', want);
+      } else if (isUUID(user.id)) {
+        q = q.or(`approval_status.eq.approved,created_by.eq.${user.id}`);
+      } else {
+        q = q.eq('approval_status', 'approved');
+      }
+    }
+
     const { data, error } = await q.order('created_at', { ascending: false });
     if (error) { badRequest(res, error.message); return; }
     ok(res, data || []);
@@ -137,11 +153,16 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       : isUUID(headerClientId)          ? headerClientId
       : (isUUID(user.client_id) ? user.client_id : null);
 
-    const payload = {
-      ...body,
+    const payload: Record<string, unknown> = {
+      ...(tableName === 'stores' ? stripApprovalFields(body) : body),
       org_id: user.org_id,
       client_id: pickedClientId,
     };
+    // A rep's outlet waits for a manager; anyone else's is approved at once.
+    if (tableName === 'stores') {
+      payload.created_by = user.id;
+      payload.approval_status = needsApproval(user.role) ? 'pending' : 'approved';
+    }
     const { data, error } = await supabaseAdmin.from(tableName).insert(payload).select().single();
     if (error) { badRequest(res, error.message); return; }
     created(res, data);
@@ -152,7 +173,9 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     const user = req.user!;
     if (isDemo(user)) return ok(res, { id, ...req.body }, 'Updated (Demo)');
     if (!isUUID(id)) { notFound(res, `${tableName} record not found`); return; }
-    const { org_id, client_id: _, ...rest } = req.body; // strip sensitive IDs
+    const { org_id, client_id: _, ...restRaw } = req.body; // strip sensitive IDs
+    // Approval is decided only through the approval endpoint, never by a plain edit.
+    const rest = tableName === 'stores' ? stripApprovalFields(restRaw) : restRaw;
     let q = supabaseAdmin
       .from(tableName).update({ ...rest, updated_at: new Date().toISOString() })
       .eq('id', id).eq('org_id', user.org_id);
@@ -222,6 +245,36 @@ function getSelect(table: string): string {
 // stay strictly tenant-isolated.
 export const citiesCtrl   = buildCRUD('cities',     ['name', 'state'], { sharedWithOwn: true });
 export const storesCtrl   = buildCRUD('stores',     ['name']);
+
+// PATCH /stores/:id/approval { status: 'approved' | 'rejected', reason? } — a manager decides a proposed outlet.
+export const setStoreApproval = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const { id } = req.params;
+  if (!canApprove(user.role)) { res.status(403).json({ success: false, error: 'Only a manager can approve outlets' }); return; }
+  if (!isUUID(id)) { notFound(res, 'stores record not found'); return; }
+  const status = String(req.body?.status || '').toLowerCase() as ApprovalStatus;
+  if (status !== 'approved' && status !== 'rejected') { badRequest(res, "status must be 'approved' or 'rejected'"); return; }
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : '';
+  if (status === 'rejected' && !reason) { badRequest(res, 'Give a reason when rejecting an outlet'); return; }
+
+  let q = supabaseAdmin.from('stores')
+    .update({
+      approval_status: status,
+      approved_by: user.id,
+      approved_at: new Date().toISOString(),
+      rejection_reason: status === 'rejected' ? reason : null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', id).eq('org_id', user.org_id);
+  const companies = outletClientIds(req);
+  if (companies) q = q.in('client_id', companies);
+  else if (isUUID(user.client_id)) q = q.eq('client_id', user.client_id);
+
+  const { data, error } = await q.select().single();
+  if (error) { badRequest(res, error.message); return; }
+  if (!data) { notFound(res, 'stores record not found'); return; }
+  ok(res, data);
+});
 export const skusCtrl     = buildCRUD('skus',       ['sku_code', 'name']);
 export const assetsCtrl   = buildCRUD('assets',     ['name']);
 export const activitiesCtrl = buildCRUD('activities', ['name']);
