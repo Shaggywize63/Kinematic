@@ -30,6 +30,25 @@ router.get('/mine', async (req: AuthRequest, res: Response) => {
   });
 });
 
+// GET /companies/all — every company (client) in the caller's organisation, for the "who can sell for what" screen.
+router.get('/all', requireRole('super_admin', 'admin', 'main_admin'), async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabaseAdmin.from('clients').select('id, name').eq('org_id', req.user!.org_id).order('name');
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data: data || [] });
+});
+
+// GET /companies/users/:userId — the companies this user may sell for (empty = just their own client).
+router.get('/users/:userId', requireRole('super_admin', 'admin', 'main_admin'), async (req: AuthRequest, res: Response) => {
+  const userId = String(req.params.userId);
+  if (!UUID_RE.test(userId)) return res.status(400).json({ success: false, error: 'Invalid user id' });
+  const orgId = req.user!.org_id;
+  const u = await supabaseAdmin.from('users').select('id').eq('id', userId).eq('org_id', orgId).maybeSingle();
+  if (!u.data) return res.status(404).json({ success: false, error: 'User not found' });
+  const { data, error } = await supabaseAdmin.from('user_companies').select('client_id').eq('user_id', userId);
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data: { user_id: userId, client_ids: (data || []).map((r: { client_id: string }) => r.client_id) } });
+});
+
 // PUT /companies/users/:userId { client_ids: string[] } — replace a user's allowed
 // companies. Admins only, and only within their own org.
 router.put('/users/:userId', requireRole('super_admin', 'admin', 'main_admin'), async (req: AuthRequest, res: Response) => {
