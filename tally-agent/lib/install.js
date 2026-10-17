@@ -38,4 +38,17 @@ function uninstall(log) {
   log(r.status === 0 ? 'Startup task removed.' : `Nothing to remove (${(r.stderr || '').trim()})`);
   return true;
 }
-module.exports = { install, uninstall, TASK };
+/** Windows: true when this process has administrator rights (needed to register the startup task). */
+function isAdmin() {
+  if (process.platform !== 'win32') return true;
+  return run('net', ['session']).status === 0;
+}
+/** Re-launch this .exe elevated (shows the normal Windows "Do you want to allow…" prompt). Returns true if launched. */
+function relaunchElevated() {
+  if (process.platform !== 'win32' || !isPackaged()) return false;
+  const exe = process.execPath.replace(/'/g, "''");
+  const r = run('powershell', ['-NoProfile', '-Command', `Start-Process -FilePath '${exe}' -Verb RunAs`]);
+  return r.status === 0;
+}
+
+module.exports = { install, uninstall, isAdmin, relaunchElevated, TASK };

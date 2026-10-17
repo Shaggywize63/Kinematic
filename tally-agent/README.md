@@ -11,13 +11,15 @@ checklist, and pulls stock items and dealer ledgers for review in the dashboard.
    connection and click **Connect Tally PC**. You get a **Download** button and a
    6-character **pairing code** (e.g. `K7F-29X`, valid 24 h, single use).
 2. On the Tally PC download `kinematic-tally-agent.exe`.
-3. Open **Command Prompt as Administrator** in the download folder and run:
+3. **Double-click the file.** (If Windows shows "Windows protected your PC", choose *More info → Run anyway*; allow the
+   permission prompt.) A window asks for the pairing code, pairs, and stays open until you press Enter.
+   Command-line alternative, from an administrator Command Prompt:
 
    ```
    kinematic-tally-agent.exe pair K7F-29X
    ```
 
-   This saves the config to `C:\ProgramData\Kinematic\TallyConnector`, registers a
+   Either way this saves the config to `C:\ProgramData\Kinematic\TallyConnector`, registers a
    startup task so it runs at boot, starts it, and reports to the dashboard.
 4. In Tally: **F1 → Settings → Connectivity → Client/Server**, set *TallyPrime acts as*
    = **Both**, port **9000**, and keep the company open.
