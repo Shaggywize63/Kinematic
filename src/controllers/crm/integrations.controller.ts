@@ -466,9 +466,24 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
 // matches what the admin stored in integration.config.verify_token.
 // Only meta_lead_ads uses this today; other providers return 405.
 
-export const verifyChallenge = asyncHandler<Request>(async (req, res) => {
+export const verifyChallenge = asyncHandler<Request>(async (req, res, next) => {
   const providerSlug = req.params.provider;
   const providerId = providerSlug.replace(/-/g, '_') as ProviderId;
+
+  // CallerDesk delivers the Call Report webhook as a GET with every field on the
+  // query string (SourceNumber / CallRecordingUrl / CallDuration / Status / key),
+  // not a POST body (see docs.callerdesk.io "Get Webhook payload"). Fold the query
+  // into req.body and run the exact same ingest + auth path as the POST handler, so
+  // the recording flows into Conversation Analysis. (POST handshake pings still work.)
+  if (providerId === 'call_recording') {
+    const q = req.query as Record<string, unknown>;
+    const existing = (req.body && typeof req.body === 'object' && !Array.isArray(req.body))
+      ? (req.body as Record<string, unknown>) : {};
+    req.body = { ...existing, ...q };
+    inboundWebhook(req, res, next);
+    return;
+  }
+
   if (providerId !== 'meta_lead_ads') {
     res.status(405).json({ ok: false, error: 'GET not supported for this provider' });
     return;
