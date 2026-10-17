@@ -11,6 +11,7 @@
  */
 import { AppError } from '../../utils';
 import { supabaseAdmin } from '../../lib/supabase';
+import { recordPlacement } from './ai/telephonyCallLog.service';
 
 export interface TelephonyConfig {
   provider?: string;            // 'exotel' (default). 'callerdesk'. knowlarity / twilio can follow.
@@ -186,9 +187,24 @@ export async function clickToCallForLead(params: {
   if (!from) throw new AppError(400, 'Your phone number is not set on your profile — add it to place recorded calls', 'NO_AGENT_NUMBER');
 
   const { data: integs } = await supabaseAdmin.from('crm_lead_source_integrations')
-    .select('config').eq('org_id', org_id).eq('provider', 'call_recording').limit(1);
-  const cfg = (((integs?.[0] as any)?.config) || {}) as TelephonyConfig;
+    .select('id, client_id, config').eq('org_id', org_id).eq('provider', 'call_recording').limit(1);
+  const integ = (integs?.[0] as any) || {};
+  const cfg = (integ.config || {}) as TelephonyConfig;
 
   const result = await placeClickToCall(cfg, from, to, {});
+
+  // Log the placement (campid → lead + rep) so the recording PULL reconcile can
+  // ingest the resulting recording onto this exact lead/rep instead of
+  // re-resolving by phone. Best-effort (recordPlacement never throws); only the
+  // CallerDesk provider returns a campid we can correlate on.
+  if (result.call_id && (cfg.provider || '').toLowerCase() === 'callerdesk') {
+    await recordPlacement({
+      org_id, provider: 'callerdesk', call_key: result.call_id,
+      campid: result.call_id, lead_id, user_id,
+      client_id: integ.client_id ?? null, integration_id: integ.id ?? null,
+      customer_number: to, agent_number: from, direction: 'WEBOBD',
+    });
+  }
+
   return { ...result, from, to, lead_id };
 }

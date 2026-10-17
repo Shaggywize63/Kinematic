@@ -37,6 +37,7 @@ import { emailInboundProvider } from '../../services/crm/integrations/providers/
 import { ivrMissedCallProvider } from '../../services/crm/integrations/providers/ivrMissedCall';
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
 import { ingestCallRecording } from '../../services/crm/ai/callRecordingIngest.service';
+import { deriveCallKey, claimForIngest, markIngested, markCallStatus } from '../../services/crm/ai/telephonyCallLog.service';
 import { logger } from '../../lib/logger';
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
@@ -360,19 +361,40 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
       res.status(200).json({ ok: true });
       return;
     }
+    // Dedup across the webhook AND the pull reconcile (crm_telephony_calls): one
+    // recorded call is transcribed + analyzed at most once, whichever path sees
+    // it first. Keyed on campid (outgoing) / CallSid (incoming).
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const callKey = deriveCallKey({ campid: body.campid, call_sid: body.CallSid, uniqueid: body.Uniqueid });
+    if (callKey) {
+      const won = await claimForIngest(integration.org_id, 'callerdesk', callKey, {
+        client_id: (integration as { client_id?: string | null }).client_id ?? null,
+        integration_id,
+        campid: body.campid != null ? String(body.campid) : callKey,
+        call_sid: body.CallSid != null ? String(body.CallSid) : null,
+      });
+      if (!won) {
+        await finishEvent(event_id, { error: 'duplicate (already ingested)' });
+        res.status(200).json({ ok: true, deduped: true });
+        return;
+      }
+    }
     try {
       const r = await ingestCallRecording({
         org_id: integration.org_id,
         client_id: (integration as { client_id?: string | null }).client_id ?? null,
         source_id: integration.source_id,
         config: (integration as { config?: Record<string, unknown> | null }).config ?? null,
-      }, (req.body ?? {}) as Record<string, unknown>);
+      }, body);
+      if ('recording_id' in r) await markIngested(integration.org_id, 'callerdesk', callKey, { recording_id: r.recording_id, lead_id: r.lead_id });
+      else await markCallStatus(integration.org_id, 'callerdesk', callKey, 'skipped', r.skipped);
       await finishEvent(event_id, 'recording_id' in r ? { lead_id: r.lead_id } : { error: r.skipped });
       await bumpIntegrationCounters(integration_id, false);
       res.status(200).json({ ok: true, ...r });
     } catch (e) {
       const err = (e as Error).message;
       logger.error({ integration_id, err }, 'callRecordingWebhook: processing failed');
+      await markCallStatus(integration.org_id, 'callerdesk', callKey, 'error', err);
       await finishEvent(event_id, { error: err });
       await bumpIntegrationCounters(integration_id, true, err);
       res.status(200).json({ ok: true });
