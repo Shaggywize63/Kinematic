@@ -1,3 +1,4 @@
+import { pickPriceList, isCompanyScoped } from '../../services/distribution/priceListPicker';
 import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../../lib/supabase';
@@ -190,6 +191,7 @@ export const preview = asyncHandler(async (req: AuthRequest, res: Response) => {
     const result = await priceCart(items, {
       org_id: user.org_id,
       client_id: user.client_id,
+      company_scoped: isCompanyScoped(user),
       customer_class: ctx.customer_class,
       region: ctx.distributor.region,
       distributor_state_code: ctx.distributor.state_code,
@@ -229,14 +231,10 @@ export const catalogue = asyncHandler(async (req: AuthRequest, res: Response) =>
   try {
     const ctx = await buildPriceContext(user, outletId);
     const region = ctx.distributor.region || 'ALL';
-    const { data: priceList } = await supabaseAdmin.from('price_lists').select('id, version')
-      .eq('org_id', user.org_id)
-      .eq('customer_class', ctx.customer_class)
-      .or(`region.eq.${region},region.eq.ALL`)
-      .eq('is_active', true)
-      .order('region', { ascending: false })
-      .order('version', { ascending: false })
-      .limit(1).maybeSingle();
+    const priceList = await pickPriceList({
+      org_id: user.org_id, customer_class: ctx.customer_class, region,
+      client_id: user.client_id, company_scoped: isCompanyScoped(user), select: 'id, version',
+    });
 
     const credit = computeCredit(ctx.ext, 0);
     if (!priceList) {
@@ -300,6 +298,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     priced = await priceCart(items, {
       org_id: user.org_id,
       client_id: user.client_id,
+      company_scoped: isCompanyScoped(user),
       customer_class: ctx.customer_class,
       region: ctx.distributor.region,
       distributor_state_code: ctx.distributor.state_code,
