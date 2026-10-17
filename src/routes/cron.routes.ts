@@ -20,6 +20,7 @@ import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { runDailyBriefings } from '../services/crm/ai/dailyBriefing.service';
 import { dispatchActivityReminders } from '../services/crm/activityReminders.service';
 import { runScheduledTasks, runProactiveNudges } from '../services/crm/ai/kiniScheduler.service';
+import { reconcileCallRecordings } from '../services/crm/ai/callRecordingPull.service';
 import { runRetentionPurge } from '../services/crm/retention.service';
 import {
   pullEvents as pullGoogleEvents,
@@ -633,6 +634,33 @@ router.post('/process-automations', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: out });
   } catch (err: any) {
     logger.error(`[cron] process-automations crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/pull-call-recordings
+ *
+ * CallerDesk recording reconcile — for every `call_recording` integration using
+ * the CallerDesk provider, PULLs recent answered calls from the Call Report API
+ * (call_list_v2) and runs each recording through the same transcribe → analyze
+ * pipeline the webhook uses (Sarvam → KINI → the lead's Conversations). This is
+ * the reliable path when CallerDesk doesn't PUSH the Call Report to the webhook.
+ * Idempotent + dedup-safe via crm_telephony_calls (never double-ingests, and
+ * never collides with the webhook). Self-gating — a tenant with no CallerDesk
+ * integration is a no-op. Both tenants schedule it, so drive with
+ * { all_projects: true }; also runs as an in-process tick (see server.ts).
+ * Body: { all_projects?, project?, org_id?, lookback_hours? }.
+ */
+router.post('/pull-call-recordings', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string; org_id?: string; lookback_hours?: number };
+    const org_id = typeof body.org_id === 'string' ? body.org_id : undefined;
+    const lookbackHours = Number.isFinite(body.lookback_hours) ? Number(body.lookback_hours) : undefined;
+    const result = await runForRequestedProjects(body, () => reconcileCallRecordings({ org_id, lookbackHours }));
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] pull-call-recordings crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });
