@@ -41,6 +41,19 @@ export interface AttendanceRules {
    * column (see transportMode.service.ts).
    */
   track_transport_mode: boolean;
+  /**
+   * Minimum work for a full day, in minutes (e.g. 510 = 8h30m). Opt-in: unset
+   * for every client that does not need it, so no default and no effect unless
+   * explicitly stored. Consumed by isShortWorkday() — a checkout whose
+   * working_minutes fall short is a candidate for half-day / short-day flagging.
+   */
+  required_minutes?: number;
+  /**
+   * Latest 'HH:MM' (IST) a punch-in still counts as a full day; a check-in after
+   * it is a half-day. Opt-in: unset for every client that does not need it.
+   * Consumed by isHalfDayCheckin().
+   */
+  half_day_cutoff?: string;
 }
 
 export interface ResolvedAttendanceRules {
@@ -60,6 +73,7 @@ export const ATTENDANCE_RULES_SETTINGS_KEY = 'attendance_rules';
 export const ATTENDANCE_RULE_KEYS = [
   'shift_start', 'shift_end', 'grace_minutes', 'weekly_off', 'allow_offline_checkin',
   'selfie_required', 'form_checkin_required', 'track_transport_mode',
+  'required_minutes', 'half_day_cutoff',
 ] as const;
 export type AttendanceRuleKey = (typeof ATTENDANCE_RULE_KEYS)[number];
 
@@ -79,6 +93,7 @@ export const ATTENDANCE_RULES_DEFAULTS: Readonly<AttendanceRules> = Object.freez
 
 export const ATTENDANCE_RULES_BOUNDS = Object.freeze({
   grace_minutes: Object.freeze({ min: 0, max: 120 }),
+  required_minutes: Object.freeze({ min: 0, max: 1440 }),
 });
 
 /** A fresh, mutable copy of the defaults. */
@@ -157,6 +172,11 @@ function validGrace(v: unknown): v is number {
     && v >= ATTENDANCE_RULES_BOUNDS.grace_minutes.min && v <= ATTENDANCE_RULES_BOUNDS.grace_minutes.max;
 }
 
+function validRequiredMinutes(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v)
+    && v >= ATTENDANCE_RULES_BOUNDS.required_minutes.min && v <= ATTENDANCE_RULES_BOUNDS.required_minutes.max;
+}
+
 function validWeeklyOff(v: unknown): v is number[] {
   return Array.isArray(v) && v.length <= 7 && v.every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 6);
 }
@@ -218,6 +238,16 @@ export function validateRulesPatch(body: unknown): RulesPatchResult {
     if (typeof body.track_transport_mode !== 'boolean') return { ok: false, error: 'track_transport_mode must be true or false' };
     patch.track_transport_mode = body.track_transport_mode;
   }
+  if ('required_minutes' in body) {
+    if (!validRequiredMinutes(body.required_minutes)) {
+      return { ok: false, error: `required_minutes must be an integer between ${ATTENDANCE_RULES_BOUNDS.required_minutes.min} and ${ATTENDANCE_RULES_BOUNDS.required_minutes.max}` };
+    }
+    patch.required_minutes = body.required_minutes;
+  }
+  if ('half_day_cutoff' in body) {
+    if (parseHHMM(body.half_day_cutoff) === null) return { ok: false, error: 'half_day_cutoff must be a 24h time in HH:MM format (e.g. "11:15")' };
+    patch.half_day_cutoff = body.half_day_cutoff as string;
+  }
   return { ok: true, patch };
 }
 
@@ -258,6 +288,8 @@ export function resolveAttendanceRules(settings: unknown): ResolvedAttendanceRul
   if (typeof stored.selfie_required === 'boolean') rules.selfie_required = stored.selfie_required;
   if (typeof stored.form_checkin_required === 'boolean') rules.form_checkin_required = stored.form_checkin_required;
   if (typeof stored.track_transport_mode === 'boolean') rules.track_transport_mode = stored.track_transport_mode;
+  if (validRequiredMinutes(stored.required_minutes)) rules.required_minutes = stored.required_minutes;
+  if (parseHHMM(stored.half_day_cutoff) !== null) rules.half_day_cutoff = stored.half_day_cutoff as string;
   return { configured: true, lateTracking: lateTrackingEnabled(stored), rules };
 }
 
@@ -279,7 +311,10 @@ export function rulesAdminView(resolved: ResolvedAttendanceRules) {
     configured: resolved.configured,
     rules: resolved.rules,
     defaults: defaultAttendanceRules(),
-    bounds: { grace_minutes: { ...ATTENDANCE_RULES_BOUNDS.grace_minutes } },
+    bounds: {
+      grace_minutes: { ...ATTENDANCE_RULES_BOUNDS.grace_minutes },
+      required_minutes: { ...ATTENDANCE_RULES_BOUNDS.required_minutes },
+    },
   };
 }
 
@@ -303,6 +338,39 @@ export function computeLate(checkinAt: number | string | Date | null | undefined
   if (start === null) return null;
   const isLate = p.minuteOfDay > start + rules.grace_minutes;
   return { is_late: isLate, minutes_late: isLate ? p.minuteOfDay - start : 0 };
+}
+
+/**
+ * Half-day-by-cutoff: a check-in after `half_day_cutoff` (IST) is a half day.
+ * Opt-in — returns false when the client has no `half_day_cutoff` rule, so no
+ * existing client is affected. Minute granularity (seconds ignored), so a punch
+ * at exactly the cutoff minute is still a full day.
+ * Returns null when the instant is unparseable or the rule is unset.
+ */
+export function isHalfDayCheckin(
+  checkinAt: number | string | Date | null | undefined,
+  rules: AttendanceRules,
+): boolean | null {
+  const cutoff = parseHHMM(rules.half_day_cutoff);
+  if (cutoff === null) return null;            // rule not configured
+  if (checkinAt == null || checkinAt === '') return null;
+  const p = istParts(checkinAt);
+  if (!p) return null;
+  return p.minuteOfDay > cutoff;
+}
+
+/**
+ * Short-workday: true when `working_minutes` fall below `required_minutes`.
+ * Opt-in — returns null when the client has no `required_minutes` rule, so no
+ * existing client is affected.
+ */
+export function isShortWorkday(
+  workingMinutes: number | null | undefined,
+  rules: AttendanceRules,
+): boolean | null {
+  if (rules.required_minutes === undefined) return null;   // rule not configured
+  if (typeof workingMinutes !== 'number' || !Number.isFinite(workingMinutes)) return null;
+  return workingMinutes < rules.required_minutes;
 }
 
 /**

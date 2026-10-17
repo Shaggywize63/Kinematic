@@ -117,7 +117,7 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
       configured: true,
       rules: RESOLVED_A,
       defaults: DEFAULT_RULES,
-      bounds: { grace_minutes: { min: 0, max: 120 } },
+      bounds: { grace_minutes: { min: 0, max: 120 }, required_minutes: { min: 0, max: 1440 } },
     });
   });
 
