@@ -18,6 +18,7 @@
  * persisted to distribution_integration_events.error for surfacing in
  * the admin UI.
  */
+import { visibleCompanyIds, canSeeAll, scopeIntegrations } from '../../lib/companyVisibility';
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { supabaseAdmin } from '../../lib/supabase';
@@ -54,9 +55,9 @@ export function sanitiseIntegration<T extends Record<string, unknown>>(row: T): 
 
 export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
-  const { data, error } = await supabaseAdmin.from('distribution_integrations')
+  const { data, error } = await scopeIntegrations(supabaseAdmin.from('distribution_integrations')
     .select('id, org_id, provider, label, status, config, last_seen_at, last_sync_at, last_error, last_event_count, created_at, updated_at')
-    .eq('org_id', org_id)
+    .eq('org_id', org_id), req.user)
     .order('created_at', { ascending: false });
   if (error) return badRequest(res, error.message);
   return ok(res, data ?? []);
@@ -64,38 +65,46 @@ export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
-  const { data, error } = await supabaseAdmin.from('distribution_integrations')
+  const { data, error } = await scopeIntegrations(supabaseAdmin.from('distribution_integrations')
     .select('id, org_id, provider, label, status, config, last_seen_at, last_sync_at, last_error, last_event_count, created_at, updated_at')
-    .eq('org_id', org_id).eq('id', req.params.id).maybeSingle();
+    .eq('org_id', org_id).eq('id', req.params.id), req.user).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!data) return notFound(res, 'Integration not found');
   return ok(res, sanitiseIntegration(data));
 });
 
 /** A connection can be pinned to one company (config.client_id); when set it must be one of this org's. */
-async function companyInOrg(config: Record<string, unknown> | undefined | null, org_id: string): Promise<boolean> {
+async function companyInOrg(config: Record<string, unknown> | undefined | null, org_id: string, user?: { client_id?: string | null; company_client_ids?: string[] }): Promise<boolean> {
   const raw = config?.client_id;
   if (raw == null || raw === '') return true;
   const cid = String(raw);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cid)) return false;
+  if (!canSeeAll(visibleCompanyIds(user), [cid])) return false;   // a scoped admin can't pin to someone else's company
   const { data } = await supabaseAdmin.from('clients').select('id').eq('id', cid).eq('org_id', org_id).maybeSingle();
   return !!data;
 }
 
 export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id, id: user_id } = req.user!;
-  const { provider, label, config, credentials } = req.body as {
+  const { provider, label, credentials } = req.body as {
     provider: Provider;
     label?: string;
     config?: Record<string, unknown>;
     credentials?: Record<string, unknown>;
   };
+  let config = (req.body as { config?: Record<string, unknown> }).config;
 
   if (!provider || !PROVIDER_LABEL[provider]) {
     return badRequest(res, `Invalid provider. Must be one of: ${Object.keys(PROVIDER_LABEL).join(', ')}`);
   }
 
-  if (!(await companyInOrg(config, org_id))) return badRequest(res, 'That company is not in your organisation');
+  // A client-pinned admin's connection always belongs to their company (otherwise they could not see it again).
+  const mine = visibleCompanyIds(req.user);
+  if (mine && !config?.client_id) {
+    if (mine.length !== 1) return badRequest(res, 'Choose which company this connection is for');
+    config = { ...(config ?? {}), client_id: mine[0] };
+  }
+  if (!(await companyInOrg(config, org_id, req.user))) return badRequest(res, 'That company is not in your organisation');
 
   const agent_secret = crypto.randomBytes(24).toString('base64url');
 
@@ -157,13 +166,13 @@ export const updateIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   if (Object.keys(updates).length === 0) {
     return badRequest(res, 'No updatable fields supplied (allowed: label, status, config)');
   }
-  if ('config' in updates && !(await companyInOrg(updates.config as Record<string, unknown> | null, org_id))) {
+  if ('config' in updates && !(await companyInOrg(updates.config as Record<string, unknown> | null, org_id, req.user))) {
     return badRequest(res, 'That company is not in your organisation');
   }
   updates.updated_at = new Date().toISOString();
 
-  const { data, error } = await supabaseAdmin.from('distribution_integrations')
-    .update(updates).eq('id', req.params.id).eq('org_id', org_id)
+  const { data, error } = await scopeIntegrations(supabaseAdmin.from('distribution_integrations')
+    .update(updates).eq('id', req.params.id).eq('org_id', org_id), req.user)
     .select('*').single();
   if (error) return badRequest(res, error.message);
   if (!data)  return notFound(res, 'Integration not found');
@@ -176,8 +185,15 @@ export const updateIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, sanitiseIntegration(data));
 });
 
+/** True when the caller may touch this connection (org-wide callers: any in their org; scoped callers: only their companies'). */
+async function integrationVisible(user: Parameters<typeof scopeIntegrations>[1] & { org_id: string }, id: string): Promise<boolean> {
+  const { data } = await scopeIntegrations(supabaseAdmin.from('distribution_integrations').select('id').eq('id', id).eq('org_id', user.org_id), user).maybeSingle();
+  return !!data;
+}
+
 export const deleteIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
+  if (!(await integrationVisible(req.user!, String(req.params.id)))) return notFound(res, 'Integration not found');
   const { error } = await supabaseAdmin.from('distribution_integrations')
     .delete().eq('id', req.params.id).eq('org_id', org_id);
   if (error) return badRequest(res, error.message);
@@ -187,6 +203,7 @@ export const deleteIntegration = asyncHandler<AuthRequest>(async (req, res) => {
 export const listIntegrationEvents = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
   const limit = Math.min(Number(req.query.limit ?? 50), 200);
+  if (!(await integrationVisible(req.user!, String(req.params.id)))) return notFound(res, 'Integration not found');
   const { data, error } = await supabaseAdmin.from('distribution_integration_events')
     .select('id, kind, ref_table, ref_id, status, attempts, last_attempt_at, tally_voucher_id, error, created_at, synced_at')
     .eq('integration_id', req.params.id).eq('org_id', org_id)
@@ -203,7 +220,7 @@ export const getEventXml = asyncHandler<AuthRequest>(async (req, res) => {
   const { data: event } = await supabaseAdmin.from('distribution_integration_events')
     .select('id, integration_id, kind, ref_id')
     .eq('id', req.params.eventId).eq('org_id', org_id).maybeSingle();
-  if (!event) return notFound(res, 'Event not found');
+  if (!event || !(await integrationVisible(req.user!, event.integration_id as string))) return notFound(res, 'Event not found');
 
   const { data: integration } = await supabaseAdmin.from('distribution_integrations')
     .select('id, org_id, config').eq('id', event.integration_id as string).maybeSingle();

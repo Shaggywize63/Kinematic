@@ -180,3 +180,58 @@ describe('a Tally connection pinned to a company', () => {
     expect(supa().chainsFor('clients')).toHaveLength(0);
   });
 });
+
+describe('a client-pinned admin cannot pin a connection to another client', () => {
+  const OWN = '22222222-2222-4222-8222-222222222222';
+  const OTHER = '55555555-5555-4555-8555-555555555555';
+  const scoped = (config: any, extra: any = {}) => adminReq({ user: { id: 'u1', org_id: ORG, role: 'admin', client_id: OWN }, body: { provider: 'tally', label: 'T', config }, ...extra });
+  beforeEach(() => supa().reset());
+
+  it('create refuses another client without even looking it up', async () => {
+    const r = await call(createIntegration, scoped({ client_id: OTHER }));
+    expect(r.status).toBe(400);
+    expect(supa().chains).toHaveLength(0);
+  });
+  it('update refuses another client too', async () => {
+    const r = await call(updateIntegration, scoped({ client_id: OTHER }, { params: { id: INT } }));
+    expect(r.status).toBe(400);
+    expect(supa().chains).toHaveLength(0);
+  });
+});
+
+describe('a client-pinned admin only sees their own Tally connections', () => {
+  const OWN = '22222222-2222-4222-8222-222222222222';
+  const scopedUser = { id: 'u1', org_id: ORG, role: 'admin', client_id: OWN };
+  const sreq = (o: any = {}) => adminReq({ user: scopedUser, ...o });
+  const inOp = (c: any) => c.ops.find((o: any) => o.method === 'in');
+  beforeEach(() => supa().reset());
+
+  it('list is filtered to connections pinned to their company', async () => {
+    await call(listIntegrations, sreq());
+    expect(inOp(supa().chainsFor('distribution_integrations')[0]).args).toEqual(['config->>client_id', [OWN]]);
+  });
+  it('an org-wide admin is not filtered', async () => {
+    await call(listIntegrations, adminReq());
+    expect(inOp(supa().chainsFor('distribution_integrations')[0])).toBeUndefined();
+  });
+  it('get is filtered to their company and returns nothing for someone else\'s connection', async () => {
+    const g = await call(getIntegration, sreq({ params: { id: INT } }));
+    expect(g.status).not.toBe(200);   // (the mock's maybeSingle errors on no rows; the real one gives 404)
+    expect(g.body.data).toBeUndefined();
+    expect(inOp(supa().chainsFor('distribution_integrations')[0]).args[1]).toEqual([OWN]);
+  });
+  it('delete and the event log check visibility first and touch nothing otherwise', async () => {
+    const { deleteIntegration, listIntegrationEvents } = require('../src/controllers/distribution/integrations.controller');
+    expect((await call(deleteIntegration, sreq({ params: { id: INT } }))).status).toBe(404);
+    expect((await call(listIntegrationEvents, sreq({ params: { id: INT } }))).status).toBe(404);
+    expect(supa().chainsFor('distribution_integrations').every((c: any) => !c.ops.some((o: any) => o.method === 'delete'))).toBe(true);
+    expect(supa().chainsFor('distribution_integration_events')).toHaveLength(0);
+  });
+  it('a connection they create is pinned to their company automatically', async () => {
+    supa().queue('clients', { data: { id: OWN }, error: null });
+    supa().queue('distribution_integrations', { data: { id: INT, config: {} }, error: null });
+    await call(createIntegration, sreq({ body: { provider: 'tally', label: 'T' } }));
+    const ins = supa().chainsFor('distribution_integrations').flatMap((c: any) => c.ops.filter((o: any) => o.method === 'insert'))[0];
+    expect(ins.args[0].config.client_id).toBe(OWN);
+  });
+});

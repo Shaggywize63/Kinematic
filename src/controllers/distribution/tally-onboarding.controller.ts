@@ -14,6 +14,7 @@ import { AuthRequest } from '../../types';
 import { asyncHandler, ok, badRequest, notFound } from '../../utils';
 import { logger } from '../../lib/logger';
 import { verifyAgentSecret } from './integrations.controller';
+import { scopeIntegrations } from '../../lib/companyVisibility';
 import { pinnedCompany } from '../../services/distribution/integrations/enqueue.poller';
 import {
   PAIRING_TTL_MS, publicApiBase, generatePairingCode, hashPairingCode, normalisePairingCode,
@@ -29,11 +30,11 @@ const isUuid = (s: unknown): s is string =>
 
 interface Command { id: string; type: 'pull_masters' | 'tally_xml'; label?: string; xml?: string }
 
-async function loadTallyIntegration(org_id: string, id: string) {
+async function loadTallyIntegration(org_id: string, id: string, user?: { client_id?: string | null; company_client_ids?: string[] }) {
   if (!isUuid(id)) return null;
-  const { data } = await supabaseAdmin.from('distribution_integrations')
+  const { data } = await scopeIntegrations(supabaseAdmin.from('distribution_integrations')
     .select('id, org_id, provider, config, last_seen_at, agent_version, tally_profile, tally_profile_at, pending_commands, last_command_result, master_sync_requested_at, last_master_sync_at')
-    .eq('id', id).eq('org_id', org_id).eq('provider', 'tally').maybeSingle();
+    .eq('id', id).eq('org_id', org_id).eq('provider', 'tally'), user).maybeSingle();
   return data as null | {
     id: string; org_id: string; config: TallyIntegrationConfig; last_seen_at: string | null; agent_version: string | null;
     tally_profile: TallyProfile | null; tally_profile_at: string | null; pending_commands: Command[] | null;
@@ -50,7 +51,7 @@ async function queueCommand(integrationId: string, current: Command[] | null, cm
 // ── Admin ───────────────────────────────────────────────────────────────────
 
 export const createPairingCode = asyncHandler<AuthRequest>(async (req, res) => {
-  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id);
+  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id, req.user);
   if (!integ) return notFound(res, 'Tally integration not found');
   const code = generatePairingCode();
   const expires = new Date(Date.now() + PAIRING_TTL_MS).toISOString();
@@ -61,7 +62,7 @@ export const createPairingCode = asyncHandler<AuthRequest>(async (req, res) => {
 });
 
 export const getHealth = asyncHandler<AuthRequest>(async (req, res) => {
-  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id);
+  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id, req.user);
   if (!integ) return notFound(res, 'Tally integration not found');
   const health = computeHealth({ agentSeenAt: integ.last_seen_at, profile: integ.tally_profile, config: integ.config ?? {} });
 
@@ -89,7 +90,7 @@ export const getHealth = asyncHandler<AuthRequest>(async (req, res) => {
 });
 
 export const createMissingLedgers = asyncHandler<AuthRequest>(async (req, res) => {
-  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id);
+  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id, req.user);
   if (!integ) return notFound(res, 'Tally integration not found');
   const company = integ.config?.company_name?.trim();
   if (!company) return badRequest(res, 'Choose the Tally company first');
@@ -102,7 +103,7 @@ export const createMissingLedgers = asyncHandler<AuthRequest>(async (req, res) =
 });
 
 export const requestMasterPull = asyncHandler<AuthRequest>(async (req, res) => {
-  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id);
+  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id, req.user);
   if (!integ) return notFound(res, 'Tally integration not found');
   const cmd: Command = { id: crypto.randomUUID(), type: 'pull_masters' };
   await queueCommand(integ.id, integ.pending_commands, cmd);
@@ -112,7 +113,7 @@ export const requestMasterPull = asyncHandler<AuthRequest>(async (req, res) => {
 });
 
 export const listMasters = asyncHandler<AuthRequest>(async (req, res) => {
-  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id);
+  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id, req.user);
   if (!integ) return notFound(res, 'Tally integration not found');
   const kind = req.query.kind === 'party' ? 'party' : 'stock_item';
   const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 500);
@@ -132,7 +133,7 @@ export const listMasters = asyncHandler<AuthRequest>(async (req, res) => {
 /** body: { kind, action: 'import'|'ignore'|'link', ids?: uuid[], all_new?: boolean, link_to?: uuid } */
 export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
-  const integ = await loadTallyIntegration(user.org_id, req.params.id);
+  const integ = await loadTallyIntegration(user.org_id, req.params.id, user);
   if (!integ) return notFound(res, 'Tally integration not found');
   const { action, ids, all_new, link_to } = req.body as { kind?: string; action?: string; ids?: unknown[]; all_new?: boolean; link_to?: string };
   const kind: MasterKind = req.body.kind === 'party' ? 'party' : 'stock_item';
