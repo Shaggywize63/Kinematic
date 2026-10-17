@@ -10,6 +10,7 @@
 import { Router } from 'express';
 import { perRouteLimit } from '../middleware/security';
 import { agentFetchJobs, agentReportResult } from '../controllers/distribution/integrations.controller';
+import { withTallyIntegrationProject, withTallyPairProject } from '../middleware/withProject';
 import { agentPair, agentProfile, agentMasters, agentCommandResult } from '../controllers/distribution/tally-onboarding.controller';
 
 const router = Router();
@@ -29,11 +30,11 @@ router.get('/agent/download', limit, (_req, res) => {
   if (!target || !/^https:\/\//.test(target)) { res.status(404).json({ ok: false, error: 'The connector download is not configured yet.' }); return; }
   res.redirect(302, target);
 });
-router.post('/pair',                   pairLimit, agentPair);
-router.post('/jobs/:id/profile',        limit, agentProfile);
-router.post('/jobs/:id/masters',        limit, agentMasters);
-router.post('/jobs/:id/command-result', limit, agentCommandResult);
-router.get('/jobs/:id',          limit, agentFetchJobs);
-router.post('/jobs/:id/result',  limit, agentReportResult);
+router.post('/pair',                   pairLimit, withTallyPairProject, agentPair);
+router.post('/jobs/:id/profile',        limit, withTallyIntegrationProject, agentProfile);
+router.post('/jobs/:id/masters',        limit, withTallyIntegrationProject, agentMasters);
+router.post('/jobs/:id/command-result', limit, withTallyIntegrationProject, agentCommandResult);
+router.get('/jobs/:id',          limit, withTallyIntegrationProject, agentFetchJobs);
+router.post('/jobs/:id/result',  limit, withTallyIntegrationProject, agentReportResult);
 
 export default router;

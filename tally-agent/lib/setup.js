@@ -2,6 +2,12 @@
 // Pairing + the double-click (interactive) flow. Dependencies are injected so it can be tested.
 const C = require('./config');
 
+/** Be forgiving: if the whole command was pasted ("kinematic-tally-agent.exe pair K7F-29X"), keep just the code. */
+function tidyCode(raw) {
+  const parts = String(raw || '').trim().split(/\s+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
 /** Exchange a pairing code for this PC's config, save it, register auto-start, report to the dashboard. */
 async function pairAndInstall({ code, server, noInstall = false, log, deps = {} }) {
   const cfgMod = deps.config || C;
@@ -71,9 +77,9 @@ async function interactive({ ask, say, log, deps = {}, existingConfig, platform 
 }
 
 async function pairLoop({ first, ask, say, log, deps, platform }) {
-  let code = first;
+  let code = tidyCode(first);
   for (let attempt = 1; attempt <= 3; attempt++) {
-    if (!code) code = (await ask('Enter the pairing code (for example K7F-29X): ')).trim();
+    if (!code) code = tidyCode(await ask('Enter the pairing code (for example K7F-29X): '));
     if (!code) { say('No code entered.'); continue; }
     const r = await pairAndInstall({ code, log, deps });
     if (r.ok) {
@@ -96,4 +102,4 @@ async function pairLoop({ first, ask, say, log, deps, platform }) {
   return { ok: false };
 }
 
-module.exports = { pairAndInstall, interactive, describeProfile };
+module.exports = { pairAndInstall, interactive, describeProfile, tidyCode };

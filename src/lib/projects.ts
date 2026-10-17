@@ -502,6 +502,50 @@ export async function resolveProjectForIntegrationAsync(integrationId?: string |
   return fallbackProjectKey();
 }
 
+// ── Tally bridge agent routing ───────────────────────────────────────────
+// The Tally connector (on the client's PC) calls /api/v1/integrations/tally/* with
+// NO auth and NO X-Kinematic-Project header, so without this every call fell back to
+// the default (Tata) database and a Kinematic-tenant integration "didn't exist"
+// (pairing said "invalid or expired", polling returned nothing). We probe each known
+// project for the row that owns the id / pairing code. Unknown values fall back to the
+// default project, where the handler returns its own not-found response, exactly as
+// before — so Tata behaviour is unchanged.
+const tallyIntegrationProjectCache = new Map<string, { project: string; at: number }>();
+const TALLY_PROJECT_TTL_MS = 5 * 60_000;
+
+async function probeProjectsFor(table: string, column: string, value: string): Promise<string | null> {
+  for (const key of projectSearchOrder()) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PROJECT_PROBE_TIMEOUT_MS);
+    try {
+      const { data } = await adminClientFor(key)
+        .from(table).select('id').eq(column, value).limit(1)
+        .abortSignal(ctrl.signal).maybeSingle();
+      if (data) return key;
+    } catch { /* project unreachable, timed out, or lacks the column/table — skip it */ }
+    finally { clearTimeout(timer); }
+  }
+  return null;
+}
+
+/** Project that owns Tally integration `id` (cached). Unknown ids → the fallback project. */
+export async function resolveProjectForTallyIntegrationAsync(integrationId?: string | null): Promise<string> {
+  const id = (integrationId || '').trim();
+  if (!id) return fallbackProjectKey();
+  const cached = tallyIntegrationProjectCache.get(id);
+  if (cached && Date.now() - cached.at < TALLY_PROJECT_TTL_MS) return cached.project;
+  const found = await probeProjectsFor('distribution_integrations', 'id', id);
+  if (found) { tallyIntegrationProjectCache.set(id, { project: found, at: Date.now() }); return found; }
+  return fallbackProjectKey();
+}
+
+/** Project that holds the (hashed) pairing code. Not cached: codes are single-use. */
+export async function resolveProjectForTallyPairingAsync(codeHash?: string | null): Promise<string> {
+  const h = (codeHash || '').trim();
+  if (!h) return fallbackProjectKey();
+  return (await probeProjectsFor('distribution_integrations', 'pairing_code_hash', h)) ?? fallbackProjectKey();
+}
+
 // Short TTL cache for capture-token→project so a burst of hits on one outlet's
 // public QR link doesn't probe every project DB each time.
 const captureProjectCache = new Map<string, { project: string; at: number }>();
