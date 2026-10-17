@@ -136,3 +136,56 @@ describe('GET /companies/report', () => {
     expect((await hit('get', '/report', { user: { id: 'r', org_id: ORG, role: 'executive' }, query: q })).status).toBe(403);
   });
 });
+
+describe('a client-pinned admin never sees or assigns other clients', () => {
+  const C = '55555555-5555-4555-8555-555555555555';   // another client in the same org
+  const scopedAdmin = (over: any = {}) => ({ user: { id: 'a', org_id: ORG, role: 'admin', client_id: A }, params: {}, body: {}, query: { from: '2026-10-01', to: '2026-10-17' }, ...over });
+
+  it('/all is limited to their own company', async () => {
+    await hit('get', '/all', scopedAdmin());
+    const ops = supa().chainsFor('clients')[0].ops;
+    expect(ops.find((o: any) => o.method === 'in').args).toEqual(['id', [A]]);
+  });
+  it('/all for an assigned-companies admin lists exactly those', async () => {
+    await hit('get', '/all', scopedAdmin({ user: { id: 'a', org_id: ORG, role: 'admin', client_id: A, company_client_ids: [A, B] } }));
+    expect(supa().chainsFor('clients')[0].ops.find((o: any) => o.method === 'in').args).toEqual(['id', [A, B]]);
+  });
+  it('an org-wide admin (no client) is not filtered', async () => {
+    await hit('get', '/all', admin());
+    expect(supa().chainsFor('clients')[0].ops.some((o: any) => o.method === 'in')).toBe(false);
+  });
+  it('the report reads only their companies, from every table', async () => {
+    await hit('get', '/report', scopedAdmin());
+    for (const t of ['clients', 'orders', 'invoices', 'payments', 'returns']) {
+      const inOp = supa().chainsFor(t)[0].ops.find((o: any) => o.method === 'in');
+      expect(inOp.args[1]).toEqual([A]);
+    }
+  });
+  it('cannot assign a company that is not theirs, and writes nothing', async () => {
+    const r = await hit('put', '/users/:userId', scopedAdmin({ params: { userId: U }, body: { client_ids: [C] } }));
+    expect(r.status).toBe(403);
+    expect(supa().chains).toHaveLength(0);
+  });
+  it('cannot read or edit a user who belongs to another client (looks like not found)', async () => {
+    supa().queue('users', { data: { id: U, client_id: C }, error: null });
+    expect((await hit('get', '/users/:userId', scopedAdmin({ params: { userId: U } }))).status).toBe(404);
+    supa().queue('users', { data: { id: U, client_id: C }, error: null });
+    supa().queue('clients', { data: [{ id: A }], error: null });
+    expect((await hit('put', '/users/:userId', scopedAdmin({ params: { userId: U }, body: { client_ids: [A] } }))).status).toBe(404);
+    expect(supa().chainsFor('user_companies')).toHaveLength(0);
+  });
+  it('replacing assignments only removes the ones they can see', async () => {
+    supa().queue('users', { data: { id: U, client_id: A }, error: null });
+    supa().queue('clients', { data: [{ id: A }], error: null });
+    const r = await hit('put', '/users/:userId', scopedAdmin({ params: { userId: U }, body: { client_ids: [A] } }));
+    expect(r.status).toBe(200);
+    const del = supa().chainsFor('user_companies').find((c: any) => c.ops.some((o: any) => o.method === 'delete'));
+    expect(del.ops.find((o: any) => o.method === 'in').args).toEqual(['client_id', [A]]);
+  });
+  it('hides assignments to companies they cannot see when reading a user', async () => {
+    supa().queue('users', { data: { id: U, client_id: A }, error: null });
+    supa().queue('user_companies', { data: [{ client_id: A }, { client_id: C }], error: null });
+    const r = await hit('get', '/users/:userId', scopedAdmin({ params: { userId: U } }));
+    expect(r.body.data.client_ids).toEqual([A]);
+  });
+});
