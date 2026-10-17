@@ -43,3 +43,14 @@ export function isSuperAdmin(req: Request): boolean {
   const r = req as Request & { user?: { role?: string | null } };
   return (r.user?.role ?? '').toLowerCase() === 'super_admin';
 }
+
+/**
+ * Outlets are shared across the companies a user may sell for, so reads of
+ * `stores` match any of them instead of only the company picked right now.
+ * Returns null for users with no assigned companies (unchanged single-client scope).
+ */
+export function outletClientIds(req: Request): string[] | null {
+  const ids = (req as Request & { user?: { company_client_ids?: string[] } }).user?.company_client_ids;
+  const valid = (ids || []).filter((i) => UUID_RE.test(String(i)));
+  return valid.length > 0 ? valid : null;
+}
