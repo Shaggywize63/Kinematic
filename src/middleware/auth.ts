@@ -163,6 +163,8 @@ async function maybeDeriveViewerOrg(user: AuthRequest['user'], req: AuthRequest)
   return { ...(u as object), org_id: org, enabled_modules: cappedModules } as AuthRequest['user'];
 }
 
+import { pickCompany } from '../lib/companyPick';
+
 // Impersonation profile cache — keyed `impersonate:<project>:<targetId>`.
 // Separate from the token-keyed authCache so an impersonated identity is
 // NEVER written under the master's real token. Short TTL like authCache.
@@ -178,7 +180,7 @@ const impersonateCache = new Map<string, CachedAuth>();
  * target's.
  */
 export async function buildUserContext(userId: string): Promise<AuthRequest['user'] | null> {
-  const [profileRes, permsRes, citiesRes] = await Promise.all([
+  const [profileRes, permsRes, citiesRes, companiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
       .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, viewer_org_ids, active_session_id, active_session_device, org_role_id')
@@ -186,6 +188,7 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', userId),
     supabaseAdmin.from('user_city_assignments').select('city_id, cities!city_id(name)').eq('user_id', userId),
+    supabaseAdmin.from('user_companies').select('client_id').eq('user_id', userId),
   ]);
 
   if (profileRes.error || !profileRes.data) return null;
@@ -234,6 +237,7 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
   return {
     ...profile,
     permissions: permsRes.data?.map((p) => p.module_id) || [],
+    company_client_ids: ((companiesRes.data || []) as Array<{ client_id: string }>).map((r) => r.client_id),
     assigned_cities: userCityIds,
     assigned_city_names: userCityNames,
     role_assigned_cities: roleAssignedCities,
@@ -428,7 +432,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const cached = cacheGet(cacheKey);
   if (cached) {
     if (rejectIfStaleSession(req, res, cached)) return;
-    req.user = await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(cached, req), req), req);
+    req.user = pickCompany(await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(cached, req), req), req), req.headers['x-client-id']);
     req.accessToken = token;
     return next();
   }
@@ -439,7 +443,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // Cold path — fetch profile + permissions + cities in parallel (was sequential).
   // The cities join also resolves the city NAME because downstream RBAC
   // filters CRM records by name (crm_leads.city/contacts.city are text columns).
-  const [profileRes, permsRes, citiesRes] = await Promise.all([
+  const [profileRes, permsRes, citiesRes, companiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
       .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, viewer_org_ids, active_session_id, active_session_device, org_role_id')
@@ -447,6 +451,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', verified.sub),
     supabaseAdmin.from('user_city_assignments').select('city_id, cities!city_id(name)').eq('user_id', verified.sub),
+    supabaseAdmin.from('user_companies').select('client_id').eq('user_id', verified.sub),
   ]);
 
   if (profileRes.error || !profileRes.data) {
@@ -541,6 +546,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const user = {
     ...profile,
     permissions: isDemoEmail ? DEMO_PERMISSIONS : (permsRes.data?.map(p => p.module_id) || []),
+    company_client_ids: ((companiesRes.data || []) as Array<{ client_id: string }>).map((r) => r.client_id),
     assigned_cities: userCityIds,
     assigned_city_names: userCityNames,
     role_assigned_cities: roleAssignedCities,
@@ -560,7 +566,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (rejectIfStaleSession(req, res, user)) return;
 
   cacheSet(cacheKey, user, verified.exp);
-  req.user = await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(user, req), req), req);
+  req.user = pickCompany(await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(user, req), req), req), req.headers['x-client-id']);
   req.accessToken = token;
   next();
 }

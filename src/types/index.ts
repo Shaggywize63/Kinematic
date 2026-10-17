@@ -24,6 +24,8 @@ export interface AuthUser {
   // read-only "view SRS + BMW leads only" account that is NOT a super_admin.
   viewer_org_ids?: string[];
   client_id?: string;             // client enterprise ID
+  // Companies (clients) this user may sell for; X-Client-Id picks one per request.
+  company_client_ids?: string[];
   permissions?: string[];       // legacy per-user grants from user_module_permissions
   assigned_cities?: string[];    // IDs of assigned cities
   // City NAMES resolved from user_city_assignments → cities.name. Used by
