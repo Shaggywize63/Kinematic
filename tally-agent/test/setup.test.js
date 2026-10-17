@@ -103,3 +103,18 @@ test('a failed status report is not blamed on Tally', async () => {
   assert.doesNotMatch(text, /Tally is not reachable/);
   api.close();
 });
+
+test('tidyCode keeps just the code when the whole command was pasted', () => {
+  assert.strictEqual(S.tidyCode('kinematic-tally-agent.exe pair CCG-4DR'), 'CCG-4DR');
+  assert.strictEqual(S.tidyCode('  K7F-29X  '), 'K7F-29X');
+  assert.strictEqual(S.tidyCode(''), '');
+  assert.strictEqual(S.tidyCode(undefined), '');
+});
+
+test('double-click flow accepts a pasted full command', async () => {
+  const api = await fakeApi(); const c = collector(); const a = scripted(['kinematic-tally-agent.exe pair K7F-29X']);
+  const d = deps(); d.config.DEFAULT_SERVER = api.url;
+  const r = await S.interactive({ ask: a.ask, say: c.say, log: c.log, deps: d, existingConfig: null, platform: 'win32' });
+  assert.strictEqual(r.ok, true); assert.deepStrictEqual(api.seen, ['K7F-29X']);
+  api.close();
+});

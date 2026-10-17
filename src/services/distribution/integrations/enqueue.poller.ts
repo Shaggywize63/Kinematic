@@ -18,6 +18,7 @@
  */
 import { supabaseAdmin } from '../../../lib/supabase';
 import { logger } from '../../../lib/logger';
+import { knownProjectKeys, runWithProject, DEFAULT_PROJECT } from '../../../lib/projects';
 
 const POLL_INTERVAL_MS = 30_000;
 const COLD_START_LOOKBACK_HOURS = 24;
@@ -39,14 +40,40 @@ export function stopTallyEnqueuePoller(): void {
   if (timer) { clearInterval(timer); timer = null; }
 }
 
-async function runOnce(): Promise<void> {
+let running = false;
+
+/**
+ * One poll across EVERY tenant database. Outside a request the Supabase clients resolve to the
+ * default project only, so a Kinematic-tenant integration (e.g. Gomant) was never enqueued; each
+ * project is now visited inside its own project context (same pattern as the auto-replenishment
+ * job). The default (Tata) project is visited exactly as before. A project that is unreachable or
+ * has no distribution_integrations table is skipped without noise.
+ */
+export async function runOnce(): Promise<void> {
+  if (running) return;                // a slow tick must not overlap the next one
+  running = true;
+  try {
+    for (const key of knownProjectKeys()) {
+      try {
+        await runWithProject(key, () => runOnceForProject(key));
+      } catch (e) {
+        logger.warn({ project: key, err: (e as Error).message }, 'tally poller: project pass failed');
+      }
+    }
+  } finally {
+    running = false;
+  }
+}
+
+async function runOnceForProject(projectKey: string): Promise<void> {
   const { data: integrations, error } = await supabaseAdmin
     .from('distribution_integrations')
     .select('id, org_id, last_sync_at, config')
     .eq('provider', 'tally')
     .eq('status', 'active');
   if (error) {
-    logger.error({ err: error.message }, 'tally poller: integrations query failed');
+    // Only the default project is expected to always have this table; others may not.
+    if (projectKey === DEFAULT_PROJECT) logger.error({ err: error.message }, 'tally poller: integrations query failed');
     return;
   }
   if (!integrations || integrations.length === 0) return;
@@ -55,12 +82,12 @@ async function runOnce(): Promise<void> {
     try {
       await enqueueForIntegration(integration as IntegrationLite);
     } catch (e) {
-      logger.error({ integration_id: integration.id, err: (e as Error).message }, 'tally poller: per-integration enqueue failed');
+      logger.error({ project: projectKey, integration_id: integration.id, err: (e as Error).message }, 'tally poller: per-integration enqueue failed');
     }
   }
 }
 
-export interface IntegrationLite { id: string; org_id: string; last_sync_at: string | null; config?: Record<string, unknown> | null }
+interface IntegrationLite { id: string; org_id: string; last_sync_at: string | null; config?: Record<string, unknown> | null }
 
 /** Ids of Kinematic records already linked to a Tally master (so we never push a duplicate). */
 async function linkedRefIds(integration_id: string, kind: 'party' | 'stock_item'): Promise<Set<string>> {
