@@ -72,6 +72,16 @@ export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, sanitiseIntegration(data));
 });
 
+/** A connection can be pinned to one company (config.client_id); when set it must be one of this org's. */
+async function companyInOrg(config: Record<string, unknown> | undefined | null, org_id: string): Promise<boolean> {
+  const raw = config?.client_id;
+  if (raw == null || raw === '') return true;
+  const cid = String(raw);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cid)) return false;
+  const { data } = await supabaseAdmin.from('clients').select('id').eq('id', cid).eq('org_id', org_id).maybeSingle();
+  return !!data;
+}
+
 export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id, id: user_id } = req.user!;
   const { provider, label, config, credentials } = req.body as {
@@ -85,14 +95,7 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
     return badRequest(res, `Invalid provider. Must be one of: ${Object.keys(PROVIDER_LABEL).join(', ')}`);
   }
 
-  // A connection can be pinned to one company (config.client_id); it must be one of this org's.
-  if (config && config.client_id != null && config.client_id !== '') {
-    const cid = String(config.client_id);
-    const { data: co } = /^[0-9a-f-]{36}$/i.test(cid)
-      ? await supabaseAdmin.from('clients').select('id').eq('id', cid).eq('org_id', org_id).maybeSingle()
-      : { data: null };
-    if (!co) return badRequest(res, 'That company is not in your organisation');
-  }
+  if (!(await companyInOrg(config, org_id))) return badRequest(res, 'That company is not in your organisation');
 
   const agent_secret = crypto.randomBytes(24).toString('base64url');
 
@@ -153,6 +156,9 @@ export const updateIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   }
   if (Object.keys(updates).length === 0) {
     return badRequest(res, 'No updatable fields supplied (allowed: label, status, config)');
+  }
+  if ('config' in updates && !(await companyInOrg(updates.config as Record<string, unknown> | null, org_id))) {
+    return badRequest(res, 'That company is not in your organisation');
   }
   updates.updated_at = new Date().toISOString();
 

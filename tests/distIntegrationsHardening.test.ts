@@ -150,3 +150,33 @@ describe('the bridge agent still authenticates with its own key (public routes, 
     expect(bad.status).toBe(403);
   });
 });
+
+describe('a Tally connection pinned to a company', () => {
+  const CO = '22222222-2222-4222-8222-222222222222';
+  beforeEach(() => supa().reset());
+
+  it('create refuses a company outside the org, and writes nothing', async () => {
+    supa().queue('clients', { data: null, error: null });
+    const r = await call(createIntegration, adminReq({ body: { provider: 'tally', label: 'T', config: { client_id: CO } } }));
+    expect(r.status).toBe(400);
+    expect(supa().chainsFor('clients')[0].eqs).toMatchObject({ id: CO, org_id: ORG });
+    expect(supa().chainsFor('distribution_integrations')).toHaveLength(0);
+  });
+  it('create refuses a malformed company id without a lookup', async () => {
+    const r = await call(createIntegration, adminReq({ body: { provider: 'tally', label: 'T', config: { client_id: 'nope' } } }));
+    expect(r.status).toBe(400);
+    expect(supa().chains).toHaveLength(0);
+  });
+  it('update refuses a company outside the org', async () => {
+    supa().queue('clients', { data: null, error: null });
+    const r = await call(updateIntegration, adminReq({ params: { id: INT }, body: { config: { client_id: CO } } }));
+    expect(r.status).toBe(400);
+    expect(supa().chainsFor('distribution_integrations')).toHaveLength(0);
+  });
+  it('a config without client_id needs no lookup (existing behaviour)', async () => {
+    supa().queue('distribution_integrations', { data: { id: INT }, error: null });
+    const r = await call(updateIntegration, adminReq({ params: { id: INT }, body: { config: { company_name: 'X' } } }));
+    expect(r.status).toBe(200);
+    expect(supa().chainsFor('clients')).toHaveLength(0);
+  });
+});
