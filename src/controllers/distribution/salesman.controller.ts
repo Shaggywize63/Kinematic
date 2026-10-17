@@ -6,7 +6,7 @@ import { haversineMeters } from '../../services/order-pricer';
 import {
   getDemoCartSuggest, getDemoRouteToday, getDemoOrderList, getDemoSalesmanOutlets, getDemoOutletOutstanding,
 } from '../../utils/demoDistribution';
-import { getClientScope } from '../../lib/tenancy';
+import { getClientScope, outletClientIds } from '../../lib/tenancy';
 import {
   loadOutletInvoiceBalances, loadLedgerBalance, openInvoices, resolveOutstandingBalance, round2,
 } from '../../services/distribution/collections.service';
@@ -169,6 +169,7 @@ export const myOutlets = asyncHandler(async (req: AuthRequest, res: Response) =>
   if (isDemo(user)) return ok(res, getDemoSalesmanOutlets());
 
   const scope = getClientScope(req);
+  const companyIds = outletClientIds(req);
   const search = sanitisePostgrestSearch(req.query.search);
   const rawLimit = parseInt(String(req.query.limit ?? ''), 10);
   const limit = Math.min(100, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 50));
@@ -176,7 +177,8 @@ export const myOutlets = asyncHandler(async (req: AuthRequest, res: Response) =>
   const STORE_COLS = 'id, name, store_code, address, phone, city_id, cities!city_id(name)';
   const scoped = (q: any) => {
     let r = q.eq('org_id', user.org_id).eq('is_active', true);
-    if (scope.id) r = r.eq('client_id', scope.id);
+    if (companyIds) r = r.in('client_id', companyIds);
+    else if (scope.id) r = r.eq('client_id', scope.id);
     if (search) r = r.or(`name.ilike.%${search}%,store_code.ilike.%${search}%`);
     return r;
   };
@@ -268,7 +270,9 @@ export const outletOutstanding = asyncHandler(async (req: AuthRequest, res: Resp
 
   const scope = getClientScope(req);
   let oq = supabaseAdmin.from('stores').select('id, name').eq('id', outletId).eq('org_id', user.org_id);
-  if (scope.id) oq = oq.eq('client_id', scope.id);
+  const companyIds = outletClientIds(req);
+  if (companyIds) oq = oq.in('client_id', companyIds);
+  else if (scope.id) oq = oq.eq('client_id', scope.id);
   const { data: outlet } = await oq.maybeSingle();
   if (!outlet) return notFound(res, 'Outlet not found');
 

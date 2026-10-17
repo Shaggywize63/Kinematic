@@ -18,6 +18,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../utils';
 import { DEMO_ORG_ID, isDemo, getMockCities, getMockStores, getMockActivities } from '../utils/demoData';
+import { outletClientIds } from '../lib/tenancy';
 
 interface CrudOpts {
   /**
@@ -71,7 +72,11 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     // India seed cities (those are reference data, not the client's beat).
     const ownOnly = String(req.query.own_only || '').toLowerCase() === 'true';
 
-    if (targetCid) {
+    // Outlets are shared across every company the user may sell for.
+    const outletCompanies = tableName === 'stores' ? outletClientIds(req) : null;
+    if (outletCompanies) {
+      q = q.in('client_id', outletCompanies);
+    } else if (targetCid) {
       q = (opts.sharedWithOwn && !ownOnly)
         ? q.or(`client_id.is.null,client_id.eq.${targetCid}`)
         : q.eq('client_id', targetCid);
@@ -101,7 +106,10 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
       : isUUID(headerClientId) ? (headerClientId as string)
       : null;
 
-    if (targetCid) {
+    const outletCompanies = tableName === 'stores' ? outletClientIds(req) : null;
+    if (outletCompanies) {
+      q = q.in('client_id', outletCompanies);
+    } else if (targetCid) {
       q = opts.sharedWithOwn
         ? q.or(`client_id.is.null,client_id.eq.${targetCid}`)
         : q.eq('client_id', targetCid);
@@ -153,7 +161,10 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     // edit the global rows (`client_id IS NULL`); only platform admins
     // with no picker selected can modify those.
     const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
-    if (isUUID(user.client_id)) {
+    const outletCompanies = tableName === 'stores' ? outletClientIds(req) : null;
+    if (outletCompanies) {
+      q = q.in('client_id', outletCompanies);
+    } else if (isUUID(user.client_id)) {
       q = q.eq('client_id', user.client_id);
     } else if (isUUID(req.query.client_id as string)) {
       q = q.eq('client_id', req.query.client_id as string);
@@ -179,7 +190,10 @@ export function buildCRUD(tableName: string, requiredFields: string[] = ['name']
     // Same as update — deletes are strict so clients can't accidentally
     // remove org-shared reference rows.
     const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
-    if (isUUID(user.client_id)) {
+    const outletCompanies = tableName === 'stores' ? outletClientIds(req) : null;
+    if (outletCompanies) {
+      q = q.in('client_id', outletCompanies);
+    } else if (isUUID(user.client_id)) {
       q = q.eq('client_id', user.client_id);
     } else if (isUUID(req.query.client_id as string)) {
       q = q.eq('client_id', req.query.client_id as string);
