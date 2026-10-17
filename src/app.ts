@@ -76,6 +76,7 @@ import broadcastEntitlementRoutes from './routes/broadcastEntitlement.routes';
 import emailCampaignEntitlementRoutes from './routes/emailCampaignEntitlement.routes';
 import skusRoutes         from './routes/skus.routes';
 import storesRoutes       from './routes/stores.routes';
+import companiesRoutes    from './routes/companies.routes';
 import warehouseRoutes    from './routes/warehouse.routes';
 
 // Distribution module
@@ -611,6 +612,7 @@ app.use(`${V1}/cities`,        requireAuth, citiesRoutes);
 app.use(`${V1}/management`,    requireAuth, managementRoutes);
 app.use(`${V1}/skus`,          requireAuth, requireModule('inventory'), skusRoutes);
 app.use(`${V1}/stores`,        requireAuth, enforceCityScope, storesRoutes);
+app.use(`${V1}/companies`,     requireAuth, companiesRoutes);
 app.use(`${V1}/warehouse`,     requireAuth, requireModule('inventory'), warehouseRoutes);
 
 // ── Org-level admin settings (location-ping cadence today; more to come) ──
