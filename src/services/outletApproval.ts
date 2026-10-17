@@ -26,7 +26,7 @@ export function stripApprovalFields<T extends Record<string, unknown>>(body: T):
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const STORE_TYPES = new Set(['on_trade', 'off_trade']);
+const TRADE_TYPES = new Set(['on_trade', 'off_trade']);
 
 export interface NewOutletInput {
   name: string;
@@ -35,7 +35,10 @@ export interface NewOutletInput {
   address: string | null;
   lat: number | null;
   lng: number | null;
+  /** Free-text retail category (Kirana, Pan Shop, …). */
   store_type: string | null;
+  /** Channel: on_trade | off_trade. */
+  trade_type: string | null;
   city_id: string | null;
   zone_id: string | null;
 }
@@ -67,8 +70,8 @@ export function parseNewOutlet(body: any): { ok: true; value: NewOutletInput } |
   const phone = text(body?.phone, 20);
   if (phone && !/^[0-9+()\-\s]{6,20}$/.test(phone)) return { ok: false, error: 'Phone number looks invalid' };
 
-  const storeType = text(body?.store_type, 40)?.toLowerCase().replace(/[\s-]+/g, '_') ?? null;
-  if (storeType && !STORE_TYPES.has(storeType)) return { ok: false, error: 'store_type must be on_trade or off_trade' };
+  const tradeType = text(body?.trade_type, 40)?.toLowerCase().replace(/[\s-]+/g, '_') ?? null;
+  if (tradeType && !TRADE_TYPES.has(tradeType)) return { ok: false, error: 'trade_type must be on_trade or off_trade' };
 
   const cityId = text(body?.city_id, 64);
   const zoneId = text(body?.zone_id, 64);
@@ -78,7 +81,7 @@ export function parseNewOutlet(body: any): { ok: true; value: NewOutletInput } |
     ok: true,
     value: {
       name, owner_name: text(body?.owner_name, 200), phone, address: text(body?.address, 500),
-      lat, lng, store_type: storeType, city_id: cityId, zone_id: zoneId,
+      lat, lng, store_type: text(body?.store_type, 80), trade_type: tradeType, city_id: cityId, zone_id: zoneId,
     },
   };
 }

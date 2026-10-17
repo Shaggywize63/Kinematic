@@ -27,12 +27,12 @@ describe('stripApprovalFields', () => {
 });
 
 describe('parseNewOutlet', () => {
-  const good = { name: '  Mapusa Mini Mart ', owner_name: 'R. Naik', phone: '+91 98220 12345', address: 'Market Rd', lat: 15.59, lng: 73.81, store_type: 'On-Trade' };
+  const good = { name: '  Mapusa Mini Mart ', owner_name: 'R. Naik', phone: '+91 98220 12345', address: 'Market Rd', lat: 15.59, lng: 73.81, store_type: 'Kirana / General Store', trade_type: 'On-Trade' };
 
   it('accepts a complete outlet and cleans it', () => {
     const r = parseNewOutlet(good) as any;
     expect(r.ok).toBe(true);
-    expect(r.value).toMatchObject({ name: 'Mapusa Mini Mart', store_type: 'on_trade', lat: 15.59, lng: 73.81, city_id: null });
+    expect(r.value).toMatchObject({ name: 'Mapusa Mini Mart', store_type: 'Kirana / General Store', trade_type: 'on_trade', lat: 15.59, lng: 73.81, city_id: null });
   });
 
   it('needs a name', () => {
@@ -47,16 +47,17 @@ describe('parseNewOutlet', () => {
     expect((parseNewOutlet({ name: 'A' }) as any).ok).toBe(true);
   });
 
-  it('only on_trade / off_trade, a plausible phone, real UUIDs', () => {
-    expect((parseNewOutlet({ ...good, store_type: 'wholesale' }) as any).error).toMatch(/on_trade/);
+  it('trade_type is on_trade / off_trade only; a plausible phone; real UUIDs', () => {
+    expect((parseNewOutlet({ ...good, trade_type: 'wholesale' }) as any).error).toMatch(/on_trade/);
     expect((parseNewOutlet({ ...good, phone: 'call me' }) as any).error).toMatch(/phone/i);
     expect((parseNewOutlet({ ...good, city_id: 'x),is_active.eq.false' }) as any).error).toMatch(/city/i);
-    expect((parseNewOutlet({ ...good, store_type: 'off trade' }) as any).value.store_type).toBe('off_trade');
+    expect((parseNewOutlet({ ...good, trade_type: 'off trade' }) as any).value.trade_type).toBe('off_trade');
+    expect((parseNewOutlet({ name: 'A', store_type: 'Pan Shop' }) as any).value).toMatchObject({ store_type: 'Pan Shop', trade_type: null });
   });
 
   it('ignores anything that is not an outlet field', () => {
     const r = parseNewOutlet({ ...good, id: 'x', client_id: 'y', approval_status: 'approved', org_id: 'z' }) as any;
-    expect(Object.keys(r.value).sort()).toEqual(['address', 'city_id', 'lat', 'lng', 'name', 'owner_name', 'phone', 'store_type', 'zone_id']);
+    expect(Object.keys(r.value).sort()).toEqual(['address', 'city_id', 'lat', 'lng', 'name', 'owner_name', 'phone', 'store_type', 'trade_type', 'zone_id']);
   });
 });
 

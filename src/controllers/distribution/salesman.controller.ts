@@ -332,7 +332,7 @@ export const createOutlet = asyncHandler(async (req: AuthRequest, res: Response)
       created_by: user.id,
       // A manager adding an outlet here is approved at once; a rep's waits.
       approval_status: needsApproval(user.role) ? 'pending' : 'approved',
-    }).select('id, name, store_code, approval_status, store_type, address, phone, lat, lng, created_at').single();
+    }).select('id, name, store_code, approval_status, store_type, trade_type, address, phone, lat, lng, created_at').single();
     if (!error && data) return res.status(201).json({ success: true, data });
     if (error && !/duplicate|unique/i.test(error.message)) return badRequest(res, error.message);
   }

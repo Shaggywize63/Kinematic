@@ -35,7 +35,7 @@ const insertOf = (table = 'stores') => supa().chainsFor(table).flatMap((c: any) 
 beforeEach(() => supa().reset());
 
 describe('POST /salesman/outlets', () => {
-  const body = { name: 'Mapusa Mini Mart', phone: '9822012345', lat: 15.59, lng: 73.81, store_type: 'off_trade' };
+  const body = { name: 'Mapusa Mini Mart', phone: '9822012345', lat: 15.59, lng: 73.81, store_type: 'Grocery', trade_type: 'off_trade' };
 
   it('a rep proposes an outlet: stored as pending, stamped with who made it, with a generated code', async () => {
     supa().queue('stores', { data: { id: STORE, approval_status: 'pending' }, error: null });
