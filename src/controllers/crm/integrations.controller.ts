@@ -49,7 +49,7 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   salesforce:      'Salesforce',
   email_inbound:   'Inbound Email',
   ivr_missed_call: 'IVR / Missed Call',
-  call_recording:  'Call Recording (Conversation Analysis)',
+  call_recording:  'Call Recording (Call Insights)',
 };
 
 // All v1 providers are push-mode: an external system POSTs leads to our

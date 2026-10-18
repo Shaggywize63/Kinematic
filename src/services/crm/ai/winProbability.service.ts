@@ -10,6 +10,7 @@
  */
 import { supabaseAdmin } from '../../../lib/supabase';
 import { complete as aiComplete } from './aiClient';
+import { getLatestCallInsight, callInsightWinMultiplier } from './callInsights.signal';
 
 export interface WinProbabilityBreakdown {
   /** Set when the stage is `won` / `lost` and the figure is locked. */
@@ -25,6 +26,10 @@ export interface WinProbabilityBreakdown {
   activities_30d: number;
   engagement_multiplier: number;
   engagement_label: string;
+  /** Call Insights factor — present only when the deal's lead has an analyzed
+   *  call (i.e. a Call Insights client). Omitted entirely otherwise. */
+  call_multiplier?: number;
+  call_label?: string;
   /** Single-line maths string, e.g. "50% × 1.00 × 1.20 = 60%". */
   formula_text: string;
   final_probability: number;
@@ -116,8 +121,24 @@ export async function compute(org_id: string, client_id: string | null, deal_id:
   let baseline = Math.round(stageProb * agePenalty * engagement);
   baseline = Math.max(0, Math.min(100, baseline));
 
-  const formulaText = `${stageProb}% × ${agePenalty.toFixed(2)} (age) × ${engagement.toFixed(2)} (engagement) = ${baseline}%`;
-  let reasoning = `Stage probability ${stageProb}% × age factor ${agePenalty.toFixed(2)} × engagement ${engagement.toFixed(2)} → ${baseline}%.`;
+  // Call Insights link — the latest analyzed call on this deal's lead nudges the
+  // odds (strong positive call lifts, hostile low-intent trims). No-op for
+  // clients without the Call Insights module (the lead has no recordings).
+  let callMultiplier = 1;
+  let callLabel: string | undefined;
+  if (deal.lead_id) {
+    const sig = await getLatestCallInsight(org_id, deal.lead_id);
+    if (sig) {
+      const r = callInsightWinMultiplier(sig);
+      callMultiplier = r.multiplier;
+      callLabel = r.label;
+      baseline = Math.max(0, Math.min(100, Math.round(baseline * callMultiplier)));
+    }
+  }
+
+  const callFactorText = callMultiplier !== 1 ? ` × ${callMultiplier.toFixed(2)} (call)` : '';
+  const formulaText = `${stageProb}% × ${agePenalty.toFixed(2)} (age) × ${engagement.toFixed(2)} (engagement)${callFactorText} = ${baseline}%`;
+  let reasoning = `Stage probability ${stageProb}% × age factor ${agePenalty.toFixed(2)} × engagement ${engagement.toFixed(2)}${callMultiplier !== 1 ? ` × call factor ${callMultiplier.toFixed(2)}` : ''} → ${baseline}%.`;
 
   try {
     const llm = await aiComplete({
@@ -139,6 +160,8 @@ export async function compute(org_id: string, client_id: string | null, deal_id:
     activities_30d: actCnt,
     engagement_multiplier: engagement,
     engagement_label: engagementLabel,
+    call_multiplier: callMultiplier !== 1 ? callMultiplier : undefined,
+    call_label: callLabel,
     formula_text: formulaText,
     final_probability: baseline,
   });

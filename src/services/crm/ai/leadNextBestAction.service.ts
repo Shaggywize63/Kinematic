@@ -12,8 +12,11 @@
  */
 import { supabaseAdmin } from '../../../lib/supabase';
 import { complete as aiComplete } from './aiClient';
+import { getLatestCallInsight, callInsightPayload } from './callInsights.signal';
 
 const SYSTEM_PROMPT = `You are a sales coach. Given a lead's current state, recent activity, recent free-form updates from the rep, and score, recommend ONE immediate next action AND a step-by-step qualification/nurture plan.
+
+If \`signals.latest_call\` is present it is the AI analysis of the most recent RECORDED call with this lead (intent stage + score, sentiment, objections, commitments, and a suggested next_action). Treat it as the strongest recent signal — align your immediate action and plan with it (e.g. honour commitments the customer made, address unresolved objections, and act faster when intent is high).
 
 Constraints on every step:
 - The action must be something the rep reading this can execute personally. Use imperative voice ("Call the lead", "Send a WhatsApp follow-up", "Schedule a meeting").
@@ -101,6 +104,13 @@ export async function compute(
     (recent ?? []) as RawActivity[],
     (updates ?? []) as RawUpdate[],
   );
+
+  // Call Insights link — fold the latest analyzed call's signal into the NBA.
+  // Null (and so a no-op) for every client without the Call Insights module,
+  // since they have no recordings. Surfaced in `signals` so it also shows in
+  // the "How is this calculated?" methodology modal.
+  const callSig = await getLatestCallInsight(org_id, lead_id);
+  if (callSig) (signals as Record<string, unknown>).latest_call = callInsightPayload(callSig);
 
   const userPayload = {
     lead: {
