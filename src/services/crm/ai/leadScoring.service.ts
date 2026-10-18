@@ -38,6 +38,7 @@ import { supabaseAdmin } from '../../../lib/supabase';
 import { createTtlCache } from '../../../utils/ttlCache';
 import { complete as aiComplete } from './aiClient';
 import { isMinor } from '../../../lib/age';
+import { getLatestCallInsight, callInsightScorePoints, type CallInsightSignal } from './callInsights.signal';
 import type { Lead, ScoreBreakdown } from '../../../types/crm.types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -381,6 +382,12 @@ export interface ComputeScoreOptions {
   icp?: Icp;
   // Pre-loaded scoring config (per-tenant overrides).
   scoringConfig?: ScoringConfig;
+  // Call Insights link: the latest analyzed call for this lead. Pass it to
+  // avoid a re-fetch (the recording-completion trigger already has it). When
+  // the key is omitted, computeUnifiedScore fetches it for a persisted lead;
+  // when it is explicitly null, no call factor is applied. Either way it is a
+  // no-op for clients without the Call Insights module (they have no recordings).
+  callInsight?: CallInsightSignal | null;
 }
 
 export async function computeUnifiedScore(
@@ -422,6 +429,15 @@ export async function computeUnifiedScore(
   const breakdown = profile === 'b2c'
     ? scoreB2C(lead, engagement, config.weights?.b2c ?? {})
     : scoreB2B(lead, icp, engagement, config.weights?.b2b ?? {});
+
+  // Call Insights factor (module-gated at the data layer: getLatestCallInsight
+  // returns null for every client without the Call Insights module, so this is
+  // a pure no-op for them). A real, positive, high-intent recorded call adds a
+  // bounded credit. Skipped for minors (no behavioural profiling, DPDP §9(3)).
+  const callSig: CallInsightSignal | null = opts.callInsight !== undefined
+    ? opts.callInsight
+    : (lead.id && !minor && !opts.skipEngagement ? await getLatestCallInsight(org_id, String(lead.id)) : null);
+  if (callSig) (breakdown as any).call_insight = callInsightScorePoints(callSig);
 
   const score = sumBreakdown(breakdown);
   breakdown.total = score;

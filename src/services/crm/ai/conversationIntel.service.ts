@@ -173,9 +173,17 @@ async function processAsync(id: string): Promise<void> {
     }).eq('id', id);
 
     const intent = insights?.intent?.stage ? ` · intent: ${insights.intent.stage}` : '';
-    await notify(r.org_id, r.user_id, 'Call analysis ready',
-      `KINI analyzed your conversation${intent}. Tap to see positives, gaps and next steps.`,
+    await notify(r.org_id, r.user_id, 'Call Insights ready',
+      `KINI analyzed your call${intent}. Tap to see positives, gaps and next steps.`,
       { type: 'conversation_ready', recording_id: id, lead_id: r.lead_id });
+
+    // Call Insights → score / NBA / win-probability link. The call was just
+    // analyzed for this lead, so refresh the lead's score + Next Best Action
+    // (and, if the lead has a deal, that deal's win-probability + NBA) to
+    // reflect it. Gated to Call Insights clients by construction — this only
+    // runs after a recording completed, which only happens for them. Detached
+    // + best-effort: it must never fail the analysis pipeline.
+    void refreshLinkedIntelligence(r.org_id, r.client_id ?? null, r.lead_id);
   } catch (e: any) {
     await fail(id, e?.message || String(e));
   }
@@ -186,6 +194,44 @@ async function fail(id: string, message: string) {
   await supabaseAdmin.from('conversation_recordings').update({
     status: 'failed', error: String(message).slice(0, 2000), updated_at: new Date().toISOString(),
   }).eq('id', id);
+}
+
+/**
+ * After a call is analyzed, propagate its insight into the lead's score + Next
+ * Best Action, and (when the lead has a deal) that deal's win-probability + NBA,
+ * so those features reflect the just-finished call. Modules are loaded lazily to
+ * avoid any import cycle, and every step is independently best-effort — a
+ * refresh failure never affects the recording's own `complete` status. Only
+ * reached for Call Insights clients (a recording had to complete to get here).
+ */
+async function refreshLinkedIntelligence(org_id: string, client_id: string | null, lead_id: string): Promise<void> {
+  if (!lead_id) return;
+  try {
+    const [leadsSvc, leadNba, winProb, dealNba] = await Promise.all([
+      import('../leads.service'),
+      import('./leadNextBestAction.service'),
+      import('./winProbability.service'),
+      import('./nextBestAction.service'),
+    ]);
+    try { await leadsSvc.rescoreLead(org_id, lead_id); }
+    catch (e: any) { logger.warn(`[conv-intel] rescore after call failed: ${e?.message || e}`); }
+    try { await leadNba.compute(org_id, client_id, lead_id, true); }
+    catch (e: any) { logger.warn(`[conv-intel] lead NBA refresh after call failed: ${e?.message || e}`); }
+
+    // The lead's most recent open deal, if any, gets its win-probability + NBA refreshed too.
+    const { data: deal } = await supabaseAdmin.from('crm_deals')
+      .select('id').eq('org_id', org_id).eq('lead_id', lead_id).is('deleted_at', null)
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    const dealId = (deal as any)?.id as string | undefined;
+    if (dealId) {
+      try { await winProb.compute(org_id, client_id, dealId); }
+      catch (e: any) { logger.warn(`[conv-intel] win-prob refresh after call failed: ${e?.message || e}`); }
+      try { await dealNba.compute(org_id, client_id, dealId, true); }
+      catch (e: any) { logger.warn(`[conv-intel] deal NBA refresh after call failed: ${e?.message || e}`); }
+    }
+  } catch (e: any) {
+    logger.warn(`[conv-intel] linked intelligence refresh failed: ${e?.message || e}`);
+  }
 }
 
 const SYSTEM = `You are KINI, a sales-conversation analyst for a building-materials brand (TMT steel rebar) selling to individual home builders (IHBs) in India via field reps ("Consumer Champions"). You are given a diarized transcript (Hindi/Hinglish/English) of a rep↔customer conversation.
