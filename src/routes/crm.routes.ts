@@ -4787,6 +4787,51 @@ targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
     : await targetsSvc.setTarget(orgId(req), clientId(req), { user_id: user_id ?? null, org_role_id: org_role_id ?? null, hierarchy_level_id: hierarchy_level_id ?? null, target_value: Number(target_value) }, userId(req));
   res.json(row);
 }));
+// ---------- Telecaller CALLS target (a daily call-count goal) ----------
+// A separate metric from the lead/rupee targets: the admin sets "N calls per
+// day" (per role / per user / org default) and a telecaller sees today's logged
+// calls against it. Reuses the same crm_targets scoping; the roles picker is the
+// shared GET /targets/levels (no type needed).
+
+/** A calls target value: a whole number of calls from 0 to the cap. */
+function parseCallsValue(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n < 0 || n > targetsSvc.MAX_CALLS_TARGET) {
+    throw new AppError(400, `target_value must be a whole number of calls from 0 to ${targetsSvc.MAX_CALLS_TARGET.toLocaleString('en-US')}`, 'VALIDATION');
+  }
+  return Math.floor(n);
+}
+
+// FE-facing: my daily calls target + today's logged-call count. Any CRM user
+// (telecallers read their own).
+targets.get('/calls/me', wrap(async (req, res) => {
+  const user = (req as AuthRequest).user!;
+  res.json({ success: true, data: await targetsSvc.myCallsTarget(orgId(req), user.id, clientId(req)) });
+}));
+
+// Manager-facing: list current calls targets (default + per-role + per-user).
+targets.get('/calls', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  res.json({ success: true, data: await targetsSvc.listTargets(orgId(req), clientId(req), targetsSvc.CALLS_SPEC) });
+}));
+
+// Manager-facing: set a calls target. Body { target_value, user_id?,
+// org_role_id? / hierarchy_level_id?, all? } — same scoping rules as the lead
+// target. Consumer Champions are view-only here too.
+targets.put('/calls', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  if (isFrontlineChampion((req as AuthRequest).user)) {
+    throw new AppError(403, 'Consumer Champions cannot set targets', 'FORBIDDEN');
+  }
+  const { user_id, org_role_id, hierarchy_level_id, target_value, all } = req.body ?? {};
+  if (target_value === undefined || target_value === null) throw new AppError(400, 'target_value is required', 'VALIDATION');
+  const value = parseCallsValue(target_value);
+  const id = z.string().uuid().nullish();
+  const scope = parse(z.object({ user_id: id, org_role_id: id, hierarchy_level_id: id }), { user_id, org_role_id, hierarchy_level_id }) as { user_id?: string | null; org_role_id?: string | null; hierarchy_level_id?: string | null };
+  const row = all
+    ? await targetsSvc.setAllTargets(orgId(req), clientId(req), value, userId(req), targetsSvc.CALLS_SPEC)
+    : await targetsSvc.setTarget(orgId(req), clientId(req), { ...scope, target_value: value }, userId(req), targetsSvc.CALLS_SPEC);
+  res.json({ success: true, data: row });
+}));
+
 router.use('/targets', targets);
 
 // ---------- HIERARCHY (Phase 3 — client-admin org hierarchy) ----------

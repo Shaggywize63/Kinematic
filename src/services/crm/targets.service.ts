@@ -18,6 +18,17 @@ const DEFAULT_PERIOD = 'daily';
 export interface TargetSpec { metric: string; period: string }
 const LEAD_SPEC: TargetSpec = { metric: DEFAULT_METRIC, period: DEFAULT_PERIOD };
 
+/**
+ * Telecaller calls target. A plain DAILY count — the admin sets "N calls per
+ * day" (per role / per user / org default, same scoping as the lead target) and
+ * a telecaller sees today's logged-call count against it. Progress counts the
+ * same rows the Telecaller Performance report calls "calls": crm_activities of
+ * type 'call' owned by the user (owner_id OR assigned_to), dated today in IST.
+ */
+export const CALLS_SPEC: TargetSpec = { metric: 'calls_made', period: 'daily' };
+/** Sanity cap on a calls target — a whole number of calls per day. */
+export const MAX_CALLS_TARGET = 100000;
+
 export interface TargetRow {
   id: string;
   user_id: string | null;
@@ -339,6 +350,32 @@ export async function setLeaderboardRoleId(org_id: string, client_id: string | n
  * column remains a single source of truth — the value itself is the
  * weekly figure end-to-end.
  */
+/**
+ * Resolve one user's target value from a set of crm_targets rows.
+ * Higher score wins: user(4) > org_role(3) > hierarchy_level(2) > default(1);
+ * within a scope, a client-specific row beats an org-wide one (client_id null).
+ * Shared by the lead target and the telecaller calls target.
+ */
+function resolveTargetValue(
+  rows: any[],
+  who: { user_id: string; org_role_id: string | null; hierarchy_level_id: string | null },
+  fe_client_id: string | null,
+): number {
+  const score = (r: any): number => {
+    const clientOk = (fe_client_id && r.client_id === fe_client_id) || r.client_id === null;
+    if (!clientOk) return -1;
+    const bonus = (fe_client_id && r.client_id === fe_client_id) ? 0.5 : 0;
+    if (r.user_id === who.user_id) return 4 + bonus;
+    if (r.user_id === null && r.org_role_id && r.org_role_id === who.org_role_id) return 3 + bonus;
+    if (r.user_id === null && r.hierarchy_level_id && r.hierarchy_level_id === who.hierarchy_level_id) return 2 + bonus;
+    if (r.user_id === null && r.org_role_id === null && r.hierarchy_level_id === null) return 1 + bonus;
+    return -1;
+  };
+  let best: any = null; let bestScore = -1;
+  for (const r of rows) { const s = score(r); if (s > bestScore) { bestScore = s; best = r; } }
+  return best?.target_value ?? 0;
+}
+
 export async function myTargetToday(org_id: string, user_id: string, fe_client_id: string | null) {
   const { data: me } = await supabaseAdmin.from('users')
     .select('org_role_id, hierarchy_level_id').eq('id', user_id).maybeSingle();
@@ -350,22 +387,7 @@ export async function myTargetToday(org_id: string, user_id: string, fe_client_i
     .eq('org_id', org_id).eq('metric', DEFAULT_METRIC).eq('period', DEFAULT_PERIOD);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   const rows = data ?? [];
-
-  // Higher score wins. user(4) > org_role(3) > hierarchy_level(2) > default(1);
-  // within a scope, client-specific beats org-wide.
-  const score = (r: any): number => {
-    const clientOk = (fe_client_id && r.client_id === fe_client_id) || r.client_id === null;
-    if (!clientOk) return -1;
-    const bonus = (fe_client_id && r.client_id === fe_client_id) ? 0.5 : 0;
-    if (r.user_id === user_id) return 4 + bonus;
-    if (r.user_id === null && r.org_role_id && r.org_role_id === roleId) return 3 + bonus;
-    if (r.user_id === null && r.hierarchy_level_id && r.hierarchy_level_id === levelId) return 2 + bonus;
-    if (r.user_id === null && r.org_role_id === null && r.hierarchy_level_id === null) return 1 + bonus;
-    return -1;
-  };
-  let best: any = null; let bestScore = -1;
-  for (const r of rows) { const s = score(r); if (s > bestScore) { bestScore = s; best = r; } }
-  const target = best?.target_value ?? 0;
+  const target = resolveTargetValue(rows, { user_id, org_role_id: roleId, hierarchy_level_id: levelId }, fe_client_id);
 
   // This-week-so-far count — IST week starts on Monday 00:00.
   const since = istPeriodStartUTC('week');
@@ -377,4 +399,37 @@ export async function myTargetToday(org_id: string, user_id: string, fe_client_i
   const { count, error: cErr } = await cq;
   if (cErr) throw new AppError(500, cErr.message, 'DB_ERROR');
   return { metric: DEFAULT_METRIC, period: 'weekly', target, achieved: count ?? 0 };
+}
+
+/**
+ * A telecaller's daily calls target + how many calls they've logged TODAY (IST).
+ * Target resolution is the same priority as the lead target (user > role >
+ * level > default, client-specific beats org-wide). "Calls" are counted exactly
+ * as the Telecaller Performance report counts them — crm_activities of type
+ * 'call' owned by the user (owner_id OR assigned_to), dated in today's IST
+ * window — so the number a telecaller sees here matches the admin's report.
+ */
+export async function myCallsTarget(org_id: string, user_id: string, _fe_client_id: string | null) {
+  const { data: me } = await supabaseAdmin.from('users')
+    .select('org_role_id, hierarchy_level_id').eq('id', user_id).maybeSingle();
+  const roleId: string | null = (me as any)?.org_role_id ?? null;
+  const levelId: string | null = (me as any)?.hierarchy_level_id ?? null;
+
+  const { data, error } = await supabaseAdmin.from('crm_targets')
+    .select('user_id, org_role_id, hierarchy_level_id, client_id, target_value')
+    .eq('org_id', org_id).eq('metric', CALLS_SPEC.metric).eq('period', CALLS_SPEC.period);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const target = resolveTargetValue(data ?? [], { user_id, org_role_id: roleId, hierarchy_level_id: levelId }, _fe_client_id);
+
+  // Calls logged today (IST). Scoped to the caller by owner_id OR assigned_to,
+  // not by client_id — crm_activities client scoping is inconsistent and the
+  // perf report scopes purely by the owner, so this stays in lock-step with it.
+  const since = istDayStartUTC();
+  const { count, error: cErr } = await supabaseAdmin.from('crm_activities')
+    .select('id', { count: 'exact', head: true })
+    .eq('org_id', org_id).is('deleted_at', null).eq('type', 'call')
+    .gte('activity_date', since)
+    .or(`owner_id.eq.${user_id},assigned_to.eq.${user_id}`);
+  if (cErr) throw new AppError(500, cErr.message, 'DB_ERROR');
+  return { metric: CALLS_SPEC.metric, period: 'daily', target, achieved: count ?? 0 };
 }
