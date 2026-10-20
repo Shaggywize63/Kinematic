@@ -13,6 +13,7 @@ import {
 import { haversineDistance } from '../lib/haversine';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { AuthRequest } from '../types';
+import { usesStrictTenantScope, resolveStrictTenantScope } from '../lib/tenantScope';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
@@ -21,13 +22,15 @@ export const getRoutePlans = asyncHandler(async (req, res) => {
   const user = (req as any).user;
   if (isDemo(user)) return ok(res, getMockRoutePlans(todayDate()));
   const { client_id, date } = req.query;
+  // Every project except the Tata default returns ONE org's plans per request (see lib/tenantScope).
+  const strict = usesStrictTenantScope() ? await resolveStrictTenantScope(req, client_id) : null;
 
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
 
-  const isGlobal = isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) );
-  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
+  const isGlobal = !strict && (isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) ));
+  const effectiveOrgId = strict ? (strict.scopeOrgId as string) : (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
 
   const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
@@ -182,12 +185,14 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
     });
   }
   const { client_id, date } = req.query;
+  // Every project except the Tata default returns ONE org's plans per request (see lib/tenantScope).
+  const strict = usesStrictTenantScope() ? await resolveStrictTenantScope(req, client_id) : null;
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
 
-  const isGlobal = isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) );
-  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
+  const isGlobal = !strict && (isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) ));
+  const effectiveOrgId = strict ? (strict.scopeOrgId as string) : (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
 
   const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);

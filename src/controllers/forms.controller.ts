@@ -12,6 +12,7 @@ import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { withVisitFields } from '../services/formVisit.service';
 import { reverseGeocode } from '../services/crm/places.service';
 import { resolveVisitTimes } from '../services/formVisit.store';
+import { usesStrictTenantScope, resolveStrictTenantScope, callerMayReadOrg } from '../lib/tenantScope';
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
 function parseGps(s: unknown): { lat: number; lng: number } | null {
@@ -362,12 +363,16 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockSubmissionDetails(req.params.id));
   const { id } = req.params;
+  const strict = usesStrictTenantScope();
   const { data: sub } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title), activities(name)').eq('id', id).single();
+  // One org's rows only: a submission id from another org is a 404, not a read.
+  if (sub && strict && (sub as { user_id?: string }).user_id !== user.id && !callerMayReadOrg(user, (sub as { org_id?: string | null }).org_id)) return notFound(res);
   if (sub) {
     const { data: resp } = await supabaseAdmin.from('form_responses').select('*, builder_questions(*)').eq('submission_id', id);
     return ok(res, { ...sub, form_responses: resp || [] });
   }
   const { data: bSub } = await supabaseAdmin.from('builder_submissions').select('*, builder_forms(title), users(name)').eq('id', id).single();
+  if (bSub && strict && (bSub as { user_id?: string }).user_id !== user.id && !callerMayReadOrg(user, (bSub as { org_id?: string | null }).org_id)) return notFound(res);
   if (bSub) return ok(res, { ...bSub, activities: { name: bSub.builder_forms?.title }, form_responses: bSub.responses || [] });
   return notFound(res);
 });
@@ -388,6 +393,9 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const tId = (template_id as string)?.trim();
   const aId = (activity_id as string)?.trim();
 
+  // Every project except the Tata default returns ONE org's rows per request — see lib/tenantScope.
+  const strictScope = usesStrictTenantScope() ? await resolveStrictTenantScope(req, client_id) : null;
+
   const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const role = (user.role || '').toLowerCase();
@@ -407,7 +415,8 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // when a platform admin "acting as a client" sent the scope only as a header,
   // this endpoint never saw it, stayed global, and returned EVERY org's rows.
   const headerClientId = req.headers['x-client-id'] as string | undefined;
-  const pickedClientId = isClientBound
+  const pickedClientId = strictScope ? strictScope.pickedClientId
+    : isClientBound
     ? ((user as any).client_id as string)
     // A real X-Client-Id header pins a specific client and MUST win over the
     // picker's "All clients" (Kinematic) sentinel: a super-admin "acting as a
@@ -422,15 +431,15 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   // specific client is selected. The moment a client is picked (JWT / query /
   // header) the request is scoped to that client — a super_admin acting as a
   // client must never see other tenants' submissions.
-  const isGlobal = !isClientBound && (isSuper || isSagar) && !pickedClientId;
+  const isGlobal = !strictScope && !isClientBound && (isSuper || isSagar) && !pickedClientId;
 
   // The org every query is scoped to. Client-bound / org-scoped callers use
   // their own org. A platform admin who picked a client is scoped to THAT
   // client's org (resolved from the clients table) — essential for
   // builder_submissions, which carry only org_id and no client_id. A truly
   // global platform admin gets no org filter (the intended cross-tenant view).
-  let scopeOrgId: string | null = isGlobal ? null : (user.org_id ?? null);
-  if (!isClientBound && pickedClientId) {
+  let scopeOrgId: string | null = strictScope ? strictScope.scopeOrgId : isGlobal ? null : (user.org_id ?? null);
+  if (!strictScope && !isClientBound && pickedClientId) {
     const { data: pickedClient } = await supabaseAdmin
       .from('clients').select('org_id').eq('id', pickedClientId).maybeSingle();
     const pickedOrg = (pickedClient as { org_id?: string } | null)?.org_id;
