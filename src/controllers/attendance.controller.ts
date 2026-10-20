@@ -28,6 +28,7 @@ import {
 import { hasTransportModeValue, trackTransportModeOn, validateTransportMode } from '../services/transportMode.service';
 import { annotateTransportLabels, transportModesForUser } from '../services/transportMode.store';
 import { usesStrictTenantScope, resolveStrictTenantScope } from '../lib/tenantScope';
+import { assertUserReachable } from '../lib/userGuard';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -721,6 +722,9 @@ async function annotateOverrideTransport(row: any, admin: { org_id: string; clie
 export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => {
   const admin = req.user!;
   const { user_id, date, status, override_reason, checkin_at, checkout_at, notes } = req.body;
+  // The upsert below stamps the caller's org on the row, so the user must be one the caller can reach — otherwise
+  // another tenant's attendance row would be rewritten and moved into this org.
+  await assertUserReachable(admin, user_id, 'overrideAttendance');
 
   let total_hours: number | null = null;
   if (checkin_at && checkout_at) {
@@ -754,6 +758,10 @@ export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => 
 export const updateAttendanceOverride = asyncHandler<AuthRequest>(async (req, res) => {
   const admin = req.user!;
   const { status, override_reason, checkin_at, checkout_at, notes } = req.body;
+
+  const { data: existing } = await supabaseAdmin.from('attendance').select('user_id').eq('id', req.params.id).maybeSingle();
+  if (!existing?.user_id) { badRequest(res, 'Attendance record not found'); return; }
+  await assertUserReachable(admin, existing.user_id as string, 'updateAttendanceOverride');
 
   const { data: updated, error } = await supabaseAdmin
     .from('attendance')

@@ -101,6 +101,7 @@ import * as dsarSvc from '../services/crm/dsar.service';
 import * as consentSvc from '../services/crm/consent.service';
 import * as nomineeSvc from '../services/crm/nominee.service';
 import { isMinor } from '../lib/age';
+import { isLookupTargetAllowed, isSensitiveColumn, offeredLookupTables, stripSensitiveColumns } from '../lib/lookupGuard';
 
 const router: Router = express.Router();
 
@@ -4132,6 +4133,21 @@ function genericDisplay(r: Record<string, unknown>): string {
   return String(r.id ?? '').slice(0, 8) || 'Record';
 }
 
+const CURATED_LOOKUP_TARGETS: ReadonlySet<string> = new Set(Object.keys(LOOKUP_TABLES));
+
+/** Tables list_lookup_tables() offers for this project (cached 5 min). A failed load is not cached and offers nothing. */
+async function offeredTables(): Promise<ReadonlySet<string>> {
+  try {
+    return await offeredLookupTables(currentProjectKey(), async () => {
+      const { data, error } = await supabaseAdmin.rpc('list_lookup_tables');
+      if (error) throw new Error(error.message);
+      return (data ?? []) as Array<{ table_name: string }>;
+    });
+  } catch {
+    return new Set();
+  }
+}
+
 // ---------- GLOBAL SEARCH -------------------------------------------
 // Unified, tenant-scoped omnisearch across the core CRM entities, powering the
 // dashboard's ⌘/Ctrl-K command palette. Every entity is queried in parallel
@@ -4338,6 +4354,11 @@ router.get('/lookup/search', wrap(async (req, res) => {
     throw new AppError(400, `Invalid lookup target: ${target}`, 'BAD_TARGET');
   }
   const meta = LOOKUP_TABLES[target];
+  // The service-role client reads whatever table it is told to, so the target must be one the picker legitimately
+  // offers (curated, or listed by list_lookup_tables) and never a credential/integration table. Fail closed.
+  if (!isLookupTargetAllowed(target, CURATED_LOOKUP_TARGETS, await offeredTables())) {
+    throw new AppError(400, `Invalid lookup target: ${target}`, 'BAD_TARGET');
+  }
   const display = meta?.display ?? genericDisplay;
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const scope = clientScope(req);
@@ -4365,7 +4386,7 @@ router.get('/lookup/search', wrap(async (req, res) => {
     query = query.in('id', resolveIds);
     const { data, error } = await query.limit(resolveIds.length);
     if (error) throw new AppError(500, error.message, 'DB_ERROR');
-    const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: r }));
+    const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: stripSensitiveColumns(r) }));
     return res.json({ success: true, data: items });
   }
   // Per-user city gate for the people_directory lookup target.
@@ -4413,7 +4434,7 @@ router.get('/lookup/search', wrap(async (req, res) => {
     try {
       const clauses = JSON.parse(filterRaw) as Array<{ field: string; op: string; value: unknown }>;
       for (const c of Array.isArray(clauses) ? clauses : []) {
-        if (typeof c.field !== 'string' || !/^[a-z_][a-z0-9_]*$/i.test(c.field)) continue;
+        if (typeof c.field !== 'string' || !/^[a-z_][a-z0-9_]*$/i.test(c.field) || isSensitiveColumn(c.field)) continue;
         switch (c.op) {
           case 'eq':       query = query.eq(c.field, c.value as never); break;
           case 'ne':       query = query.neq(c.field, c.value as never); break;
@@ -4434,7 +4455,7 @@ router.get('/lookup/search', wrap(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Slim down to (id, label) the picker can render directly without
   // every column over the wire.
-  const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: r }));
+  const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: stripSensitiveColumns(r) }));
   res.json({ success: true, data: items });
 }));
 // Drag-and-drop reordering. Frontend sends the new (id, position)

@@ -301,6 +301,15 @@ const DEMO_MODULE_PREFIXES = [
   '/activities', '/activity-mappings', '/assets',
 ];
 
+const DEMO_FENCED_PREFIXES = ['/environments', '/admin', '/candidates']; // plus writes under /roles
+
+/** What a fenced request gets instead of reaching its handler: an empty read, or the same pretend-success a demo write gets. */
+function fenced(res: Response, method: string): void {
+  if (method === 'GET') { ok(res, []); return; }
+  if (method === 'DELETE') { res.status(204).end(); return; }
+  res.status(method === 'POST' ? 201 : 200).json({ success: true, data: { id: 'demo-noop-fenced', ok: true }, demo: true });
+}
+
 const startsWithModule = (path: string) =>
   DEMO_MODULE_PREFIXES.some(m => path === m || path.startsWith(m + '/'));
 
@@ -327,6 +336,14 @@ export function demoExtensionsMiddleware(req: Request, res: Response, next: Next
   // CRM has its own demoCrmMiddleware mounted on the CRM router — let it
   // handle anything under /crm so we don't double-intercept.
   if (path === '/crm' || path.startsWith('/crm/')) return next();
+
+  // The demo login is a super_admin session on a sentinel org, and its token is a fixed string. These areas act on
+  // other orgs' data or on the platform control plane (cross-project config, entitlements, the shared recruitment
+  // pool, role edits), so the demo principal is never allowed through to the real handlers.
+  const inPrefix = (m: string) => path === m || path.startsWith(m + '/');
+  if (DEMO_FENCED_PREFIXES.some(inPrefix) || (method !== 'GET' && inPrefix('/roles'))) {
+    return fenced(res, method);
+  }
 
   if (method === 'GET') {
     // ── Analytics ────────────────────────────────────────────────

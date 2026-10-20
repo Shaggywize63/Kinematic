@@ -79,6 +79,12 @@ function sanitiseIntegration(row: any): IntegrationRow & { webhook_url?: string 
 
 // ── Admin CRUD ─────────────────────────────────────────────────────────
 
+/** Callers without the CRM-settings module (see integrationsGate) get a read that carries no secrets or config. */
+const limitedView = (res: { locals: Record<string, unknown> }): boolean => res.locals.integrationsLimitedView === true;
+const LIMITED_FIELDS = ['id', 'provider', 'label', 'source_id', 'status', 'created_at', 'updated_at'];
+const limited = <T extends Record<string, unknown>>(row: T): Partial<T> =>
+  Object.fromEntries(Object.entries(row).filter(([k]) => LIMITED_FIELDS.includes(k))) as Partial<T>;
+
 export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
   const { data, error } = await supabaseAdmin.from('crm_lead_source_integrations')
@@ -86,7 +92,7 @@ export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('org_id', org_id)
     .order('created_at', { ascending: false });
   if (error) return badRequest(res, error.message);
-  return ok(res, data ?? []);
+  return ok(res, limitedView(res) ? (data ?? []).map((r) => limited(r as Record<string, unknown>)) : (data ?? []));
 });
 
 export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
@@ -96,6 +102,7 @@ export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('org_id', org_id).eq('id', req.params.id).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!data) return notFound(res, 'Integration not found');
+  if (limitedView(res)) return ok(res, limited(data as Record<string, unknown>));
   return ok(res, sanitiseIntegration(data));
 });
 

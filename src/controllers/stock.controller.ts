@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, isDemo } from '../utils';
 import { getMockStockAllocations } from '../utils/demoData';
+import { assertUserReachable } from '../lib/userGuard';
 
 const allocateSchema = z.object({
   user_id: z.string().uuid(),
@@ -97,6 +98,8 @@ export const reviewItem = asyncHandler(async (req: AuthRequest, res: Response) =
     badRequest(res, 'Not authorised to review this item');
     return;
   }
+  // An admin may review items allocated to people they can reach, not any item id in the project.
+  if (alloc?.user_id && alloc.user_id !== user.id) await assertUserReachable(user, alloc.user_id, 'reviewStockItem');
 
   const updateData: Record<string, unknown> = {
     status: body.data.status,

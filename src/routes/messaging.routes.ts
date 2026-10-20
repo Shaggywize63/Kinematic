@@ -20,6 +20,7 @@ import {
 } from '../services/crm/messaging.service';
 import { registerSubscription, unregisterSubscription, vapidPublicKey } from '../services/crm/webPush.service';
 import { supabaseAdmin } from '../lib/supabase';
+import { isPlatformOperator } from '../lib/tenantScope';
 
 const router = Router();
 
@@ -111,6 +112,14 @@ function gatePlatformAdmin(req: AuthRequest, res: Response): boolean {
   return false;
 }
 
+/**
+ * The org an audit read is limited to: null for a platform operator (every tenant), otherwise the caller's own org.
+ * An admin tier used to read every tenant's private chats through these routes.
+ */
+function auditOrgScope(req: AuthRequest): string | null {
+  return isPlatformOperator(req.user) ? null : ((req.user?.org_id as string | undefined) ?? '00000000-0000-0000-0000-000000000000');
+}
+
 interface HydratedRefs {
   orgById: Map<string, string>;
   threadById: Map<string, { title: string; kind: string }>;
@@ -175,6 +184,8 @@ router.get('/audit/messages', wrap(async (req, res) => {
     .order('created_at', { ascending: false })
     .limit(limit);
   if (sinceParam) q = q.gte('created_at', sinceParam);
+  const auditOrg = auditOrgScope(req);
+  if (auditOrg) q = q.eq('org_id', auditOrg);
   const { data, error } = await q;
   if (error) return res.status(500).json({ message: error.message });
   const rows = (data ?? []) as any[];
@@ -198,11 +209,14 @@ router.get('/audit/messages', wrap(async (req, res) => {
 router.get('/audit/mentions', wrap(async (req, res) => {
   if (!gatePlatformAdmin(req, res)) return;
   const limit = Math.min(Number(req.query.limit) || 200, 1000);
-  const { data, error } = await supabaseAdmin
+  let mq = supabaseAdmin
     .from('mentions')
     .select('id, org_id, source_kind, source_id, mentioner_id, mentioned_user_id, created_at')
     .order('created_at', { ascending: false })
     .limit(limit);
+  const mentionOrg = auditOrgScope(req);
+  if (mentionOrg) mq = mq.eq('org_id', mentionOrg);
+  const { data, error } = await mq;
   if (error) return res.status(500).json({ message: error.message });
   const rows = (data ?? []) as any[];
   const refs = await hydrateRefs(
@@ -232,6 +246,8 @@ router.get('/audit/threads/:id', wrap(async (req, res) => {
     .maybeSingle();
   if (te) return res.status(500).json({ message: te.message });
   if (!thread) return res.status(404).json({ message: 'Thread not found' });
+  const threadOrg = auditOrgScope(req);
+  if (threadOrg && (thread as any).org_id !== threadOrg) return res.status(404).json({ message: 'Thread not found' });
 
   const { data: members } = await supabaseAdmin
     .from('message_thread_members').select('user_id').eq('thread_id', threadId);

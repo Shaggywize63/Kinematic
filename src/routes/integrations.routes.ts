@@ -28,6 +28,9 @@ import {
 import { AppError } from '../utils';
 import { demoIntegrationsMiddleware } from '../utils/demoCrm';
 import { currentProjectKey } from '../lib/projects';
+import { moduleAccessAllowed } from '../middleware/rbac';
+import { logger } from '../lib/logger';
+import type { AuthRequest } from '../types';
 
 const router = Router();
 
@@ -102,12 +105,25 @@ router.post('/google/sync', wrap(async (req, res) => {
 }));
 
 // ── Lead-source integrations CRUD ────────────────────────────────────────
-router.get('/',               listIntegrations);
-router.post('/',              createIntegration);
-router.get('/:id',            getIntegration);
-router.patch('/:id',          updateIntegration);
-router.delete('/:id',         deleteIntegration);
-router.get('/:id/events',     listIntegrationEvents);
-router.post('/:id/test',      testIntegration);
+// These manage the org's lead-capture credentials (each integration's webhook_secret is the only credential on the
+// public ingest endpoints), so they need the CRM-settings module like the rest of CRM configuration. Writes without
+// it are refused; a read without it still works but carries no config or secret.
+function integrationsGate(req: Request, res: Response, next: NextFunction) {
+  const user = (req as AuthRequest).user;
+  const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase());
+  if (moduleAccessAllowed(user, 'crm_settings', isWrite)) return next();
+  logger.warn(`[authz-deny] integrations ${req.method} ${req.path}: actor=${user?.id} (${user?.role})`);
+  if (isWrite) return res.status(403).json({ success: false, error: "You don't have access to manage integrations." });
+  res.locals.integrationsLimitedView = true;
+  next();
+}
+
+router.get('/',               integrationsGate, listIntegrations);
+router.post('/',              integrationsGate, createIntegration);
+router.get('/:id',            integrationsGate, getIntegration);
+router.patch('/:id',          integrationsGate, updateIntegration);
+router.delete('/:id',         integrationsGate, deleteIntegration);
+router.get('/:id/events',     integrationsGate, listIntegrationEvents);
+router.post('/:id/test',      integrationsGate, testIntegration);
 
 export default router;
