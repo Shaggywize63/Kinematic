@@ -439,7 +439,14 @@ export async function listLeadsWithCount(
   // Integration-backed source ids for this org, to tag/filter inbound leads.
   const inboundSet = new Set(await inboundSourceIdsForOrg(org_id));
 
-  let q = supabaseAdmin.from('crm_leads').select('*', { count: 'exact' })
+  // `followup_due=true` narrows to leads with an open follow-up that is due or overdue. It is an
+  // existence test on crm_activities (lead_id FK), done as an INNER embed so the filter, the page
+  // range and the exact count all stay in this one round trip — a lead with five due activities is
+  // still one row. The embed is only added when asked for, so every other call is byte-for-byte the
+  // query it was before.
+  const followupDue = String(filters.followup_due ?? '') === 'true';
+  let q = supabaseAdmin.from('crm_leads')
+    .select(followupDue ? '*, crm_activities!inner(id)' : '*', { count: 'exact' })
     .eq('org_id', org_id).is('deleted_at', null);
   if (client_id) {
     q = options.strictClient
@@ -516,6 +523,17 @@ export async function listLeadsWithCount(
   if (filters.approval_status) q = q.eq('approval_status', String(filters.approval_status));
   if (filters.lifecycle_stage) q = q.eq('lifecycle_stage', String(filters.lifecycle_stage));
   if (filters.owner_id) q = q.eq('owner_id', String(filters.owner_id));
+  // Unassigned queue: leads nobody owns yet. AND-ed with the visibility scope above, so a rep who
+  // only sees their own leads gets an empty list — correct, they own none that are unowned.
+  if (String(filters.unassigned ?? '') === 'true') q = q.is('owner_id', null);
+  if (followupDue) {
+    // Open (not completed / done / cancelled) activity whose due time has arrived. due_at <= now also
+    // excludes undated activities, which are tasks without a deadline rather than follow-ups.
+    q = q.is('crm_activities.completed_at', null)
+         .is('crm_activities.deleted_at', null)
+         .not('crm_activities.status', 'in', '(done,cancelled)')
+         .lte('crm_activities.due_at', new Date().toISOString());
+  }
   if (filters.source_id) q = q.eq('source_id', String(filters.source_id));
   // Inbound-only view: leads whose source is an integration (Google Ads, web
   // form, Meta, …). Powers the "N from Google Ads / web forms" counter chip and
@@ -658,8 +676,10 @@ export async function listLeadsWithCount(
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Tag each row so the list can badge inbound leads without a second lookup.
   const rows = (data ?? []).map((r) => {
-    const sid = (r as { source_id?: string | null }).source_id;
-    return { ...(r as Lead), is_inbound: !!sid && inboundSet.has(sid) };
+    // The follow-up embed is only a join key — never leak it into the lead payload (or the CSV export).
+    const { crm_activities: _embed, ...lead } = r as unknown as Lead & { crm_activities?: unknown };
+    const sid = (lead as { source_id?: string | null }).source_id;
+    return { ...(lead as Lead), is_inbound: !!sid && inboundSet.has(sid) };
   });
   return { rows, total: count ?? 0, page, limit };
 }
