@@ -14,6 +14,9 @@ import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { normalizeMobile, newUserContactProblem } from '../lib/userContact';
 import { userAccessRows, modulePermissionsForNewUser } from '../lib/userAccessRows';
 import { clientGrantedModuleIds } from '../lib/entitlements';
+import { assertMayManageUser, assertMayAssignRole } from '../lib/userGuard';
+import { isPlatformOperator, usesStrictTenantScope } from '../lib/tenantScope';
+import { invalidateAuthCache } from '../middleware/auth';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -530,6 +533,7 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   if (!name || !password) {
     throw new AppError(400, 'name and password are required', 'VALIDATION_ERROR')
   }
+  assertMayAssignRole(admin, typeof role === 'string' ? role : undefined, null, 'createUser')
   const mobile = normalizeMobile(rawMobile)
   const contactProblem = newUserContactProblem({ mobile, email })
   if (contactProblem) throw new AppError(400, contactProblem, 'VALIDATION_ERROR')
@@ -699,6 +703,11 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
 })
 
 export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
+  // Who may be edited at all (org / client ownership / super_admin / self-promotion) is decided before anything is
+  // written, including the GoTrue password change below, which used to run for whatever id the URL carried.
+  await assertMayManageUser(req.user!, req.params.id, 'updateUser')
+  assertMayAssignRole(req.user!, typeof req.body.role === 'string' ? req.body.role : undefined, req.params.id, 'updateUser')
+
   // `org_role_id` is allowed here so admins can reassign the hierarchy role
   // (and the modules it inherits) without having to delete + recreate. The
   // column exists on `users`; missing it from this list silently dropped
@@ -865,8 +874,10 @@ export const resetUserPassword = asyncHandler<AuthRequest>(async (req, res) => {
   if (!password || password.length < 6) {
     throw new AppError(400, 'Password must be at least 6 characters', 'VALIDATION_ERROR')
   }
+  await assertMayManageUser(req.user!, req.params.id, 'resetUserPassword')
   const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password })
   if (authErr) throw new AppError(500, authErr.message, 'AUTH_ERROR')
+  invalidateAuthCache((u) => u?.id === req.params.id)
 
   sendSuccess(res, { message: 'Password reset successfully' })
 })
@@ -876,6 +887,7 @@ export const resetUserPassword = asyncHandler<AuthRequest>(async (req, res) => {
 // it to the user, who then sets their own new password via the reset page.
 // Reuses the same service the self-service /auth/forgot-password endpoint uses.
 export const sendUserPasswordReset = asyncHandler<AuthRequest>(async (req, res) => {
+  await assertMayManageUser(req.user!, req.params.id, 'sendUserPasswordReset')
   const { data: u } = await supabaseAdmin
     .from('users')
     .select('email')
@@ -1216,6 +1228,11 @@ export const getClients = asyncHandler<AuthRequest>(async (req, res) => {
     query = query.in('org_id', Array.from(new Set([user.org_id, ...viewerOrgs])))
   } else if (!isManagement) {
     query = query.eq('org_id', user.org_id)
+  } else if (usesStrictTenantScope() && !isPlatformOperator(user) && isUUID(user.org_id)) {
+    // Org-per-client projects: an admin sees their own org's clients (and the ones their org owns), not every
+    // customer's name. The platform operator keeps the full list; the Tata `default` project keeps its historical
+    // all-clients list (its super-admins rely on it).
+    query = query.or(`org_id.eq.${user.org_id},owner_org_id.eq.${user.org_id}`)
   }
 
   const { data, error } = await query
@@ -1372,68 +1389,3 @@ export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Resp
   const { data, error, count } = await query.range(offset, offset + limit - 1)
   sendPaginated(res, data || [], count || 0, page, limit)
 })
-
-
-export const nukeTestData = asyncHandler<AuthRequest>(async (req, res) => {
-  const { user_name = 'Test FE' } = req.body;
-  logger.info(`🛡️ [DEBUG] Nuke initiated for user: ${user_name}`);
-
-  // 1. Find User
-  const { data: user, error: userErr } = await supabaseAdmin
-    .from('users')
-    .select('id, name')
-    .ilike('name', `%${user_name}%`)
-    .maybeSingle();
-
-  if (userErr || !user) {
-    throw new AppError(404, `User matching "${user_name}" not found`, 'USER_NOT_FOUND');
-  }
-
-  const userId = user.id;
-  const stats: Record<string, number> = {};
-
-  // --- FORMS ---
-  const { data: subs } = await supabaseAdmin.from('form_submissions').select('id').eq('user_id', userId);
-  const subIds = (subs || []).map(s => s.id);
-  if (subIds.length > 0) {
-    const { count: respCount } = await supabaseAdmin.from('form_responses').delete({ count: 'exact' }).in('submission_id', subIds);
-    const { count: subCount } = await supabaseAdmin.from('form_submissions').delete({ count: 'exact' }).eq('user_id', userId);
-    stats.form_responses = respCount || 0;
-    stats.form_submissions = subCount || 0;
-  }
-
-  // --- ATTENDANCE ---
-  const { count: attCount } = await supabaseAdmin.from('attendance').delete({ count: 'exact' }).eq('user_id', userId);
-  stats.attendance = attCount || 0;
-
-  // --- ROUTE PLANS ---
-  const { data: routes } = await supabaseAdmin.from('route_plans').select('id').eq('user_id', userId);
-  const routeIds = (routes || []).map(r => r.id);
-  if (routeIds.length > 0) {
-    const { count: actCount } = await supabaseAdmin.from('route_activities').delete({ count: 'exact' }).in('plan_id', routeIds);
-    const { count: outCount } = await supabaseAdmin.from('route_outlets').delete({ count: 'exact' }).in('plan_id', routeIds);
-    const { count: planCount } = await supabaseAdmin.from('route_plans').delete({ count: 'exact' }).eq('user_id', userId);
-    stats.route_activities = actCount || 0;
-    stats.route_outlets = outCount || 0;
-    stats.route_plans = planCount || 0;
-  }
-
-  // --- VISIT LOGS ---
-  const { count: visitCount } = await supabaseAdmin.from('visit_logs').delete({ count: 'exact' }).or(`user_id.eq.${userId},executive_id.eq.${userId}`);
-  stats.visit_logs = visitCount || 0;
-
-  // --- FEEDBACK & ALERTS ---
-  const { count: sosCount } = await supabaseAdmin.from('sos_alerts').delete({ count: 'exact' }).eq('user_id', userId);
-  const { count: gCount } = await supabaseAdmin.from('grievances').delete({ count: 'exact' }).eq('user_id', userId);
-  const { count: bCount } = await supabaseAdmin.from('broadcast_answers').delete({ count: 'exact' }).eq('user_id', userId);
-  stats.sos_alerts = sosCount || 0;
-  stats.grievances = gCount || 0;
-  stats.broadcast_answers = bCount || 0;
-
-  // --- TRACKING & LOGS ---
-  await supabaseAdmin.from('user_activity_logs').delete().eq('user_id', userId);
-  await supabaseAdmin.from('user_status_history').delete().eq('user_id', userId);
-  await supabaseAdmin.from('notifications').delete().eq('user_id', userId);
-
-  sendSuccess(res, { user_id: userId, user_name: user.name, stats }, 'Data Nuke Complete');
-});

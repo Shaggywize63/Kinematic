@@ -14,6 +14,7 @@ import { haversineDistance } from '../lib/haversine';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { AuthRequest } from '../types';
 import { usesStrictTenantScope, resolveStrictTenantScope } from '../lib/tenantScope';
+import { assertUserReachable } from '../lib/userGuard';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
@@ -124,6 +125,8 @@ export const createRoutePlan = asyncHandler(async (req, res) => {
   const { user_id, plan_date, outlets, activity_ids, activity_id, vehicle_type } = req.body;
   const acts = activity_ids || (activity_id ? [activity_id] : []);
   if (!user_id || !plan_date || !acts.length || !outlets?.length) return badRequest(res, 'Missing required fields');
+  // The delete below is keyed on (user, date, activity) only, so the user must be someone the caller can reach.
+  await assertUserReachable((req as any).user, user_id, 'createRoutePlan');
 
   const pDate = parseAppDate(plan_date);
   const normVehicle = normalizeVehicleType(vehicle_type);
@@ -660,6 +663,17 @@ export const updateOutletVisit = asyncHandler(async (req, res) => {
   const { outletId } = req.params;
   const { status, checkin_lat, checkin_lng, photo_url, visit_notes, checkin_at, checkout_at } = req.body;
   const updates: any = { status, checkin_lat, checkin_lng, photo_url, visit_notes, checkin_at, checkout_at };
+
+  // The outlet must belong to a plan of someone the caller can reach (any role may call this for their own visits);
+  // it used to update whichever outlet id it was given, in any org.
+  if (!isUUID(outletId)) return badRequest(res, 'Invalid outlet id');
+  const { data: owning } = await supabase.from('route_plan_outlets').select('route_plan_id').eq('id', outletId).maybeSingle();
+  const { data: owningPlan } = owning?.route_plan_id
+    ? await supabase.from('route_plans').select('org_id, user_id').eq('id', owning.route_plan_id).maybeSingle()
+    : { data: null };
+  if (!owningPlan) return notFound(res, 'Outlet visit not found');
+  if (owningPlan.user_id) await assertUserReachable((req as any).user, owningPlan.user_id as string, 'updateOutletVisit');
+  else if (owningPlan.org_id !== orgId(req)) return notFound(res, 'Outlet visit not found');
 
   // When the mobile app sends check-in coordinates, record how far the rep was
   // from the planned outlet as checkin_distance_m. The route_deviation feature

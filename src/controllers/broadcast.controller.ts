@@ -191,6 +191,11 @@ export const deleteQuestion = asyncHandler<AuthRequest>(async (req, res) => {
   if (isDemo(user)) return ok(res, null, 'Question deleted (Demo)');
   const { id } = req.params;
 
+  // The answers go first, so confirm the question is this org's before touching them.
+  const { data: owned } = await supabaseAdmin
+    .from('broadcast_questions').select('id').eq('id', id).eq('org_id', user.org_id).maybeSingle();
+  if (!owned) return notFound(res, 'Question not found');
+
   // Delete answers first
   await supabaseAdmin
     .from('broadcast_answers')

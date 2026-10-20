@@ -6,6 +6,7 @@ import { DEMO_ORG_ID, DEMO_USER_ID, isDemo } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
 import { logger } from '../lib/logger';
 import { resolveEntitlements } from '../lib/entitlements';
+import { isPlatformOperator } from '../lib/tenantScope';
 
 // In-memory profile cache. Keyed by token (so a refreshed token re-validates).
 // TTL is min(5 min, JWT exp). Eliminates 3 sequential round-trips per request:
@@ -93,6 +94,12 @@ function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): AuthRequ
   const raw = req.headers['x-org-id'];
   const target = Array.isArray(raw) ? raw[0] : raw;
   if (!target || !ORG_UUID_RE.test(target) || target === (user as { org_id?: string }).org_id) return user;
+  // Only the named platform operators are meant to act as another org. Any other super_admin (a tenant's own, or an
+  // account that was promoted) is logged first; IMPERSONATE_OPERATOR_ONLY=on stops it (the header is then ignored).
+  if (!isPlatformOperator(user as { role?: string; email?: string; client_id?: string })) {
+    logger.warn(`[authz-shadow] non-operator super_admin ${(user as { id?: string }).id} acting as org ${target}`);
+    if ((process.env.IMPERSONATE_OPERATOR_ONLY || '').toLowerCase() === 'on') return user;
+  }
   logger.info(`[Auth] super_admin acting as org ${target}`);
   return { ...(user as object), org_id: target } as AuthRequest['user'];
 }

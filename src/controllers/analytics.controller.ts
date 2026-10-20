@@ -951,14 +951,12 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
 
   let attRecord = (attRecords && attRecords.length > 0) ? attRecords[0] : null;
 
-  // SELF-HEALING: If duplicates exist, clean them up in background
+  // More than one open row means a shift from an earlier day was never closed (the sweep closes those, but clients
+  // that opt out of auto-checkout can have an overnight shift). This used to hard-delete every row but the newest on
+  // a plain GET — irreversible loss of attendance/payroll records — so it now only reports the newest and leaves
+  // the rest for the sweep / an admin to close.
   if (attRecords && attRecords.length > 1) {
-     console.log(`[MobileHome] Self-Healing: Cleaning ${attRecords.length - 1} duplicates for user ${user.id}`);
-     const toKeep = attRecords[0].id;
-     const toDelete = attRecords.slice(1).map(r => r.id);
-     supabaseAdmin.from('attendance').delete().in('id', toDelete).then(() => {
-        console.log(`[MobileHome] Self-Healing Complete: Removed ${toDelete.length} records.`);
-     });
+     console.log(`[MobileHome] ${attRecords.length} open attendance rows for user ${user.id}; showing the newest, leaving the rest untouched`);
   }
 
   if (attRecord) {

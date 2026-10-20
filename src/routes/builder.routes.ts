@@ -4,7 +4,46 @@ import { asyncHandler, sendSuccess, AppError } from "../utils";
 import { supabaseAdmin } from "../lib/supabase";
 import { AuthRequest } from "../types";
 import { resolveVisitTimes } from "../services/formVisit.store";
+import { orgRowReachable } from "../lib/userGuard";
+import { logger } from "../lib/logger";
 const router = Router();
+
+/**
+ * Every child route below takes a form/page/question id from the URL and used to act on it whatever org it belonged
+ * to. A form is reachable when it is the caller's org's (or the caller is the platform operator); anything else is a
+ * 404 so ids cannot be probed. `shadow` (app-facing reads/submits) only logs until BUILDER_ORG_ENFORCE=on, in case
+ * a tenant fills in a form another of its orgs owns.
+ */
+const builderEnforced = () => (process.env.BUILDER_ORG_ENFORCE || "").toLowerCase() === "on";
+
+async function assertFormReachable(req: AuthRequest, formId: string, opts: { shadow?: boolean; what: string }): Promise<void> {
+  const actor = req.user;
+  if (!actor) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+  const lenient = !!opts.shadow && !builderEnforced();
+  let formOrg: string | null | undefined;
+  try {
+    const { data, error } = await supabaseAdmin.from("builder_forms").select("org_id").eq("id", formId).maybeSingle();
+    if (error) throw new AppError(500, error.message, "DB_ERROR");
+    if (!data) throw new AppError(404, "Form not found", "NOT_FOUND");
+    formOrg = (data as { org_id?: string | null }).org_id;
+  } catch (e) {
+    // App-facing paths never start failing because of the check itself while it is only being observed.
+    if (lenient) { logger.warn(`[authz-shadow] ${opts.what}: form lookup failed for ${formId}: ${(e as Error).message}`); return; }
+    throw e;
+  }
+  if (orgRowReachable(actor, formOrg)) return;
+  logger.warn(`[authz-${lenient ? "shadow" : "deny"}] ${opts.what}: actor=${actor.id} org=${actor.org_id} form=${formId} formOrg=${formOrg}`);
+  if (lenient) return;
+  throw new AppError(404, "Form not found", "NOT_FOUND");
+}
+
+/** page/question id -> its form id, then the same check. */
+async function assertChildReachable(req: AuthRequest, table: "builder_pages" | "builder_questions", id: string, what: string): Promise<void> {
+  const { data, error } = await supabaseAdmin.from(table).select("form_id").eq("id", id).maybeSingle();
+  if (error) throw new AppError(500, error.message, "DB_ERROR");
+  if (!data) throw new AppError(404, "Not found", "NOT_FOUND");
+  await assertFormReachable(req, (data as { form_id: string }).form_id, { what });
+}
 
 /* ── Forms ───────────────────────────────────────── */
 
@@ -76,6 +115,7 @@ router.patch(
     allowed.forEach((k) => {
       if (req.body[k] !== undefined) updates[k] = req.body[k];
     });
+    await assertChildReachable(req, "builder_questions", req.params.id, "updateQuestion");
 
     updates.updated_at = new Date().toISOString();
 
@@ -100,6 +140,8 @@ router.delete(
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const orgId = req.user?.org_id;
     if (!orgId) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+
+    await assertFormReachable(req, req.params.id, { what: "deleteForm" });
 
     // Manual cascade delete due to lack of FK ON DELETE CASCADE
     const { error: e1 } = await supabaseAdmin.from("builder_submissions").delete().eq("form_id", req.params.id);
@@ -137,6 +179,7 @@ router.get(
   "/forms/:id/pages",
   requireAuth,
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    await assertFormReachable(req, req.params.id, { what: "getPages", shadow: true });
     const { data, error } = await supabaseAdmin
       .from("builder_pages")
       .select("*")
@@ -154,6 +197,7 @@ router.post(
   requireAuth,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { title, description, page_order } = req.body;
+    await assertFormReachable(req, req.params.id, { what: "createPage" });
 
     const { data, error } = await supabaseAdmin
       .from("builder_pages")
@@ -177,6 +221,7 @@ router.patch(
   requireAuth,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { title, description, page_order } = req.body;
+    await assertChildReachable(req, "builder_pages", req.params.id, "updatePage");
 
     const { data, error } = await supabaseAdmin
       .from("builder_pages")
@@ -195,6 +240,7 @@ router.delete(
   "/pages/:id",
   requireAuth,
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    await assertChildReachable(req, "builder_pages", req.params.id, "deletePage");
     await supabaseAdmin.from("builder_pages").delete().eq("id", req.params.id);
 
     return sendSuccess(res, { deleted: true });
@@ -207,6 +253,7 @@ router.get(
   "/forms/:id/questions",
   requireAuth,
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    await assertFormReachable(req, req.params.id, { what: "getQuestions", shadow: true });
     const { data, error } = await supabaseAdmin
       .from("builder_questions")
       .select("*")
@@ -249,6 +296,7 @@ router.post(
 
     if (!qtype)
       throw new AppError(400, "qtype is required", "VALIDATION_ERROR");
+    await assertFormReachable(req, req.params.id, { what: "createQuestion" });
 
     const { data, error } = await supabaseAdmin
       .from("builder_questions")
@@ -328,6 +376,7 @@ router.delete(
   "/questions/:id",
   requireAuth,
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    await assertChildReachable(req, "builder_questions", req.params.id, "deleteQuestion");
     await supabaseAdmin
       .from("builder_questions")
       .delete()
@@ -343,6 +392,7 @@ router.get(
   "/forms/:id/submissions",
   requireAuth,
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    await assertFormReachable(req, req.params.id, { what: "listFormSubmissions" });
     const { data, error } = await supabaseAdmin
       .from("builder_submissions")
       .select("*, users(name, employee_id)")
@@ -366,6 +416,7 @@ router.post(
     } = req.body;
 
     const user = req.user;
+    await assertFormReachable(req, req.params.id, { what: "createFormSubmission", shadow: true });
 
     // Enforce 10-digit mobile numbers for every `phone`-type field (mirrors the
     // guard in forms.controller.submitForm). `answers` is a field_id -> value

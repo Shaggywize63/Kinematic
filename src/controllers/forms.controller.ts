@@ -13,6 +13,7 @@ import { withVisitFields } from '../services/formVisit.service';
 import { reverseGeocode } from '../services/crm/places.service';
 import { resolveVisitTimes } from '../services/formVisit.store';
 import { usesStrictTenantScope, resolveStrictTenantScope, callerMayReadOrg } from '../lib/tenantScope';
+import { orgRowReachable } from '../lib/userGuard';
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
 function parseGps(s: unknown): { lat: number; lng: number } | null {
@@ -117,7 +118,13 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
 export const getTemplate = asyncHandler<AuthRequest>(async (req, res) => {
   const { data, error } = await supabaseAdmin.from('builder_forms').select('*, builder_questions(*)').eq('id', req.params.id).single();
   if (error) return badRequest(res, error.message);
-  
+  // Another org's form: logged first (BUILDER_ORG_ENFORCE=on turns it into a 404) in case a tenant fills in a form
+  // that one of its sibling orgs owns.
+  if (!orgRowReachable(req.user, data.org_id)) {
+    logger.warn(`[authz-shadow] getTemplate: actor=${req.user?.id} org=${req.user?.org_id} form=${data.id} formOrg=${data.org_id}`);
+    if ((process.env.BUILDER_ORG_ENFORCE || '').toLowerCase() === 'on') return notFound(res, 'Form not found');
+  }
+
   // Apply same mapping logic for consistency
   const mapped = {
     id: data.id,
