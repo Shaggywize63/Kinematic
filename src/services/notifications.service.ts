@@ -186,5 +186,7 @@ export async function dispatchPendingPushes(opts?: {
     );
   }
 
+  // Silent by design for the recipient, so leave a trace operators can grep when checking that a project or client is really switched off.
+  if (suppressed > 0) logger.info(`[notif-policy] suppressed ${suppressed} of ${rows.length} pending notification(s); sent ${sent}`);
   return { scanned: rows.length, sent, failed, skipped_no_token, suppressed, firebase_disabled: !messaging, credential_error: credentialFailures > 0 };
 }
