@@ -164,6 +164,71 @@ describe('listLeadsWithCount — column filters', () => {
   });
 });
 
+describe('listLeadsWithCount — unassigned & follow-up due', () => {
+  const selectArg = () => leadsChain().ops.find((o) => o.method === 'select')?.args[0];
+
+  it('unassigned=true filters to owner_id IS NULL', async () => {
+    __mock.setDefault('crm_leads', { data: [], count: 0 });
+    await leads.listLeadsWithCount(ORG, { unassigned: 'true' }, null, {});
+    expect(leadsChain().ops.some((o) => o.method === 'is' && o.args[0] === 'owner_id' && o.args[1] === null)).toBe(true);
+  });
+
+  it('ignores unassigned unless it is exactly "true"', async () => {
+    __mock.setDefault('crm_leads', { data: [], count: 0 });
+    await leads.listLeadsWithCount(ORG, { unassigned: 'false' }, null, {});
+    expect(leadsChain().ops.some((o) => o.method === 'is' && o.args[0] === 'owner_id')).toBe(false);
+  });
+
+  it('is AND-ed with the visibility scope — an own-only rep never gains unowned leads', async () => {
+    __mock.setDefault('crm_leads', { data: [], count: 0 });
+    await leads.listLeadsWithCount(ORG, { unassigned: 'true' }, CLIENT, { strictClient: true, ownOnly: true, selfOwnerId: SELF });
+    const c = leadsChain();
+    expect(c.ors.some((o) => o.includes(`owner_id.eq.${SELF}`))).toBe(true); // the scope OR is still applied
+    expect(c.ops.some((o) => o.method === 'is' && o.args[0] === 'owner_id' && o.args[1] === null)).toBe(true);
+  });
+
+  it('followup_due=true embeds crm_activities as an INNER join and filters to open, due-or-overdue ones', async () => {
+    __mock.setDefault('crm_leads', { data: [], count: 0 });
+    const before = Date.now();
+    await leads.listLeadsWithCount(ORG, { followup_due: 'true' }, null, {});
+    expect(selectArg()).toBe('*, crm_activities!inner(id)');
+    const ops = leadsChain().ops;
+    expect(ops.some((o) => o.method === 'is' && o.args[0] === 'crm_activities.completed_at' && o.args[1] === null)).toBe(true);
+    expect(ops.some((o) => o.method === 'is' && o.args[0] === 'crm_activities.deleted_at' && o.args[1] === null)).toBe(true);
+    expect(ops.some((o) => o.method === 'not' && o.args[0] === 'crm_activities.status' && o.args[1] === 'in' && o.args[2] === '(done,cancelled)')).toBe(true);
+    const lte = ops.find((o) => o.method === 'lte' && o.args[0] === 'crm_activities.due_at');
+    expect(lte).toBeTruthy();
+    // "now", not a date window: a follow-up due later today is not due yet.
+    const t = new Date(lte!.args[1] as string).getTime();
+    expect(t).toBeGreaterThanOrEqual(before);
+    expect(t).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('does not touch the select (or add activity filters) when followup_due is absent', async () => {
+    __mock.setDefault('crm_leads', { data: [], count: 0 });
+    await leads.listLeadsWithCount(ORG, {}, null, {});
+    expect(selectArg()).toBe('*');
+    expect(leadsChain().ops.some((o) => typeof o.args[0] === 'string' && (o.args[0] as string).startsWith('crm_activities.'))).toBe(false);
+  });
+
+  it('strips the embedded activities from the returned rows (API payload and CSV export)', async () => {
+    __mock.setDefault('crm_leads', { data: [{ id: 'l1', first_name: 'A', crm_activities: [{ id: 'a1' }] }], count: 1 });
+    const { rows } = await leads.listLeadsWithCount(ORG, { followup_due: 'true' }, null, {});
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).not.toHaveProperty('crm_activities');
+    expect(rows[0]).toMatchObject({ id: 'l1', first_name: 'A', is_inbound: false });
+  });
+
+  it('combines with the other filters (unassigned + followup_due + status)', async () => {
+    __mock.setDefault('crm_leads', { data: [], count: 0 });
+    await leads.listLeadsWithCount(ORG, { unassigned: 'true', followup_due: 'true', status: 'working' }, null, {});
+    const c = leadsChain();
+    expect(c.eqs.status).toBe('working');
+    expect(c.ops.some((o) => o.method === 'is' && o.args[0] === 'owner_id')).toBe(true);
+    expect(c.ops.some((o) => o.method === 'lte' && o.args[0] === 'crm_activities.due_at')).toBe(true);
+  });
+});
+
 describe('listLeadsWithCount — sort & pagination', () => {
   it('maps sort=name to first_name then last_name (whitelisted)', async () => {
     __mock.setDefault('crm_leads', { data: [], count: 0 });
