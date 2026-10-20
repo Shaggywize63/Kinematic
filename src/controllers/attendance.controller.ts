@@ -27,6 +27,7 @@ import {
 } from '../services/dailyReport.service';
 import { hasTransportModeValue, trackTransportModeOn, validateTransportMode } from '../services/transportMode.service';
 import { annotateTransportLabels, transportModesForUser } from '../services/transportMode.store';
+import { usesStrictTenantScope, resolveStrictTenantScope } from '../lib/tenantScope';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -599,6 +600,14 @@ async function resolveTeamAttendanceScope(
 ): Promise<TeamAttendanceScope> {
   const user = req.user!;
   const { client_id } = req.query as Record<string, string>;
+
+  // Every project except the Tata default returns ONE org's attendance per request (see lib/tenantScope):
+  // the caller's own org, or the client they explicitly picked and may use — never every org at once.
+  if (usesStrictTenantScope()) {
+    const s = await resolveStrictTenantScope(req, client_id);
+    const scopeIds = await fieldForceScopeIds(req);
+    return { isGlobal: false, isClientBound: s.isClientBound, pickedClientId: s.pickedClientId, scopeOrgId: s.scopeOrgId, scopeIds };
+  }
 
   const isSagar = (user.name || '').toLowerCase().includes('sagar');
   const role = (user.role || '').toLowerCase();
