@@ -11,6 +11,7 @@ import { createClient as createSupabaseClient, type SupabaseClient } from '@supa
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
 import { readOrgSettings, writeOrgSettings } from '../services/notificationPolicy';
+import { cleanAppUiForStore } from '../lib/appItems';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
 // its OWN org (a row-level tenant) for isolation, and the parent org that
@@ -732,7 +733,9 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
   let trialOut: any = ((client as { settings?: any }).settings || {})?.trial ?? null;
   const hasAppUi = app_ui !== undefined && app_ui !== null && typeof app_ui === 'object' && !Array.isArray(app_ui);
   const settingsExtras: Record<string, unknown> = {};
-  if (hasAppUi) settingsExtras.app_ui = app_ui;
+  // The layout (drag-and-drop order / bottom-bar placement) is cleaned on the way in: known ids only, no duplicates.
+  const appUiToStore = hasAppUi ? cleanAppUiForStore(app_ui) : null;
+  if (hasAppUi) settingsExtras.app_ui = appUiToStore;
   if (trial !== undefined) {
     // Sent → set or clear (null when invalid/empty, which removes the record).
     trialOut = computeTrial(trial);
@@ -747,7 +750,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     if (!seesAllClients(user)) sUpd = sUpd.eq(ownerColumn(), user.org_id);
     const { error: sErr } = await sUpd;
     if (sErr) logger.warn(`[Clients] settings write failed for ${id}: ${sErr.message}`);
-    else { if (hasAppUi) appUiOut = app_ui; clearClientFlagCache(id); }
+    else { if (hasAppUi) appUiOut = appUiToStore; clearClientFlagCache(id); }
 
     // Mirror app_ui ONLY to the linked data project (same idea as the
     // module-ceiling sync) so a client whose /auth/me is served from another
@@ -761,7 +764,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
           const remote = adminClientFor(dataProject);
           const { data: tc } = await remote.from('clients').select('settings').eq('id', dataClientId).maybeSingle();
           const cur = ((tc as any)?.settings && typeof (tc as any).settings === 'object' && !Array.isArray((tc as any).settings)) ? (tc as any).settings : {};
-          await remote.from('clients').update({ settings: { ...cur, app_ui } }).eq('id', dataClientId);
+          await remote.from('clients').update({ settings: { ...cur, app_ui: appUiToStore } }).eq('id', dataClientId);
           clearClientFlagCache(dataClientId);
           logger.info(`[Clients] synced app_ui ${id} -> ${dataProject}/${dataClientId}`);
         } catch (e: any) {

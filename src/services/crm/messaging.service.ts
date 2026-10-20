@@ -277,7 +277,7 @@ export async function persistMentions(
   // Web Push — fire-and-forget; failures don't abort the originating
   // request because the user has already seen the message land.
   void import('./webPush.service').then((wp) =>
-    wp.sendPushToUsers(recipients, { title, body: bodyByKind[source_kind], url: linkForSource(source_kind, source_id) }),
+    wp.sendPushToUsers(recipients, { title, body: bodyByKind[source_kind], url: linkForSource(source_kind, source_id) }, { orgId: me.org_id, kind: 'mention' }),
   ).catch(() => { /* ignore */ });
 }
 
@@ -543,7 +543,7 @@ export async function sendMessage(req: AuthRequest, threadId: string, body: stri
       })),
     );
     void import('./webPush.service').then((wp) =>
-      wp.sendPushToUsers(recipients, { title, body: preview, url: `/dashboard/inbox?thread=${threadId}` }),
+      wp.sendPushToUsers(recipients, { title, body: preview, url: `/dashboard/inbox?thread=${threadId}` }, { orgId: (thread as any).org_id, kind: 'message' }),
     ).catch(() => { /* ignore */ });
   }
 

@@ -201,6 +201,10 @@ Managing it:
 - `PUT  /api/v1/clients/:id/notifications` `{ "enabled_kinds": ["sos", …] | ["*"] | [] }` — replaces the list; unknown kinds → 400.
 - `GET  /api/v1/notifications/catalog` — the same view for the signed-in user's own org (read-only).
 
+Other in-app surfaces follow the same switches: the **unread badge** on the home payload (`countUnreadAllowed`), the **home
+broadcast banner** and the **browser (web) push** for chat messages and @mentions. A client without the **Notifications**
+module (a complete entitlement list that lacks it) sees no in-app notifications at all.
+
 Adding a notification: add its `kind` to the catalogue first. A kind that is not in the catalogue is **never** delivered
 (except to a client on `["*"]`) and logs `[notif-policy] notification kind "x" is not in the catalogue` once.
 

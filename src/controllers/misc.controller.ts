@@ -176,7 +176,9 @@ export const getNotifications = asyncHandler<AuthRequest>(async (req, res) => {
   // client with a kind switched off does not see it in the bell either.
   const allowed = await allowedFlags(rows.map((n: any) => ({ orgId: user.org_id, kind: n.data.kind })))
   rows = rows.filter((_: unknown, i: number) => allowed[i])
-  sendPaginated(res, rows, isProjectDisabled() ? 0 : (count || 0), page, limit)
+  // A client without the Notifications module (a complete entitlement list that lacks it) has no in-app notifications.
+  if (user.entitlements_strict === true && !(user.enabled_modules ?? []).includes('notifications') && (user.role || '').toLowerCase() !== 'super_admin') rows = []
+  sendPaginated(res, rows, isProjectDisabled() || rows.length === 0 && (data || []).length > 0 ? 0 : (count || 0), page, limit)
 })
 
 export const markRead = asyncHandler<AuthRequest>(async (req, res) => {

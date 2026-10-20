@@ -12,6 +12,7 @@
 import webpush from 'web-push';
 import { supabaseAdmin } from '../../lib/supabase';
 import { logger } from '../../lib/logger';
+import { isNotificationEnabled } from '../notificationPolicy';
 
 let configured = false;
 function configure(): boolean {
@@ -37,9 +38,14 @@ export interface PushPayload {
   tag?: string;
 }
 
-export async function sendPushToUsers(userIds: string[], payload: PushPayload): Promise<void> {
+/**
+ * `policy` names the notification kind and the recipients' org so the same switches that govern the app push apply to the
+ * browser push (Tata and clients with that kind off receive nothing). Omit it only for pushes that are not notifications.
+ */
+export async function sendPushToUsers(userIds: string[], payload: PushPayload, policy?: { orgId?: string | null; kind: string }): Promise<void> {
   if (userIds.length === 0) return;
   if (!configure()) return; // VAPID not set → silently skip in dev
+  if (policy && !(await isNotificationEnabled(policy.orgId, policy.kind))) return;
 
   const { data: subs } = await supabaseAdmin
     .from('web_push_subscriptions')

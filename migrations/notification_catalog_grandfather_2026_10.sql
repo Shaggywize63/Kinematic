@@ -16,3 +16,9 @@ select o.id, 'notifications.enabled_kinds', '["*"]'::jsonb, null
 from organisations o
 where exists (select 1 from users u where u.org_id = o.id)
   and not exists (select 1 from org_settings s where s.org_id = o.id and s.key = 'notifications.enabled_kinds');
+
+-- 2026-10-20 follow-up: notifications are now OFF for every client until Client Management → Notifications ticks them.
+-- The seed above was applied first so nothing changed on the day the catalogue shipped; this switches the seeded
+-- orgs to "nothing on". Only rows still holding the seed value are touched, so a choice an admin made since stays.
+--   update org_settings set value = '[]'::jsonb, updated_at = now()
+--   where key = 'notifications.enabled_kinds' and value = '["*"]'::jsonb;
