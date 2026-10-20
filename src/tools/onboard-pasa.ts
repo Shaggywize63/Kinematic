@@ -21,8 +21,9 @@
  * Decisions (operator-approved):
  *   • 40 users (25 sales BM/ASM/ASO/CSE + 15 Consumer Champions). Krishna
  *     Kachhap skipped (no email). Kishan Prasad created, city scope pending.
- *   • Every user gets a login; shared temp password (Pasa@12345). Admin
- *     pasa@kinematicapp.com keeps Manvik@1221.
+ *   • Every user gets a login with a shared temp password; the admin
+ *     pasa@kinematicapp.com has its own. Both come from the environment
+ *     (PASA_TEMP_PASSWORD / PASA_ADMIN_PASSWORD) — never from source.
  *   • Designations mirror SRS: BM→Business Managers, SM→Area Sales Manager,
  *     ASO→Area Sales Officer, CC→Consumer Champion, plus a NEW
  *     "Consumer Sales Executive" (own scope, under Area Sales Officer) for CSE.
@@ -43,8 +44,9 @@ const PASA_ORG_NAME = 'PASA';
 const PASA_ORG_SLUG = 'pasa-house';
 const OWNER_ORG_FALLBACK = '11111111-1111-4111-8111-111111111111'; // BMW's owner (platform master)
 const ADMIN_EMAIL = 'pasa@kinematicapp.com';
-const ADMIN_PASSWORD = 'Manvik@1221';
-const TEMP_PASSWORD = 'Pasa@12345';
+const ADMIN_PASSWORD = process.env.PASA_ADMIN_PASSWORD || '';
+const TEMP_PASSWORD = process.env.PASA_TEMP_PASSWORD || '';
+if (!ADMIN_PASSWORD || !TEMP_PASSWORD) { console.error('Set PASA_ADMIN_PASSWORD and PASA_TEMP_PASSWORD to run this tool.'); process.exit(1); }
 const NEW_DESIGNATION = 'Consumer Sales Executive'; // created under Area Sales Officer
 
 type PasaUser = {
