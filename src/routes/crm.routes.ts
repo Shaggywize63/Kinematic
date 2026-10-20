@@ -1591,6 +1591,9 @@ router.post('/telephony/click-to-call', wrap(async (req, res) => {
     throw new AppError(403, 'IVR calling is not enabled for your account', 'FORBIDDEN');
   }
   const b = (req.body ?? {}) as { lead_id?: string; to?: string; from?: string };
+  // Whose telephony is it? The lead's client must have IVR switched on in Client Management (platform admins bypass the
+  // per-user module list, so this is the check that keeps IVR off for clients that do not have it).
+  await telephony.assertIvrEnabledForLead({ org_id: orgId(req), lead_id: b.lead_id, caller_client_id: clientId(req) });
   res.json(await telephony.clickToCallForLead({
     org_id: orgId(req), user_id: userId(req)!,
     lead_id: String(b.lead_id ?? ''), to: b.to ?? null, from: b.from ?? null,

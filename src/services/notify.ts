@@ -19,6 +19,7 @@
  */
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
+import { isNotificationEnabled } from './notificationPolicy';
 
 export interface NotifyInput {
   orgId: string | null | undefined;
@@ -50,6 +51,8 @@ function rowFor(orgId: string, userId: string, n: Omit<NotifyInput, 'orgId' | 'u
 export async function notify(n: NotifyInput): Promise<void> {
   if (!n.orgId || !n.userId) return;
   try {
+    // Don't create a row nobody will be sent (project switched off, or this client has the kind off).
+    if (!(await isNotificationEnabled(n.orgId, n.kind))) return;
     await supabaseAdmin.from('notifications').insert(rowFor(n.orgId, n.userId, n));
   } catch (e: any) {
     logger.error(`[notify] insert failed (kind=${n.kind}): ${e?.message || e}`);
@@ -66,6 +69,7 @@ export async function notifyUsers(
   const ids = [...new Set(userIds.filter((x): x is string => !!x && x !== opts?.exclude))];
   if (!ids.length) return;
   try {
+    if (!(await isNotificationEnabled(n.orgId, n.kind))) return;
     await supabaseAdmin.from('notifications').insert(ids.map((uid) => rowFor(n.orgId as string, uid, n)));
   } catch (e: any) {
     logger.error(`[notify] bulk insert failed (kind=${n.kind}): ${e?.message || e}`);

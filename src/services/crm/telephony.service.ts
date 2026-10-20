@@ -9,8 +9,9 @@
  * safe. The call itself is placed on the provider; we only kick it off and
  * return the provider's call id/status.
  */
-import { AppError } from '../../utils';
+import { AppError, isUUID } from '../../utils';
 import { supabaseAdmin } from '../../lib/supabase';
+import { clientGrantedModuleIds } from '../../lib/entitlements';
 import { recordPlacement } from './ai/telephonyCallLog.service';
 
 export interface TelephonyConfig {
@@ -163,6 +164,28 @@ async function exotelConnect(
   }
   const call = json?.Call ?? json?.Calls ?? {};
   return { ok: true, provider: 'exotel', call_id: call?.Sid ?? call?.CallSid ?? null, status: call?.Status ?? 'queued' };
+}
+
+/** The module Client Management switches on for a client that gets IVR calling. */
+export const IVR_MODULE = 'ivr_call';
+
+/**
+ * IVR is a per-client switch (Client Management → IVR calling). The apps hide the button for a user whose client lacks the
+ * module, but platform admins bypass the module list there, so the server decides: the lead's client (else the caller's
+ * client) must hold `ivr_call`. A lead with no client at all is a platform-level lead and is left to the caller's own
+ * entitlement check in the route.
+ */
+export async function assertIvrEnabledForLead(params: { org_id: string; lead_id?: string | null; caller_client_id?: string | null }): Promise<void> {
+  let client: string | null = null;
+  if (params.lead_id && isUUID(params.lead_id)) {
+    const { data } = await supabaseAdmin.from('crm_leads').select('client_id').eq('id', params.lead_id).eq('org_id', params.org_id).maybeSingle();
+    client = (data as { client_id?: string | null } | null)?.client_id ?? null;
+  }
+  client = client ?? params.caller_client_id ?? null;
+  if (!client) return;
+  if (!(await clientGrantedModuleIds(client)).includes(IVR_MODULE)) {
+    throw new AppError(403, 'IVR calling is not switched on for this client', 'FORBIDDEN');
+  }
 }
 
 /**

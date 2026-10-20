@@ -10,6 +10,7 @@ import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
+import { readOrgSettings, writeOrgSettings } from '../services/notificationPolicy';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
 // its OWN org (a row-level tenant) for isolation, and the parent org that
@@ -916,4 +917,43 @@ export const grantClientPackages = asyncHandler(async (req: AuthRequest, res: Re
 
   clearEntitlementCache(id);
   ok(res, { client_id: id, granted_packages: filtered, granted_modules: grantable.length });
+});
+
+// ── Notifications per client (Client Management → Notifications) ─────────────────────────────────────────────
+// Which of the catalogue's notifications (lib/notificationCatalog.ts) this client receives. Nothing is on by
+// default; the setting lands on the org that holds the client's users, exactly like the seat cap above.
+
+async function ownedClientOrg(req: AuthRequest, res: Response): Promise<{ admin: SupabaseClient; orgId: string; project: string } | null> {
+  const user = req.user!;
+  const { id } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return null; }
+  let q = supabaseAdmin.from('clients').select('id, org_id, data_project_key, data_client_id').eq('id', id);
+  if (!seesAllClients(user)) q = q.eq(ownerColumn(), user.org_id);
+  const { data: client, error } = await q.maybeSingle();
+  if (error) { badRequest(res, error.message); return null; }
+  if (!client) { notFound(res, 'Client not found'); return null; }
+  const { admin, orgId } = await resolveCapTarget(client as { org_id?: string; data_project_key?: string; data_client_id?: string });
+  if (!orgId) { badRequest(res, 'This client has no organisation to configure yet'); return null; }
+  const linked = admin !== supabaseAdmin && (client as { data_project_key?: string }).data_project_key;
+  return { admin, orgId, project: linked || currentProjectKey() };
+}
+
+/** GET /api/v1/clients/:id/notifications — the catalogue with this client's on/off flags. */
+export const getClientNotifications = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const target = await ownedClientOrg(req, res);
+  if (!target) return;
+  ok(res, await readOrgSettings(target.orgId, target.admin, target.project));
+});
+
+/** PUT /api/v1/clients/:id/notifications — body { enabled_kinds: string[] } (catalogue kinds, or ["*"] for all). */
+export const setClientNotifications = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const target = await ownedClientOrg(req, res);
+  if (!target) return;
+  try {
+    await writeOrgSettings(target.orgId, (req.body ?? {}).enabled_kinds, req.user!.id, target.admin);
+  } catch (e: any) {
+    badRequest(res, e?.message || 'Could not save notification settings');
+    return;
+  }
+  ok(res, await readOrgSettings(target.orgId, target.admin, target.project));
 });
