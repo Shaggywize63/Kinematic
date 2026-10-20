@@ -10,7 +10,6 @@ import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
-import { provisionClient as runProvision, provisioningPreflight } from '../services/provisionClient.service';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
 // its OWN org (a row-level tenant) for isolation, and the parent org that
@@ -392,46 +391,20 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
 });
 
 /**
- * GET /api/v1/clients/provision/preflight
- * Super-admin only: is automated per-client project provisioning available on
- * this deployment? Lets the UI show/hide the "dedicated project" toggle.
+ * Dedicated per-client Supabase projects were created through supabase.com's Management API. Everything now runs on
+ * the self-hosted stack in AWS, so that flow no longer exists; the two routes stay so an older dashboard build that
+ * still asks gets a clear answer (preflight says "not available", which hides its "dedicated project" toggle).
  */
+const PROVISIONING_RETIRED = 'Dedicated per-client project provisioning was retired with the move to AWS.';
+
+/** GET /api/v1/clients/provision/preflight — super-admin only. */
 export const provisionPreflight = asyncHandler(async (_req: AuthRequest, res: Response) => {
-  ok(res, provisioningPreflight());
+  ok(res, { ok: false, reason: PROVISIONING_RETIRED });
 });
 
-/**
- * POST /api/v1/clients/provision
- * Super-admin only: fully automated onboarding — creates a dedicated Supabase
- * project (separate DB) for the client, loads the golden schema, creates its
- * org + client record + admin user (test@<slug>.com), creates the control-plane
- * client record in Kinematic, and links the two. Idempotent via Idempotency-Key.
- */
-export const provisionClientHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const user = req.user!;
-  const { name, contact_person, phone, email, password, modules, region } = req.body || {};
-  if (!name || typeof name !== 'string') { badRequest(res, 'Client name is required'); return; }
-
-  const pre = provisioningPreflight();
-  if (!pre.ok) { badRequest(res, pre.reason || 'Provisioning is not configured'); return; }
-
-  try {
-    const result = await runProvision({
-      name: name.trim(),
-      contactPerson: contact_person,
-      phone,
-      adminEmail: typeof email === 'string' && email.trim() ? email.trim() : undefined,
-      adminPassword: typeof password === 'string' && password ? password : undefined,
-      modules: Array.isArray(modules) ? modules : [],
-      region: typeof region === 'string' ? region : undefined,
-      actorUserId: user.id,
-      actorOrgId: user.org_id,
-      idempotencyKey: (req.headers['idempotency-key'] as string) || undefined,
-    });
-    created(res, result);
-  } catch (e: any) {
-    badRequest(res, `Provisioning failed: ${e?.message || e}`);
-  }
+/** POST /api/v1/clients/provision — super-admin only. */
+export const provisionClientHandler = asyncHandler(async (_req: AuthRequest, res: Response) => {
+  res.status(410).json({ success: false, error: PROVISIONING_RETIRED });
 });
 
 /**
