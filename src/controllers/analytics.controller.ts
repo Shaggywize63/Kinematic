@@ -8,6 +8,7 @@ import { rulesForClients, lateFields } from '../services/attendanceRules.store';
 import { annotateTransportLabels } from '../services/transportMode.store';
 import { resolveLivePosition } from '../lib/livePosition';
 import { logger } from '../lib/logger';
+import { countUnreadAllowed, isNotificationEnabled } from '../services/notificationPolicy';
 import { UNKNOWN_STORE_FALLBACK, buildFeedTitle, customerNamesBySubmission } from '../services/activityFeedTitle.service';
 import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome, getMockBroadcasts, getMockLearningMaterials } from '../utils/demoData';
 
@@ -986,11 +987,8 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('user_id', user.id)
     .gte('submitted_at', `${today}T00:00:00+05:30`)
     .lte('submitted_at', `${today}T23:59:59+05:30`);
-  const unreadPromise = supabaseAdmin
-    .from('notifications')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', user.id)
-    .eq('is_read', false);
+  // Same policy as the bell list, so the badge never counts what the list will not show (Tata, or a client with it off).
+  const unreadPromise = countUnreadAllowed({ id: user.id, org_id: user.org_id }).then((count) => ({ count }));
   const quotePromise = supabaseAdmin
     .from('motivation_quotes')
     .select('*')
@@ -1027,7 +1025,8 @@ export const getMobileHome = asyncHandler<AuthRequest>(async (req, res) => {
   const actualSubmissions = actualSubsRes.data;
   const unread = unreadRes.count;
   const quote = quoteRes.data;
-  const bq = broadcastRes.data;
+  // The home broadcast banner is a "Broadcast" notification: it follows the same policy (Tata / a client with it off: none).
+  const bq = (await isNotificationEnabled(user.org_id, 'broadcast')) ? broadcastRes.data : null;
 
   if (attRecord) {
     enrichWithHours(attRecord);

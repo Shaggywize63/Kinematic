@@ -20,6 +20,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { currentProjectKey } from '../lib/projects';
 import { logger } from '../lib/logger';
 import { ALL_KINDS, canonicalKind, isKnownKind, parseEnabledKinds, NOTIFICATION_CATALOG } from '../lib/notificationCatalog';
+import { notificationKind } from '../lib/notificationRoute';
 
 export const SETTING_KEY = 'notifications.enabled_kinds';
 const TTL_MS = 60_000;
@@ -155,4 +156,26 @@ export async function writeOrgSettings(orgId: string, kindsInput: unknown, updat
   if (error) throw new Error(error.message);
   cache.delete(ck(orgId));
   return kinds;
+}
+
+// ── In-app surfaces other than the bell list ────────────────────────────────────────────────────────────────────
+
+/**
+ * The unread badge. It must agree with the list: a project or client with notifications off shows no badge, and a client
+ * with only some kinds on counts only those. Fails open to the plain count when settings can't be read.
+ */
+export async function countUnreadAllowed(user: { id: string; org_id?: string | null }, client = supabaseAdmin): Promise<number> {
+  const plain = async () => {
+    const { count } = await client.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('is_read', false);
+    return count ?? 0;
+  };
+  if (!policyActive()) return plain();
+  if (isProjectDisabled()) return 0;
+  const settings = await loadEnabledKinds([user.org_id]);
+  if (!settings) return plain();
+  const e = user.org_id ? settings.get(user.org_id) : undefined;
+  if (!e || (!e.all && e.kinds.size === 0)) return 0;
+  if (e.all) return plain();
+  const { data } = await client.from('notifications').select('type, data').eq('user_id', user.id).eq('is_read', false).limit(500);
+  return ((data ?? []) as Array<{ type?: string | null; data?: unknown }>).filter((r) => kindEnabled(e, notificationKind(r.type, r.data))).length;
 }

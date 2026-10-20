@@ -8,6 +8,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
 import { resolveEntitlements } from '../lib/entitlements';
+import { deriveAppUi } from '../lib/appItems';
 import { invalidateAuthCache } from '../middleware/auth';
 import { resolveProjectForEmailAsync } from '../lib/projects';
 import * as passwordReset from '../services/auth/passwordReset.service';
@@ -379,7 +380,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds(userProfile.org_id);
   const businessType = await getCrmBusinessType(userProfile.org_id, userProfile.client_id);
-  const appUiConfig = await getClientAppUiConfig(userProfile.client_id);
+  const appUiConfig = deriveAppUi(await getClientAppUiConfig(userProfile.client_id), entitlements);
 
   return ok(res, {
     access_token: session.session.access_token,
@@ -396,6 +397,7 @@ export const login = asyncHandler<Request>(async (req, res) => {
       assigned_city_names: assignedCityNames,
       enabled_modules: entitlements.enabled_modules,
       enabled_packages: entitlements.enabled_packages,
+      entitlements_strict: entitlements.strict === true,
       location_ping_interval_seconds: locationPingIntervalSeconds,
       business_type: businessType,
       app_ui_config: appUiConfig,
@@ -651,7 +653,7 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds((data as any)?.org_id);
   const businessType = await getCrmBusinessType((data as any)?.org_id, (data as any)?.client_id);
-  const appUiConfig = await getClientAppUiConfig((data as any)?.client_id);
+  const appUiConfig = deriveAppUi(await getClientAppUiConfig((data as any)?.client_id), entitlements);
 
   const result = {
     ...data,
@@ -672,6 +674,9 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
     org_name: (data as { organisations?: { name?: string } | null })?.organisations?.name ?? null,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
+    // True when enabled_modules is the COMPLETE list (empty = nothing). Clients treat an empty list as "unknown, show
+    // the defaults" only when this is false/absent.
+    entitlements_strict: entitlements.strict === true,
     location_ping_interval_seconds: locationPingIntervalSeconds,
     business_type: businessType,
     // Per-client app-UI customization (menu / bottom-tab / CRM-More visibility)

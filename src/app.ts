@@ -382,6 +382,7 @@ app.get('/health', (_req, res) => {
 const V1 = '/api/v1';
 
 import { requireModule, enforceCityScope } from './middleware/rbac';
+import { moduleGate } from './middleware/moduleGate';
 
 // ── Public webhook ingestion (NO auth) ───────────────────────
 // Mounted BEFORE the auth-catch-all below so provider webhooks
@@ -569,6 +570,9 @@ app.use(V1, (req, res, next) => {
 // login-as/impersonate view-switch intact. No-op for everyone else.
 app.use(V1, readOnlyGuard);
 
+// A client sees only the modules ticked for it. Log-only until MODULE_GATE=enforce (see middleware/moduleGate.ts).
+app.use(V1, moduleGate);
+
 // Public/Auth routes (loginLimiter already applied at /auth/login above)
 app.use(`${V1}/auth`,          perRouteLimit({ windowMs: 60_000, max: 30 }), authRoutes);
 
@@ -584,7 +588,7 @@ app.use(`${V1}/sos`,           requireAuth, sosRoutes);
 app.use(`${V1}/leaderboard`,   requireAuth, leaderboardRoutes);
 app.use(`${V1}/notifications`, requireAuth, notifRoutes);
 app.use(`${V1}/learning`,      requireAuth, learningRoutes);
-app.use(`${V1}/grievances`,    requireAuth, requireModule('reports'), grievanceRoutes);
+app.use(`${V1}/grievances`,    requireAuth, requireModule('grievances'), grievanceRoutes);
 app.use(`${V1}/analytics`,     requireAuth, enforceCityScope, analyticsRoutes);
 app.use(`${V1}/visits`,        requireAuth, enforceCityScope, visitlogRoutes);
 app.use(`${V1}/upload`,        requireAuth, uploadRoutes);

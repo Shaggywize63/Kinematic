@@ -254,6 +254,7 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
     role_permissions_write: rolePermissionsWrite,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
+    entitlements_strict: entitlements.strict === true,
   } as AuthRequest['user'];
 }
 
@@ -563,6 +564,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     role_permissions_write: rolePermissionsWrite,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
+    entitlements_strict: entitlements.strict === true,
   } as AuthRequest['user'];
 
   // Session check happens AFTER we have the fresh profile (with the
@@ -612,8 +614,9 @@ export function requireModule(moduleName: string) {
     const entitlements = req.user.enabled_modules || [];
 
     if (role === 'super_admin') return next();
-    // Entitlement gate: client must have purchased/been-granted the module.
-    if (entitlements.length > 0 && !entitlements.includes(moduleName)) {
+    // Entitlement gate: client must have purchased/been-granted the module. A strict list is complete, so an empty
+    // one denies too (Client Management ticks are the whole story).
+    if ((entitlements.length > 0 || req.user.entitlements_strict === true) && !entitlements.includes(moduleName)) {
       return forbidden(res, `Module not enabled for your account: ${moduleName}`);
     }
     // Per-user RBAC inside a client: legacy permissions array still respected.

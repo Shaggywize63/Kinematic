@@ -12,7 +12,7 @@ jest.mock('../src/lib/apns', () => ({ apnsEnabled: true, sendApns: (...a: unknow
 
 import {
   allowedFlags, isNotificationEnabled, policyActive, isProjectDisabled, readOrgSettings, writeOrgSettings,
-  toEnabled, _resetPolicyCache,
+  toEnabled, _resetPolicyCache, countUnreadAllowed,
 } from '../src/services/notificationPolicy';
 import { dispatchPendingPushes } from '../src/services/notifications.service';
 import { notify, notifyUsers } from '../src/services/notify';
@@ -233,5 +233,39 @@ describe('management (Client Management → Notifications)', () => {
   it('refuses an unknown kind without touching the stored setting', async () => {
     await expect(writeOrgSettings('o1', ['nope'], null)).rejects.toThrow(/Unknown notification kind/);
     expect(supa().chainsFor('org_settings')).toHaveLength(0);
+  });
+});
+
+describe('unread badge follows the same policy as the list', () => {
+  const rows = [
+    { type: 'sos', data: { sos_id: 'S1' } },
+    { type: 'general', data: { kind: 'lead_assigned' } },
+    { type: 'general', data: { kind: 'lead_assigned' } },
+  ];
+  beforeEach(() => supa().setDefault('notifications', (chain: any) =>
+    chain.ops.some((o: any) => o.args?.[1]?.head) || chain.ops.some((o: any) => o.method === 'select' && o.args?.[1]?.head)
+      ? { data: null, count: 3 } : { data: rows }));
+
+  it('is 0 for a disabled project without counting anything', async () => {
+    delete process.env.NOTIFICATIONS_DISABLED_PROJECTS;
+    expect(await countUnreadAllowed({ id: 'u1', org_id: 'o1' })).toBe(0);
+    expect(supa().chainsFor('notifications')).toHaveLength(0);
+  });
+  it('is 0 for a client with nothing on, the plain count for a wildcard client', async () => {
+    settings({ o1: [], o2: ['*'] });
+    expect(await countUnreadAllowed({ id: 'u1', org_id: 'o1' })).toBe(0);
+    expect(await countUnreadAllowed({ id: 'u1', org_id: 'o2' })).toBe(3);
+  });
+  it('counts only the kinds the client has on', async () => {
+    settings({ o1: ['lead_assigned'] });
+    expect(await countUnreadAllowed({ id: 'u1', org_id: 'o1' })).toBe(2);
+  });
+  it('falls back to the plain count when the policy is off or settings cannot be read', async () => {
+    process.env.NOTIFICATION_POLICY = 'off';
+    expect(await countUnreadAllowed({ id: 'u1', org_id: 'o1' })).toBe(3);
+    process.env.NOTIFICATION_POLICY = 'on';
+    supa().setDefault('org_settings', { data: null, error: { message: 'boom' } });
+    _resetPolicyCache();
+    expect(await countUnreadAllowed({ id: 'u1', org_id: 'o9' })).toBe(3);
   });
 });

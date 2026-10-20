@@ -22,7 +22,8 @@ export function requireModule(moduleName: string) {
     // resolved, the module must be in the enabled set; otherwise the SKU was
     // not purchased/granted.
     const entitlements = enabled_modules || [];
-    if (entitlements.length > 0 && !entitlements.includes(moduleName)) {
+    // A strict list is the complete set the client was given, so an empty one denies as well.
+    if ((entitlements.length > 0 || req.user.entitlements_strict === true) && !entitlements.includes(moduleName)) {
       return forbidden(res, `Module not enabled for your account: ${moduleName}`);
     }
 
@@ -56,7 +57,7 @@ export function requireAnyModule(moduleNames: string[]) {
 
     const entitlements = enabled_modules || [];
     // Entitlement gate: the client must own at least one of the SKUs.
-    if (entitlements.length > 0 && !moduleNames.some((m) => entitlements.includes(m))) {
+    if ((entitlements.length > 0 || req.user.entitlements_strict === true) && !moduleNames.some((m) => entitlements.includes(m))) {
       return forbidden(res, `None of the required modules are enabled for your account: ${moduleNames.join(', ')}`);
     }
     if (permissions && moduleNames.some((m) => permissions.includes(m))) return next();
@@ -109,7 +110,7 @@ export function requireModuleAccess(moduleName: string) {
 
     const entitlements = req.user.enabled_modules || [];
     // Entitlement gate: the client must own the module SKU at all.
-    if (entitlements.length > 0 && !entitlements.includes(moduleName)) {
+    if ((entitlements.length > 0 || req.user.entitlements_strict === true) && !entitlements.includes(moduleName)) {
       return forbidden(res, `Module not enabled for your account: ${moduleName}`);
     }
 
@@ -155,7 +156,7 @@ export function moduleAccessAllowed(user: AuthRequest['user'], moduleName: strin
   if (role === 'super_admin') return true;
 
   const entitlements = user.enabled_modules || [];
-  if (entitlements.length > 0 && !entitlements.includes(moduleName)) return false;
+  if ((entitlements.length > 0 || user.entitlements_strict === true) && !entitlements.includes(moduleName)) return false;
 
   if (hasRoleGovernedPerms(user)) {
     const readPerms = user.role_permissions || [];
@@ -192,7 +193,7 @@ export function requireAnyModuleAccess(moduleNames: string[]) {
     // Entitlement gate: any one of the modules must be enabled for the
     // client. (Most CRM modules are bundled together, so this is a
     // formality except for surgically narrow installs.)
-    if (entitlements.length > 0 && !moduleNames.some((m) => entitlements.includes(m))) {
+    if ((entitlements.length > 0 || req.user.entitlements_strict === true) && !moduleNames.some((m) => entitlements.includes(m))) {
       return forbidden(res, `None of the required modules are enabled for your account: ${moduleNames.join(', ')}`);
     }
 

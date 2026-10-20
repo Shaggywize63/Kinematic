@@ -57,6 +57,8 @@ export interface AuthUser {
   role_permissions_write?: string[];
   enabled_modules?: string[];   // module IDs enabled for this user's client (entitlement)
   enabled_packages?: string[];  // package SKUs enabled for this user's client
+  /** True when enabled_modules is the complete list for this client: empty means none, not "unknown" (see lib/entitlements). */
+  entitlements_strict?: boolean;
   // Single-device login enforcement. Set by /auth/login on mobile platforms;
   // middleware compares X-Session-Id header against this. NULL = legacy or
   // dashboard session, enforcement is skipped.

@@ -1,7 +1,8 @@
 // Module entitlement resolver. Single source of truth for "what can this user see?".
 //
 // Rules (in order of precedence):
-//   1. Universal modules (modules.is_universal = true) are always enabled for any client.
+//   1. Universal modules (modules.is_universal = true) are always enabled for any client. As of 2026-10 none are
+//      flagged universal: Client Management ticks every module, so a client sees exactly what was ticked.
 //   2. Per-client grants from `client_modules` (enabled = true, not expired).
 //   3. Per-org grants from `org_modules` (enabled = true, not expired).
 //   4. super_admin gets every module.
@@ -15,10 +16,30 @@
 
 import { supabaseAdmin } from './supabase';
 import { logger } from './logger';
+import { currentProjectKey } from './projects';
+
+/**
+ * Projects whose clients see exactly what Client Management ticked (the strict model). The Tata project (`default`) is
+ * deliberately not in the default list: its database still carries the old always-on modules, so it keeps today's
+ * behaviour until its data is migrated and `default` is added here. Env MODULE_STRICT_PROJECTS overrides (comma list).
+ */
+export function strictProjects(): Set<string> {
+  const raw = process.env.MODULE_STRICT_PROJECTS;
+  const list = raw === undefined ? 'kinematic' : raw;
+  return new Set(list.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
+}
+const strictHere = (): boolean => strictProjects().has(String(currentProjectKey()).toLowerCase());
 
 export type Entitlements = {
   enabled_modules: string[];
   enabled_packages: string[];
+  /**
+   * True when `enabled_modules` is the COMPLETE list of what this user's client was given (a client-bound user whose
+   * lookup succeeded). Then an empty list means "nothing", not "unknown": every gate (backend, dashboard, apps) denies
+   * what is not in the list. False for platform users (who see everything) and when the lookup failed (fail open, so a
+   * database hiccup never locks anyone out).
+   */
+  strict?: boolean;
 };
 
 const EMPTY: Entitlements = { enabled_modules: [], enabled_packages: [] };
@@ -163,6 +184,7 @@ export async function resolveEntitlements(opts: {
       const fallback: Entitlements = {
         enabled_modules: uni?.map(m => m.id) || [],
         enabled_packages: Array.from(new Set((uni || []).map(m => m.package).filter(Boolean) as string[])),
+        strict: false, // the real list is unknown: do not treat this one as complete
       };
       cache.set(cacheKey, { value: fallback, expiresAt: Date.now() + ENTITLEMENT_CACHE_TTL_MS });
       return fallback;
@@ -171,6 +193,7 @@ export async function resolveEntitlements(opts: {
     const result: Entitlements = {
       enabled_modules: (data || []).map(r => r.module_id),
       enabled_packages: Array.from(new Set((data || []).map(r => r.package).filter(Boolean) as string[])),
+      strict: strictHere(),
     };
     cache.set(cacheKey, { value: result, expiresAt: Date.now() + ENTITLEMENT_CACHE_TTL_MS });
     return result;
