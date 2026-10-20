@@ -35,7 +35,8 @@ const ORG_NAME = 'ByteBack';
 const ORG_SLUG = 'byteback';
 
 // Placeholder credentials — replace the emails later via User Management.
-const TEMP_PASSWORD = 'ByteBack@2026';
+const TEMP_PASSWORD = process.env.BYTEBACK_TEMP_PASSWORD || '';
+if (!TEMP_PASSWORD) { console.error('Set BYTEBACK_TEMP_PASSWORD to run this tool.'); process.exit(1); }
 // Master admin login supplied by the Kinematic team. It's on kinematicapp.com,
 // which is in ACTIVE_CAP_BYPASS_DOMAINS (misc.controller), so this account is
 // EXEMPT from the seat cap — it never consumes a ByteBack seat and can always
@@ -261,7 +262,7 @@ async function main() {
   log(`\n=== ${dry ? 'DRY-RUN complete (nothing written)' : 'COMMIT complete'} ===`);
   log(`ByteBack org=${BYTEBACK_ORG_ID} client=${BYTEBACK_CLIENT_ID}`);
   log(`Master (cap-exempt): ${MASTER.email}`);
-  log(`Manager: ${MANAGER.email} · Field users: ${FIELD_USERS.map((u) => u.email).join(', ')} · temp password: ${TEMP_PASSWORD}`);
+  log(`Manager: ${MANAGER.email} · Field users: ${FIELD_USERS.map((u) => u.email).join(', ')}`);
   log(`Seat cap: ${SEAT_LIMIT} (1 manager + 3 users; master exempt). 5th byteback.example user → upgrade prompt.`);
 }
 
