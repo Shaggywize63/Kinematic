@@ -8,6 +8,7 @@ import { getPagination, buildPaginatedResult } from '../utils/pagination';
 import { messaging } from '../lib/firebase';
 import { sendApns, apnsEnabled } from '../lib/apns';
 import { logger } from '../lib/logger';
+import { readOrgSettings } from '../services/notificationPolicy';
 
 const fcmSchema = z.object({ fcm_token: z.string().min(10) });
 
@@ -497,4 +498,9 @@ export const deleteGroup = asyncHandler(async (req: AuthRequest, res: Response) 
     .eq('org_id', user.org_id).eq('id', req.params.id).is('deleted_at', null);
   if (error) return badRequest(res, error.message);
   return ok(res, null, 'Group deleted');
+});
+
+/** GET /api/v1/notifications/catalog — every notification the platform can send, with what is on for the caller's org. */
+export const getCatalog = asyncHandler<AuthRequest>(async (req, res) => {
+  ok(res, await readOrgSettings(req.user!.org_id));
 });

@@ -15,6 +15,7 @@ import { normalizeMobile, newUserContactProblem } from '../lib/userContact';
 import { userAccessRows, modulePermissionsForNewUser } from '../lib/userAccessRows';
 import { clientGrantedModuleIds } from '../lib/entitlements';
 import { assertMayManageUser, assertMayAssignRole } from '../lib/userGuard';
+import { allowedFlags, isProjectDisabled } from '../services/notificationPolicy';
 import { isPlatformOperator, usesStrictTenantScope } from '../lib/tenantScope';
 import { invalidateAuthCache } from '../middleware/auth';
 
@@ -170,8 +171,12 @@ export const getNotifications = asyncHandler<AuthRequest>(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   // Every row carries `data.kind` so a tap in the in-app list routes exactly like
   // a tap on the push (see lib/notificationRoute.ts).
-  const rows = (data || []).map((n: any) => ({ ...n, data: routedData(n) }))
-  sendPaginated(res, rows, count || 0, page, limit)
+  let rows = (data || []).map((n: any) => ({ ...n, data: routedData(n) }))
+  // The in-app list follows the same notification policy as the push (services/notificationPolicy.ts): a project or
+  // client with a kind switched off does not see it in the bell either.
+  const allowed = await allowedFlags(rows.map((n: any) => ({ orgId: user.org_id, kind: n.data.kind })))
+  rows = rows.filter((_: unknown, i: number) => allowed[i])
+  sendPaginated(res, rows, isProjectDisabled() ? 0 : (count || 0), page, limit)
 })
 
 export const markRead = asyncHandler<AuthRequest>(async (req, res) => {

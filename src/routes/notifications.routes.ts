@@ -6,6 +6,9 @@ const router = Router();
 
 router.use(requireAuth);
 
+// The notification catalogue and which kinds are switched on for the caller's organisation (read-only).
+router.get('/catalog', ctrl.getCatalog);
+
 // Per-user clear actions — register before /:id so they aren't shadowed by
 // the admin deleteHistory route below.
 router.delete('/clear',      ctrl.clearMyNotifications);

@@ -19,5 +19,8 @@ router.post('/:id/login-as',    requireAuth, requireRole('super_admin'), clientC
 router.post('/:id/impersonate', requireAuth, requireRole('super_admin'), clientCtrl.impersonateClient);
 router.get('/:id/modules',      requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientModules);
 router.post('/:id/packages',    requireAuth, requireRole('admin', 'super_admin'), clientCtrl.grantClientPackages);
+// Which notifications from the catalogue this client receives (none by default).
+router.get('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientNotifications);
+router.put('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.setClientNotifications);
 
 export default router;
