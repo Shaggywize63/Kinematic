@@ -5,16 +5,17 @@ import { supabaseAdmin } from "../lib/supabase";
 import { AuthRequest } from "../types";
 import { resolveVisitTimes } from "../services/formVisit.store";
 import { orgRowReachable } from "../lib/userGuard";
+import { enforcedUnlessOff } from "../lib/tenantScope";
 import { logger } from "../lib/logger";
 const router = Router();
 
 /**
  * Every child route below takes a form/page/question id from the URL and used to act on it whatever org it belonged
  * to. A form is reachable when it is the caller's org's (or the caller is the platform operator); anything else is a
- * 404 so ids cannot be probed. `shadow` (app-facing reads/submits) only logs until BUILDER_ORG_ENFORCE=on, in case
+ * 404 so ids cannot be probed. `shadow` (app-facing reads/submits) is a 404 too unless BUILDER_ORG_ENFORCE=off (log only), in case
  * a tenant fills in a form another of its orgs owns.
  */
-const builderEnforced = () => (process.env.BUILDER_ORG_ENFORCE || "").toLowerCase() === "on";
+const builderEnforced = () => enforcedUnlessOff("BUILDER_ORG_ENFORCE");
 
 async function assertFormReachable(req: AuthRequest, formId: string, opts: { shadow?: boolean; what: string }): Promise<void> {
   const actor = req.user;
