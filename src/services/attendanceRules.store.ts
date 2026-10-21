@@ -17,6 +17,7 @@ import { getClientSettings, clearClientFlagCache } from '../lib/clientFlags';
 import { logger } from '../lib/logger';
 import { AppError } from '../utils';
 import { AuthRequest } from '../types';
+import { callerMayUseClientRow } from '../lib/tenantScope';
 import {
   applyLate, computeLate, lateTrackingOn, mergeRulesIntoSettings, resolveAttendanceRules,
   type AttendanceRules, type LateInfo, type ResolvedAttendanceRules,
@@ -136,12 +137,10 @@ async function loadScopedClient(req: AuthRequest): Promise<ClientRow> {
 /**
  * May the caller act on a client they picked with X-Client-Id (not pinned by
  * their JWT)? Yes when the client lives in, or is owned by, the caller's org —
- * or the caller is the platform super_admin (same reach as the team list).
+ * or the caller is an allow-listed platform operator (not "any super_admin").
  */
 export function callerMayUseClient(req: AuthRequest, row: ClientRow): boolean {
-  if ((req.user?.role ?? '').toLowerCase() === 'super_admin') return true;
-  const org = req.user?.org_id;
-  return !!org && (row.org_id === org || row.owner_org_id === org);
+  return callerMayUseClientRow(req.user ?? {}, row);
 }
 
 /** Admin read: the scoped client's rules, straight from the DB (not the cache). */

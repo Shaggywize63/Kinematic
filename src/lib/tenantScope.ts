@@ -17,7 +17,10 @@ import type { AuthRequest } from '../types';
  *  - a picked client      → allowed only if it lives in / is owned by the caller's org, or the caller is an
  *                           allow-listed platform operator (who may act as any client — never "all at once").
  *
- * The Tata `default` project keeps its historical behaviour byte-for-byte (see usesStrictTenantScope).
+ * The Tata `default` project keeps its aggregated "All clients" view, but ONLY for the named platform operators
+ * (resolveTenantScope). Anyone else there — an unbound admin, a client-role user, a name containing "sagar" — gets
+ * their own org, and a picked client is verified exactly as above. `TENANT_LEGACY_SCOPE=on` restores the old
+ * any-admin global view and unverified picks without a code change (kill switch).
  */
 
 /** Cross-org platform operators: named super-admins only — NOT "any super_admin" and never a name match. */
@@ -34,8 +37,9 @@ export const isPlatformOperator = (user: Caller): boolean =>
   && PLATFORM_OPERATOR_EMAILS.has((user?.email || '').trim().toLowerCase());
 
 /**
- * The strict one-org rule applies to every project except the historical Tata `default`, whose super-admins
- * (SRS / PASA / BMW sit under three different orgs there) rely on the aggregated "All clients" view.
+ * The strict one-org rule (no aggregated view at all, not even for operators) applies to every project except the
+ * historical Tata `default`, whose platform operators (SRS / PASA / BMW sit under three different orgs there) rely on
+ * the aggregated "All clients" view — see resolveTenantScope.
  */
 export const usesStrictTenantScope = (): boolean => currentProjectKey() !== DEFAULT_PROJECT;
 
@@ -81,8 +85,7 @@ export async function resolveStrictTenantScope(req: Request | AuthRequest, query
   const row = (res.data as { org_id?: string | null; owner_org_id?: string | null } | null) ?? null;
   if (!row) throw new AppError(404, 'Client not found', 'NOT_FOUND');
 
-  const mine = !!own && (row.org_id === own || row.owner_org_id === own);
-  if (!mine && !isPlatformOperator(user)) throw new AppError(404, 'Client not found', 'NOT_FOUND');
+  if (!callerMayUseClientRow(user, row)) throw new AppError(404, 'Client not found', 'NOT_FOUND');
   const scopeOrgId = row.org_id ?? own;
   if (!scopeOrgId) throw new AppError(403, 'No organisation context', 'NO_ORG');
   return { scopeOrgId, pickedClientId: picked, isClientBound: false };
@@ -91,3 +94,68 @@ export async function resolveStrictTenantScope(req: Request | AuthRequest, query
 /** May the caller read a single row stamped with `rowOrgId`? Own org, or a platform operator acting as a client. */
 export const callerMayReadOrg = (user: Caller, rowOrgId: unknown): boolean =>
   (!!user?.org_id && rowOrgId === user.org_id) || isPlatformOperator(user);
+
+/** Kill switch: TENANT_LEGACY_SCOPE=on brings back the pre-fix Tata behaviour (any admin may see every org). */
+const legacyTenantScope = (): boolean =>
+  (process.env.TENANT_LEGACY_SCOPE || '').toLowerCase() === 'on' && currentProjectKey() === DEFAULT_PROJECT;
+
+/** Enforcement flags that used to be opt-in (`=on`) and are now on unless explicitly `off`. */
+export const enforcedUnlessOff = (flag: string): boolean => (process.env[flag] || '').trim().toLowerCase() !== 'off';
+
+/** Callers the pre-fix Tata code treated as platform-wide: any unbound admin tier, or a name containing "sagar". */
+const legacyGlobalCaller = (user: Caller & { name?: string | null }): boolean => {
+  if (isUUID(user?.client_id)) return false;
+  const role = (user?.role || '').toLowerCase();
+  return ['super_admin', 'admin', 'main_admin', 'master_admin'].includes(role)
+    || (user?.name || '').toLowerCase().includes('sagar');
+};
+
+/**
+ * May the caller use a client they PICKED (X-Client-Id / ?client_id=) rather than one their JWT pins? Yes when the
+ * client lives in, or is owned by, the caller's org, or the caller is an allow-listed platform operator.
+ */
+export const callerMayUseClientRow = (
+  user: Caller & { name?: string | null },
+  row: { org_id?: string | null; owner_org_id?: string | null },
+): boolean => {
+  const own = user?.org_id;
+  if (own && (row.org_id === own || row.owner_org_id === own)) return true;
+  if (isPlatformOperator(user)) return true;
+  return legacyTenantScope() && (user?.role || '').toLowerCase() === 'super_admin';
+};
+
+export interface TenantScopeResult extends TenantScope {
+  /** True only for the Tata aggregated view: no org filter at all. Never true on any other project. */
+  isGlobal: boolean;
+}
+
+/**
+ * The scope for a cross-client "team" read on ANY project.
+ *
+ *  - every project except Tata  → exactly resolveStrictTenantScope (one org, always);
+ *  - Tata `default`             → the same one-org rule, except an allow-listed platform operator with no client
+ *                                 picked keeps the aggregated "All clients" view (`isGlobal`, scopeOrgId null).
+ *
+ * A picked client that isn't the caller's to use is a 404, whichever project and role.
+ */
+export async function resolveTenantScope(req: Request | AuthRequest, queryClientId?: unknown): Promise<TenantScopeResult> {
+  if (usesStrictTenantScope()) return { ...(await resolveStrictTenantScope(req, queryClientId)), isGlobal: false };
+
+  const user = (req as AuthRequest).user!;
+  const own = (user.org_id as string | undefined) ?? null;
+  const pinned = isUUID(user.client_id);
+
+  if (!pinned && !own && !isPlatformOperator(user)) throw new AppError(403, 'No organisation context', 'NO_ORG');
+
+  const header = req.headers['x-client-id'];
+  const headerId = String((Array.isArray(header) ? header[0] : header) ?? '').trim();
+  const queryId = isAllClientsSentinel(queryClientId) ? '' : String(queryClientId ?? '').trim();
+  const picked = pinned ? null : isUUID(headerId) ? headerId : isUUID(queryId) ? queryId : null;
+
+  if (!pinned && !picked && (isPlatformOperator(user) || (legacyTenantScope() && legacyGlobalCaller(user)))) {
+    return { scopeOrgId: null, pickedClientId: null, isClientBound: false, isGlobal: true };
+  }
+
+  const s = await resolveStrictTenantScope(req, queryClientId);
+  return { ...s, isGlobal: false };
+}

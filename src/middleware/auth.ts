@@ -6,7 +6,7 @@ import { DEMO_ORG_ID, DEMO_USER_ID, isDemo } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
 import { logger } from '../lib/logger';
 import { resolveEntitlements } from '../lib/entitlements';
-import { isPlatformOperator } from '../lib/tenantScope';
+import { isPlatformOperator, enforcedUnlessOff } from '../lib/tenantScope';
 
 // In-memory profile cache. Keyed by token (so a refreshed token re-validates).
 // TTL is min(5 min, JWT exp). Eliminates 3 sequential round-trips per request:
@@ -89,16 +89,17 @@ const ORG_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 // entry always holds the real profile org. Gated strictly to super_admin; for
 // every other role org always comes from the profile, so this is a no-op.
 // Normal super-admin traffic sends their own org (X-Org-Id === own) → no-op.
-function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): AuthRequest['user'] {
+export function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): AuthRequest['user'] {
   if (!user || (user as { role?: string }).role !== 'super_admin') return user;
   const raw = req.headers['x-org-id'];
   const target = Array.isArray(raw) ? raw[0] : raw;
   if (!target || !ORG_UUID_RE.test(target) || target === (user as { org_id?: string }).org_id) return user;
-  // Only the named platform operators are meant to act as another org. Any other super_admin (a tenant's own, or an
-  // account that was promoted) is logged first; IMPERSONATE_OPERATOR_ONLY=on stops it (the header is then ignored).
+  // Only the named platform operators may act as another org. Any other super_admin (a tenant's own, or an account
+  // that was promoted) has the header ignored; IMPERSONATE_OPERATOR_ONLY=off falls back to logging it only.
   if (!isPlatformOperator(user as { role?: string; email?: string; client_id?: string })) {
-    logger.warn(`[authz-shadow] non-operator super_admin ${(user as { id?: string }).id} acting as org ${target}`);
-    if ((process.env.IMPERSONATE_OPERATOR_ONLY || '').toLowerCase() === 'on') return user;
+    const deny = enforcedUnlessOff('IMPERSONATE_OPERATOR_ONLY');
+    logger.warn(`[authz-${deny ? 'deny' : 'shadow'}] non-operator super_admin ${(user as { id?: string }).id} acting as org ${target}`);
+    if (deny) return user;
   }
   logger.info(`[Auth] super_admin acting as org ${target}`);
   return { ...(user as object), org_id: target } as AuthRequest['user'];

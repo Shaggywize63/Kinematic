@@ -16,7 +16,6 @@ import {
 } from '../services/attendanceRules.service';
 import {
   annotateLate, rulesForClient, rulesForClients, readRulesForViewer, clientIdOfUser,
-  fetchClientRow, callerMayUseClient,
 } from '../services/attendanceRules.store';
 import { buildDayTravel } from '../services/travel.service';
 import { dayTravel, dbTravelFetchers } from '../services/travel.store';
@@ -27,7 +26,7 @@ import {
 } from '../services/dailyReport.service';
 import { hasTransportModeValue, trackTransportModeOn, validateTransportMode } from '../services/transportMode.service';
 import { annotateTransportLabels, transportModesForUser } from '../services/transportMode.store';
-import { usesStrictTenantScope, resolveStrictTenantScope } from '../lib/tenantScope';
+import { resolveTenantScope } from '../lib/tenantScope';
 import { assertUserReachable } from '../lib/userGuard';
 
 const checkinSchema = z.object({
@@ -579,14 +578,13 @@ export const getHistory = asyncHandler<AuthRequest>(async (req, res) => {
  *
  *  - client-bound callers (client_id pinned in the JWT) are NEVER cross-org;
  *  - otherwise the picked client comes from X-Client-Id, then ?client_id=;
- *  - `isGlobal` = a platform caller with no client picked (cross-org view);
+ *  - `isGlobal` = a Tata platform operator with no client picked (cross-org view); never anyone else;
  *  - `scopeOrgId` is the picked client's org (so acting-as-ClientA never shows
  *    ClientB's rows), else the caller's own org;
  *  - `scopeIds` = supervisor-hierarchy restriction (opt-in per client), null = none.
  *
- * `verifyPickedClient` (new endpoints only) additionally requires a header /
- * query-picked client to belong to the caller's org — the legacy team list keeps
- * its historical behaviour unchanged.
+ * A header / query-picked client must belong to (or be owned by) the caller's
+ * org, or the caller must be a platform operator — otherwise 404.
  */
 interface TeamAttendanceScope {
   isGlobal: boolean;
@@ -596,64 +594,19 @@ interface TeamAttendanceScope {
   scopeIds: string[] | null;
 }
 
-async function resolveTeamAttendanceScope(
-  req: AuthRequest, opts: { verifyPickedClient?: boolean } = {},
-): Promise<TeamAttendanceScope> {
+async function resolveTeamAttendanceScope(req: AuthRequest): Promise<TeamAttendanceScope> {
   const user = req.user!;
   const { client_id } = req.query as Record<string, string>;
 
-  // Every project except the Tata default returns ONE org's attendance per request (see lib/tenantScope):
-  // the caller's own org, or the client they explicitly picked and may use — never every org at once.
-  if (usesStrictTenantScope()) {
-    const s = await resolveStrictTenantScope(req, client_id);
-    const scopeIds = await fieldForceScopeIds(req);
-    return { isGlobal: false, isClientBound: s.isClientBound, pickedClientId: s.pickedClientId, scopeOrgId: s.scopeOrgId, scopeIds };
-  }
-
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const role = (user.role || '').toLowerCase();
-  // A CLIENT-BOUND user (client_id pinned in the JWT, e.g. ByteBack's sub_admin
-  // admin/manager) is NEVER cross-org. Previously isSuper = role.includes('admin')
-  // matched 'sub_admin', so such a caller was treated as global and saw every
-  // org's attendance — other tenants'/seeded rows leaked in as "mock" data.
-  const isClientBound = isUUID((user as any).client_id);
-  const isSuper = !isClientBound && (role === 'super_admin' || role === 'admin' || role === 'main_admin' || role === 'master_admin');
-  // Resolve the selected client from the JWT (pinned), ?client_id=, or the
-  // X-Client-Id header. A super-admin "acting as a client" sets that header, and
-  // it MUST be honoured even when the top-right picker still reads "All clients"
-  // (which sends no client_id) — otherwise acting-as-ClientA returned EVERY org's
-  // attendance (cross-tenant leak).
-  const headerClientId = req.headers['x-client-id'] as string | undefined;
-  const pickedClientId = isClientBound ? ((user as any).client_id as string)
-    : isUUID(headerClientId as string) ? (headerClientId as string)
-    : isUUID(client_id as string) ? (client_id as string)
-    : null;
-  const isGlobal = !isClientBound && (isSagar || isSuper) && !pickedClientId;
-
-  let scopeOrgId = user.org_id;
-  if (!isGlobal) {
-    // Scope to the picked client's org (super-admin acting as a client) or the
-    // caller's own org, plus the client itself. Resolving the picked client's
-    // org is what isolates a Trent view from a ByteBack view, etc.
-    if (!isClientBound && pickedClientId) {
-      if (opts.verifyPickedClient) {
-        const row = await fetchClientRow(pickedClientId);
-        if (!row || !callerMayUseClient(req, row)) throw new AppError(404, 'Client not found', 'NOT_FOUND');
-        if (row.org_id) scopeOrgId = row.org_id;
-      } else {
-        const { data: pc } = await supabaseAdmin
-          .from('clients').select('org_id').eq('id', pickedClientId).maybeSingle();
-        const pcOrg = (pc as { org_id?: string } | null)?.org_id;
-        if (pcOrg) scopeOrgId = pcOrg;
-      }
-    }
-  }
-
-  // Supervisor-hierarchy scoping (opt-in per client): a team manager sees only
-  // attendance for the field reps in their supervisor subtree. null = no
-  // restriction (every other tenant, the master, and data_scope='all').
+  // One org's attendance per request on every project — the caller's own org, or the client they picked and may
+  // use (see lib/tenantScope). Only the Tata platform operators keep the aggregated "All clients" view; an admin,
+  // a client-role user or a name containing "sagar" no longer does.
+  const s = await resolveTenantScope(req, client_id);
   const scopeIds = await fieldForceScopeIds(req);
-  return { isGlobal, isClientBound, pickedClientId, scopeOrgId, scopeIds };
+  return {
+    isGlobal: s.isGlobal, isClientBound: s.isClientBound, pickedClientId: s.pickedClientId,
+    scopeOrgId: (s.scopeOrgId ?? user.org_id) as string, scopeIds,
+  };
 }
 
 export const getTeamToday = asyncHandler<AuthRequest>(async (req, res) => {
@@ -919,7 +872,7 @@ export const getAttendanceSummary = asyncHandler<AuthRequest>(async (req, res) =
     .is('deleted_at', null);
   let scopeClientId: string | null = user.client_id ?? null;
   if (isManager) {
-    const scope = await resolveTeamAttendanceScope(req, { verifyPickedClient: true });
+    const scope = await resolveTeamAttendanceScope(req);
     // A platform caller with no client picked is held to their own org — a
     // cross-org roster x 62 days is never what a summary wants.
     userQ = userQ.eq('org_id', scope.isGlobal ? user.org_id : scope.scopeOrgId);
@@ -1018,7 +971,7 @@ async function findVisibleUser(req: AuthRequest, wantedUserId: string, columns: 
   const user = req.user!;
   const isManager = SUPERVISOR_OR_ABOVE_ROLES.includes(((user.role || '').toLowerCase()) as any);
   if (!isManager) return { status: 403, error: forbiddenMessage };
-  const scope = await resolveTeamAttendanceScope(req, { verifyPickedClient: true });
+  const scope = await resolveTeamAttendanceScope(req);
   const scopeOrg = scope.isGlobal ? user.org_id : scope.scopeOrgId;
   let q: any = supabaseAdmin.from('users').select(columns).eq('id', wantedUserId).eq('org_id', scopeOrg).is('deleted_at', null);
   if (scope.pickedClientId) q = q.eq('client_id', scope.pickedClientId);
@@ -1143,7 +1096,7 @@ export const getDailyReportTeam = asyncHandler<AuthRequest>(async (req, res) => 
 
   if (isDemo(user)) { ok(res, { date, rows: [] }); return; }
 
-  const scope = await resolveTeamAttendanceScope(req, { verifyPickedClient: true });
+  const scope = await resolveTeamAttendanceScope(req);
   const scopeOrg = scope.isGlobal ? user.org_id : scope.scopeOrgId;
 
   let query: any = supabaseAdmin

@@ -13,7 +13,7 @@ import {
 import { haversineDistance } from '../lib/haversine';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { AuthRequest } from '../types';
-import { usesStrictTenantScope, resolveStrictTenantScope } from '../lib/tenantScope';
+import { resolveTenantScope } from '../lib/tenantScope';
 import { assertUserReachable } from '../lib/userGuard';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
@@ -23,15 +23,11 @@ export const getRoutePlans = asyncHandler(async (req, res) => {
   const user = (req as any).user;
   if (isDemo(user)) return ok(res, getMockRoutePlans(todayDate()));
   const { client_id, date } = req.query;
-  // Every project except the Tata default returns ONE org's plans per request (see lib/tenantScope).
-  const strict = usesStrictTenantScope() ? await resolveStrictTenantScope(req, client_id) : null;
-
-  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-
-  const isGlobal = !strict && (isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) ));
-  const effectiveOrgId = strict ? (strict.scopeOrgId as string) : (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
+  // One org's plans per request on every project; only a Tata platform operator in the "All clients" view is
+  // unfiltered (see lib/tenantScope). A client_id is resolved to its org and must be the caller's to use (404).
+  const scope = await resolveTenantScope(req, client_id);
+  const isGlobal = scope.isGlobal;
+  const effectiveOrgId = (scope.scopeOrgId ?? user.org_id) as string;
 
   const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
@@ -188,14 +184,11 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
     });
   }
   const { client_id, date } = req.query;
-  // Every project except the Tata default returns ONE org's plans per request (see lib/tenantScope).
-  const strict = usesStrictTenantScope() ? await resolveStrictTenantScope(req, client_id) : null;
-  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-
-  const isGlobal = !strict && (isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) ));
-  const effectiveOrgId = strict ? (strict.scopeOrgId as string) : (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
+  // One org's plans per request on every project; only a Tata platform operator in the "All clients" view is
+  // unfiltered (see lib/tenantScope). A client_id is resolved to its org and must be the caller's to use (404).
+  const scope = await resolveTenantScope(req, client_id);
+  const isGlobal = scope.isGlobal;
+  const effectiveOrgId = (scope.scopeOrgId ?? user.org_id) as string;
 
   const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
@@ -208,7 +201,8 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
 
   if (error) return badRequest(res, error.message);
   const rows = data || [];
-  const { count: rawTotal } = await supabase.from('route_plans').select('*', { count: 'exact', head: true });
+  // A whole-table count is a cross-tenant disclosure: only the all-clients operator view gets it.
+  const rawTotal = isGlobal ? (await supabase.from('route_plans').select('*', { count: 'exact', head: true })).count : null;
   return ok(res, {
     total_fes: rows.length,
     total_outlets: rows.reduce((s, r: any) => s + (r.total_outlets || 0), 0),
