@@ -10,7 +10,7 @@ import { signUpload, UploadKind } from '../../utils/upload-signer';
 const signSchema = z.object({
   kind: z.preprocess(
     (v) => (typeof v === 'string' ? v.trim().toLowerCase().replace(/^distribution\//, '') : v),
-    z.enum(['cheque', 'pod', 'return', 'signature', 'kyc']),
+    z.enum(['cheque', 'upi', 'pod', 'return', 'signature', 'kyc']),
   ),
   ext: z.string().regex(/^[a-z0-9]{1,8}$/i).optional(),
 });

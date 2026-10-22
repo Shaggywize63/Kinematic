@@ -74,6 +74,7 @@ export const NOTIFICATION_CATALOG: CatalogEntry[] = [
   { kind: 'expense_cancelled', label: 'Expense cancelled', group: 'FieldForce', description: 'An expense claim was cancelled.' },
 
   // ── Supply chain / distribution ───────────────────────────────────────────────────────────────────────────
+  { kind: 'order_assigned', label: 'Order assigned to me', group: 'Distribution', description: 'An admin created and assigned an order to a field user.' },
   { kind: 'low_stock', label: 'Low stock', group: 'Distribution', description: 'SKUs are running low against projected demand.' },
   { kind: 'stock_expiry', label: 'Stock nearing expiry', group: 'Distribution', description: 'A stock batch is inside its expiry alert window.' },
 

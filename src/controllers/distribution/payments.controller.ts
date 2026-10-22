@@ -20,6 +20,9 @@ const paymentSchema = z.object({
   cheque_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   cheque_image_url: z.string().url().optional(),
   upi_qr_id: z.string().optional(),
+  // Optional proof image for a UPI collection (screenshot from gallery/camera).
+  // Must come from our signed-upload flow (kind=upi) when supplied.
+  upi_image_url: z.string().url().optional(),
   applied_to_invoices: z.array(z.object({
     invoice_id: z.string().uuid(),
     // Accepted for forward/back compatibility but never trusted: the server
@@ -60,6 +63,12 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     }
   }
 
+  // UPI proof image is optional, but when supplied it must come from our
+  // signed-upload flow (defends against arbitrary pasted URLs, same as cheque).
+  if (parsed.data.upi_image_url && !isOurUploadUrl(parsed.data.upi_image_url, user.org_id, 'upi')) {
+    return badRequest(res, 'upi_image_url must be a signed-upload URL we issued');
+  }
+
   // Resolve distributor_id from outlet if not provided.
   let distributorId = parsed.data.distributor_id;
   if (!distributorId) {
@@ -69,8 +78,9 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   }
   if (!distributorId) return badRequest(res, 'No distributor for this outlet');
 
-  // Salesman daily collection cap.
-  if (user.role === 'field_executive') {
+  // Salesman daily collection cap. Field reps are `field_executive` on some
+  // tenants and `executive` on others — both count.
+  if (['field_executive', 'executive'].includes(String(user.role))) {
     const { data: ext } = await supabaseAdmin.from('salesman_ext').select('daily_collection_cap').eq('user_id', user.id).maybeSingle();
     if (ext && Number(ext.daily_collection_cap) > 0) {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
@@ -134,6 +144,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     cheque_date: parsed.data.cheque_date ?? null,
     cheque_image_url: parsed.data.cheque_image_url ?? null,
     upi_qr_id: parsed.data.upi_qr_id ?? null,
+    upi_image_url: parsed.data.upi_image_url ?? null,
     applied_to_invoices: applied,
     gps_lat: parsed.data.gps?.lat ?? null,
     gps_lng: parsed.data.gps?.lng ?? null,

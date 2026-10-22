@@ -11,6 +11,44 @@ import { priceCart, haversineMeters, PricerError, CartLineInput } from '../../se
 import { applySchemes, SCHEME_ENGINE_VERSION } from '../../services/scheme-engine';
 import { summariseTotals } from '../../services/tax';
 import { getDemoOrder, getDemoOrderList } from '../../utils/demoDistribution';
+import { notify } from '../../services/notify';
+import { sendReportCsv, csvDateOnly, type ReportColumn } from '../../utils/reportCsv';
+
+// Roles allowed to place an order on behalf of a field user (admin/dashboard
+// order entry). A field_executive always books in their own name, whatever the
+// body says, so a rep can never plant an order on a colleague.
+const CAN_ASSIGN_ROLES = new Set([
+  'super_admin', 'admin', 'main_admin', 'sub_admin', 'city_manager', 'supervisor', 'client',
+]);
+// Roles a dashboard-created order may be assigned to (the field users who work the
+// beat). Tenants differ on the label — some use `field_executive`, others
+// `executive` — so both count everywhere a "field rep" is meant.
+const FIELD_USER_ROLES = ['field_executive', 'executive'];
+const isFieldRole = (role: unknown): boolean => FIELD_USER_ROLES.includes(String(role));
+
+/**
+ * Resolve who an order is booked for. A field_executive is always themselves.
+ * An admin/supervisor/client may pass `salesman_id` to assign the order to a
+ * field user; the target is validated to be an active field user in the same
+ * org (and, for a client-scoped creator, the same client). Returns the creator
+ * when no explicit assignee is given.
+ */
+async function resolveAssignee(user: any, salesmanId?: string): Promise<{ id: string; assigned: boolean } | { error: string }> {
+  if (isFieldRole(user.role)) return { id: user.id, assigned: false };
+  if (!salesmanId || salesmanId === user.id) return { id: user.id, assigned: false };
+  if (!CAN_ASSIGN_ROLES.has(String(user.role))) return { error: 'You are not allowed to assign orders to other users' };
+  const { data: target } = await supabaseAdmin.from('users')
+    .select('id, role, is_active, client_id, org_id')
+    .eq('id', salesmanId).eq('org_id', user.org_id).maybeSingle();
+  if (!target) return { error: 'Assigned field user not found in your organisation' };
+  if (target.is_active === false) return { error: 'Assigned field user is inactive' };
+  if (!FIELD_USER_ROLES.includes(String(target.role))) return { error: 'Orders can only be assigned to a field user' };
+  // A client-scoped admin may only assign within their own client.
+  if (user.client_id && target.client_id && target.client_id !== user.client_id) {
+    return { error: 'Assigned field user belongs to a different client' };
+  }
+  return { id: salesmanId, assigned: true };
+}
 
 const lineSchema = z.object({
   sku_id: z.string().uuid(),
@@ -22,6 +60,9 @@ const orderInputSchema = z.object({
   outlet_id: z.string().uuid(),
   distributor_id: z.string().uuid().optional(),
   visit_id: z.string().uuid().optional(),
+  // Admin/dashboard only: assign the order to a field user. Ignored (self) for a
+  // field_executive. Validated in resolveAssignee().
+  salesman_id: z.string().uuid().optional(),
   items: z.array(lineSchema).min(1).max(200),
   gps: z.object({ lat: z.number(), lng: z.number() }).optional(),
   notes: z.string().max(500).optional(),
@@ -55,6 +96,66 @@ export const list = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { data, error } = await q;
   if (error) return badRequest(res, error.message);
   ok(res, data);
+});
+
+// ── Orders report / export (admin) ──────────────────────────────────────────
+// Shares the exact filters of `list` (status / distributor / salesman / outlet /
+// date range). Default emits a downloadable CSV; `?format=json` returns
+// { columns, rows, count } for inline display. One order per row with resolved
+// outlet / salesman / distributor names so the CSV is readable on its own.
+export const report = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const status = req.query.status as string | undefined;
+  const distributorId = req.query.distributor_id as string | undefined;
+  const salesmanId = req.query.salesman_id as string | undefined;
+  const outletId = req.query.outlet_id as string | undefined;
+  const from = req.query.from as string | undefined;
+  const to = req.query.to as string | undefined;
+
+  let q = supabaseAdmin.from('orders')
+    .select('*, order_items(id)')
+    .eq('org_id', user.org_id)
+    .order('placed_at', { ascending: false })
+    .limit(Math.min(parseInt(req.query.limit as string) || 5000, 10000));
+  if (status) q = q.eq('status', status);
+  if (distributorId) q = q.eq('distributor_id', distributorId);
+  if (salesmanId) q = q.eq('salesman_id', salesmanId);
+  if (outletId) q = q.eq('outlet_id', outletId);
+  if (from) q = q.gte('placed_at', from);
+  if (to) q = q.lte('placed_at', to);
+
+  const { data, error } = await q;
+  if (error) return badRequest(res, error.message);
+  const rows = (data || []) as any[];
+
+  // Resolve ids → names in bulk (best-effort; missing relations leave a blank).
+  const [outlets, salesmen, distributors] = await Promise.all([
+    fetchRelated('stores', rows.map((r) => r.outlet_id), 'name'),
+    fetchRelated('users', rows.map((r) => r.salesman_id), 'name'),
+    fetchRelated('distributors', rows.map((r) => r.distributor_id), 'name'),
+  ]);
+  const nameOf = (m: Map<string, Record<string, unknown>>, id: unknown): string =>
+    (id && (m.get(String(id))?.name as string)) || '';
+
+  const cols: Array<ReportColumn<any>> = [
+    { label: 'Order No', get: (r) => r.order_no },
+    { label: 'Date', get: (r) => csvDateOnly(r.placed_at) },
+    { label: 'Status', get: (r) => r.status },
+    { label: 'Outlet', get: (r) => nameOf(outlets, r.outlet_id) },
+    { label: 'Field User', get: (r) => nameOf(salesmen, r.salesman_id) },
+    { label: 'Distributor', get: (r) => nameOf(distributors, r.distributor_id) },
+    { label: 'Items', get: (r) => (Array.isArray(r.order_items) ? r.order_items.length : 0) },
+    { label: 'Subtotal', get: (r) => r.subtotal },
+    { label: 'Discount', get: (r) => r.discount_total },
+    { label: 'Scheme', get: (r) => r.scheme_total },
+    { label: 'Taxable', get: (r) => r.taxable_value },
+    { label: 'CGST', get: (r) => r.cgst },
+    { label: 'SGST', get: (r) => r.sgst },
+    { label: 'IGST', get: (r) => r.igst },
+    { label: 'Cess', get: (r) => r.cess },
+    { label: 'Grand Total', get: (r) => r.grand_total },
+  ];
+  sendReportCsv(req, res, 'orders', cols, rows);
 });
 
 export const get = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -105,7 +206,7 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
     return conflict(res, `Cannot cancel from status=${before.status}`);
   }
   // Salesman can cancel only their own placed orders.
-  if (user.role === 'field_executive' && before.salesman_id !== user.id) {
+  if (isFieldRole(user.role) && before.salesman_id !== user.id) {
     return forbidden(res, 'Cannot cancel another FE\'s order');
   }
   const { data, error } = await supabaseAdmin.from('orders')
@@ -342,7 +443,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   }
 
   // Salesman caps.
-  if (user.role === 'field_executive') {
+  if (isFieldRole(user.role)) {
     const { data: ext } = await supabaseAdmin.from('salesman_ext').select('*').eq('user_id', user.id).maybeSingle();
     if (ext) {
       const todayStart = new Date();
@@ -362,6 +463,11 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     }
   }
 
+  // Resolve the field user this order is booked for (self for a rep; an
+  // admin/supervisor/client may assign it to a field user via salesman_id).
+  const assignee = await resolveAssignee(user, parsed.data.salesman_id);
+  if ('error' in assignee) return badRequest(res, assignee.error);
+
   // Generate order_no (date-stamped per org).
   const { data: orderNoRow } = await supabaseAdmin.rpc('gen_order_no', { p_org: user.org_id });
   const orderNo = orderNoRow || `ORD-${Date.now()}`;
@@ -374,7 +480,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     order_no: orderNo,
     outlet_id: parsed.data.outlet_id,
     distributor_id: ctx.distributor.id,
-    salesman_id: user.id,
+    salesman_id: assignee.id,
     route_visit_id: parsed.data.visit_id ?? null,
     status: 'placed',
     placed_at: new Date().toISOString(),
@@ -454,6 +560,22 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   }
 
   await audit(req, 'order.create', 'orders', order.id, null, { ...order, items_count: itemRows.length });
+
+  // Notify the assigned field user when an admin/supervisor booked the order for
+  // them (never notify a rep about their own order). Best-effort: notify() is
+  // gated by the client's enabled kinds and never throws, so it can't fail the
+  // order. The per-minute dispatch-pushes cron fans the row out to FCM/APNs.
+  if (assignee.assigned) {
+    const outletName = (ctx.outlet as any)?.name ? ` for ${(ctx.outlet as any).name}` : '';
+    await notify({
+      orgId: user.org_id,
+      userId: assignee.id,
+      kind: 'order_assigned',
+      title: 'New order assigned',
+      body: `Order ${orderNo}${outletName} (₹${priced.totals.grand_total}) was assigned to you.`,
+      data: { order_id: order.id, order_no: orderNo, outlet_id: parsed.data.outlet_id },
+    });
+  }
 
   const { data: full } = await supabaseAdmin.from('orders')
     .select('*, order_items(*)').eq('id', order.id).single();
