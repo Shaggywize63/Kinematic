@@ -15,7 +15,7 @@ import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
-import { runWithProject, currentProjectKey } from '../lib/projects';
+import { runWithProject, currentProjectKey, DEFAULT_PROJECT } from '../lib/projects';
 import { chunk } from '../lib/chunk';
 import { isSteelDealerClient } from '../lib/steelDealer';
 
@@ -173,6 +173,37 @@ function isFrontlineChampion(me: { org_role_name?: string | null; org_role_data_
   // manager (not own-only) so we never hide a team from its lead.
   const scope = me?.org_role_data_scope ?? 'own';
   return scope === 'own';
+}
+
+/** The request's pinned project. `req.projectKey` is stamped by the withProject
+ *  middleware and survives awaits, so it's reliable even where the ALS-backed
+ *  currentProjectKey() has reverted (see the analytics handlers). */
+function requestProjectKey(req: Request): string {
+  return (req as AuthRequest & { projectKey?: string }).projectKey || currentProjectKey();
+}
+
+/**
+ * Whether a caller's LEADS view is restricted to the leads they personally own.
+ *
+ * A frontline Consumer Champion is always own-only (Tata + every tenant). In
+ * addition, for every NON-default project, ANY designation whose org-role
+ * data_scope is 'own' is strictly own-only — a rep sees ONLY leads with
+ * owner_id = self. This matches the signal already used for activities
+ * (activityVisibilityScope), the leads map, and the custom-field CSV path, and
+ * closes the leak where a non-"Consumer Champion" own-scope designation (e.g.
+ * Aadinath's Sales Executive / Service Engineer) fell through to the city/no
+ * filter and saw every lead in the client.
+ *
+ * The Tata `default` project is deliberately left on its historical
+ * city-broadened behaviour for its 'own' ASOs (CLAUDE.md golden rule: never
+ * change default-project behaviour). `req.projectKey` is the per-request pin.
+ */
+export function leadsOwnOnly(
+  req: Request,
+  me: { org_role_name?: string | null; org_role_data_scope?: string | null } | undefined,
+): boolean {
+  if (isFrontlineChampion(me)) return true;
+  return requestProjectKey(req) !== DEFAULT_PROJECT && (me?.org_role_data_scope === 'own');
 }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -652,12 +683,13 @@ leads.get('/', wrap(async (req, res) => {
     visibleOwnerIds = selfOwnerId ? [selfOwnerId] : [];
   }
   const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn || isTelecaller;
-  // Consumer Champion is strictly own-only: they see ONLY leads where
-  // owner_id = self (plus their hierarchy subtree if applicable). Their
-  // city allocation does NOT broaden visibility — a new Champion lands
-  // on an empty list until leads are assigned to them. A Consumer
-  // Champion MANAGER is NOT own-only — they manage a team (see helper).
-  const ownOnly = isFrontlineChampion(me);
+  // Own-scope callers are strictly own-only: they see ONLY leads where
+  // owner_id = self (plus their hierarchy subtree if applicable). City
+  // allocation does NOT broaden visibility — a new rep lands on an empty
+  // list until leads are assigned to them. Covers a frontline Consumer
+  // Champion (all tenants) and, on non-default projects, every
+  // data_scope='own' designation; a team/all-scope manager is NOT own-only.
+  const ownOnly = leadsOwnOnly(req, me);
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
@@ -862,7 +894,10 @@ leads.get('/export', wrap(async (req, res) => {
     visibleOwnerIds = selfOwnerId ? [selfOwnerId] : [];
   }
   const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn || isTelecaller;
-  const ownOnly = isFrontlineChampion(me);
+  // Mirror the list endpoint's own-scope rule so /export never returns rows the
+  // UI hides (own-only for a frontline Champion anywhere, and for any
+  // data_scope='own' designation on a non-default project).
+  const ownOnly = leadsOwnOnly(req, me);
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
   // bounded.
@@ -4213,7 +4248,8 @@ router.get('/search', wrap(async (req, res) => {
   const genericOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
   const selfOwnerId = me?.id ?? null;
   const includeNullCity = ((me?.org_role_data_scope ?? 'all') === 'all') || hierOn;
-  const ownOnly = isFrontlineChampion(me);
+  // Global search must not surface leads the caller can't see in the list.
+  const ownOnly = leadsOwnOnly(req, me);
   const filters: Record<string, unknown> = { q, limit: PER };
 
   // Guard each entity so one failing query can't 500 the whole search.
@@ -5445,14 +5481,15 @@ async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope
     // leaking another region's numbers.
     return cities.includes(pickedCity) ? [pickedCity] : [];
   };
-  // Frontline Consumer Champions see only their own data — no city
-  // broadening and no hierarchy expansion. Mirrors the ownOnly flag used
-  // in the leads list. A Consumer Champion MANAGER is NOT own-only: they
-  // fall through to the team-scope branch below (subtree of champions),
-  // which is what makes Team Performance / Lead Tracker / Team Daily
-  // populate for a manager instead of rendering blank.
-  const isChampion = isFrontlineChampion(me);
-  if (isChampion) {
+  // Own-scope callers see only their own data — no city broadening and no
+  // hierarchy expansion — so analytics totals match the leads list exactly.
+  // Covers a frontline Consumer Champion (all tenants) and, on non-default
+  // projects, every data_scope='own' designation. A team/all-scope manager is
+  // NOT own-only: they fall through to the team-scope branch below (subtree),
+  // which is what makes Team Performance / Lead Tracker / Team Daily populate
+  // for a manager instead of rendering blank.
+  const ownScoped = leadsOwnOnly(req, me);
+  if (ownScoped) {
     return {
       effectiveCities: pickedCity ? [pickedCity] : null,
       visibleOwnerIds: selfOwnerId ? [selfOwnerId] : [],
