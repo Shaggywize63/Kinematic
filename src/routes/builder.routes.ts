@@ -116,7 +116,10 @@ router.patch(
     allowed.forEach((k) => {
       if (req.body[k] !== undefined) updates[k] = req.body[k];
     });
-    await assertChildReachable(req, "builder_questions", req.params.id, "updateQuestion");
+    // Guard the FORM itself (not a question) — the :id here is a form id. The
+    // previous check looked it up in builder_questions, so every form save /
+    // publish 404'd ("Could not change the form status: Not found").
+    await assertFormReachable(req, req.params.id, { what: "updateForm" });
 
     updates.updated_at = new Date().toISOString();
 
