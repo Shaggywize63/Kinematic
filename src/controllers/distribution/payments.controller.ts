@@ -20,6 +20,9 @@ const paymentSchema = z.object({
   cheque_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   cheque_image_url: z.string().url().optional(),
   upi_qr_id: z.string().optional(),
+  // Optional proof image for a UPI collection (screenshot from gallery/camera).
+  // Must come from our signed-upload flow (kind=upi) when supplied.
+  upi_image_url: z.string().url().optional(),
   applied_to_invoices: z.array(z.object({
     invoice_id: z.string().uuid(),
     // Accepted for forward/back compatibility but never trusted: the server
@@ -58,6 +61,12 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     if (!isOurUploadUrl(parsed.data.cheque_image_url, user.org_id, 'cheque')) {
       return badRequest(res, 'cheque_image_url must be a signed-upload URL we issued');
     }
+  }
+
+  // UPI proof image is optional, but when supplied it must come from our
+  // signed-upload flow (defends against arbitrary pasted URLs, same as cheque).
+  if (parsed.data.upi_image_url && !isOurUploadUrl(parsed.data.upi_image_url, user.org_id, 'upi')) {
+    return badRequest(res, 'upi_image_url must be a signed-upload URL we issued');
   }
 
   // Resolve distributor_id from outlet if not provided.
@@ -134,6 +143,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     cheque_date: parsed.data.cheque_date ?? null,
     cheque_image_url: parsed.data.cheque_image_url ?? null,
     upi_qr_id: parsed.data.upi_qr_id ?? null,
+    upi_image_url: parsed.data.upi_image_url ?? null,
     applied_to_invoices: applied,
     gps_lat: parsed.data.gps?.lat ?? null,
     gps_lng: parsed.data.gps?.lng ?? null,
