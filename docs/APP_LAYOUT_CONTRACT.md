@@ -105,3 +105,9 @@ Activities `crm_activities`, Home/More are essential. Gate each under `entitleme
 
 `middleware/moduleGate.ts` logs (`MODULE_GATE=shadow`, default) or refuses (`MODULE_GATE=enforce`) calls to routes whose
 module the client has not ticked. Existing `requireModule` mounts are strict now (an empty complete list denies).
+
+`GET` / `HEAD` on `/cities`, `/zones` and `/stores` are never refused: other screens read them as reference data
+(filters, pickers, attendance, forms), so only writes there need the module. The shadow line also names the caller's
+`role` and `ua` (app or browser), so a review can tell a screen's call from an app's background refresh (the apps call
+`/broadcast`, `/leaderboard` and `/route-plan` on every home refresh; they ignore a refusal, but the clean fix is for them to
+skip the call when the module is not held).
