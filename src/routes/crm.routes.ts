@@ -198,12 +198,44 @@ function requestProjectKey(req: Request): string {
  * city-broadened behaviour for its 'own' ASOs (CLAUDE.md golden rule: never
  * change default-project behaviour). `req.projectKey` is the per-request pin.
  */
+/**
+ * Core own-scope predicate shared by every CRM entity (leads, deals, contacts,
+ * accounts): a designation whose org-role data_scope is 'own' is restricted to
+ * its own records on every NON-default project. The Tata `default` project is
+ * excluded (CLAUDE.md golden rule — never change default-project behaviour),
+ * so its 'own' ASOs keep their historical broader visibility.
+ */
+export function crmOwnScope(
+  req: Request,
+  me: { org_role_data_scope?: string | null } | undefined,
+): boolean {
+  return requestProjectKey(req) !== DEFAULT_PROJECT && (me?.org_role_data_scope === 'own');
+}
+
 export function leadsOwnOnly(
   req: Request,
   me: { org_role_name?: string | null; org_role_data_scope?: string | null } | undefined,
 ): boolean {
-  if (isFrontlineChampion(me)) return true;
-  return requestProjectKey(req) !== DEFAULT_PROJECT && (me?.org_role_data_scope === 'own');
+  // A frontline Consumer Champion is own-only on EVERY tenant (pre-existing,
+  // incl. Tata default); plus the shared non-default own-scope rule.
+  return isFrontlineChampion(me) || crmOwnScope(req, me);
+}
+
+/**
+ * The visible-owner-id set for deals / contacts / accounts list + export +
+ * search. Uses the hierarchy subtree when the client opted into hierarchy RBAC
+ * (that path already caps a data_scope='own' caller to themselves). Otherwise,
+ * on a non-default project, a data_scope='own' caller is restricted to the
+ * leads/records they personally own (owner_id = self) — closing the same
+ * cross-user leak fixed for leads. null = no owner filter (admins, team-scope
+ * off-hierarchy, and the whole Tata `default` project — all unchanged).
+ */
+export async function crmVisibleOwnerIds(req: AuthRequest): Promise<string[] | null> {
+  const hierIds = await hierarchy.maybeSubtreeOwnerIds(req);
+  if (hierIds !== null) return hierIds;
+  const me = req.user;
+  if (crmOwnScope(req, me)) return me?.id ? [me.id] : [];
+  return null;
 }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1881,7 +1913,7 @@ const contacts = express.Router();
 const contactOpts = { searchColumns: ['first_name','last_name','email','phone'] };
 contacts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   return res.json(
     await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds }))
   );
@@ -1967,7 +1999,7 @@ router.use('/contacts', rbac.requireModuleAccess('crm_contacts'), contacts);
 const accounts = express.Router();
 accounts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   return res.json(
     await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds }))
   );
@@ -2026,7 +2058,7 @@ router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
 const deals = express.Router();
 deals.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   const [{ rows, total, page, limit }, totals, isSteel] = await Promise.all([
     dealsSvc.listDealsWithCount(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
     dealsSvc.dealsTotals(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
@@ -2060,7 +2092,7 @@ deals.get('/', wrap(async (req, res) => {
 // breakdown captured at convert time.
 deals.get('/export', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   const PAGE = 200;
   const MAX  = 10000;
   const rows: any[] = [];
@@ -4245,7 +4277,11 @@ router.get('/search', wrap(async (req, res) => {
   const effectiveCities = rbac.getEffectiveCityNames(me);
   const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
   const subtreeIds = hierOn ? await hierarchy.subtreeUserIds(req as AuthRequest) : null;
-  const genericOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  // Own-scope owner set for deals / contacts / accounts: hierarchy subtree when
+  // on, else [self] for a data_scope='own' caller on a non-default project,
+  // else null. Keeps search from surfacing records the caller can't see in the
+  // list (the same leak fixed for leads).
+  const crmOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   const selfOwnerId = me?.id ?? null;
   const includeNullCity = ((me?.org_role_data_scope ?? 'all') === 'all') || hierOn;
   // Global search must not surface leads the caller can't see in the list.
@@ -4264,13 +4300,13 @@ router.get('/search', wrap(async (req, res) => {
       strictClient: scope.strict, effectiveCities, visibleOwnerIds: subtreeIds, selfOwnerId, includeNullCity, ownOnly,
     })),
     safe(has('crm_deals'), () => dealsSvc.listDeals(org, filters, scope.id, {
-      strictClient: scope.strict, visibleOwnerIds: subtreeIds,
+      strictClient: scope.strict, visibleOwnerIds: crmOwnerIds,
     })),
     safe(has('crm_contacts'), () => crud.clientScopedList('crm_contacts', org, scope.id, filters, {
-      searchColumns: ['first_name', 'last_name', 'email', 'phone'], strictClient: scope.strict, visibleOwnerIds: genericOwnerIds,
+      searchColumns: ['first_name', 'last_name', 'email', 'phone'], strictClient: scope.strict, visibleOwnerIds: crmOwnerIds,
     })),
     safe(has('crm_accounts'), () => crud.clientScopedList('crm_accounts', org, scope.id, filters, {
-      searchColumns: ['name', 'domain', 'industry'], strictClient: scope.strict, visibleOwnerIds: genericOwnerIds,
+      searchColumns: ['name', 'domain', 'industry'], strictClient: scope.strict, visibleOwnerIds: crmOwnerIds,
     })),
     safe(has('crm_activities'), () => crud.clientScopedList('crm_activities', org, scope.id, filters, {
       searchColumns: ['subject', 'body'], strictClient: scope.strict,
