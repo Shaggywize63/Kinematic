@@ -2,8 +2,33 @@ import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { asyncHandler, AppError } from '../utils';
 import { AIService } from '../services/ai.service';
+import { logger } from '../lib/logger';
 
 const router = Router();
+
+/**
+ * Best-effort JSON object out of an AI reply: strips a ```json fence if present,
+ * then falls back to the first `{` … last `}` slice. Returns null when nothing
+ * parses (a truncated or prose reply), so the caller can fail with a clear
+ * message instead of a bare 500.
+ */
+function extractJsonObject(text: string): any | null {
+  if (!text) return null;
+  const candidates: string[] = [];
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence && fence[1]) candidates.push(fence[1].trim());
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start !== -1 && end > start) candidates.push(text.slice(start, end + 1));
+  candidates.push(text.trim());
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch { /* try the next candidate */ }
+  }
+  return null;
+}
 
 // --- AI CHATBOT / ASSISTANT ---
 router.post('/chat', requireAuth, asyncHandler(async (req: Request, res: Response) => {
@@ -59,21 +84,21 @@ Return an object with:
 2. "questions": Array of { "qtype": string, "label": string, "placeholder": string, "is_required": boolean, "options": Array<{label:string, value:string}>, "helper_text": string }
 `;
 
+  // 4096 tokens so a comprehensive form (KYC + address + image + many fields)
+  // doesn't truncate mid-JSON — truncation was the cause of the "Internal
+  // server error" on Generate Smart Form.
   const text = await AIService.callKiniAI({
     system: systemPrompt,
     messages: [{ role: 'user', content: `Problem Statement: ${problemStatement}` }],
-    max_tokens: 2000
+    max_tokens: 4096
   });
-  
-  try {
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    const jsonStr = text.substring(start, end + 1);
-    const parsed = JSON.parse(jsonStr);
-    res.json({ success: true, data: parsed });
-  } catch (e) {
-    throw new AppError(500, 'AI failed to generate a valid form structure.', 'AI_ERROR');
+
+  const parsed = extractJsonObject(text);
+  if (!parsed || typeof parsed !== 'object' || !parsed.form || !Array.isArray(parsed.questions)) {
+    logger.error(`[ai.generate-form] unparseable AI output (len=${text?.length ?? 0}): ${String(text).slice(0, 300)}`);
+    throw new AppError(502, 'KINI could not turn that into a form. Please rephrase your problem statement and try again.', 'AI_ERROR');
   }
+  res.json({ success: true, data: parsed });
 }));
 
 // --- AI FORM METADATA RECOMMENDATIONS ---
@@ -105,18 +130,15 @@ ${JSON.stringify(activities || [])}
   const text = await AIService.callKiniAI({
     system: systemPrompt,
     messages: [{ role: 'user', content: `Description Prompt: ${prompt}` }],
-    max_tokens: 500
+    max_tokens: 800
   });
-  
-  try {
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    const jsonStr = text.substring(start, end + 1);
-    const parsed = JSON.parse(jsonStr);
-    res.json({ success: true, data: parsed });
-  } catch (e) {
-    throw new AppError(500, 'AI failed to recommend form details.', 'AI_ERROR');
+
+  const parsed = extractJsonObject(text);
+  if (!parsed || typeof parsed !== 'object') {
+    logger.error(`[ai.recommend-form-details] unparseable AI output (len=${text?.length ?? 0}): ${String(text).slice(0, 300)}`);
+    throw new AppError(502, 'KINI could not suggest form details. Please try again.', 'AI_ERROR');
   }
+  res.json({ success: true, data: parsed });
 }));
 
 export default router;
