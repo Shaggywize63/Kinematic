@@ -78,8 +78,9 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   }
   if (!distributorId) return badRequest(res, 'No distributor for this outlet');
 
-  // Salesman daily collection cap.
-  if (user.role === 'field_executive') {
+  // Salesman daily collection cap. Field reps are `field_executive` on some
+  // tenants and `executive` on others — both count.
+  if (['field_executive', 'executive'].includes(String(user.role))) {
     const { data: ext } = await supabaseAdmin.from('salesman_ext').select('daily_collection_cap').eq('user_id', user.id).maybeSingle();
     if (ext && Number(ext.daily_collection_cap) > 0) {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);

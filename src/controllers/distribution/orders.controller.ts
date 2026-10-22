@@ -20,8 +20,11 @@ import { sendReportCsv, csvDateOnly, type ReportColumn } from '../../utils/repor
 const CAN_ASSIGN_ROLES = new Set([
   'super_admin', 'admin', 'main_admin', 'sub_admin', 'city_manager', 'supervisor', 'client',
 ]);
-// Roles a dashboard-created order may be assigned to (the field users who work the beat).
+// Roles a dashboard-created order may be assigned to (the field users who work the
+// beat). Tenants differ on the label — some use `field_executive`, others
+// `executive` — so both count everywhere a "field rep" is meant.
 const FIELD_USER_ROLES = ['field_executive', 'executive'];
+const isFieldRole = (role: unknown): boolean => FIELD_USER_ROLES.includes(String(role));
 
 /**
  * Resolve who an order is booked for. A field_executive is always themselves.
@@ -31,7 +34,7 @@ const FIELD_USER_ROLES = ['field_executive', 'executive'];
  * when no explicit assignee is given.
  */
 async function resolveAssignee(user: any, salesmanId?: string): Promise<{ id: string; assigned: boolean } | { error: string }> {
-  if (user.role === 'field_executive') return { id: user.id, assigned: false };
+  if (isFieldRole(user.role)) return { id: user.id, assigned: false };
   if (!salesmanId || salesmanId === user.id) return { id: user.id, assigned: false };
   if (!CAN_ASSIGN_ROLES.has(String(user.role))) return { error: 'You are not allowed to assign orders to other users' };
   const { data: target } = await supabaseAdmin.from('users')
@@ -203,7 +206,7 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
     return conflict(res, `Cannot cancel from status=${before.status}`);
   }
   // Salesman can cancel only their own placed orders.
-  if (user.role === 'field_executive' && before.salesman_id !== user.id) {
+  if (isFieldRole(user.role) && before.salesman_id !== user.id) {
     return forbidden(res, 'Cannot cancel another FE\'s order');
   }
   const { data, error } = await supabaseAdmin.from('orders')
@@ -440,7 +443,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   }
 
   // Salesman caps.
-  if (user.role === 'field_executive') {
+  if (isFieldRole(user.role)) {
     const { data: ext } = await supabaseAdmin.from('salesman_ext').select('*').eq('user_id', user.id).maybeSingle();
     if (ext) {
       const todayStart = new Date();
