@@ -1,10 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
-import { isLiveTrackingDisabled } from '../lib/liveTracking';
+import { isLiveTrackingDisabled, requiresOpenShift, shouldLogOffShift } from '../lib/liveTracking';
 import { isDuplicateHeartbeat, isNullIsland } from '../lib/heartbeatGuard';
 import { clearEmailProjectCache } from '../lib/projects';
-import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
+import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, isoDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
 import { routedData } from '../lib/notificationRoute';
@@ -1132,14 +1132,30 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   // Bug Fix: 0% battery is valid.
   const batteryLevel = battery !== undefined ? battery : (battery_percentage !== undefined ? battery_percentage : null);
   
-  // 1. Run User Update and Attendance fetch concurrently
-  const today = now.split('T')[0];
-  
-  const [userUpdate, attResult, prevPingResult] = await Promise.all([
+  // The open shift (checked in, not checked out). Location is stored only while one exists — see requiresOpenShift.
+  // Today or yesterday (IST): a shift that started before midnight is still open until it is checked out.
+  const sinceDate = isoDate(new Date(Date.now() - 86_400_000));
+  const { data: att } = await supabaseAdmin
+    .from('attendance')
+    .select('id')
+    .eq('user_id', user.id)
+    .gte('date', sinceDate)
+    .not('checkin_at', 'is', null)
+    .is('checkout_at', null)
+    .order('date', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const storeLocation = hasFix && (!!att || !requiresOpenShift(user));
+  if (hasFix && !storeLocation && shouldLogOffShift(user.id)) {
+    logger.info(`[tracking] ignored a location ping from ${user.id} (${user.role ?? '-'}): no open shift (not checked in, or already checked out)`);
+  }
+
+  // Run the user update and the previous-fix lookup concurrently.
+  const [userUpdate, prevPingResult] = await Promise.all([
     supabaseAdmin
       .from('users')
       .update({
-        ...(hasFix && { last_latitude: latitude, last_longitude: longitude, last_location_updated_at: now }),
+        ...(storeLocation && { last_latitude: latitude, last_longitude: longitude, last_location_updated_at: now }),
         battery_percentage: batteryLevel,
         device_model: device_model || undefined,
         device_brand: device_brand || undefined,
@@ -1153,25 +1169,19 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
       })
       .eq('id', user.id),
 
-    supabaseAdmin
-      .from('attendance')
-      .select('id')
-      .eq('user_id', user.id)
-      .eq('date', today)
-      .maybeSingle(),
-
     // Previous fix — for the server-side teleport / impossible-speed check.
-    supabaseAdmin
-      .from('work_activity')
-      .select('lat, lng, captured_at')
-      .eq('user_id', user.id)
-      .order('captured_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+    storeLocation
+      ? supabaseAdmin
+          .from('work_activity')
+          .select('lat, lng, captured_at')
+          .eq('user_id', user.id)
+          .order('captured_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+      : Promise.resolve({ data: null })
   ]);
 
   if (userUpdate.error) throw new AppError(500, userUpdate.error.message, 'DB_ERROR');
-  const att = attResult.data;
 
   // Location-integrity: flag a ping that "moves" faster than any ground travel
   // (>100 m/s ≈ 360 km/h over >500 m) vs the previous fix — a classic GPS
@@ -1192,7 +1202,8 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
-  // 2. Insert into work_activity for history tracking (+ integrity signals)
+  // 2. Insert into work_activity for history tracking (+ integrity signals) — only for a position we are tracking.
+  if (!storeLocation) { sendSuccess(res, null, 'Status updated'); return; }
   await supabaseAdmin.from('work_activity').insert({
     org_id: user.org_id,
     client_id: user.client_id,
