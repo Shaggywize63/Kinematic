@@ -119,6 +119,7 @@ Keep ids under these key names when adding a notification, and prefer
 | 21 | **SOS / panic** raised | (sos) | Managers / safety contacts | inline — SOS controller |
 | 22 | **Attendance regularization** request / decision | (attendance) | Rep / approver | inline — attendance service |
 | 22a | **Forgot to check out** — still checked in 10 h after starting (once per shift). If still open at 12:00 AM IST the shift is auto-checked-out (`attendance.notes` records it). Opt an org out with `org_settings` `attendance_checkout_reminder` / `attendance_auto_checkout` = `false` | `checkout_reminder` | Rep (self) | scheduled — attendance-sweep tick (all projects) |
+| 22b | **Time to check out** — fixed-time variant of 22a at a clock time (default 6:30 PM IST) for a rep on an open shift that started before that time. Opt a client in with `clients.settings.attendance_checkout_reminder_time` = `"18:30"` / `true` / `{ enabled, time }`; the 10 h reminder (22a) is then suppressed for that client so the rep gets exactly one nudge. Same `checkout_reminder` kind (deep-links to Attendance), marked `data.scheduled: true` | `checkout_reminder` | Rep (self) | scheduled — attendance-sweep tick (all projects) |
 | 23 | **Leave** request / decision | (leave) | Rep / approver | inline — leave service |
 | 24 | **Expense** submitted / decided | (expense) | Rep / approver | inline — expenses service |
 

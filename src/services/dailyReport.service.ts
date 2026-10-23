@@ -47,6 +47,8 @@ export interface RoutePoint { lat: number; lng: number; at: string }
 export interface DailyReportVisit {
   submission_id: string;
   label: string;
+  /** The outlet / customer the visit was logged at; null when the submission names none. */
+  customer_name: string | null;
   arrival_at: string;
   departure_at: string;
   minutes: number;
@@ -151,7 +153,7 @@ export function buildDailyReport(input: BuildDailyReportInput): DailyReport {
   const label = mode ? (input.modeLabel ? input.modeLabel(mode) : labelForTransportMode(mode)) : null;
   const route = thinRoute(path);
   const visits: DailyReportVisit[] = travel.stops.map((s) => ({
-    submission_id: s.submission_id, label: s.label, arrival_at: s.check_in_at, departure_at: s.check_out_at,
+    submission_id: s.submission_id, label: s.label, customer_name: s.customer_name, arrival_at: s.check_in_at, departure_at: s.check_out_at,
     minutes: s.minutes, lat: s.lat, lng: s.lng,
   }));
   return {

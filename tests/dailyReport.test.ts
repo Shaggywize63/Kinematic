@@ -31,9 +31,9 @@ const att = (over: Partial<TravelAttendanceRow> = {}): TravelAttendanceRow => ({
   ...over,
 });
 const fix = (hhmm: string, p: Pt, extra: Partial<TrailRow> = {}): TrailRow => ({ lat: p[0], lng: p[1], captured_at: t(hhmm), ...extra });
-const form = (id: string, inHm: string, outHm: string, p: Pt, title = 'Customer Visit'): RawVisitRow => ({
+const form = (id: string, inHm: string, outHm: string, p: Pt, title = 'Customer Visit', outlet: string | null = null): RawVisitRow => ({
   source: 'form',
-  row: { id, check_in_at: t(inHm), check_out_at: t(outHm), check_in_gps: `${p[0]},${p[1]}`, check_out_gps: `${p[0]},${p[1]}`, builder_forms: { title } },
+  row: { id, check_in_at: t(inHm), check_out_at: t(outHm), check_in_gps: `${p[0]},${p[1]}`, check_out_gps: `${p[0]},${p[1]}`, builder_forms: { title }, outlet_name: outlet },
 });
 
 function fetchersFor(a: TravelAttendanceRow | null, visits: RawVisitRow[] = [], trail: TrailRow[] = []) {
@@ -187,7 +187,7 @@ describe('a day with visits and halts', () => {
   // 09:30 check-in at P0 · ride to P2 (09:50) · stand at P2 until 10:20 (a halt) · ride to the customer at P4 ·
   // dealer visit 10:30-10:50 and customer visit 11:00-11:20 (their fixes are NOT halts) · stand at P6 12:30-13:10 (a halt) · check-out 18:00 at P0
   const attendance = att({ total_hours: 8.5, transport_mode: 'own_bike' });
-  const visits = [form('v1', '11:00', '11:20', P(4)), form('v0', '10:30', '10:50', P(3), 'Dealer Visit')];   // given out of order
+  const visits = [form('v1', '11:00', '11:20', P(4)), form('v0', '10:30', '10:50', P(3), 'Dealer Visit', 'Acme Depot')];   // given out of order
   const trail = [
     fix('09:40', P(1)), fix('09:50', P(2)), fix('10:00', P(2)), fix('10:10', P(2)), fix('10:20', P(2)),
     fix('10:30', P(3)), fix('10:45', P(3)),
@@ -213,8 +213,8 @@ describe('a day with visits and halts', () => {
 
     // visits: arrival / departure / minutes / where, earliest first (they were fetched out of order)
     expect(r.visits).toEqual([
-      { submission_id: 'v0', label: 'Dealer Visit', arrival_at: t('10:30'), departure_at: t('10:50'), minutes: 20, lat: P(3)[0], lng: P(3)[1] },
-      { submission_id: 'v1', label: 'Customer Visit', arrival_at: t('11:00'), departure_at: t('11:20'), minutes: 20, lat: P(4)[0], lng: P(4)[1] },
+      { submission_id: 'v0', label: 'Dealer Visit', customer_name: 'Acme Depot', arrival_at: t('10:30'), departure_at: t('10:50'), minutes: 20, lat: P(3)[0], lng: P(3)[1] },
+      { submission_id: 'v1', label: 'Customer Visit', customer_name: null, arrival_at: t('11:00'), departure_at: t('11:20'), minutes: 20, lat: P(4)[0], lng: P(4)[1] },
     ]);
 
     // halts: the two real stops in time order; the pings while at the dealer (10:30-10:45) and the customer (11:00-11:20) are visits, not halts

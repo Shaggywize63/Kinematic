@@ -11,8 +11,10 @@ jest.mock('../src/lib/supabase', () => {
 });
 
 import {
-  autoCheckoutOverdue, sendCheckoutReminders, runAttendanceSweep, istDayStartMs, istDayEndMs, workedMinutes,
+  autoCheckoutOverdue, sendCheckoutReminders, sendScheduledCheckoutReminders, runAttendanceSweep,
+  istDayStartMs, istDayEndMs, istMinuteOfDay, workedMinutes, scheduledReminderMinute,
   CHECKOUT_REMINDER_KIND, AUTO_CHECKOUT_NOTE, AUTO_CHECKOUT_SETTING, CHECKOUT_REMINDER_SETTING,
+  SCHEDULED_CHECKOUT_REMINDER_SETTING,
 } from '../src/services/attendanceSweep.service';
 
 const supa = () => (global as any).__supa;
@@ -195,6 +197,87 @@ describe('10-hour check-out reminder', () => {
     seedReminders([]);
     expect(await sendCheckoutReminders(NOW)).toEqual({ candidates: 0, reminded: 0 });
     expect(supa().chainsFor('users')).toHaveLength(0);
+  });
+
+  it('suppresses the 10 h reminder for a client that uses a fixed-time one', async () => {
+    seedReminders([row('a', { client_id: 'c-fixed' }), row('b', { client_id: 'c-other' })]);
+    supa().setDefault('clients', { data: [{ id: 'c-fixed', org_id: 'org-1', settings: { [SCHEDULED_CHECKOUT_REMINDER_SETTING]: '18:30' } }] });
+    const r = await sendCheckoutReminders(NOW);
+    expect(r.reminded).toBe(1);
+    expect(insertsOf('notifications').map((n: any) => n.user_id)).toEqual(['u-b']);
+  });
+});
+
+describe('fixed-time (6:30 PM) check-out reminder', () => {
+  const NOW_E = Date.parse('2026-10-08T13:10:00Z');   // 18:40 IST — past 18:30
+  const DAY_START = iso('2026-10-07T18:30:00Z');       // 00:00 IST of that day
+  const morning = iso('2026-10-08T03:30:00Z');         // 09:00 IST
+  const evening = iso('2026-10-08T13:05:00Z');         // 18:35 IST — after the reminder time
+  const crow = (id: string, x: Record<string, unknown> = {}) =>
+    ({ id, user_id: `u-${id}`, org_id: 'org-1', client_id: 'c-efocus', checkin_at: morning, ...x });
+
+  function seed(att: Array<Record<string, any>>, o: { settings?: unknown; active?: string[]; prior?: Array<Record<string, unknown>> } = {}) {
+    supa().setDefault('clients', { data: [{ id: 'c-efocus', org_id: 'org-1', settings: { [SCHEDULED_CHECKOUT_REMINDER_SETTING]: o.settings ?? '18:30' } }] });
+    supa().setDefault('attendance', { data: att });
+    supa().setDefault('users', { data: (o.active ?? att.map((r) => r.user_id)).map((id) => ({ id })) });
+    supa().setDefault('notifications', (chain: any) => (has(chain, 'insert') ? { data: [] } : { data: o.prior ?? [] }));
+  }
+
+  it('istMinuteOfDay is the IST minute-of-day', () => {
+    expect(istMinuteOfDay(NOW_E)).toBe(18 * 60 + 40);
+    expect(istMinuteOfDay(NOW)).toBe(15 * 60 + 30);
+  });
+
+  it('reminds a rep on an open shift once the time has passed, scoped to the opted-in client', async () => {
+    seed([crow('a')]);
+    const r = await sendScheduledCheckoutReminders(NOW_E);
+    expect(r).toEqual({ candidates: 1, reminded: 1 });
+    const [n] = insertsOf('notifications');
+    expect(n).toMatchObject({ org_id: 'org-1', user_id: 'u-a', title: 'Time to check out', type: 'general', sent_at: null });
+    expect(n.data).toMatchObject({ kind: CHECKOUT_REMINDER_KIND, attendance_id: 'a', scheduled: true });
+    expect(n.body).toMatch(/6:30 PM/);
+    // today's open shifts, scoped to the opted-in client
+    const q = supa().chainsFor('attendance')[0];
+    expect(has(q, 'is', 'checkout_at', null)).toBe(true);
+    expect(has(q, 'gte', 'checkin_at', DAY_START)).toBe(true);
+    expect(has(q, 'in', 'client_id', ['c-efocus'])).toBe(true);
+  });
+
+  it('does not fire before the configured time (no attendance query)', async () => {
+    seed([crow('a')]);
+    expect(await sendScheduledCheckoutReminders(NOW)).toEqual({ candidates: 0, reminded: 0 });
+    expect(supa().chainsFor('attendance')).toHaveLength(0);
+    expect(insertsOf('notifications')).toHaveLength(0);
+  });
+
+  it('excludes a rep who checked in after the reminder time', async () => {
+    seed([crow('a', { checkin_at: evening })]);
+    expect(await sendScheduledCheckoutReminders(NOW_E)).toEqual({ candidates: 0, reminded: 0 });
+  });
+
+  it('never reminds the same shift twice in a day', async () => {
+    seed([crow('a')], { prior: [{ data: { attendance_id: 'a' } }] });
+    expect((await sendScheduledCheckoutReminders(NOW_E)).reminded).toBe(0);
+    expect(insertsOf('notifications')).toHaveLength(0);
+  });
+
+  it('does nothing when no client opted in', async () => {
+    supa().setDefault('attendance', { data: [crow('a')] });
+    expect(await sendScheduledCheckoutReminders(NOW_E)).toEqual({ candidates: 0, reminded: 0 });
+    expect(supa().chainsFor('attendance')).toHaveLength(0);   // short-circuits on the clients lookup
+  });
+
+  it('reads the time from HH:MM, true (⇒ default) and { enabled, time }, and treats off as off', () => {
+    const k = SCHEDULED_CHECKOUT_REMINDER_SETTING;
+    expect(scheduledReminderMinute({ [k]: '18:30' })).toBe(1110);
+    expect(scheduledReminderMinute({ [k]: '07:05' })).toBe(425);
+    expect(scheduledReminderMinute({ [k]: true })).toBe(1110);
+    expect(scheduledReminderMinute({ [k]: { enabled: true } })).toBe(1110);
+    expect(scheduledReminderMinute({ [k]: { time: '20:00' } })).toBe(1200);
+    expect(scheduledReminderMinute({ [k]: false })).toBeNull();
+    expect(scheduledReminderMinute({ [k]: { enabled: false, time: '18:30' } })).toBeNull();
+    expect(scheduledReminderMinute({ [k]: 'nope' })).toBeNull();
+    expect(scheduledReminderMinute({})).toBeNull();
   });
 });
 

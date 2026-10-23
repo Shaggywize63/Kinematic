@@ -75,6 +75,8 @@ export interface TravelLeg {
 export interface TravelStop {
   submission_id: string;
   label: string;
+  /** The outlet / customer the form was checked in at (`outlet_name`, else `store_name`); null when the submission names none. */
+  customer_name: string | null;
   check_in_at: string;
   check_out_at: string;
   minutes: number;
@@ -175,6 +177,8 @@ export function shiftWindow(att: TravelAttendanceRow, nowMs: number): ShiftWindo
 interface Visit {
   id: string;
   label: string;
+  /** The outlet / customer this visit was logged at (see customerNameOf); null when the submission names none. */
+  customerName: string | null;
   inMs: number;
   outMs: number;
   inPt: LatLng;
@@ -185,6 +189,18 @@ function titleOf(row: Record<string, any>): string | null {
   const bf = Array.isArray(row.builder_forms) ? row.builder_forms[0] : row.builder_forms;
   const t = bf && typeof bf.title === 'string' ? bf.title.trim() : '';
   return t || null;
+}
+
+/**
+ * The customer / outlet a form visit was logged at. Form & builder submissions carry the outlet as the
+ * denormalized `outlet_name` (falling back to `store_name`); there is no lead/contact link on a submission.
+ */
+function customerNameOf(row: Record<string, any>): string | null {
+  for (const k of ['outlet_name', 'store_name'] as const) {
+    const v = row[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
 }
 
 /**
@@ -203,8 +219,9 @@ export function normalizeVisit(raw: RawVisitRow): Visit | null {
   const inPt = gIn ?? fallback ?? gOut;
   const outPt = gOut ?? fallback ?? gIn;
   if (!inPt || !outPt || r.id == null) return null;
-  const label = titleOf(r) ?? (typeof r.outlet_name === 'string' && r.outlet_name.trim() ? r.outlet_name.trim() : 'Form visit');
-  return { id: String(r.id), label, inMs, outMs, inPt, outPt };
+  const customerName = customerNameOf(r);
+  const label = titleOf(r) ?? customerName ?? 'Form visit';
+  return { id: String(r.id), label, customerName, inMs, outMs, inPt, outPt };
 }
 
 // ── the computation ───────────────────────────────────────────────────────
@@ -294,7 +311,7 @@ export function computeDayTravel(input: BuildDayTravelInput): DayTravelComputati
     .filter((v): v is Visit => !!v && v.inMs >= win.startMs && v.outMs <= win.endMs)
     .sort((a, b) => a.inMs - b.inMs || a.outMs - b.outMs);
   base.stops = visits.map((v) => ({
-    submission_id: v.id, label: v.label, check_in_at: iso(v.inMs), check_out_at: iso(v.outMs),
+    submission_id: v.id, label: v.label, customer_name: v.customerName, check_in_at: iso(v.inMs), check_out_at: iso(v.outMs),
     minutes: Math.round((v.outMs - v.inMs) / 60_000), lat: v.inPt.lat, lng: v.inPt.lng,
   }));
 
