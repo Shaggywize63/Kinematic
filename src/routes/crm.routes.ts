@@ -31,6 +31,7 @@ import * as upsellsSvc from '../services/crm/upsells.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
 import * as leadFollowUpSvc from '../services/crm/leadFollowUp.service';
+import * as leadBalanceSvc from '../services/crm/leadBalance.service';
 import * as ownerAssign from '../services/crm/ownerAssignment';
 import { fireActivityLifecycle } from '../services/crm/activityTriggers';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
@@ -1556,6 +1557,22 @@ leads.post('/:id/important', wrap(async (req, res) => {
 }));
 leads.post('/:id/convert', wrap(async (req, res) =>
   res.json(await leadsSvc.convertLead(orgId(req), req.params.id, parse(v.leadConvertSchema, req.body), userId(req)))));
+// Order balance (interested volume − already-booked volume across the lead's
+// deals) + "fulfill balance" (spawn an open deal for the remainder). Steel-
+// dealer tenants (BMW) book a lead's tonnage across several orders over time.
+leads.get('/:id/balance', wrap(async (req, res) =>
+  res.json(await leadBalanceSvc.computeLeadBalance(orgId(req), req.params.id))));
+leads.post('/:id/fulfill-balance', wrap(async (req, res) => {
+  const body = (req.body ?? {}) as { volume_kg?: unknown; deal_name?: unknown };
+  res.json(await leadBalanceSvc.fulfillBalance({
+    org_id: orgId(req),
+    user_id: userId(req),
+    lead_id: req.params.id,
+    volume_kg: typeof body.volume_kg === 'number' ? body.volume_kg
+      : (typeof body.volume_kg === 'string' && body.volume_kg.trim() !== '' ? Number(body.volume_kg) : undefined),
+    deal_name: typeof body.deal_name === 'string' ? body.deal_name : undefined,
+  }));
+}));
 // Reopen / unconvert — flips back to 'working' and clears terminal fields.
 leads.post('/:id/reopen', wrap(async (req, res) =>
   res.json(await stampSourceName(await stampOwnerName(await leadsSvc.reopenLead(orgId(req), req.params.id, parse(v.leadReopenSchema, req.body), userId(req)))))));
