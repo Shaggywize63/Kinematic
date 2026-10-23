@@ -52,6 +52,8 @@ export interface DailyReportVisit {
   minutes: number;
   lat: number;
   lng: number;
+  /** Server-resolved place name of the visit point (set by the daily-report controller); absent otherwise. */
+  place?: string | null;
 }
 
 export interface DailyReport {
@@ -175,6 +177,37 @@ export function buildDailyReport(input: BuildDailyReportInput): DailyReport {
       total_km: travel.total_km,
     },
   };
+}
+
+// ── place names ─────────────────────────────────────────────────────────────
+
+/** Every coordinate a place name is shown for on the report: each leg's from/to, each halt, each visit. */
+export function reportPlacePoints(report: DailyReport): Array<{ lat: number; lng: number }> {
+  const pts: Array<{ lat: number; lng: number }> = [];
+  const add = (lat: number | null | undefined, lng: number | null | undefined) => {
+    if (typeof lat === 'number' && typeof lng === 'number') pts.push({ lat, lng });
+  };
+  for (const l of report.travel.legs) { add(l.from?.lat, l.from?.lng); add(l.to?.lat, l.to?.lng); }
+  for (const h of report.halts) add(h.lat, h.lng);
+  for (const v of report.visits) add(v.lat, v.lng);
+  return pts;
+}
+
+/**
+ * Stamp each shown point with its server-resolved place name (mutates `report`). `nameAt` returns the name for a
+ * coordinate, or null; a null leaves `place` unset so the dashboard falls back to its own lookup. Pure — the
+ * geocoding/caching happens in the controller via placeNames.store, which hands the resolved lookup here.
+ */
+export function stampPlaceNames(report: DailyReport, nameAt: (lat: number, lng: number) => string | null): void {
+  const set = (o: { lat: number | null; lng: number | null; place?: string | null } | null | undefined): void => {
+    if (o && typeof o.lat === 'number' && typeof o.lng === 'number') {
+      const n = nameAt(o.lat, o.lng);
+      if (n) o.place = n;
+    }
+  };
+  for (const l of report.travel.legs) { set(l.from); set(l.to); }
+  for (const h of report.halts) set(h);
+  for (const v of report.visits) set(v);
 }
 
 /** The report of a day with nothing to report (no database reads). */

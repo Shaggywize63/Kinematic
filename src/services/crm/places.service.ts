@@ -107,6 +107,12 @@ export async function details(placeId: string): Promise<PlaceDetail | null> {
 // write. Uses the classic Geocoding API with the same server key as autocomplete;
 // that key must have the Geocoding API enabled (a REQUEST_DENIED is logged once so
 // ops can enable it, then degrades to null).
+// Pin the language and region of every reverse-geocode so the server resolves ONE name per point that is the
+// same for every viewer (English / India) — the fix for "the same GPS fix shows a different, sometimes foreign,
+// place name to different admins". Overridable for a future non-India deployment.
+const GEOCODE_LANGUAGE = process.env.GOOGLE_GEOCODE_LANGUAGE || 'en';
+const GEOCODE_REGION = process.env.GOOGLE_GEOCODE_REGION || 'in';
+
 let reverseGeocodeDenied = false;
 export async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
   if (!PLACES_KEY) return null;
@@ -115,7 +121,9 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
   if (Math.abs(lat) < 0.5 && Math.abs(lng) < 0.5) return null;
   try {
     const res = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${encodeURIComponent(PLACES_KEY)}`,
+      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}`
+      + `&language=${encodeURIComponent(GEOCODE_LANGUAGE)}&region=${encodeURIComponent(GEOCODE_REGION)}`
+      + `&key=${encodeURIComponent(PLACES_KEY)}`,
     );
     if (!res.ok) return null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

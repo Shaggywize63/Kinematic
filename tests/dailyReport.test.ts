@@ -418,3 +418,47 @@ describe('mapWithConcurrency', () => {
     await expect(mapWithConcurrency([1, 2, 3], 2, async (n) => { if (n === 2) throw new Error('boom'); return n; })).rejects.toThrow('boom');
   });
 });
+
+// ── place-name stamping (reportPlacePoints / stampPlaceNames) ────────────────
+import { reportPlacePoints, stampPlaceNames } from '../src/services/dailyReport.service';
+import type { DailyReport } from '../src/services/dailyReport.service';
+
+const reportWithPoints = (): DailyReport => ({
+  date: DATE, user: ME,
+  shift: { attendance_id: 'a1', checkin_at: t('09:30'), checkout_at: t('18:00'), total_hours: 8.5, in_progress: false },
+  transport: { mode: null, label: null },
+  travel: { total_km: 1, method: 'gps_trail', legs: [
+    { index: 0, km: 1, method: 'gps_trail',
+      from: { kind: 'checkin', at: t('09:30'), lat: 22.6955, lng: 88.3937, label: 'Check-in' },
+      to:   { kind: 'checkout', at: t('18:00'), lat: 22.7541, lng: 88.3714, label: 'Check-out' } },
+  ] },
+  visits: [{ submission_id: 's1', label: 'Shop', arrival_at: t('11:00'), departure_at: t('11:20'), minutes: 20, lat: 22.7006, lng: 88.3816 }],
+  halts: [{ index: 1, start_at: t('12:00'), end_at: t('12:20'), minutes: 20, lat: 22.6955, lng: 88.3938, points: 5 }],
+  route: { points: [], thinned: false },
+  summary: { visits: 1, visit_minutes: 20, halts: 1, halt_minutes: 20, total_km: 1 },
+});
+
+describe('reportPlacePoints / stampPlaceNames', () => {
+  it('collects every shown point: both leg ends, the halt and the visit', () => {
+    const pts = reportPlacePoints(reportWithPoints());
+    expect(pts).toEqual([
+      { lat: 22.6955, lng: 88.3937 }, { lat: 22.7541, lng: 88.3714 },
+      { lat: 22.6955, lng: 88.3938 }, { lat: 22.7006, lng: 88.3816 },
+    ]);
+  });
+
+  it('stamps each point with its resolved name and leaves an unresolved one unset', () => {
+    const r = reportWithPoints();
+    const names: Record<string, string> = {
+      '22.6955,88.3937': 'Welfare Association, Sodepur, Panihati',
+      '22.7541,88.3714': 'Jogen Roy Road, Barrackpore',
+      '22.7006,88.3816': 'Sodepur Station Road',
+      // 22.6955,88.3938 (the halt) deliberately omitted -> stays unset
+    };
+    stampPlaceNames(r, (lat, lng) => names[`${lat.toFixed(4)},${lng.toFixed(4)}`] ?? null);
+    expect(r.travel.legs[0].from.place).toBe('Welfare Association, Sodepur, Panihati');
+    expect(r.travel.legs[0].to.place).toBe('Jogen Roy Road, Barrackpore');
+    expect(r.visits[0].place).toBe('Sodepur Station Road');
+    expect(r.halts[0].place).toBeUndefined();
+  });
+});

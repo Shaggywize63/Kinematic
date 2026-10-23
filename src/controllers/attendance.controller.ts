@@ -22,8 +22,10 @@ import { dayTravel, dbTravelFetchers } from '../services/travel.store';
 import { clampMinHaltMinutes } from '../services/haltDetection';
 import {
   emptyDailyReport, getDailyReport as assembleDailyReport, getTeamReport, TEAM_REPORT_MAX_USERS,
+  reportPlacePoints, stampPlaceNames,
   type ReportUser, type TeamReportMember,
 } from '../services/dailyReport.service';
+import { resolvePlaceNames, placeCell } from '../services/placeNames.store';
 import { hasTransportModeValue, trackTransportModeOn, validateTransportMode } from '../services/transportMode.service';
 import { annotateTransportLabels, transportModesForUser } from '../services/transportMode.store';
 import { resolveTenantScope } from '../lib/tenantScope';
@@ -1078,6 +1080,18 @@ export const getDailyReport = asyncHandler<AuthRequest>(async (req, res) => {
     );
     if (typeof labelled?.transport_label === 'string') report.transport.label = labelled.transport_label;
   }
+
+  // Name every point the timeline shows (check-in / check-out, each leg end, halts, visits) ONCE, here on the
+  // server, in one consistent language — so every viewer sees the same name instead of each browser geocoding
+  // the point in its own Google locale. Best-effort: resolvePlaceNames never throws, and an unnamed point just
+  // keeps its coordinates (the dashboard then falls back to its own, now language-pinned, lookup).
+  try {
+    const names = await resolvePlaceNames(reportPlacePoints(report));
+    if (names.size) stampPlaceNames(report, (lat, lng) => names.get(placeCell(lat, lng)) ?? null);
+  } catch (e) {
+    logger.warn(`[daily-report] place-name resolution skipped for user=${targetId}: ${(e as Error)?.message || e}`);
+  }
+
   ok(res, report);
 });
 
