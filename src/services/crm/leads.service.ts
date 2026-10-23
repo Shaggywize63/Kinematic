@@ -1593,7 +1593,7 @@ export async function reopenLead(
  * Throws only when NO pipelines exist at all — that's a real
  * configuration error, not a resolution ambiguity.
  */
-async function getDefaultPipelineId(org_id: string, client_id: string | null = null): Promise<string> {
+export async function getDefaultPipelineId(org_id: string, client_id: string | null = null): Promise<string> {
   let q = supabaseAdmin.from('crm_pipelines')
     .select('id, is_default, client_id, created_at')
     .eq('org_id', org_id).eq('is_active', true).is('deleted_at', null)
@@ -1622,7 +1622,7 @@ async function getDefaultPipelineId(org_id: string, client_id: string | null = n
   return winner.id;
 }
 
-async function getFirstOpenStageId(pipeline_id: string): Promise<string> {
+export async function getFirstOpenStageId(pipeline_id: string): Promise<string> {
   // Prefer the lowest-position stage explicitly tagged stage_type='open'.
   // Fall back to the lowest-position stage of any type if no 'open'
   // exists (some legacy pipelines were imported without stage_type).

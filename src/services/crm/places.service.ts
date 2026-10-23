@@ -74,6 +74,52 @@ export async function autocomplete(
     }));
 }
 
+/**
+ * Text Search for addresses/places — the "show more location suggestions"
+ * fallback. Google's Autocomplete (New) caps at ~5 predictions, so when the rep
+ * wants a wider list we run a Text Search (returns up to 20) against the same
+ * typed query. Shape matches `autocomplete` (place_id + description) so the
+ * clients can render both lists through one code path and resolve a pick via
+ * `details()`. India-restricted, optionally biased to the rep's GPS fix.
+ */
+export async function textSearch(
+  input: string,
+  bias?: { lat: number; lng: number; radiusMeters?: number },
+): Promise<PlacePrediction[]> {
+  const q = (input || '').trim();
+  if (!PLACES_KEY || q.length < 3) return [];
+  const body: Record<string, unknown> = { textQuery: q, includedRegionCodes: ['in'], pageSize: 20 };
+  if (bias && isPlausibleIndiaFix(bias.lat, bias.lng)) {
+    body.locationBias = {
+      circle: {
+        center: { latitude: bias.lat, longitude: bias.lng },
+        radius: Math.max(1, Math.min(50_000, Math.round(bias.radiusMeters ?? 30_000))),
+      },
+    };
+  }
+  const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': PLACES_KEY,
+      // Only the id + a human label are needed for the suggestion list; a tight
+      // field mask keeps this in the cheapest Text Search SKU.
+      'X-Goog-FieldMask': 'places.id,places.formattedAddress,places.displayName',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new AppError(502, `Places text search failed: ${await res.text()}`, 'PLACES_ERROR');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data: any = await res.json();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data.places ?? [])
+    .filter((p: any) => p.id)
+    .map((p: any) => ({
+      place_id: p.id as string,
+      description: (p.formattedAddress || p.displayName?.text || '') as string,
+    }));
+}
+
 /** Resolve a place id to address parts + coordinates. */
 export async function details(placeId: string): Promise<PlaceDetail | null> {
   if (!PLACES_KEY || !placeId) return null;
