@@ -49,9 +49,14 @@ export function dbTravelFetchers(orgId?: string | null, opts: DbTravelFetcherOpt
       const read = async (source: 'form' | 'builder'): Promise<RawVisitRow[]> => {
         const table = source === 'form' ? 'form_submissions' : 'builder_submissions';
         const formFk = source === 'form' ? 'template_id' : 'form_id';
+        // The customer name a rep typed into the visit form is a form_responses answer (its question
+        // label names it); embed those for form_submissions so the daily report can show the customer.
+        const select = source === 'form'
+          ? `*, builder_forms:${formFk}(title), form_responses(value_text, builder_questions(label))`
+          : `*, builder_forms:${formFk}(title)`;
         const { data, error } = await supabaseAdmin
           .from(table)
-          .select(`*, builder_forms:${formFk}(title)`)
+          .select(select)
           .eq('user_id', userId)
           .gte('check_in_at', fromIso)
           .lte('check_in_at', toIso)

@@ -288,6 +288,30 @@ describe('where a visit\'s coordinates come from', () => {
     expect(normalizeVisit({ source: 'form', row: base })!.customerName).toBeNull();
   });
 
+  it('prefers the customer typed into the form (a "Customer Name" answer) over the outlet column', () => {
+    const base = { id: 'x', check_in_at: t('10:00'), check_out_at: t('10:20'), check_in_gps: '13.5,80.5' };
+    const responses = [
+      { value_text: 'enquiry', builder_questions: { label: 'Purpose of Visit' } },
+      { value_text: ' S3 electronics ', builder_questions: { label: 'Customer Name' } },
+      { value_text: '8939433715', builder_questions: { label: 'Mobile Number' } },
+    ];
+    // the form answer wins even when an outlet_name is also present
+    expect(normalizeVisit({ source: 'form', row: { ...base, outlet_name: 'Ignored Outlet', form_responses: responses } })!.customerName).toBe('S3 electronics');
+    // label priority: a specific "Dealer Name" beats a generic "Name"
+    expect(normalizeVisit({ source: 'form', row: { ...base, form_responses: [
+      { value_text: 'Someone', builder_questions: { label: 'Name' } },
+      { value_text: 'Raj Motors', builder_questions: { label: 'Dealer Name' } },
+    ] } })!.customerName).toBe('Raj Motors');
+    // a legacy builder submission carries its answers inline as `responses`
+    expect(normalizeVisit({ source: 'builder', row: { ...base, location_lat: 13.5, location_lng: 80.5, responses: [
+      { value_text: 'Metro Hardware', builder_questions: { label: 'Consumer Name' } },
+    ] } })!.customerName).toBe('Metro Hardware');
+    // no name-ish answer → fall back to the outlet column
+    expect(normalizeVisit({ source: 'form', row: { ...base, outlet_name: 'Fallback Outlet', form_responses: [
+      { value_text: 'blue', builder_questions: { label: 'Colour' } },
+    ] } })!.customerName).toBe('Fallback Outlet');
+  });
+
   it('accepts a timestamptz as the database prints it', () => {
     const v = normalizeVisit({ source: 'form', row: { id: 'x', check_in_at: '2026-10-09T04:30:00+00:00', check_out_at: '2026-10-09T04:50:00.123456+00:00', check_in_gps: '13.5,80.5' } })!;
     expect(v.outMs - v.inMs).toBe(20 * 60_000 + 123);
