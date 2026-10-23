@@ -88,7 +88,12 @@ export async function textSearch(
 ): Promise<PlacePrediction[]> {
   const q = (input || '').trim();
   if (!PLACES_KEY || q.length < 3) return [];
-  const body: Record<string, unknown> = { textQuery: q, includedRegionCodes: ['in'], pageSize: 20 };
+  // NOTE: Text Search (unlike Autocomplete) does NOT accept `includedRegionCodes`
+  // — sending it makes Google reject the whole request (INVALID_ARGUMENT), which
+  // surfaced as "Show more" returning nothing (the dropdown stayed at the ~5
+  // autocomplete rows). Text Search biases by `regionCode` (singular) +
+  // locationBias instead. pageSize 20 is the max.
+  const body: Record<string, unknown> = { textQuery: q, regionCode: 'IN', pageSize: 20 };
   if (bias && isPlausibleIndiaFix(bias.lat, bias.lng)) {
     body.locationBias = {
       circle: {
