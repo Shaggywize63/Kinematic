@@ -60,6 +60,8 @@ export interface TravelAnchorOut<K extends string> {
   lat: number | null;
   lng: number | null;
   label: string;
+  /** Server-resolved place name (set by the daily-report controller after the pure computation); absent otherwise. */
+  place?: string | null;
 }
 
 export interface TravelLeg {
