@@ -191,11 +191,42 @@ function titleOf(row: Record<string, any>): string | null {
   return t || null;
 }
 
+/** Question labels (lowercased) that name the customer/party a visit was logged at, most specific first. */
+const CUSTOMER_NAME_LABELS = [
+  'customer name', 'consumer name', 'client name', 'dealer name', 'party name',
+  'firm name', 'shop name', 'store name', 'outlet name', 'company name', 'name',
+];
+
 /**
- * The customer / outlet a form visit was logged at. Form & builder submissions carry the outlet as the
- * denormalized `outlet_name` (falling back to `store_name`); there is no lead/contact link on a submission.
+ * The customer named in the visit's own form answers. A form-builder submission stores each answer as a
+ * `form_responses` row ({ value_text, builder_questions: { label } }); a legacy builder submission carries
+ * them inline as `responses`. We take the value of the question whose label names the customer (by the
+ * priority list, else any label containing "name").
+ */
+function answeredCustomerName(row: Record<string, any>): string | null {
+  const resps = Array.isArray(row.form_responses) ? row.form_responses
+    : Array.isArray(row.responses) ? row.responses : [];
+  const byLabel = new Map<string, string>();
+  for (const r of resps) {
+    if (!r || typeof r !== 'object') continue;
+    const q = Array.isArray(r.builder_questions) ? r.builder_questions[0] : r.builder_questions;
+    const label = q && typeof q.label === 'string' ? q.label.trim().toLowerCase() : '';
+    const val = typeof r.value_text === 'string' ? r.value_text.trim() : '';
+    if (label && val && !byLabel.has(label)) byLabel.set(label, val);
+  }
+  for (const want of CUSTOMER_NAME_LABELS) { const v = byLabel.get(want); if (v) return v; }
+  for (const [label, val] of byLabel) if (label.includes('name')) return val;
+  return null;
+}
+
+/**
+ * The customer a form visit was logged at. For a form-builder visit (e.g. "Customer Visit") the rep types
+ * the customer into a form field, stored as a `form_responses` answer (question labelled "Customer Name" or
+ * similar); for an outlet check-in it is the denormalized `outlet_name` (else `store_name`). No lead link.
  */
 function customerNameOf(row: Record<string, any>): string | null {
+  const answered = answeredCustomerName(row);
+  if (answered) return answered;
   for (const k of ['outlet_name', 'store_name'] as const) {
     const v = row[k];
     if (typeof v === 'string' && v.trim()) return v.trim();
