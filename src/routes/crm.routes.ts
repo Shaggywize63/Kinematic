@@ -30,6 +30,7 @@ import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as upsellsSvc from '../services/crm/upsells.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
+import * as leadFollowUpSvc from '../services/crm/leadFollowUp.service';
 import * as ownerAssign from '../services/crm/ownerAssignment';
 import { fireActivityLifecycle } from '../services/crm/activityTriggers';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
@@ -879,7 +880,23 @@ leads.post('/', wrap(async (req, res) => {
     }
   }
 
-  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse });
+  // "Follow-up date" from the lead form (custom field `next_follow_up_date`):
+  // spawn a planned activity due 09:00 IST on that day so the owner is reminded
+  // that morning to visit the lead. Best-effort — the lead already exists, so a
+  // reminder failure must not fail the create.
+  let followUpResponse: Record<string, unknown> = {};
+  if (lead?.id) {
+    try {
+      const followUp = await leadFollowUpSvc.createFollowUpReminder({
+        org_id: orgId(req), user_id: userId(req), lead: lead as unknown as Record<string, unknown>,
+      });
+      if (followUp) followUpResponse = { follow_up_reminder: followUp };
+    } catch (e) {
+      console.warn(`[follow_up] could not schedule the follow-up for lead ${lead.id}: ${(e as Error).message}`);
+    }
+  }
+
+  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse, ...followUpResponse });
 }));
 // Approve / reject a pending lead. Restricted to managers — a supervisor/admin
 // role, or any user with HR-module access (matches "notify the manager or a
@@ -5113,6 +5130,15 @@ places.get('/autocomplete', wrap(async (req, res) => {
   const lng = Number(req.query.lng ?? NaN);
   const bias = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : undefined;
   res.json({ success: true, data: await placesSvc.autocomplete(q, bias) });
+}));
+// "Show more suggestions" — a wider Text Search list (up to 20) for when the
+// 5-result autocomplete cap isn't enough. Same shape as /autocomplete.
+places.get('/search', wrap(async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q : '';
+  const lat = Number(req.query.lat ?? NaN);
+  const lng = Number(req.query.lng ?? NaN);
+  const bias = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : undefined;
+  res.json({ success: true, data: await placesSvc.textSearch(q, bias) });
 }));
 places.get('/details', wrap(async (req, res) => {
   const id = typeof req.query.place_id === 'string' ? req.query.place_id : '';
