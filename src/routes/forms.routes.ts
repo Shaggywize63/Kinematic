@@ -12,6 +12,10 @@ router.get('/templates/:id',                 ctrl.getTemplate);
 router.post('/templates',                    requireAdminOrAbove, ctrl.createTemplate);
 router.post('/templates/:id/fields',         requireAdminOrAbove, ctrl.addField);
 
+// Visiting-card OCR for the `card_scan` field type — auth-only so any
+// form-filling rep can use it (no CRM module required).
+router.post('/scan-card',                    ctrl.scanBusinessCard);
+
 // Submissions
 router.post('/submit',                       ctrl.submitForm);
 router.get('/submissions',                   ctrl.getMySubmissions);

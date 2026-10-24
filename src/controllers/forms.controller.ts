@@ -11,6 +11,7 @@ import * as crud from '../services/crm/crud.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { withVisitFields } from '../services/formVisit.service';
 import { resolveVisitTimes } from '../services/formVisit.store';
+import { scanCard, CardMediaType } from '../services/crm/ai/cardScan.service';
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
 function parseGps(s: unknown): { lat: number; lng: number } | null {
@@ -158,6 +159,26 @@ export const addField = asyncHandler<AuthRequest>(async (req, res) => {
   const { data, error } = await supabaseAdmin.from('builder_questions').insert({ ...req.body, form_id: req.params.id }).select().single();
   if (error) return badRequest(res, error.message);
   return created(res, data, 'Field added');
+});
+
+/**
+ * Business-card OCR for the Form Builder's `card_scan` field. The apps capture
+ * a photo of the customer's visiting card, downscale it, and POST the base64;
+ * we return structured contact fields so the form can auto-fill its Contact
+ * section (name / designation / phone / email / company).
+ *
+ * Lives on the /forms mount (auth-only) rather than /crm/ai/scan-card, so a
+ * field rep who fills surveys but has no CRM module can still scan a card.
+ * Thin wrapper over the same single-shot vision helper CRM lead capture uses.
+ */
+export const scanBusinessCard = asyncHandler<AuthRequest>(async (req, res) => {
+  const { image_base64, media_type } = req.body as { image_base64?: unknown; media_type?: unknown };
+  if (typeof image_base64 !== 'string' || image_base64.length < 100) {
+    return badRequest(res, 'image_base64 (base64-encoded card photo) is required');
+  }
+  const mt: CardMediaType = (media_type === 'image/png' || media_type === 'image/webp') ? media_type : 'image/jpeg';
+  const fields = await scanCard(image_base64, mt);
+  return ok(res, fields);
 });
 
 export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
