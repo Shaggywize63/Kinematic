@@ -562,6 +562,8 @@ export const afterSalesConfigSchema = z.object({
 export const assignTelecallerSchema = z.object({
   telecaller_id: uuid,
   campaign: z.string().max(60).optional().nullable(),
+  // Optional capture-time follow-up date (YYYY-MM-DD) — walk-in flow.
+  follow_up_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
 });
 
 export const territorySchema = z.object({

@@ -63,6 +63,7 @@ const CAMPAIGN_ALIASES: Record<string, string> = {
   goldscheme: 'Gold Scheme', goldorder: 'Gold Order',
   'app&digigold': 'App & DigiGold', appdigigold: 'App & DigiGold',
   aftersales: 'After-Sales',
+  walkin: 'Walk-in', walkincustomer: 'Walk-in',
 };
 function canonicalCampaign(raw?: string | null): string | null {
   if (!raw) return null;
@@ -85,6 +86,10 @@ export async function assignLeadToTelecaller(
   lead_id: string,
   telecaller_id: string,
   campaign?: string | null,
+  // Optional capture-time follow-up (YYYY-MM-DD). When set, a telecaller-owned
+  // open call is created so the lead surfaces in that telecaller's Follow-ups
+  // tab. Used by the walk-in "Not Purchased" capture flow.
+  follow_up_date?: string | null,
 ): Promise<Record<string, unknown>> {
   const valid = new Set((await listTelecallers(org_id, scope.id)).map((t) => t.id));
   if (!valid.has(telecaller_id)) {
@@ -109,6 +114,28 @@ export async function assignLeadToTelecaller(
   const { data, error } = await supabaseAdmin.from('crm_leads')
     .update(update).eq('org_id', org_id).eq('id', lead_id).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+  // Optional capture-time follow-up → a telecaller-owned open call so the lead
+  // shows in that telecaller's Follow-ups tab (owner_id OR assigned_to match).
+  // Best-effort: a follow-up failure never fails the assignment itself.
+  if (follow_up_date && /^\d{4}-\d{2}-\d{2}$/.test(follow_up_date)) {
+    try {
+      const dueIso = new Date(`${follow_up_date}T09:00:00+05:30`).toISOString(); // 9am IST
+      if (!Number.isNaN(Date.parse(dueIso))) {
+        await supabaseAdmin.from('crm_activities').insert({
+          org_id,
+          client_id: (lead as any).client_id ?? null,
+          lead_id,
+          type: 'call',
+          status: 'open',
+          subject: 'Walk-in follow-up',
+          due_at: dueIso,
+          owner_id: telecaller_id,
+          assigned_to: telecaller_id,
+        });
+      }
+    } catch { /* non-blocking */ }
+  }
   return data as Record<string, unknown>;
 }
 
