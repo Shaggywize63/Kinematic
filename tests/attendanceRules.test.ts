@@ -8,6 +8,7 @@ import {
   validateRulesPatch, resolveAttendanceRules, mergeRulesIntoSettings, rulesAdminView,
   istParts, istDateOf, isValidYmd, addDaysYmd, weekdayOf, inclusiveDayCount,
   computeLate, classifyPunctuality, applyLate, lateTrackingEnabled, lateTrackingOn,
+  isHalfDayCheckin, isShortWorkday,
   decideCapturedAt, CAPTURED_AT_MAX_FUTURE_MS, CAPTURED_AT_MAX_AGE_MS,
   validateSummaryRange, workingDaysInRange, buildAttendanceSummary, SUMMARY_MAX_RANGE_DAYS,
   type AttendanceRules,
@@ -195,7 +196,7 @@ describe('resolveAttendanceRules', () => {
     expect(v.configured).toBe(true);
     expect(v.rules.grace_minutes).toBe(5);
     expect(v.defaults).toEqual({ shift_start: '09:30', shift_end: '18:00', grace_minutes: 15, weekly_off: [0], allow_offline_checkin: false, selfie_required: true, form_checkin_required: false, track_transport_mode: false });
-    expect(v.bounds).toEqual({ grace_minutes: { min: 0, max: 120 } });
+    expect(v.bounds).toEqual({ grace_minutes: { min: 0, max: 120 }, required_minutes: { min: 0, max: 1440 } });
   });
 
   it('resolves selfie_required / form_checkin_required from the stored booleans', () => {
@@ -879,5 +880,49 @@ describe('buildAttendanceSummary', () => {
     });
     expect(s.rows.find((r) => r.user_id === 'u-bala')).toMatchObject({ present: 1, on_leave: 0, absent: 11 });
     expect(s.rows.find((r) => r.user_id === 'u-asha')).toMatchObject({ present: 4, on_leave: 3 });
+  });
+});
+
+describe('isHalfDayCheckin (opt-in half_day_cutoff)', () => {
+  it('returns null when the rule is unset (no effect for existing clients)', () => {
+    expect(isHalfDayCheckin(ist('2026-10-17', '12:00'), rules())).toBeNull();
+  });
+  it('full day up to and including the cutoff minute; half day after', () => {
+    const r = rules({ half_day_cutoff: '11:15' });
+    expect(isHalfDayCheckin(ist('2026-10-17', '11:15', '59'), r)).toBe(false); // seconds ignored
+    expect(isHalfDayCheckin(ist('2026-10-17', '11:16'), r)).toBe(true);
+    expect(isHalfDayCheckin(ist('2026-10-17', '09:00'), r)).toBe(false);
+  });
+  it('returns null for a missing/invalid instant', () => {
+    expect(isHalfDayCheckin(null, rules({ half_day_cutoff: '11:15' }))).toBeNull();
+    expect(isHalfDayCheckin('not-a-date', rules({ half_day_cutoff: '11:15' }))).toBeNull();
+  });
+});
+
+describe('isShortWorkday (opt-in required_minutes)', () => {
+  it('returns null when the rule is unset (no effect for existing clients)', () => {
+    expect(isShortWorkday(120, rules())).toBeNull();
+  });
+  it('true below the threshold, false at or above (510 = 8h30m)', () => {
+    const r = rules({ required_minutes: 510 });
+    expect(isShortWorkday(509, r)).toBe(true);
+    expect(isShortWorkday(510, r)).toBe(false);
+    expect(isShortWorkday(600, r)).toBe(false);
+  });
+  it('returns null for a non-numeric working-minutes value', () => {
+    expect(isShortWorkday(null, rules({ required_minutes: 510 }))).toBeNull();
+    expect(isShortWorkday(undefined, rules({ required_minutes: 510 }))).toBeNull();
+  });
+});
+
+describe('validateRulesPatch (required_minutes / half_day_cutoff)', () => {
+  it('accepts valid values', () => {
+    expect(validateRulesPatch({ required_minutes: 510, half_day_cutoff: '11:15' }))
+      .toEqual({ ok: true, patch: { required_minutes: 510, half_day_cutoff: '11:15' } });
+  });
+  it('rejects out-of-range required_minutes and malformed cutoff', () => {
+    expect(validateRulesPatch({ required_minutes: 2000 }).ok).toBe(false);
+    expect(validateRulesPatch({ required_minutes: 1.5 }).ok).toBe(false);
+    expect(validateRulesPatch({ half_day_cutoff: '25:00' }).ok).toBe(false);
   });
 });

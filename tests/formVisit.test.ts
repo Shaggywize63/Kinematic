@@ -205,6 +205,7 @@ beforeEach(() => {
     [CB]: {},
   };
   __mock.setDefault('clients', (chain) => ({ data: { id: chain.eqs.id, settings: CLIENT_SETTINGS[String(chain.eqs.id)] ?? {} } }));
+  __mock.setDefault('builder_forms', { data: { org_id: ORG } });
   __mock.setDefault('builder_questions', { data: [] });
   __mock.setDefault('form_responses', { data: [] });
   __mock.setDefault('form_submissions', (chain) => {
@@ -323,6 +324,7 @@ describe('POST /builder/forms/:id/submissions', () => {
     expect(a.duration_minutes).toBe(9);
 
     __mock.reset();
+    __mock.setDefault('builder_forms', { data: { org_id: ORG } });
     __mock.setDefault('builder_questions', { data: [] });
     __mock.setDefault('builder_submissions', (chain) => ({ data: chain.ops.find((o) => o.method === 'insert') ? { id: 'b2' } : [] }));
     __mock.setDefault('clients', (chain) => ({ data: { id: chain.eqs.id, settings: CLIENT_SETTINGS[String(chain.eqs.id)] ?? {} } }));

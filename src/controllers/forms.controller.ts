@@ -10,8 +10,11 @@ import { mirrorCheckinToRoutePlan } from '../services/routePlanCheckin.service';
 import * as crud from '../services/crm/crud.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { withVisitFields } from '../services/formVisit.service';
+import { reverseGeocode } from '../services/crm/places.service';
 import { resolveVisitTimes } from '../services/formVisit.store';
 import { scanCard, CardMediaType } from '../services/crm/ai/cardScan.service';
+import { resolveTenantScope, callerMayReadOrg, enforcedUnlessOff } from '../lib/tenantScope';
+import { orgRowReachable } from '../lib/userGuard';
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
 function parseGps(s: unknown): { lat: number; lng: number } | null {
@@ -116,7 +119,14 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
 export const getTemplate = asyncHandler<AuthRequest>(async (req, res) => {
   const { data, error } = await supabaseAdmin.from('builder_forms').select('*, builder_questions(*)').eq('id', req.params.id).single();
   if (error) return badRequest(res, error.message);
-  
+  // Another org's form: a 404 (BUILDER_ORG_ENFORCE=off only logs it) in case a tenant fills in a form
+  // that one of its sibling orgs owns.
+  if (!orgRowReachable(req.user, data.org_id)) {
+    const deny = enforcedUnlessOff('BUILDER_ORG_ENFORCE');
+    logger.warn(`[authz-${deny ? 'deny' : 'shadow'}] getTemplate: actor=${req.user?.id} org=${req.user?.org_id} form=${data.id} formOrg=${data.org_id}`);
+    if (deny) return notFound(res, 'Form not found');
+  }
+
   // Apply same mapping logic for consistency
   const mapped = {
     id: data.id,
@@ -256,11 +266,22 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   // server time for clients whose `form_checkin_required` rule is on. See formVisit.service.ts.
   const visit = await resolveVisitTimes(submitterClientId, { check_in_at, check_out_at });
 
+  // Stamp WHERE the form was submitted. The apps send coordinates but usually
+  // not a resolved address, so when a fix is present and no address was supplied
+  // we reverse-geocode server-side — every submission then carries a place name
+  // for all clients with no app update. Best-effort: a lookup miss (no key /
+  // Geocoding API off / no result) just leaves the address null, never fails the
+  // submission.
+  let resolvedAddress: string | null = (typeof address === 'string' && address.trim()) ? address.trim() : null;
+  if (!resolvedAddress && latitude != null && longitude != null) {
+    resolvedAddress = await reverseGeocode(Number(latitude), Number(longitude));
+  }
+
   const { data: sub, error: subErr } = await supabaseAdmin.from('form_submissions').insert({
     user_id: user.id, org_id: user.org_id, client_id: submitterClientId,
     template_id, activity_id, outlet_id, outlet_name,
     latitude, longitude, submitted_at: new Date().toISOString(),
-    check_in_at: visit.check_in_at, check_out_at: visit.check_out_at, check_in_gps, check_out_gps, gps, address,
+    check_in_at: visit.check_in_at, check_out_at: visit.check_out_at, check_in_gps, check_out_gps, gps, address: resolvedAddress,
     duration_minutes: visit.duration_minutes
   }).select().single();
   if (subErr) return badRequest(res, subErr.message);
@@ -372,11 +393,14 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
   if (isDemo(user)) return ok(res, getMockSubmissionDetails(req.params.id));
   const { id } = req.params;
   const { data: sub } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title), activities(name)').eq('id', id).single();
+  // One org's rows only, on every project: a submission id from another org is a 404, not a read.
+  if (sub && (sub as { user_id?: string }).user_id !== user.id && !callerMayReadOrg(user, (sub as { org_id?: string | null }).org_id)) return notFound(res);
   if (sub) {
     const { data: resp } = await supabaseAdmin.from('form_responses').select('*, builder_questions(*)').eq('submission_id', id);
     return ok(res, { ...sub, form_responses: resp || [] });
   }
   const { data: bSub } = await supabaseAdmin.from('builder_submissions').select('*, builder_forms(title), users(name)').eq('id', id).single();
+  if (bSub && (bSub as { user_id?: string }).user_id !== user.id && !callerMayReadOrg(user, (bSub as { org_id?: string | null }).org_id)) return notFound(res);
   if (bSub) return ok(res, { ...bSub, activities: { name: bSub.builder_forms?.title }, form_responses: bSub.responses || [] });
   return notFound(res);
 });
@@ -397,54 +421,12 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
   const tId = (template_id as string)?.trim();
   const aId = (activity_id as string)?.trim();
 
-  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const role = (user.role || '').toLowerCase();
-  // A CLIENT-BOUND user (client_id pinned in the JWT, e.g. ByteBack's sub_admins)
-  // is NEVER cross-org — it is scoped to its own org. Previously isSuper was
-  // `role.includes('admin')`, which matched 'sub_admin', so a client admin was
-  // treated as global and saw EVERY org's submissions: other tenants' / demo
-  // rows leaked into a single tenant's Work Activities as "mock" entries. Grant
-  // the cross-org (global) view only to the platform tier (super_admin / the
-  // platform owner), and never when the caller is client-bound.
-  const isClientBound = isUUID((user as any).client_id);
-  const isSuper = !isClientBound && (role === 'super_admin' || role === 'admin' || role === 'main_admin' || role === 'master_admin');
-
-  // Resolve the selected client from the JWT (pinned), an explicit ?client_id=
-  // query param, or the X-Client-Id header the dashboard auto-attaches for its
-  // global client picker. Reading the header here closes a cross-tenant leak:
-  // when a platform admin "acting as a client" sent the scope only as a header,
-  // this endpoint never saw it, stayed global, and returned EVERY org's rows.
-  const headerClientId = req.headers['x-client-id'] as string | undefined;
-  const pickedClientId = isClientBound
-    ? ((user as any).client_id as string)
-    // A real X-Client-Id header pins a specific client and MUST win over the
-    // picker's "All clients" (Kinematic) sentinel: a super-admin "acting as a
-    // client" sets this header, and while the picker still reads "All clients"
-    // the page sends client_id=Kinematic — which previously flipped the request
-    // global and leaked every org's submissions. The header is authoritative.
-    : isUUID(headerClientId as string) ? (headerClientId as string)
-    : (isUUID(client_id as string) && !isGlobalVal) ? (client_id as string)
-    : null;
-
-  // Cross-org (global) view is for the platform tier ONLY, and ONLY when no
-  // specific client is selected. The moment a client is picked (JWT / query /
-  // header) the request is scoped to that client — a super_admin acting as a
-  // client must never see other tenants' submissions.
-  const isGlobal = !isClientBound && (isSuper || isSagar) && !pickedClientId;
-
-  // The org every query is scoped to. Client-bound / org-scoped callers use
-  // their own org. A platform admin who picked a client is scoped to THAT
-  // client's org (resolved from the clients table) — essential for
-  // builder_submissions, which carry only org_id and no client_id. A truly
-  // global platform admin gets no org filter (the intended cross-tenant view).
-  let scopeOrgId: string | null = isGlobal ? null : (user.org_id ?? null);
-  if (!isClientBound && pickedClientId) {
-    const { data: pickedClient } = await supabaseAdmin
-      .from('clients').select('org_id').eq('id', pickedClientId).maybeSingle();
-    const pickedOrg = (pickedClient as { org_id?: string } | null)?.org_id;
-    if (pickedOrg) scopeOrgId = pickedOrg;
-  }
+  // One org's rows per request on every project — the caller's own org, or the client they picked and may use.
+  // Only the Tata platform operators keep the aggregated "All clients" view (scopeOrgId null). An admin, a
+  // client-role user or a name containing "sagar" no longer does; a picked client that isn't theirs is a 404.
+  // See lib/tenantScope.
+  const scope = await resolveTenantScope(req, client_id);
+  const { isGlobal, pickedClientId, scopeOrgId } = scope;
 
   const istDateFrom = parseAppDate(date_from as string);
   const istDateTo = date_to ? parseAppDate(date_to as string) : istDateFrom;
@@ -488,8 +470,7 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
      select1 += `, form_responses(*, builder_questions(*))`;
   }
   let q1 = supabaseAdmin.from('form_submissions').select(select1, { count: 'exact' });
-  // Non-global callers (org-scoped admins / supervisors) only see rows in
-  // their own org. Super admins / Sagar skip this.
+  // Everyone but a Tata platform operator in the "All clients" view is held to one org.
   if (scopeOrgId) q1 = q1.eq('org_id', scopeOrgId);
   // Client picker narrows to a specific sub-tenant, but still surfaces
   // rows with NULL client_id (org-level submissions that predate the
@@ -565,8 +546,9 @@ export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {
       activities: { name: b.builder_forms?.title || 'Form' }
   }));
 
-  const { count: rawTotalF } = await supabaseAdmin.from('form_submissions').select('*', { count: 'exact', head: true });
-  const { count: rawTotalB } = await supabaseAdmin.from('builder_submissions').select('*', { count: 'exact', head: true });
+  // Whole-table row counts are a cross-tenant disclosure: only the all-clients operator view gets them.
+  const rawTotalF = isGlobal ? (await supabaseAdmin.from('form_submissions').select('*', { count: 'exact', head: true })).count : null;
+  const rawTotalB = isGlobal ? (await supabaseAdmin.from('builder_submissions').select('*', { count: 'exact', head: true })).count : null;
 
   let merged = [...normalizedF, ...normalizedB].sort((a, b) => 
       new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime()

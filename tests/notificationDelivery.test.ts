@@ -101,6 +101,8 @@ describe('mention notifications carry what a tap needs', () => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { persistMentions } = require('../src/services/crm/messaging.service');
   const req = { user: { id: 'u1', org_id: 'o1', role: 'super_admin', name: 'Asha' } };
+  // The mentioned user is in the mentioner's org (an admin tier may only reach its own org's users).
+  beforeEach(() => supa().setDefault('users', { data: [{ id: 'u2' }] }));
 
   it('a chat mention includes the thread so the app can open the conversation', async () => {
     await persistMentions(req, 'message', 'M1', ['u2'], { thread_id: 'TH1' });

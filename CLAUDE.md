@@ -1,6 +1,7 @@
 # Kinematic Backend — Agent Guide
 
-Express + TypeScript API over Supabase (Postgres project `lnvxqjqfsxvtjvbzphou`).
+Express + TypeScript API over **self-hosted Supabase on AWS** (see "Where the data lives" below —
+there are no supabase.com cloud projects).
 Consumed by the web dashboard (`kinematic-dashboard`), iOS (`Kinematic-iOS`) and
 Android (`Kinematic-App`) apps.
 
@@ -18,12 +19,46 @@ Key conventions:
   `crud.clientScopedList*` adds the client filter; pass `strictClient` for real
   tenant isolation (leads/deals/contacts/accounts) vs shared lookup tables.
 
+## Where the data lives — AWS, not supabase.com
+
+Everything runs in AWS account `023620758744`, region `ap-south-1`, ECS cluster `kinematic`:
+
+| Service (ECS) | What it is | Public host |
+|---|---|---|
+| `kinematic-backend` | this API (task def `kinematic-backend`) | `api.kinematicapp.com` |
+| `kinematic-supabase` | **Kinematic tenant**: PostgREST + GoTrue + storage-api + nginx | `supabase-kinematic.kinematicapp.com` |
+| `kinematic-supabase-tata` | **Tata tenant**: same stack | `supabase-tata.kinematicapp.com` |
+
+- The backend reaches them via env `KINEMATIC_SUPABASE_URL` (Kinematic) and `SUPABASE_URL` (Tata).
+- Postgres is RDS `kinematic-mumbai-test` (Postgres 17, **database `kinematic`** for the Kinematic tenant,
+  master user `kinematic_admin` with an AWS-managed secret `rds!db-…`). It is named "test" but is the live
+  Kinematic database. The Tata tenant's database location has not been verified here — check the
+  `kinematic-supabase-tata` task definition's `DATABASE_URL` secret reference before touching it.
+- The RDS instance is private (not publicly accessible). The **Supabase MCP connector cannot reach any of
+  this** (it only sees supabase.com projects) — do not try it; the old project ids
+  (`clldjlojtmrrpozydqxk`, `lnvxqjqfsxvtjvbzphou`) are stale.
+
+### Running SQL / migrations (the pattern that works)
+PostgREST caches the schema, so after DDL send `NOTIFY pgrst, 'reload schema'`.
+
+1. Register a one-off Fargate task definition (family e.g. `kinematic-migrate`): image `postgres:17-alpine`,
+   execution role `kinematic-ecs-task-execution` (it can read Secrets Manager), `awslogs` group
+   `/ecs/kinematic`, and the DB login injected **by reference** — `secrets: DB_USER` / `DB_PASS` with
+   `valueFrom` = `<rds! secret ARN>:username::` / `:password::` — so credentials never appear in a transcript.
+2. The command runs `psql -h kinematic-mumbai-test.cj2yqwsi6udf.ap-south-1.rds.amazonaws.com -U $DB_USER -d kinematic
+   -v ON_ERROR_STOP=1` with `PGSSLMODE=require`: **pre-check first** (db name, target table exists, owner), then
+   apply with `-1` (single transaction), then verify, then `NOTIFY pgrst, 'reload schema'`.
+3. Run it with `RunTask` using the same subnets / security group as the `kinematic-supabase` service
+   (`sg-066697baa07f4e402`, public IP on so Docker Hub is reachable), read the result from the log stream,
+   then deregister the task definition. Migrations must be additive and idempotent (`IF NOT EXISTS`).
+4. Verify through the API, not just SQL: query the new column/table via
+   `https://supabase-kinematic.kinematicapp.com/rest/v1/<table>?select=<col>&limit=1` with the service key.
+
 ## Default tenant for changes — Kinematic, not Tata
 
-Unless the user **explicitly names** a project/tenant, ALL data, schema,
-config, SQL, and edge/cron operations default to the **Kinematic** Supabase
-project (`clldjlojtmrrpozydqxk`), NOT Tata (`lnvxqjqfsxvtjvbzphou`). Only touch
-Tata (or any other org) when the user names it.
+Unless the user **explicitly names** a tenant, ALL data, schema, config, SQL, and edge/cron operations default to
+the **Kinematic** tenant (`kinematic-supabase`, database `kinematic`), NOT Tata. Only touch Tata (or any other
+org) when the user names it.
 
 Backend code in this repo is **shared** by both tenants, so when adding
 multi-project features keep production behavior for the Tata `default` project

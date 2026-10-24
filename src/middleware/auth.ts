@@ -6,6 +6,7 @@ import { DEMO_ORG_ID, DEMO_USER_ID, isDemo } from '../utils/demoData';
 import { unauthorized, forbidden } from '../utils/response';
 import { logger } from '../lib/logger';
 import { resolveEntitlements } from '../lib/entitlements';
+import { isPlatformOperator, enforcedUnlessOff } from '../lib/tenantScope';
 
 // In-memory profile cache. Keyed by token (so a refreshed token re-validates).
 // TTL is min(5 min, JWT exp). Eliminates 3 sequential round-trips per request:
@@ -88,11 +89,18 @@ const ORG_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 // entry always holds the real profile org. Gated strictly to super_admin; for
 // every other role org always comes from the profile, so this is a no-op.
 // Normal super-admin traffic sends their own org (X-Org-Id === own) → no-op.
-function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): AuthRequest['user'] {
+export function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): AuthRequest['user'] {
   if (!user || (user as { role?: string }).role !== 'super_admin') return user;
   const raw = req.headers['x-org-id'];
   const target = Array.isArray(raw) ? raw[0] : raw;
   if (!target || !ORG_UUID_RE.test(target) || target === (user as { org_id?: string }).org_id) return user;
+  // Only the named platform operators may act as another org. Any other super_admin (a tenant's own, or an account
+  // that was promoted) has the header ignored; IMPERSONATE_OPERATOR_ONLY=off falls back to logging it only.
+  if (!isPlatformOperator(user as { role?: string; email?: string; client_id?: string })) {
+    const deny = enforcedUnlessOff('IMPERSONATE_OPERATOR_ONLY');
+    logger.warn(`[authz-${deny ? 'deny' : 'shadow'}] non-operator super_admin ${(user as { id?: string }).id} acting as org ${target}`);
+    if (deny) return user;
+  }
   logger.info(`[Auth] super_admin acting as org ${target}`);
   return { ...(user as object), org_id: target } as AuthRequest['user'];
 }
@@ -163,6 +171,8 @@ async function maybeDeriveViewerOrg(user: AuthRequest['user'], req: AuthRequest)
   return { ...(u as object), org_id: org, enabled_modules: cappedModules } as AuthRequest['user'];
 }
 
+import { pickCompany } from '../lib/companyPick';
+
 // Impersonation profile cache — keyed `impersonate:<project>:<targetId>`.
 // Separate from the token-keyed authCache so an impersonated identity is
 // NEVER written under the master's real token. Short TTL like authCache.
@@ -178,7 +188,7 @@ const impersonateCache = new Map<string, CachedAuth>();
  * target's.
  */
 export async function buildUserContext(userId: string): Promise<AuthRequest['user'] | null> {
-  const [profileRes, permsRes, citiesRes] = await Promise.all([
+  const [profileRes, permsRes, citiesRes, companiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
       .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, viewer_org_ids, active_session_id, active_session_device, org_role_id')
@@ -186,6 +196,7 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', userId),
     supabaseAdmin.from('user_city_assignments').select('city_id, cities!city_id(name)').eq('user_id', userId),
+    supabaseAdmin.from('user_companies').select('client_id').eq('user_id', userId),
   ]);
 
   if (profileRes.error || !profileRes.data) return null;
@@ -234,6 +245,7 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
   return {
     ...profile,
     permissions: permsRes.data?.map((p) => p.module_id) || [],
+    company_client_ids: ((companiesRes.data || []) as Array<{ client_id: string }>).map((r) => r.client_id),
     assigned_cities: userCityIds,
     assigned_city_names: userCityNames,
     role_assigned_cities: roleAssignedCities,
@@ -243,6 +255,7 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
     role_permissions_write: rolePermissionsWrite,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
+    entitlements_strict: entitlements.strict === true,
   } as AuthRequest['user'];
 }
 
@@ -428,7 +441,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const cached = cacheGet(cacheKey);
   if (cached) {
     if (rejectIfStaleSession(req, res, cached)) return;
-    req.user = await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(cached, req), req), req);
+    req.user = pickCompany(await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(cached, req), req), req), req.headers['x-client-id']);
     req.accessToken = token;
     return next();
   }
@@ -439,7 +452,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   // Cold path — fetch profile + permissions + cities in parallel (was sequential).
   // The cities join also resolves the city NAME because downstream RBAC
   // filters CRM records by name (crm_leads.city/contacts.city are text columns).
-  const [profileRes, permsRes, citiesRes] = await Promise.all([
+  const [profileRes, permsRes, citiesRes, companiesRes] = await Promise.all([
     supabaseAdmin
       .from('users')
       .select('id, org_id, client_id, name, email, mobile, role, zone_id, supervisor_id, fcm_token, is_active, is_read_only, viewer_org_ids, active_session_id, active_session_device, org_role_id')
@@ -447,6 +460,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
       .single(),
     supabaseAdmin.from('user_module_permissions').select('module_id').eq('user_id', verified.sub),
     supabaseAdmin.from('user_city_assignments').select('city_id, cities!city_id(name)').eq('user_id', verified.sub),
+    supabaseAdmin.from('user_companies').select('client_id').eq('user_id', verified.sub),
   ]);
 
   if (profileRes.error || !profileRes.data) {
@@ -541,6 +555,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   const user = {
     ...profile,
     permissions: isDemoEmail ? DEMO_PERMISSIONS : (permsRes.data?.map(p => p.module_id) || []),
+    company_client_ids: ((companiesRes.data || []) as Array<{ client_id: string }>).map((r) => r.client_id),
     assigned_cities: userCityIds,
     assigned_city_names: userCityNames,
     role_assigned_cities: roleAssignedCities,
@@ -550,6 +565,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     role_permissions_write: rolePermissionsWrite,
     enabled_modules: entitlements.enabled_modules,
     enabled_packages: entitlements.enabled_packages,
+    entitlements_strict: entitlements.strict === true,
   } as AuthRequest['user'];
 
   // Session check happens AFTER we have the fresh profile (with the
@@ -560,7 +576,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (rejectIfStaleSession(req, res, user)) return;
 
   cacheSet(cacheKey, user, verified.exp);
-  req.user = await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(user, req), req), req);
+  req.user = pickCompany(await maybeImpersonateUser(await maybeDeriveViewerOrg(maybeImpersonate(user, req), req), req), req.headers['x-client-id']);
   req.accessToken = token;
   next();
 }
@@ -599,8 +615,9 @@ export function requireModule(moduleName: string) {
     const entitlements = req.user.enabled_modules || [];
 
     if (role === 'super_admin') return next();
-    // Entitlement gate: client must have purchased/been-granted the module.
-    if (entitlements.length > 0 && !entitlements.includes(moduleName)) {
+    // Entitlement gate: client must have purchased/been-granted the module. A strict list is complete, so an empty
+    // one denies too (Client Management ticks are the whole story).
+    if ((entitlements.length > 0 || req.user.entitlements_strict === true) && !entitlements.includes(moduleName)) {
       return forbidden(res, `Module not enabled for your account: ${moduleName}`);
     }
     // Per-user RBAC inside a client: legacy permissions array still respected.

@@ -119,6 +119,7 @@ Keep ids under these key names when adding a notification, and prefer
 | 21 | **SOS / panic** raised | (sos) | Managers / safety contacts | inline — SOS controller |
 | 22 | **Attendance regularization** request / decision | (attendance) | Rep / approver | inline — attendance service |
 | 22a | **Forgot to check out** — still checked in 10 h after starting (once per shift). If still open at 12:00 AM IST the shift is auto-checked-out (`attendance.notes` records it). Opt an org out with `org_settings` `attendance_checkout_reminder` / `attendance_auto_checkout` = `false` | `checkout_reminder` | Rep (self) | scheduled — attendance-sweep tick (all projects) |
+| 22b | **Time to check out** — fixed-time variant of 22a at a clock time (default 6:30 PM IST) for a rep on an open shift that started before that time. Opt a client in with `clients.settings.attendance_checkout_reminder_time` = `"18:30"` / `true` / `{ enabled, time }`; the 10 h reminder (22a) is then suppressed for that client so the rep gets exactly one nudge. Same `checkout_reminder` kind (deep-links to Attendance), marked `data.scheduled: true` | `checkout_reminder` | Rep (self) | scheduled — attendance-sweep tick (all projects) |
 | 23 | **Leave** request / decision | (leave) | Rep / approver | inline — leave service |
 | 24 | **Expense** submitted / decided | (expense) | Rep / approver | inline — expenses service |
 
@@ -173,6 +174,50 @@ cron wiring:
    - `POST /api/v1/cron/stock-expiry-scan` **(new)**
    - `POST /api/v1/cron/low-stock-scan` **(new)**
    - plus the existing digest / briefing / kini / replenishment jobs.
+
+## Who receives what — the notification policy (Client Management → Notifications)
+
+The catalogue in `src/lib/notificationCatalog.ts` is the list of notifications the platform can send (the same
+`kind` string the apps route a tap on). **Nothing in it is sent unless it is switched on for the recipient's client,
+and by default nothing is on.** The policy (`src/services/notificationPolicy.ts`) is applied where a notification
+leaves the server, so every writer is covered without being touched:
+
+| Where | What happens to a row whose kind is off |
+|---|---|
+| `notify()` / `notifyUsers()` | no row is created |
+| push dispatcher (`dispatchPendingPushes`) | the row is stamped `sent_at` and never sent (counted as `suppressed`) |
+| in-app bell (`GET /notifications`) | the row is filtered out |
+
+Two rules, in this order:
+
+1. **Project switch.** Projects in `NOTIFICATIONS_DISABLED_PROJECTS` (comma-separated project keys) receive nothing.
+   Default `default` — the **Tata** project. Set it to an empty value to lift the switch.
+2. **Client catalogue.** Everywhere else a kind is delivered only if it is in the recipient org's
+   `org_settings` `notifications.enabled_kinds` (`["lead_assigned","sos"]`, or `["*"]` for everything). No row = nothing on.
+   A client's setting lives on the org that holds its users, like the seat cap.
+
+Managing it:
+
+- `GET  /api/v1/clients/:id/notifications` — the catalogue with this client's on/off flags (admin / super_admin of the owning org).
+- `PUT  /api/v1/clients/:id/notifications` `{ "enabled_kinds": ["sos", …] | ["*"] | [] }` — replaces the list; unknown kinds → 400.
+- `GET  /api/v1/notifications/catalog` — the same view for the signed-in user's own org (read-only).
+
+Other in-app surfaces follow the same switches: the **unread badge** on the home payload (`countUnreadAllowed`), the **home
+broadcast banner** and the **browser (web) push** for chat messages and @mentions. A client without the **Notifications**
+module (a complete entitlement list that lacks it) sees no in-app notifications at all.
+
+Adding a notification: add its `kind` to the catalogue first. A kind that is not in the catalogue is **never** delivered
+(except to a client on `["*"]`) and logs `[notif-policy] notification kind "x" is not in the catalogue` once.
+
+Safety and rollout:
+
+- A settings read that fails never suppresses anything — the notification is delivered as before.
+- `NOTIFICATION_POLICY=off` removes both rules (the old behaviour) — the rollback switch. Under `NODE_ENV=test` the
+  policy is off unless `NOTIFICATION_POLICY=on`.
+- `migrations/notification_catalog_grandfather_2026_10.sql` gives every existing org `["*"]` **on the Kinematic
+  database only**, so clients already receiving notifications keep them; only clients created afterwards (and Tata,
+  via the project switch) start with none. Turn a client down from Client Management or with the PUT above.
+- Settings are cached for 60 s per process, so a change takes effect within a minute.
 
 ## Self-gating & tenant safety
 

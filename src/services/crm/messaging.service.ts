@@ -16,6 +16,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { AuthRequest } from '../../types';
+import { isPlatformOperator } from '../../lib/tenantScope';
 
 export type SourceKind = 'lead_update' | 'activity' | 'message';
 
@@ -33,12 +34,14 @@ interface ScopedUser {
 // Roles that count as "platform admin" for the bypass — matches the
 // dashboard's isPlatformAdmin predicate so the same users that see
 // every tenant on the web also reach every user in the messaging picker.
-export function isPlatformAdmin(role: string | undefined, name: string | undefined): boolean {
+//
+// This is an admin TIER (it skips the hierarchy/city scoping inside the caller's own org). It is not cross-tenant:
+// only a platform operator (isPlatformOperator) reaches other orgs. A display name used to count here too
+// ("sagar") — users can rename themselves, so that bypass is gone. `name` is kept in the signature for callers.
+export function isPlatformAdmin(role: string | undefined, _name?: string | undefined): boolean {
   const r = (role || '').toLowerCase().trim().replace(/-/g, '_');
   if (['super_admin', 'admin', 'main_admin', 'sub_admin', 'master_admin'].includes(r)) return true;
-  if (r.includes('admin')) return true;
-  if ((name || '').toLowerCase().trim() === 'sagar') return true;
-  return false;
+  return r.includes('admin');
 }
 
 /**
@@ -54,7 +57,9 @@ export async function scopedUsers(req: AuthRequest): Promise<ScopedUser[]> {
   const me = req.user;
   if (!me) throw new AppError(401, 'Not authenticated', 'NO_USER');
   if (isPlatformAdmin(me.role as string, me.name as string)) {
-    return scopedUsersForSuperAdmin();
+    // Operators reach every tenant; any other admin tier reaches their own org.
+    if (isPlatformOperator(me)) return scopedUsersForSuperAdmin(null);
+    return me.org_id ? scopedUsersForSuperAdmin(me.org_id as string) : [];
   }
   const myId = me.id;
   const orgId = me.org_id;
@@ -120,13 +125,15 @@ export async function scopedUsers(req: AuthRequest): Promise<ScopedUser[]> {
   return result;
 }
 
-async function scopedUsersForSuperAdmin(): Promise<ScopedUser[]> {
-  // Platform admins reach every user in every tenant. Filter out inactive
-  // accounts so deactivated reps don't clutter the picker.
-  const { data, error } = await supabaseAdmin
+async function scopedUsersForSuperAdmin(orgId: string | null): Promise<ScopedUser[]> {
+  // `orgId` null = a platform operator (every tenant); otherwise the admin's own org.
+  // Filter out inactive accounts so deactivated reps don't clutter the picker.
+  let uq = supabaseAdmin
     .from('users')
     .select('id, name, email')
-    .eq('is_active', true)
+    .eq('is_active', true);
+  if (orgId) uq = uq.eq('org_id', orgId);
+  const { data, error } = await uq
     .order('name', { ascending: true })
     .limit(2000);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -185,7 +192,16 @@ async function fetchAncestorIds(userId: string): Promise<string[]> {
  */
 export async function assertWithinScope(req: AuthRequest, targetUserIds: string[]): Promise<void> {
   if (targetUserIds.length === 0) return;
-  if (isPlatformAdmin(req.user?.role as string, req.user?.name as string)) return;
+  if (isPlatformAdmin(req.user?.role as string, req.user?.name as string)) {
+    if (isPlatformOperator(req.user)) return;
+    // Admin tier: anyone in their own org, nobody outside it.
+    const { data } = await supabaseAdmin.from('users').select('id').in('id', targetUserIds).eq('org_id', req.user?.org_id as string);
+    const inOrg = new Set(((data ?? []) as Array<{ id: string }>).map((u) => u.id));
+    if (targetUserIds.some((id) => !inOrg.has(id))) {
+      throw new AppError(403, 'One or more recipients are outside your organisation.', 'OUT_OF_SCOPE');
+    }
+    return;
+  }
   const allowed = new Set((await scopedUsers(req)).map((u) => u.id));
   for (const id of targetUserIds) {
     if (!allowed.has(id)) {
@@ -261,7 +277,7 @@ export async function persistMentions(
   // Web Push — fire-and-forget; failures don't abort the originating
   // request because the user has already seen the message land.
   void import('./webPush.service').then((wp) =>
-    wp.sendPushToUsers(recipients, { title, body: bodyByKind[source_kind], url: linkForSource(source_kind, source_id) }),
+    wp.sendPushToUsers(recipients, { title, body: bodyByKind[source_kind], url: linkForSource(source_kind, source_id) }, { orgId: me.org_id, kind: 'mention' }),
   ).catch(() => { /* ignore */ });
 }
 
@@ -527,7 +543,7 @@ export async function sendMessage(req: AuthRequest, threadId: string, body: stri
       })),
     );
     void import('./webPush.service').then((wp) =>
-      wp.sendPushToUsers(recipients, { title, body: preview, url: `/dashboard/inbox?thread=${threadId}` }),
+      wp.sendPushToUsers(recipients, { title, body: preview, url: `/dashboard/inbox?thread=${threadId}` }, { orgId: (thread as any).org_id, kind: 'message' }),
     ).catch(() => { /* ignore */ });
   }
 

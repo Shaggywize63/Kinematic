@@ -12,9 +12,12 @@
  */
 import { supabaseAdmin } from '../../../lib/supabase';
 import { complete as aiComplete } from './aiClient';
+import { getLatestCallInsight, callInsightPayload } from './callInsights.signal';
 import type { NextBestAction } from '../../../types/crm.types';
 
 const SYSTEM_PROMPT = `You are a sales coach. Given a deal's current state, recent activity, stage history, days in stage, and win probability, recommend ONE immediate next action AND a step-by-step closing plan.
+
+If \`signals.latest_call\` is present it is the AI analysis of the most recent RECORDED call tied to this deal's lead (intent, sentiment, objections, commitments, suggested next_action). Treat it as the strongest recent signal — honour commitments made on the call, resolve open objections, and move faster when intent is high.
 
 Constraints on every step:
 - The action must be something the rep reading this can execute personally. Use imperative voice ("Call the contact", "Send the proposal", "Schedule a site visit").
@@ -71,6 +74,13 @@ export async function compute(org_id: string, client_id: string | null, deal_id:
   ]);
 
   const signals = buildSignals(deal, stage as any, (recent ?? []) as RawActivity[], (history ?? []) as RawHistory[]);
+
+  // Call Insights link — fold the latest analyzed call on this deal's lead into
+  // the recommendation. No-op for clients without the Call Insights module.
+  if (deal.lead_id) {
+    const callSig = await getLatestCallInsight(org_id, deal.lead_id);
+    if (callSig) (signals as Record<string, unknown>).latest_call = callInsightPayload(callSig);
+  }
 
   const userPayload = {
     deal: {

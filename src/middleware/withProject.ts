@@ -1,6 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../types';
-import { runWithProject, isKnownProject, fallbackProjectKey, resolveProjectForIntegrationAsync, resolveProjectForTokenAsync, resolveProjectForCaptureTokenAsync, resolveProjectForEmailTrackingTokenAsync } from '../lib/projects';
+import { runWithProject, isKnownProject, fallbackProjectKey, resolveProjectForIntegrationAsync, resolveProjectForTokenAsync, resolveProjectForCaptureTokenAsync, resolveProjectForEmailTrackingTokenAsync, resolveProjectForTallyIntegrationAsync, resolveProjectForTallyPairingAsync } from '../lib/projects';
+import { hashPairingCode, normalisePairingCode } from '../services/distribution/integrations/tally.onboarding';
 
 // Reads the X-Kinematic-Project header and runs the remainder of the request
 // inside that project's AsyncLocalStorage context, so supabase / supabaseAdmin
@@ -93,6 +94,24 @@ export async function withEmailTrackingProject(req: AuthRequest, _res: Response,
 export async function withEmailUnsubscribeProject(req: AuthRequest, _res: Response, next: NextFunction) {
   const token = String((req.query as Record<string, unknown>)?.t ?? '').trim();
   const project = await resolveProjectForEmailTrackingTokenAsync(token);
+  (req as AuthRequest & { projectKey?: string }).projectKey = project;
+  runWithProject(project, () => next());
+}
+
+// Routes the Tally bridge agent's id-scoped calls (`/integrations/tally/jobs/:id[/...]`) to
+// whichever project owns that integration. The agent sends no auth and no project header.
+export async function withTallyIntegrationProject(req: AuthRequest, _res: Response, next: NextFunction) {
+  const project = await resolveProjectForTallyIntegrationAsync(String(req.params.id || '').trim());
+  (req as AuthRequest & { projectKey?: string }).projectKey = project;
+  runWithProject(project, () => next());
+}
+
+// Same for `/integrations/tally/pair`, which has no id: the one-time pairing code in the body
+// identifies the project (a malformed code just falls through to the default project, whose
+// handler answers 400/404 itself).
+export async function withTallyPairProject(req: AuthRequest, _res: Response, next: NextFunction) {
+  const code = normalisePairingCode((req.body as { code?: unknown } | undefined)?.code);
+  const project = code.length === 6 ? await resolveProjectForTallyPairingAsync(hashPairingCode(code)) : fallbackProjectKey();
   (req as AuthRequest & { projectKey?: string }).projectKey = project;
   runWithProject(project, () => next());
 }

@@ -1,3 +1,4 @@
+import { pickPriceList } from './distribution/priceListPicker';
 import { supabaseAdmin } from '../lib/supabase';
 import { computeLineTax, isIntraState, summariseTotals } from './tax';
 
@@ -50,6 +51,8 @@ export interface PricedLine {
 export interface PriceCartContext {
   org_id: string;
   client_id?: string | null;
+  /** Rep sells for several companies: price from the picked company's own list. */
+  company_scoped?: boolean;
   customer_class: string;
   region?: string | null;
   distributor_state_code?: string | null;
@@ -79,15 +82,10 @@ export async function priceCart(cart: CartLineInput[], ctx: PriceCartContext): P
 
   // 1. Resolve active price list.
   const region = ctx.region || 'ALL';
-  const { data: priceList } = await supabaseAdmin
-    .from('price_lists').select('*')
-    .eq('org_id', ctx.org_id)
-    .eq('customer_class', ctx.customer_class)
-    .or(`region.eq.${region},region.eq.ALL`)
-    .eq('is_active', true)
-    .order('region', { ascending: false })   // exact region beats ALL
-    .order('version', { ascending: false })
-    .limit(1).maybeSingle();
+  const priceList = await pickPriceList({
+    org_id: ctx.org_id, customer_class: ctx.customer_class, region,
+    client_id: ctx.client_id, company_scoped: ctx.company_scoped,
+  });
   if (!priceList) throw new PricerError('NO_PRICE_LIST', `No active price list for ${ctx.customer_class}/${region}`);
 
   // 2. Fetch price list items for our SKUs.

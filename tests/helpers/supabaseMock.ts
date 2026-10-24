@@ -87,7 +87,8 @@ export function createSupabaseMock(): SupabaseMock {
       if (chain.single) {
         const rows = Array.isArray(r.data) ? r.data : r.data == null ? [] : [r.data];
         if (r.error) return { data: null, error: r.error };
-        // PostgREST `.single()` errors when it doesn't get exactly one row.
+        // `.maybeSingle()` answers null for no rows; PostgREST `.single()` errors when it doesn't get exactly one row.
+        if (rows.length === 0 && chain.ops.some((o) => o.method === 'maybeSingle')) return { data: null, error: null };
         if (rows.length === 0) {
           return { data: null, error: { message: 'JSON object requested, multiple (or no) rows returned', code: 'PGRST116' } };
         }

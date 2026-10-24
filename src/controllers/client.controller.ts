@@ -10,7 +10,8 @@ import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
-import { provisionClient as runProvision, provisioningPreflight } from '../services/provisionClient.service';
+import { readOrgSettings, writeOrgSettings } from '../services/notificationPolicy';
+import { cleanAppUiForStore } from '../lib/appItems';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
 // its OWN org (a row-level tenant) for isolation, and the parent org that
@@ -392,46 +393,20 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
 });
 
 /**
- * GET /api/v1/clients/provision/preflight
- * Super-admin only: is automated per-client project provisioning available on
- * this deployment? Lets the UI show/hide the "dedicated project" toggle.
+ * Dedicated per-client Supabase projects were created through supabase.com's Management API. Everything now runs on
+ * the self-hosted stack in AWS, so that flow no longer exists; the two routes stay so an older dashboard build that
+ * still asks gets a clear answer (preflight says "not available", which hides its "dedicated project" toggle).
  */
+const PROVISIONING_RETIRED = 'Dedicated per-client project provisioning was retired with the move to AWS.';
+
+/** GET /api/v1/clients/provision/preflight — super-admin only. */
 export const provisionPreflight = asyncHandler(async (_req: AuthRequest, res: Response) => {
-  ok(res, provisioningPreflight());
+  ok(res, { ok: false, reason: PROVISIONING_RETIRED });
 });
 
-/**
- * POST /api/v1/clients/provision
- * Super-admin only: fully automated onboarding — creates a dedicated Supabase
- * project (separate DB) for the client, loads the golden schema, creates its
- * org + client record + admin user (test@<slug>.com), creates the control-plane
- * client record in Kinematic, and links the two. Idempotent via Idempotency-Key.
- */
-export const provisionClientHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const user = req.user!;
-  const { name, contact_person, phone, email, password, modules, region } = req.body || {};
-  if (!name || typeof name !== 'string') { badRequest(res, 'Client name is required'); return; }
-
-  const pre = provisioningPreflight();
-  if (!pre.ok) { badRequest(res, pre.reason || 'Provisioning is not configured'); return; }
-
-  try {
-    const result = await runProvision({
-      name: name.trim(),
-      contactPerson: contact_person,
-      phone,
-      adminEmail: typeof email === 'string' && email.trim() ? email.trim() : undefined,
-      adminPassword: typeof password === 'string' && password ? password : undefined,
-      modules: Array.isArray(modules) ? modules : [],
-      region: typeof region === 'string' ? region : undefined,
-      actorUserId: user.id,
-      actorOrgId: user.org_id,
-      idempotencyKey: (req.headers['idempotency-key'] as string) || undefined,
-    });
-    created(res, result);
-  } catch (e: any) {
-    badRequest(res, `Provisioning failed: ${e?.message || e}`);
-  }
+/** POST /api/v1/clients/provision — super-admin only. */
+export const provisionClientHandler = asyncHandler(async (_req: AuthRequest, res: Response) => {
+  res.status(410).json({ success: false, error: PROVISIONING_RETIRED });
 });
 
 /**
@@ -758,7 +733,9 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
   let trialOut: any = ((client as { settings?: any }).settings || {})?.trial ?? null;
   const hasAppUi = app_ui !== undefined && app_ui !== null && typeof app_ui === 'object' && !Array.isArray(app_ui);
   const settingsExtras: Record<string, unknown> = {};
-  if (hasAppUi) settingsExtras.app_ui = app_ui;
+  // The layout (drag-and-drop order / bottom-bar placement) is cleaned on the way in: known ids only, no duplicates.
+  const appUiToStore = hasAppUi ? cleanAppUiForStore(app_ui) : null;
+  if (hasAppUi) settingsExtras.app_ui = appUiToStore;
   if (trial !== undefined) {
     // Sent → set or clear (null when invalid/empty, which removes the record).
     trialOut = computeTrial(trial);
@@ -773,7 +750,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     if (!seesAllClients(user)) sUpd = sUpd.eq(ownerColumn(), user.org_id);
     const { error: sErr } = await sUpd;
     if (sErr) logger.warn(`[Clients] settings write failed for ${id}: ${sErr.message}`);
-    else { if (hasAppUi) appUiOut = app_ui; clearClientFlagCache(id); }
+    else { if (hasAppUi) appUiOut = appUiToStore; clearClientFlagCache(id); }
 
     // Mirror app_ui ONLY to the linked data project (same idea as the
     // module-ceiling sync) so a client whose /auth/me is served from another
@@ -787,7 +764,7 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
           const remote = adminClientFor(dataProject);
           const { data: tc } = await remote.from('clients').select('settings').eq('id', dataClientId).maybeSingle();
           const cur = ((tc as any)?.settings && typeof (tc as any).settings === 'object' && !Array.isArray((tc as any).settings)) ? (tc as any).settings : {};
-          await remote.from('clients').update({ settings: { ...cur, app_ui } }).eq('id', dataClientId);
+          await remote.from('clients').update({ settings: { ...cur, app_ui: appUiToStore } }).eq('id', dataClientId);
           clearClientFlagCache(dataClientId);
           logger.info(`[Clients] synced app_ui ${id} -> ${dataProject}/${dataClientId}`);
         } catch (e: any) {
@@ -943,4 +920,43 @@ export const grantClientPackages = asyncHandler(async (req: AuthRequest, res: Re
 
   clearEntitlementCache(id);
   ok(res, { client_id: id, granted_packages: filtered, granted_modules: grantable.length });
+});
+
+// ── Notifications per client (Client Management → Notifications) ─────────────────────────────────────────────
+// Which of the catalogue's notifications (lib/notificationCatalog.ts) this client receives. Nothing is on by
+// default; the setting lands on the org that holds the client's users, exactly like the seat cap above.
+
+async function ownedClientOrg(req: AuthRequest, res: Response): Promise<{ admin: SupabaseClient; orgId: string; project: string } | null> {
+  const user = req.user!;
+  const { id } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return null; }
+  let q = supabaseAdmin.from('clients').select('id, org_id, data_project_key, data_client_id').eq('id', id);
+  if (!seesAllClients(user)) q = q.eq(ownerColumn(), user.org_id);
+  const { data: client, error } = await q.maybeSingle();
+  if (error) { badRequest(res, error.message); return null; }
+  if (!client) { notFound(res, 'Client not found'); return null; }
+  const { admin, orgId } = await resolveCapTarget(client as { org_id?: string; data_project_key?: string; data_client_id?: string });
+  if (!orgId) { badRequest(res, 'This client has no organisation to configure yet'); return null; }
+  const linked = admin !== supabaseAdmin && (client as { data_project_key?: string }).data_project_key;
+  return { admin, orgId, project: linked || currentProjectKey() };
+}
+
+/** GET /api/v1/clients/:id/notifications — the catalogue with this client's on/off flags. */
+export const getClientNotifications = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const target = await ownedClientOrg(req, res);
+  if (!target) return;
+  ok(res, await readOrgSettings(target.orgId, target.admin, target.project));
+});
+
+/** PUT /api/v1/clients/:id/notifications — body { enabled_kinds: string[] } (catalogue kinds, or ["*"] for all). */
+export const setClientNotifications = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const target = await ownedClientOrg(req, res);
+  if (!target) return;
+  try {
+    await writeOrgSettings(target.orgId, (req.body ?? {}).enabled_kinds, req.user!.id, target.admin);
+  } catch (e: any) {
+    badRequest(res, e?.message || 'Could not save notification settings');
+    return;
+  }
+  ok(res, await readOrgSettings(target.orgId, target.admin, target.project));
 });

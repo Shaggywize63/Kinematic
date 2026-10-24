@@ -65,6 +65,8 @@ export interface Halt {
   lat: number;
   lng: number;
   points: number;
+  /** Server-resolved place name of the centroid (set by the daily-report controller); absent otherwise. */
+  place?: string | null;
 }
 
 export interface DetectHaltsOptions {

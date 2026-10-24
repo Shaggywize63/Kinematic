@@ -31,9 +31,9 @@ const att = (over: Partial<TravelAttendanceRow> = {}): TravelAttendanceRow => ({
   ...over,
 });
 const fix = (hhmm: string, p: Pt, extra: Partial<TrailRow> = {}): TrailRow => ({ lat: p[0], lng: p[1], captured_at: t(hhmm), ...extra });
-const form = (id: string, inHm: string, outHm: string, p: Pt, title = 'Customer Visit'): RawVisitRow => ({
+const form = (id: string, inHm: string, outHm: string, p: Pt, title = 'Customer Visit', outlet: string | null = null): RawVisitRow => ({
   source: 'form',
-  row: { id, check_in_at: t(inHm), check_out_at: t(outHm), check_in_gps: `${p[0]},${p[1]}`, check_out_gps: `${p[0]},${p[1]}`, builder_forms: { title } },
+  row: { id, check_in_at: t(inHm), check_out_at: t(outHm), check_in_gps: `${p[0]},${p[1]}`, check_out_gps: `${p[0]},${p[1]}`, builder_forms: { title }, outlet_name: outlet },
 });
 
 function fetchersFor(a: TravelAttendanceRow | null, visits: RawVisitRow[] = [], trail: TrailRow[] = []) {
@@ -187,7 +187,7 @@ describe('a day with visits and halts', () => {
   // 09:30 check-in at P0 · ride to P2 (09:50) · stand at P2 until 10:20 (a halt) · ride to the customer at P4 ·
   // dealer visit 10:30-10:50 and customer visit 11:00-11:20 (their fixes are NOT halts) · stand at P6 12:30-13:10 (a halt) · check-out 18:00 at P0
   const attendance = att({ total_hours: 8.5, transport_mode: 'own_bike' });
-  const visits = [form('v1', '11:00', '11:20', P(4)), form('v0', '10:30', '10:50', P(3), 'Dealer Visit')];   // given out of order
+  const visits = [form('v1', '11:00', '11:20', P(4)), form('v0', '10:30', '10:50', P(3), 'Dealer Visit', 'Acme Depot')];   // given out of order
   const trail = [
     fix('09:40', P(1)), fix('09:50', P(2)), fix('10:00', P(2)), fix('10:10', P(2)), fix('10:20', P(2)),
     fix('10:30', P(3)), fix('10:45', P(3)),
@@ -213,8 +213,8 @@ describe('a day with visits and halts', () => {
 
     // visits: arrival / departure / minutes / where, earliest first (they were fetched out of order)
     expect(r.visits).toEqual([
-      { submission_id: 'v0', label: 'Dealer Visit', arrival_at: t('10:30'), departure_at: t('10:50'), minutes: 20, lat: P(3)[0], lng: P(3)[1] },
-      { submission_id: 'v1', label: 'Customer Visit', arrival_at: t('11:00'), departure_at: t('11:20'), minutes: 20, lat: P(4)[0], lng: P(4)[1] },
+      { submission_id: 'v0', label: 'Dealer Visit', customer_name: 'Acme Depot', arrival_at: t('10:30'), departure_at: t('10:50'), minutes: 20, lat: P(3)[0], lng: P(3)[1] },
+      { submission_id: 'v1', label: 'Customer Visit', customer_name: null, arrival_at: t('11:00'), departure_at: t('11:20'), minutes: 20, lat: P(4)[0], lng: P(4)[1] },
     ]);
 
     // halts: the two real stops in time order; the pings while at the dealer (10:30-10:45) and the customer (11:00-11:20) are visits, not halts
@@ -416,5 +416,49 @@ describe('mapWithConcurrency', () => {
 
   it('rejects with the first failure', async () => {
     await expect(mapWithConcurrency([1, 2, 3], 2, async (n) => { if (n === 2) throw new Error('boom'); return n; })).rejects.toThrow('boom');
+  });
+});
+
+// ── place-name stamping (reportPlacePoints / stampPlaceNames) ────────────────
+import { reportPlacePoints, stampPlaceNames } from '../src/services/dailyReport.service';
+import type { DailyReport } from '../src/services/dailyReport.service';
+
+const reportWithPoints = (): DailyReport => ({
+  date: DATE, user: ME,
+  shift: { attendance_id: 'a1', checkin_at: t('09:30'), checkout_at: t('18:00'), total_hours: 8.5, in_progress: false },
+  transport: { mode: null, label: null },
+  travel: { total_km: 1, method: 'gps_trail', legs: [
+    { index: 0, km: 1, method: 'gps_trail',
+      from: { kind: 'checkin', at: t('09:30'), lat: 22.6955, lng: 88.3937, label: 'Check-in' },
+      to:   { kind: 'checkout', at: t('18:00'), lat: 22.7541, lng: 88.3714, label: 'Check-out' } },
+  ] },
+  visits: [{ submission_id: 's1', label: 'Shop', arrival_at: t('11:00'), departure_at: t('11:20'), minutes: 20, lat: 22.7006, lng: 88.3816 }],
+  halts: [{ index: 1, start_at: t('12:00'), end_at: t('12:20'), minutes: 20, lat: 22.6955, lng: 88.3938, points: 5 }],
+  route: { points: [], thinned: false },
+  summary: { visits: 1, visit_minutes: 20, halts: 1, halt_minutes: 20, total_km: 1 },
+});
+
+describe('reportPlacePoints / stampPlaceNames', () => {
+  it('collects every shown point: both leg ends, the halt and the visit', () => {
+    const pts = reportPlacePoints(reportWithPoints());
+    expect(pts).toEqual([
+      { lat: 22.6955, lng: 88.3937 }, { lat: 22.7541, lng: 88.3714 },
+      { lat: 22.6955, lng: 88.3938 }, { lat: 22.7006, lng: 88.3816 },
+    ]);
+  });
+
+  it('stamps each point with its resolved name and leaves an unresolved one unset', () => {
+    const r = reportWithPoints();
+    const names: Record<string, string> = {
+      '22.6955,88.3937': 'Welfare Association, Sodepur, Panihati',
+      '22.7541,88.3714': 'Jogen Roy Road, Barrackpore',
+      '22.7006,88.3816': 'Sodepur Station Road',
+      // 22.6955,88.3938 (the halt) deliberately omitted -> stays unset
+    };
+    stampPlaceNames(r, (lat, lng) => names[`${lat.toFixed(4)},${lng.toFixed(4)}`] ?? null);
+    expect(r.travel.legs[0].from.place).toBe('Welfare Association, Sodepur, Panihati');
+    expect(r.travel.legs[0].to.place).toBe('Jogen Roy Road, Barrackpore');
+    expect(r.visits[0].place).toBe('Sodepur Station Road');
+    expect(r.halts[0].place).toBeUndefined();
   });
 });

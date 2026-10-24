@@ -63,15 +63,31 @@ async function resolveTenantByPhoneId(phoneNumberId: string): Promise<Tenant | n
   return tenant;
 }
 
+// One line a minute at most: the point is to see whether anything unsigned still arrives, not to flood the log.
+let lastUnsignedWarn = 0;
+function warnUnsigned(): void {
+  const now = Date.now();
+  if (now - lastUnsignedWarn < 60_000) return;
+  lastUnsignedWarn = now;
+  logger.warn('[whatsapp-webhook] unsigned inbound accepted (no CRM_WHATSAPP_APP_SECRET or no X-Hub-Signature-256) — set WHATSAPP_WEBHOOK_STRICT=on once the app secret is configured');
+}
+
 // ── POST: inbound messages + delivery/read status updates ───────────────────
 router.post('/', async (req, res) => {
   // Signature check against the RAW request bytes. Meta signs the literal POST
   // body; re-stringifying parsed JSON would not reproduce the exact bytes and
   // would reject every genuine call. `req.rawBody` is stashed by the global
-  // json parser (app.ts). Only enforced once the app secret is configured;
-  // before then we fail-open so the callback still verifies.
+  // json parser (app.ts).
+  //
+  // Default: verified when both the app secret is configured AND a signature header is present; otherwise the
+  // callback is accepted (so it keeps working before CRM_WHATSAPP_APP_SECRET is set) and a warning is logged.
+  // WHATSAPP_WEBHOOK_STRICT=on closes that gap: no secret -> 503, no/invalid signature -> 401. Turn it on once
+  // CRM_WHATSAPP_APP_SECRET (Meta app secret) is set and the `[whatsapp-webhook] unsigned` warnings have stopped.
   const appSecret = process.env.CRM_WHATSAPP_APP_SECRET;
   const sigHeader = req.headers['x-hub-signature-256'];
+  const strict = (process.env.WHATSAPP_WEBHOOK_STRICT || '').toLowerCase() === 'on';
+  if (strict && !appSecret) return res.sendStatus(503);
+  if (strict && typeof sigHeader !== 'string') return res.sendStatus(401);
   if (appSecret && typeof sigHeader === 'string') {
     const crypto = await import('crypto');
     const raw = (req as unknown as { rawBody?: Buffer }).rawBody
@@ -80,6 +96,8 @@ router.post('/', async (req, res) => {
     const a = Buffer.from(expected, 'utf8');
     const b = Buffer.from(sigHeader, 'utf8');
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.sendStatus(401);
+  } else {
+    warnUnsigned();
   }
 
   try {

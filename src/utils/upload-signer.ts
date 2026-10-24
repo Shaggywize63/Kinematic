@@ -9,9 +9,10 @@ const SIGN_TTL_SEC = 5 * 60;
  * Distribution upload paths are deterministic and bucket-scoped:
  *   org/<org_id>/distribution/<kind>/<uuid>.<ext>
  *
- * Kinds: cheque | pod | return | signature | kyc
+ * Kinds: cheque | upi | pod | return | signature | kyc
+ *   - upi: the screenshot/photo of a UPI payment (collected at payment time).
  */
-export type UploadKind = 'cheque' | 'pod' | 'return' | 'signature' | 'kyc';
+export type UploadKind = 'cheque' | 'upi' | 'pod' | 'return' | 'signature' | 'kyc';
 
 export function buildUploadPath(orgId: string, kind: UploadKind, ext = 'jpg') {
   const id = crypto.randomUUID();

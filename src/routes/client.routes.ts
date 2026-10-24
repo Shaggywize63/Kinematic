@@ -7,9 +7,7 @@ const router = Router();
 // Only Admins or Super Admins can manage clients
 router.get('/',                 requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClients);
 router.post('/',                requireAuth, requireRole('admin', 'super_admin'), clientCtrl.createClient);
-// Automated onboarding: provision a dedicated Supabase project (separate DB) +
-// org + admin user for a new client, and link it into the control plane.
-// Super-admin only (creates billable infrastructure). Static paths precede /:id.
+// Dedicated-project provisioning (supabase.com) was retired with the move to AWS; these two answer "not available".
 router.get('/provision/preflight', requireAuth, requireRole('super_admin'), clientCtrl.provisionPreflight);
 router.post('/provision',          requireAuth, requireRole('super_admin'), clientCtrl.provisionClientHandler);
 router.patch('/:id',            requireAuth, requireRole('admin', 'super_admin'), clientCtrl.updateClient);
@@ -21,5 +19,8 @@ router.post('/:id/login-as',    requireAuth, requireRole('super_admin'), clientC
 router.post('/:id/impersonate', requireAuth, requireRole('super_admin'), clientCtrl.impersonateClient);
 router.get('/:id/modules',      requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientModules);
 router.post('/:id/packages',    requireAuth, requireRole('admin', 'super_admin'), clientCtrl.grantClientPackages);
+// Which notifications from the catalogue this client receives (none by default).
+router.get('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientNotifications);
+router.put('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.setClientNotifications);
 
 export default router;

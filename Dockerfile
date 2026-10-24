@@ -29,6 +29,10 @@ COPY --chown=node:node package.json ./
 RUN npm install --omit=dev && npm cache clean --force
 # Compiled application
 COPY --chown=node:node --from=builder /app/dist ./dist
+# Static assets the app serves or reads at runtime: /embed.js (hosted lead form), /assets/planogram-refs
+# (reference images, also read by the vision matcher). They were never copied into the AWS image, so those
+# routes 404'd on ECS.
+COPY --chown=node:node public ./public
 # PORT is provided by the ECS task definition (defaults to 3000).
 # Health check lives at GET /health.
 EXPOSE 3000

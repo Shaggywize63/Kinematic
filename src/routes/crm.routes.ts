@@ -15,7 +15,7 @@ import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
-import { runWithProject, currentProjectKey } from '../lib/projects';
+import { runWithProject, currentProjectKey, DEFAULT_PROJECT } from '../lib/projects';
 import { chunk } from '../lib/chunk';
 import { isSteelDealerClient } from '../lib/steelDealer';
 
@@ -27,14 +27,18 @@ import * as flowsSvc from '../services/crm/flows.service';
 import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
 import { validateAndStampCustomFields } from '../services/crm/customFields.service';
 import * as customObjectsSvc from '../services/crm/customObjects.service';
+import * as upsellsSvc from '../services/crm/upsells.service';
 import * as leadsSvc from '../services/crm/leads.service';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
+import * as leadFollowUpSvc from '../services/crm/leadFollowUp.service';
+import * as leadBalanceSvc from '../services/crm/leadBalance.service';
 import * as ownerAssign from '../services/crm/ownerAssignment';
 import { fireActivityLifecycle } from '../services/crm/activityTriggers';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
+import * as afterSales from '../services/crm/afterSales.service';
 import * as dealsSvc from '../services/crm/deals.service';
 import * as importSvc from '../services/crm/import.service';
 import * as activityImportSvc from '../services/crm/activityImport.service';
@@ -99,6 +103,7 @@ import * as dsarSvc from '../services/crm/dsar.service';
 import * as consentSvc from '../services/crm/consent.service';
 import * as nomineeSvc from '../services/crm/nominee.service';
 import { isMinor } from '../lib/age';
+import { isLookupTargetAllowed, isSensitiveColumn, offeredLookupTables, stripSensitiveColumns } from '../lib/lookupGuard';
 
 const router: Router = express.Router();
 
@@ -170,6 +175,69 @@ function isFrontlineChampion(me: { org_role_name?: string | null; org_role_data_
   // manager (not own-only) so we never hide a team from its lead.
   const scope = me?.org_role_data_scope ?? 'own';
   return scope === 'own';
+}
+
+/** The request's pinned project. `req.projectKey` is stamped by the withProject
+ *  middleware and survives awaits, so it's reliable even where the ALS-backed
+ *  currentProjectKey() has reverted (see the analytics handlers). */
+function requestProjectKey(req: Request): string {
+  return (req as AuthRequest & { projectKey?: string }).projectKey || currentProjectKey();
+}
+
+/**
+ * Whether a caller's LEADS view is restricted to the leads they personally own.
+ *
+ * A frontline Consumer Champion is always own-only (Tata + every tenant). In
+ * addition, for every NON-default project, ANY designation whose org-role
+ * data_scope is 'own' is strictly own-only — a rep sees ONLY leads with
+ * owner_id = self. This matches the signal already used for activities
+ * (activityVisibilityScope), the leads map, and the custom-field CSV path, and
+ * closes the leak where a non-"Consumer Champion" own-scope designation (e.g.
+ * Aadinath's Sales Executive / Service Engineer) fell through to the city/no
+ * filter and saw every lead in the client.
+ *
+ * The Tata `default` project is deliberately left on its historical
+ * city-broadened behaviour for its 'own' ASOs (CLAUDE.md golden rule: never
+ * change default-project behaviour). `req.projectKey` is the per-request pin.
+ */
+/**
+ * Core own-scope predicate shared by every CRM entity (leads, deals, contacts,
+ * accounts): a designation whose org-role data_scope is 'own' is restricted to
+ * its own records on every NON-default project. The Tata `default` project is
+ * excluded (CLAUDE.md golden rule — never change default-project behaviour),
+ * so its 'own' ASOs keep their historical broader visibility.
+ */
+export function crmOwnScope(
+  req: Request,
+  me: { org_role_data_scope?: string | null } | undefined,
+): boolean {
+  return requestProjectKey(req) !== DEFAULT_PROJECT && (me?.org_role_data_scope === 'own');
+}
+
+export function leadsOwnOnly(
+  req: Request,
+  me: { org_role_name?: string | null; org_role_data_scope?: string | null } | undefined,
+): boolean {
+  // A frontline Consumer Champion is own-only on EVERY tenant (pre-existing,
+  // incl. Tata default); plus the shared non-default own-scope rule.
+  return isFrontlineChampion(me) || crmOwnScope(req, me);
+}
+
+/**
+ * The visible-owner-id set for deals / contacts / accounts list + export +
+ * search. Uses the hierarchy subtree when the client opted into hierarchy RBAC
+ * (that path already caps a data_scope='own' caller to themselves). Otherwise,
+ * on a non-default project, a data_scope='own' caller is restricted to the
+ * leads/records they personally own (owner_id = self) — closing the same
+ * cross-user leak fixed for leads. null = no owner filter (admins, team-scope
+ * off-hierarchy, and the whole Tata `default` project — all unchanged).
+ */
+export async function crmVisibleOwnerIds(req: AuthRequest): Promise<string[] | null> {
+  const hierIds = await hierarchy.maybeSubtreeOwnerIds(req);
+  if (hierIds !== null) return hierIds;
+  const me = req.user;
+  if (crmOwnScope(req, me)) return me?.id ? [me.id] : [];
+  return null;
 }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -649,12 +717,13 @@ leads.get('/', wrap(async (req, res) => {
     visibleOwnerIds = selfOwnerId ? [selfOwnerId] : [];
   }
   const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn || isTelecaller;
-  // Consumer Champion is strictly own-only: they see ONLY leads where
-  // owner_id = self (plus their hierarchy subtree if applicable). Their
-  // city allocation does NOT broaden visibility — a new Champion lands
-  // on an empty list until leads are assigned to them. A Consumer
-  // Champion MANAGER is NOT own-only — they manage a team (see helper).
-  const ownOnly = isFrontlineChampion(me);
+  // Own-scope callers are strictly own-only: they see ONLY leads where
+  // owner_id = self (plus their hierarchy subtree if applicable). City
+  // allocation does NOT broaden visibility — a new rep lands on an empty
+  // list until leads are assigned to them. Covers a frontline Consumer
+  // Champion (all tenants) and, on non-default projects, every
+  // data_scope='own' designation; a team/all-scope manager is NOT own-only.
+  const ownOnly = leadsOwnOnly(req, me);
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
@@ -812,7 +881,23 @@ leads.post('/', wrap(async (req, res) => {
     }
   }
 
-  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse });
+  // "Follow-up date" from the lead form (custom field `next_follow_up_date`):
+  // spawn a planned activity due 09:00 IST on that day so the owner is reminded
+  // that morning to visit the lead. Best-effort — the lead already exists, so a
+  // reminder failure must not fail the create.
+  let followUpResponse: Record<string, unknown> = {};
+  if (lead?.id) {
+    try {
+      const followUp = await leadFollowUpSvc.createFollowUpReminder({
+        org_id: orgId(req), user_id: userId(req), lead: lead as unknown as Record<string, unknown>,
+      });
+      if (followUp) followUpResponse = { follow_up_reminder: followUp };
+    } catch (e) {
+      console.warn(`[follow_up] could not schedule the follow-up for lead ${lead.id}: ${(e as Error).message}`);
+    }
+  }
+
+  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse, ...followUpResponse });
 }));
 // Approve / reject a pending lead. Restricted to managers — a supervisor/admin
 // role, or any user with HR-module access (matches "notify the manager or a
@@ -859,7 +944,10 @@ leads.get('/export', wrap(async (req, res) => {
     visibleOwnerIds = selfOwnerId ? [selfOwnerId] : [];
   }
   const includeNullCity = (me?.org_role_data_scope ?? 'all') === 'all' || hierOn || isTelecaller;
-  const ownOnly = isFrontlineChampion(me);
+  // Mirror the list endpoint's own-scope rule so /export never returns rows the
+  // UI hides (own-only for a frontline Champion anywhere, and for any
+  // data_scope='own' designation on a non-default project).
+  const ownOnly = leadsOwnOnly(req, me);
   // Force a high per-page cap; listLeads internally clamps to 200 so we
   // page through up to 10000 in 200-row chunks. Keeps memory + DB load
   // bounded.
@@ -1469,6 +1557,22 @@ leads.post('/:id/important', wrap(async (req, res) => {
 }));
 leads.post('/:id/convert', wrap(async (req, res) =>
   res.json(await leadsSvc.convertLead(orgId(req), req.params.id, parse(v.leadConvertSchema, req.body), userId(req)))));
+// Order balance (interested volume − already-booked volume across the lead's
+// deals) + "fulfill balance" (spawn an open deal for the remainder). Steel-
+// dealer tenants (BMW) book a lead's tonnage across several orders over time.
+leads.get('/:id/balance', wrap(async (req, res) =>
+  res.json(await leadBalanceSvc.computeLeadBalance(orgId(req), req.params.id))));
+leads.post('/:id/fulfill-balance', wrap(async (req, res) => {
+  const body = (req.body ?? {}) as { volume_kg?: unknown; deal_name?: unknown };
+  res.json(await leadBalanceSvc.fulfillBalance({
+    org_id: orgId(req),
+    user_id: userId(req),
+    lead_id: req.params.id,
+    volume_kg: typeof body.volume_kg === 'number' ? body.volume_kg
+      : (typeof body.volume_kg === 'string' && body.volume_kg.trim() !== '' ? Number(body.volume_kg) : undefined),
+    deal_name: typeof body.deal_name === 'string' ? body.deal_name : undefined,
+  }));
+}));
 // Reopen / unconvert — flips back to 'working' and clears terminal fields.
 leads.post('/:id/reopen', wrap(async (req, res) =>
   res.json(await stampSourceName(await stampOwnerName(await leadsSvc.reopenLead(orgId(req), req.params.id, parse(v.leadReopenSchema, req.body), userId(req)))))));
@@ -1501,6 +1605,18 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
   // owner_assignment = 'admin_only': assigning is the whole point of this endpoint, so a non-admin is refused (403).
   await ownerAssign.assertMayChooseOwner(crmActor(req));
   res.json(await leadsSvc.bulkAssign(orgId(req), body.lead_ids, body.owner_id, userId(req)));
+}));
+// Marketing hand-off: assign/reassign a lead to a TELECALLER (+ optional calling
+// category). Unlike /bulk-assign this is intentionally NOT behind the admin-only
+// owner gate — marketing employees must be able to route leads to telecallers —
+// because the operation is constrained to a validated telecaller owner and a
+// known campaign (see telecaller.assignLeadToTelecaller). Client scope enforced.
+leads.post('/:id/assign-telecaller', wrap(async (req, res) => {
+  const body = parse(v.assignTelecallerSchema, req.body ?? {});
+  const updated = await telecaller.assignLeadToTelecaller(
+    orgId(req), clientScope(req), req.params.id, body.telecaller_id, body.campaign ?? null, body.follow_up_date ?? null,
+  );
+  res.json(await stampOwnerName(updated));
 }));
 // Recompute the score for every non-terminal lead in scope — powers the
 // "Update all scores" button on the dashboard leads screen. Admin-tier only
@@ -1565,11 +1681,20 @@ const convActor = (req: Request): convIntel.Actor => {
 // Remove this email gate to roll it out org-wide.
 const TELEPHONY_TRIAL_EMAIL = 's@kinematicapp.com';
 router.post('/telephony/click-to-call', wrap(async (req, res) => {
-  const me = (req as AuthRequest).user as { email?: string } | undefined;
-  if (String(me?.email ?? '').toLowerCase() !== TELEPHONY_TRIAL_EMAIL) {
-    throw new AppError(403, 'Recorded calling is in limited trial', 'FORBIDDEN');
+  const me = (req as AuthRequest).user as { email?: string; enabled_modules?: string[] } | undefined;
+  // Available to the original recorded-calling trial account OR any user whose
+  // client holds the `ivr_call` module (the per-client IVR / click-to-call gate
+  // the apps surface the "IVR Call" button on). Keeps the trial working while
+  // rolling out per client.
+  const isTrial = String(me?.email ?? '').toLowerCase() === TELEPHONY_TRIAL_EMAIL;
+  const hasIvrCall = Array.isArray(me?.enabled_modules) && me!.enabled_modules!.includes('ivr_call');
+  if (!isTrial && !hasIvrCall) {
+    throw new AppError(403, 'IVR calling is not enabled for your account', 'FORBIDDEN');
   }
   const b = (req.body ?? {}) as { lead_id?: string; to?: string; from?: string };
+  // Whose telephony is it? The lead's client must have IVR switched on in Client Management (platform admins bypass the
+  // per-user module list, so this is the check that keeps IVR off for clients that do not have it).
+  await telephony.assertIvrEnabledForLead({ org_id: orgId(req), lead_id: b.lead_id, caller_client_id: clientId(req) });
   res.json(await telephony.clickToCallForLead({
     org_id: orgId(req), user_id: userId(req)!,
     lead_id: String(b.lead_id ?? ''), to: b.to ?? null, from: b.from ?? null,
@@ -1692,6 +1817,91 @@ marketingVisits.get('/', wrap(async (req, res) => {
 }));
 router.use('/marketing-visits', rbac.requireModuleAccess('crm_activities'), marketingVisits);
 
+// ---------- AFTER-SALES FEEDBACK (admin data entry + bulk import) -----------
+// Admin-only. Each record becomes a crm_leads row tagged
+// custom_fields.campaign='After-Sales' and auto-assigned to the client's
+// configured telecaller, so it appears in that telecaller's "My Calls" queue.
+// Reuses the shared lead pipeline (createLead) — no new tables. Client-scoped
+// to the active tenant (Rajkamal). Additive + admin-gated, so no other flow
+// changes.
+const afterSalesRouter = express.Router();
+
+// Telecaller directory for the assignment picker.
+afterSalesRouter.get('/telecallers', wrap(async (req, res) => {
+  res.json(await afterSales.listTelecallers(orgId(req), clientId(req)));
+}));
+
+// Current assignment config + the telecaller directory (one round-trip for the
+// admin settings card).
+afterSalesRouter.get('/assignment', wrap(async (req, res) => {
+  const [cfg, telecallers] = await Promise.all([
+    afterSales.getAfterSalesConfig(orgId(req), clientId(req)),
+    afterSales.listTelecallers(orgId(req), clientId(req)),
+  ]);
+  res.json({ ...cfg, telecallers });
+}));
+
+// Set the assignment target (single telecaller and/or round-robin pool). Only
+// the keys actually present in the body are changed, so a partial PUT can set
+// the pool without clearing the single telecaller and vice-versa.
+afterSalesRouter.put('/assignment', wrap(async (req, res) => {
+  const raw = (req.body ?? {}) as Record<string, unknown>;
+  const body = parse(v.afterSalesConfigSchema, raw);
+  const saved = await afterSales.setAfterSalesConfig(orgId(req), clientId(req), {
+    telecaller_id: Object.prototype.hasOwnProperty.call(raw, 'telecaller_id') ? (body.telecaller_id ?? null) : undefined,
+    round_robin_pool: Object.prototype.hasOwnProperty.call(raw, 'round_robin_pool') ? (body.round_robin_pool ?? []) : undefined,
+  });
+  res.json(saved);
+}));
+
+// Manual single-record create. 409 DUPLICATE_LEAD if the phone already exists.
+afterSalesRouter.post('/records', wrap(async (req, res) => {
+  const body = parse(v.afterSalesRecordSchema, req.body ?? {});
+  const out = await afterSales.createRecord(orgId(req), clientId(req), userId(req), body);
+  res.status(201).json(out);
+}));
+
+// Bulk CSV / Excel upload (multipart, field name "file"). Returns a per-row
+// summary: created / skipped (duplicates) / failed with reasons.
+afterSalesRouter.post('/import', upload.single('file'), wrap(async (req, res) => {
+  const file = (req as unknown as { file?: { buffer: Buffer; originalname: string; mimetype: string } }).file;
+  if (!file) throw new AppError(400, 'No file uploaded (field "file")', 'NO_FILE');
+  const out = await afterSales.importRecords(orgId(req), clientId(req), userId(req), file);
+  res.json(out);
+}));
+
+// Admin list of after-sales records (newest first), owner names stamped.
+afterSalesRouter.get('/records', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const rows = await afterSales.listRecords(orgId(req), scope.id, scope.strict, {
+    limit: req.query.limit ? Number(req.query.limit) : undefined,
+    search: typeof req.query.search === 'string' ? req.query.search : undefined,
+  });
+  res.json(await stampOwnerNames(rows as any[]));
+}));
+
+router.use('/after-sales',
+  requireRole('super_admin', 'admin', 'main_admin', 'sub_admin', 'client'),
+  rbac.requireModuleAccess('crm_leads'),
+  afterSalesRouter);
+
+// Telecaller directory — the marketing assign-to-telecaller picker (and any
+// other lead-capable caller) reads this. Client-scoped; lists only telecallers
+// in the active tenant. Lead-module gated (marketing employees have it).
+router.get('/telecallers', rbac.requireModuleAccess('crm_leads'), wrap(async (req, res) => {
+  res.json(await telecaller.listTelecallers(orgId(req), clientId(req)));
+}));
+
+// Telecaller "Follow-ups" tab — the caller's own pending follow-up calls
+// (open call activities with a due date), soonest first, enriched with the
+// linked lead's name + phone. Own-scoped inside the service.
+router.get('/telecaller/followups', rbac.requireModuleAccess('crm_activities'), wrap(async (req, res) => {
+  const uid = userId(req);
+  if (!uid) throw new AppError(401, 'Auth required', 'AUTH_REQUIRED');
+  const rows = await telecaller.listFollowupRows(orgId(req), uid);
+  res.json(await enrichActivities(rows as Record<string, any>[]));
+}));
+
 // ---------- CONVERSATION INTELLIGENCE (recording pipeline + dashboard) ------
 // Kick off processing after the client PUT the audio to the signed URL.
 router.post('/conversations/:cid/process', rbac.requireModuleAccess('crm_conversation_intel'), wrap(async (req, res) => {
@@ -1737,7 +1947,7 @@ const contacts = express.Router();
 const contactOpts = { searchColumns: ['first_name','last_name','email','phone'] };
 contacts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   return res.json(
     await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds }))
   );
@@ -1823,7 +2033,7 @@ router.use('/contacts', rbac.requireModuleAccess('crm_contacts'), contacts);
 const accounts = express.Router();
 accounts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   return res.json(
     await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds }))
   );
@@ -1882,7 +2092,7 @@ router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
 const deals = express.Router();
 deals.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   const [{ rows, total, page, limit }, totals, isSteel] = await Promise.all([
     dealsSvc.listDealsWithCount(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
     dealsSvc.dealsTotals(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
@@ -1916,7 +2126,7 @@ deals.get('/', wrap(async (req, res) => {
 // breakdown captured at convert time.
 deals.get('/export', wrap(async (req, res) => {
   const scope = clientScope(req);
-  const visibleOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   const PAGE = 200;
   const MAX  = 10000;
   const rows: any[] = [];
@@ -2120,6 +2330,31 @@ deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc
 deals.post('/:id/line-items', wrap(async (req, res) =>
   res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req)))));
 router.use('/deals', rbac.requireModuleAccess('crm_deals'), deals);
+
+// ── Upsells ─────────────────────────────────────────────────────────────────
+// Additional revenue logged against an existing deal and/or lead. Rendered as
+// the "Upsells" section on both the deal- and lead-detail pages. Gated on
+// crm_leads (present for every CRM tenant); the record itself links to a deal,
+// a lead, or both. See services/crm/upsells.service.ts.
+const upsells = express.Router();
+upsells.use(rbac.requireModuleAccess('crm_leads'));
+// GET /crm/upsells?deal_id=&lead_id= → the upsells for that deal or lead, newest first.
+upsells.get('/', wrap(async (req, res) => {
+  res.json(await upsellsSvc.listUpsells(orgId(req), {
+    deal_id: (req.query.deal_id as string) ?? null,
+    lead_id: (req.query.lead_id as string) ?? null,
+  }));
+}));
+// POST /crm/upsells → log an upsell. client_id + created_by come from the request scope, not the body.
+upsells.post('/', wrap(async (req, res) => {
+  res.status(201).json(await upsellsSvc.createUpsell(orgId(req), clientId(req), userId(req) ?? null, (req.body ?? {})));
+}));
+// DELETE /crm/upsells/:id → remove an upsell (within the caller's org).
+upsells.delete('/:id', wrap(async (req, res) => {
+  await upsellsSvc.deleteUpsell(orgId(req), req.params.id);
+  res.json({ ok: true });
+}));
+router.use('/upsells', upsells);
 
 const lineItems = express.Router();
 lineItems.patch('/:id', wrap(async (req, res) =>
@@ -4002,6 +4237,21 @@ function genericDisplay(r: Record<string, unknown>): string {
   return String(r.id ?? '').slice(0, 8) || 'Record';
 }
 
+const CURATED_LOOKUP_TARGETS: ReadonlySet<string> = new Set(Object.keys(LOOKUP_TABLES));
+
+/** Tables list_lookup_tables() offers for this project (cached 5 min). A failed load is not cached and offers nothing. */
+async function offeredTables(): Promise<ReadonlySet<string>> {
+  try {
+    return await offeredLookupTables(currentProjectKey(), async () => {
+      const { data, error } = await supabaseAdmin.rpc('list_lookup_tables');
+      if (error) throw new Error(error.message);
+      return (data ?? []) as Array<{ table_name: string }>;
+    });
+  } catch {
+    return new Set();
+  }
+}
+
 // ---------- GLOBAL SEARCH -------------------------------------------
 // Unified, tenant-scoped omnisearch across the core CRM entities, powering the
 // dashboard's ⌘/Ctrl-K command palette. Every entity is queried in parallel
@@ -4061,10 +4311,15 @@ router.get('/search', wrap(async (req, res) => {
   const effectiveCities = rbac.getEffectiveCityNames(me);
   const hierOn = await hierarchy.useHierarchyRbac(req as AuthRequest);
   const subtreeIds = hierOn ? await hierarchy.subtreeUserIds(req as AuthRequest) : null;
-  const genericOwnerIds = await hierarchy.maybeSubtreeOwnerIds(req as AuthRequest);
+  // Own-scope owner set for deals / contacts / accounts: hierarchy subtree when
+  // on, else [self] for a data_scope='own' caller on a non-default project,
+  // else null. Keeps search from surfacing records the caller can't see in the
+  // list (the same leak fixed for leads).
+  const crmOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   const selfOwnerId = me?.id ?? null;
   const includeNullCity = ((me?.org_role_data_scope ?? 'all') === 'all') || hierOn;
-  const ownOnly = isFrontlineChampion(me);
+  // Global search must not surface leads the caller can't see in the list.
+  const ownOnly = leadsOwnOnly(req, me);
   const filters: Record<string, unknown> = { q, limit: PER };
 
   // Guard each entity so one failing query can't 500 the whole search.
@@ -4079,13 +4334,13 @@ router.get('/search', wrap(async (req, res) => {
       strictClient: scope.strict, effectiveCities, visibleOwnerIds: subtreeIds, selfOwnerId, includeNullCity, ownOnly,
     })),
     safe(has('crm_deals'), () => dealsSvc.listDeals(org, filters, scope.id, {
-      strictClient: scope.strict, visibleOwnerIds: subtreeIds,
+      strictClient: scope.strict, visibleOwnerIds: crmOwnerIds,
     })),
     safe(has('crm_contacts'), () => crud.clientScopedList('crm_contacts', org, scope.id, filters, {
-      searchColumns: ['first_name', 'last_name', 'email', 'phone'], strictClient: scope.strict, visibleOwnerIds: genericOwnerIds,
+      searchColumns: ['first_name', 'last_name', 'email', 'phone'], strictClient: scope.strict, visibleOwnerIds: crmOwnerIds,
     })),
     safe(has('crm_accounts'), () => crud.clientScopedList('crm_accounts', org, scope.id, filters, {
-      searchColumns: ['name', 'domain', 'industry'], strictClient: scope.strict, visibleOwnerIds: genericOwnerIds,
+      searchColumns: ['name', 'domain', 'industry'], strictClient: scope.strict, visibleOwnerIds: crmOwnerIds,
     })),
     safe(has('crm_activities'), () => crud.clientScopedList('crm_activities', org, scope.id, filters, {
       searchColumns: ['subject', 'body'], strictClient: scope.strict,
@@ -4208,6 +4463,11 @@ router.get('/lookup/search', wrap(async (req, res) => {
     throw new AppError(400, `Invalid lookup target: ${target}`, 'BAD_TARGET');
   }
   const meta = LOOKUP_TABLES[target];
+  // The service-role client reads whatever table it is told to, so the target must be one the picker legitimately
+  // offers (curated, or listed by list_lookup_tables) and never a credential/integration table. Fail closed.
+  if (!isLookupTargetAllowed(target, CURATED_LOOKUP_TARGETS, await offeredTables())) {
+    throw new AppError(400, `Invalid lookup target: ${target}`, 'BAD_TARGET');
+  }
   const display = meta?.display ?? genericDisplay;
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const scope = clientScope(req);
@@ -4235,7 +4495,7 @@ router.get('/lookup/search', wrap(async (req, res) => {
     query = query.in('id', resolveIds);
     const { data, error } = await query.limit(resolveIds.length);
     if (error) throw new AppError(500, error.message, 'DB_ERROR');
-    const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: r }));
+    const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: stripSensitiveColumns(r) }));
     return res.json({ success: true, data: items });
   }
   // Per-user city gate for the people_directory lookup target.
@@ -4283,7 +4543,7 @@ router.get('/lookup/search', wrap(async (req, res) => {
     try {
       const clauses = JSON.parse(filterRaw) as Array<{ field: string; op: string; value: unknown }>;
       for (const c of Array.isArray(clauses) ? clauses : []) {
-        if (typeof c.field !== 'string' || !/^[a-z_][a-z0-9_]*$/i.test(c.field)) continue;
+        if (typeof c.field !== 'string' || !/^[a-z_][a-z0-9_]*$/i.test(c.field) || isSensitiveColumn(c.field)) continue;
         switch (c.op) {
           case 'eq':       query = query.eq(c.field, c.value as never); break;
           case 'ne':       query = query.neq(c.field, c.value as never); break;
@@ -4304,7 +4564,7 @@ router.get('/lookup/search', wrap(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Slim down to (id, label) the picker can render directly without
   // every column over the wire.
-  const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: r }));
+  const items = (data ?? []).map((r) => ({ id: r.id as string, label: display(r), raw: stripSensitiveColumns(r) }));
   res.json({ success: true, data: items });
 }));
 // Drag-and-drop reordering. Frontend sends the new (id, position)
@@ -4657,6 +4917,51 @@ targets.put('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
     : await targetsSvc.setTarget(orgId(req), clientId(req), { user_id: user_id ?? null, org_role_id: org_role_id ?? null, hierarchy_level_id: hierarchy_level_id ?? null, target_value: Number(target_value) }, userId(req));
   res.json(row);
 }));
+// ---------- Telecaller CALLS target (a daily call-count goal) ----------
+// A separate metric from the lead/rupee targets: the admin sets "N calls per
+// day" (per role / per user / org default) and a telecaller sees today's logged
+// calls against it. Reuses the same crm_targets scoping; the roles picker is the
+// shared GET /targets/levels (no type needed).
+
+/** A calls target value: a whole number of calls from 0 to the cap. */
+function parseCallsValue(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n < 0 || n > targetsSvc.MAX_CALLS_TARGET) {
+    throw new AppError(400, `target_value must be a whole number of calls from 0 to ${targetsSvc.MAX_CALLS_TARGET.toLocaleString('en-US')}`, 'VALIDATION');
+  }
+  return Math.floor(n);
+}
+
+// FE-facing: my daily calls target + today's logged-call count. Any CRM user
+// (telecallers read their own).
+targets.get('/calls/me', wrap(async (req, res) => {
+  const user = (req as AuthRequest).user!;
+  res.json({ success: true, data: await targetsSvc.myCallsTarget(orgId(req), user.id, clientId(req)) });
+}));
+
+// Manager-facing: list current calls targets (default + per-role + per-user).
+targets.get('/calls', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  res.json({ success: true, data: await targetsSvc.listTargets(orgId(req), clientId(req), targetsSvc.CALLS_SPEC) });
+}));
+
+// Manager-facing: set a calls target. Body { target_value, user_id?,
+// org_role_id? / hierarchy_level_id?, all? } — same scoping rules as the lead
+// target. Consumer Champions are view-only here too.
+targets.put('/calls', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  if (isFrontlineChampion((req as AuthRequest).user)) {
+    throw new AppError(403, 'Consumer Champions cannot set targets', 'FORBIDDEN');
+  }
+  const { user_id, org_role_id, hierarchy_level_id, target_value, all } = req.body ?? {};
+  if (target_value === undefined || target_value === null) throw new AppError(400, 'target_value is required', 'VALIDATION');
+  const value = parseCallsValue(target_value);
+  const id = z.string().uuid().nullish();
+  const scope = parse(z.object({ user_id: id, org_role_id: id, hierarchy_level_id: id }), { user_id, org_role_id, hierarchy_level_id }) as { user_id?: string | null; org_role_id?: string | null; hierarchy_level_id?: string | null };
+  const row = all
+    ? await targetsSvc.setAllTargets(orgId(req), clientId(req), value, userId(req), targetsSvc.CALLS_SPEC)
+    : await targetsSvc.setTarget(orgId(req), clientId(req), { ...scope, target_value: value }, userId(req), targetsSvc.CALLS_SPEC);
+  res.json({ success: true, data: row });
+}));
+
 router.use('/targets', targets);
 
 // ---------- HIERARCHY (Phase 3 — client-admin org hierarchy) ----------
@@ -4842,6 +5147,15 @@ places.get('/autocomplete', wrap(async (req, res) => {
   const lng = Number(req.query.lng ?? NaN);
   const bias = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : undefined;
   res.json({ success: true, data: await placesSvc.autocomplete(q, bias) });
+}));
+// "Show more suggestions" — a wider Text Search list (up to 20) for when the
+// 5-result autocomplete cap isn't enough. Same shape as /autocomplete.
+places.get('/search', wrap(async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q : '';
+  const lat = Number(req.query.lat ?? NaN);
+  const lng = Number(req.query.lng ?? NaN);
+  const bias = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : undefined;
+  res.json({ success: true, data: await placesSvc.textSearch(q, bias) });
 }));
 places.get('/details', wrap(async (req, res) => {
   const id = typeof req.query.place_id === 'string' ? req.query.place_id : '';
@@ -5246,14 +5560,15 @@ async function analyticsScope(req: Request): Promise<analyticsSvc.AnalyticsScope
     // leaking another region's numbers.
     return cities.includes(pickedCity) ? [pickedCity] : [];
   };
-  // Frontline Consumer Champions see only their own data — no city
-  // broadening and no hierarchy expansion. Mirrors the ownOnly flag used
-  // in the leads list. A Consumer Champion MANAGER is NOT own-only: they
-  // fall through to the team-scope branch below (subtree of champions),
-  // which is what makes Team Performance / Lead Tracker / Team Daily
-  // populate for a manager instead of rendering blank.
-  const isChampion = isFrontlineChampion(me);
-  if (isChampion) {
+  // Own-scope callers see only their own data — no city broadening and no
+  // hierarchy expansion — so analytics totals match the leads list exactly.
+  // Covers a frontline Consumer Champion (all tenants) and, on non-default
+  // projects, every data_scope='own' designation. A team/all-scope manager is
+  // NOT own-only: they fall through to the team-scope branch below (subtree),
+  // which is what makes Team Performance / Lead Tracker / Team Daily populate
+  // for a manager instead of rendering blank.
+  const ownScoped = leadsOwnOnly(req, me);
+  if (ownScoped) {
     return {
       effectiveCities: pickedCity ? [pickedCity] : null,
       visibleOwnerIds: selfOwnerId ? [selfOwnerId] : [],

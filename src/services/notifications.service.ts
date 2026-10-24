@@ -23,14 +23,17 @@ import { supabaseAdmin } from '../lib/supabase';
 import { messaging } from '../lib/firebase';
 import { sendApns, apnsEnabled } from '../lib/apns';
 import { logger } from '../lib/logger';
-import { routedData } from '../lib/notificationRoute';
+import { routedData, notificationKind } from '../lib/notificationRoute';
 import { classifyFcmError } from '../lib/fcmErrors';
+import { allowedFlags } from './notificationPolicy';
 
 export interface DispatchResult {
   scanned: number;
   sent: number;
   failed: number;
   skipped_no_token: number;
+  /** Rows that were not sent because the project or the client has that notification switched off. */
+  suppressed?: number;
   firebase_disabled: boolean;
   /** True when Google rejected OUR service-account credential (not a user's token) for at least one send. */
   credential_error: boolean;
@@ -74,19 +77,31 @@ export async function dispatchPendingPushes(opts?: {
   const userIds = Array.from(new Set(rows.map((r) => r.user_id)));
   const { data: users } = await supabaseAdmin
     .from('users')
-    .select('id, fcm_token, apns_token')
+    .select('id, org_id, fcm_token, apns_token')
     .in('id', userIds);
   const tokenByUser = new Map<string, { fcm: string | null; apns: string | null }>(
     (users ?? []).map((u: any) => [u.id, { fcm: u.fcm_token, apns: u.apns_token }])
   );
+  const orgByUser = new Map<string, string | null>((users ?? []).map((u: any) => [u.id, u.org_id ?? null]));
+
+  // Notification policy (services/notificationPolicy.ts): a row whose project, or whose recipient's client, has that
+  // kind switched off is stamped as handled and never sent — the same way a row with no usable token is.
+  const allowed = await allowedFlags(rows.map((r) => ({ orgId: orgByUser.get(r.user_id) ?? null, kind: notificationKind(r.type, r.data) })));
 
   const now = new Date().toISOString();
   let sent = 0;
   let failed = 0;
   let skipped_no_token = 0;
+  let suppressed = 0;
   let credentialFailures = 0;
 
-  for (const row of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!allowed[i]) {
+      suppressed++;
+      await supabaseAdmin.from('notifications').update({ sent_at: now }).eq('id', row.id);
+      continue;
+    }
     const tokens = tokenByUser.get(row.user_id) || { fcm: null, apns: null };
 
     // No usable transport (neither configured, or user has no token).
@@ -171,5 +186,7 @@ export async function dispatchPendingPushes(opts?: {
     );
   }
 
-  return { scanned: rows.length, sent, failed, skipped_no_token, firebase_disabled: !messaging, credential_error: credentialFailures > 0 };
+  // Silent by design for the recipient, so leave a trace operators can grep when checking that a project or client is really switched off.
+  if (suppressed > 0) logger.info(`[notif-policy] suppressed ${suppressed} of ${rows.length} pending notification(s); sent ${sent}`);
+  return { scanned: rows.length, sent, failed, skipped_no_token, suppressed, firebase_disabled: !messaging, credential_error: credentialFailures > 0 };
 }

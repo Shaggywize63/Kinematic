@@ -17,6 +17,7 @@ import { runRouteDeviationScan } from './services/routeDeviation.service';
 import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './services/alertScans.service';
 import { dispatchInvoiceRenewalReminders } from './services/finance/recurringReminders.service';
 import { runScheduledTasks, runProactiveNudges } from './services/crm/ai/kiniScheduler.service';
+import { reconcileCallRecordings } from './services/crm/ai/callRecordingPull.service';
 import { knownProjectKeys, runWithProject } from './lib/projects';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -224,6 +225,25 @@ if (String(process.env.KINI_SCHEDULED_ENABLED ?? 'true').toLowerCase() !== 'fals
       .catch((e) => logger.warn(`[kini-scheduled] tick failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[kini-scheduled] scheduler enabled (every ${everyMs / 1000}s, all projects)`);
+}
+
+// CallerDesk recording reconcile. Periodic tick that PULLs recent answered calls
+// from the Call Report API (call_list_v2) for every call_recording integration
+// using the CallerDesk provider, and runs each recording through the same
+// transcribe → analyze pipeline as the in-app recorder / webhook (Sarvam → KINI
+// → the lead's Conversations). This is the reliable path when CallerDesk doesn't
+// PUSH the Call Report to the webhook. Idempotent + dedup-safe via
+// crm_telephony_calls (never double-ingests, never collides with the webhook);
+// self-gating — a tenant with no CallerDesk integration is a no-op. Runs across
+// all tenant projects. Toggle with CALL_RECORDING_PULL_ENABLED=false; tune with
+// CALL_RECORDING_PULL_INTERVAL_SEC (default 300s).
+if (String(process.env.CALL_RECORDING_PULL_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(120, Number(process.env.CALL_RECORDING_PULL_INTERVAL_SEC ?? 300)) * 1000;
+  setInterval(() => {
+    forEachProject('call-recording-pull', () => reconcileCallRecordings({}))
+      .catch((e) => logger.warn(`[call-recording-pull] tick failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[call-recording-pull] scheduler enabled (every ${everyMs / 1000}s, all projects)`);
 }
 
 // KINI proactive nudges. Once a day at the configured UTC hour, per org (gated

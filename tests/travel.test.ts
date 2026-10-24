@@ -181,8 +181,8 @@ describe('with forms: travel is the legs between visits, not the visits', () => 
     for (const l of r.legs) expect(Math.abs(l.km - kmBetween(P(0), P(3)))).toBeLessThan(0.011);
     expect(r.total_km).toBe(Math.round(r.legs.reduce((s, l) => s + l.km, 0) * 100) / 100);
     expect(r.stops).toEqual([
-      { submission_id: 'f1', label: 'Customer Visit', check_in_at: t('10:00'), check_out_at: t('10:20'), minutes: 20, lat: P(3)[0], lng: P(3)[1] },
-      { submission_id: 'f2', label: 'Dealer Visit', check_in_at: t('11:00'), check_out_at: t('11:15'), minutes: 15, lat: P(6)[0], lng: P(6)[1] },
+      { submission_id: 'f1', label: 'Customer Visit', customer_name: null, check_in_at: t('10:00'), check_out_at: t('10:20'), minutes: 20, lat: P(3)[0], lng: P(3)[1] },
+      { submission_id: 'f2', label: 'Dealer Visit', customer_name: null, check_in_at: t('11:00'), check_out_at: t('11:15'), minutes: 15, lat: P(6)[0], lng: P(6)[1] },
     ]);
     // 8 fixes lie inside legs; the one during visit 1 is in no leg.
     expect(r.points_used).toBe(8);
@@ -278,6 +278,38 @@ describe('where a visit\'s coordinates come from', () => {
     expect(normalizeVisit({ source: 'form', row: { ...base, builder_forms: [{ title: 'Site Audit' }] } })!.label).toBe('Site Audit');
     expect(normalizeVisit({ source: 'form', row: { ...base, outlet_name: ' ACME ' } })!.label).toBe('ACME');
     expect(normalizeVisit({ source: 'form', row: base })!.label).toBe('Form visit');
+  });
+
+  it('carries the outlet / customer name (outlet_name, else store_name) independently of the label', () => {
+    const base = { id: 'x', check_in_at: t('10:00'), check_out_at: t('10:20'), check_in_gps: '13.5,80.5' };
+    // The form title is still the label, but the customer name is surfaced for the travel report.
+    expect(normalizeVisit({ source: 'form', row: { ...base, builder_forms: { title: 'Site Audit' }, outlet_name: ' ACME Traders ' } })!.customerName).toBe('ACME Traders');
+    expect(normalizeVisit({ source: 'builder', row: { ...base, location_lat: 13.5, location_lng: 80.5, store_name: 'Metro Store' } })!.customerName).toBe('Metro Store');
+    expect(normalizeVisit({ source: 'form', row: base })!.customerName).toBeNull();
+  });
+
+  it('prefers the customer typed into the form (a "Customer Name" answer) over the outlet column', () => {
+    const base = { id: 'x', check_in_at: t('10:00'), check_out_at: t('10:20'), check_in_gps: '13.5,80.5' };
+    const responses = [
+      { value_text: 'enquiry', builder_questions: { label: 'Purpose of Visit' } },
+      { value_text: ' S3 electronics ', builder_questions: { label: 'Customer Name' } },
+      { value_text: '8939433715', builder_questions: { label: 'Mobile Number' } },
+    ];
+    // the form answer wins even when an outlet_name is also present
+    expect(normalizeVisit({ source: 'form', row: { ...base, outlet_name: 'Ignored Outlet', form_responses: responses } })!.customerName).toBe('S3 electronics');
+    // label priority: a specific "Dealer Name" beats a generic "Name"
+    expect(normalizeVisit({ source: 'form', row: { ...base, form_responses: [
+      { value_text: 'Someone', builder_questions: { label: 'Name' } },
+      { value_text: 'Raj Motors', builder_questions: { label: 'Dealer Name' } },
+    ] } })!.customerName).toBe('Raj Motors');
+    // a legacy builder submission carries its answers inline as `responses`
+    expect(normalizeVisit({ source: 'builder', row: { ...base, location_lat: 13.5, location_lng: 80.5, responses: [
+      { value_text: 'Metro Hardware', builder_questions: { label: 'Consumer Name' } },
+    ] } })!.customerName).toBe('Metro Hardware');
+    // no name-ish answer → fall back to the outlet column
+    expect(normalizeVisit({ source: 'form', row: { ...base, outlet_name: 'Fallback Outlet', form_responses: [
+      { value_text: 'blue', builder_questions: { label: 'Colour' } },
+    ] } })!.customerName).toBe('Fallback Outlet');
   });
 
   it('accepts a timestamptz as the database prints it', () => {

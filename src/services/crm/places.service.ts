@@ -74,6 +74,57 @@ export async function autocomplete(
     }));
 }
 
+/**
+ * Text Search for addresses/places — the "show more location suggestions"
+ * fallback. Google's Autocomplete (New) caps at ~5 predictions, so when the rep
+ * wants a wider list we run a Text Search (returns up to 20) against the same
+ * typed query. Shape matches `autocomplete` (place_id + description) so the
+ * clients can render both lists through one code path and resolve a pick via
+ * `details()`. India-restricted, optionally biased to the rep's GPS fix.
+ */
+export async function textSearch(
+  input: string,
+  bias?: { lat: number; lng: number; radiusMeters?: number },
+): Promise<PlacePrediction[]> {
+  const q = (input || '').trim();
+  if (!PLACES_KEY || q.length < 3) return [];
+  // NOTE: Text Search (unlike Autocomplete) does NOT accept `includedRegionCodes`
+  // — sending it makes Google reject the whole request (INVALID_ARGUMENT), which
+  // surfaced as "Show more" returning nothing (the dropdown stayed at the ~5
+  // autocomplete rows). Text Search biases by `regionCode` (singular) +
+  // locationBias instead. pageSize 20 is the max.
+  const body: Record<string, unknown> = { textQuery: q, regionCode: 'IN', pageSize: 20 };
+  if (bias && isPlausibleIndiaFix(bias.lat, bias.lng)) {
+    body.locationBias = {
+      circle: {
+        center: { latitude: bias.lat, longitude: bias.lng },
+        radius: Math.max(1, Math.min(50_000, Math.round(bias.radiusMeters ?? 30_000))),
+      },
+    };
+  }
+  const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': PLACES_KEY,
+      // Only the id + a human label are needed for the suggestion list; a tight
+      // field mask keeps this in the cheapest Text Search SKU.
+      'X-Goog-FieldMask': 'places.id,places.formattedAddress,places.displayName',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new AppError(502, `Places text search failed: ${await res.text()}`, 'PLACES_ERROR');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data: any = await res.json();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data.places ?? [])
+    .filter((p: any) => p.id)
+    .map((p: any) => ({
+      place_id: p.id as string,
+      description: (p.formattedAddress || p.displayName?.text || '') as string,
+    }));
+}
+
 /** Resolve a place id to address parts + coordinates. */
 export async function details(placeId: string): Promise<PlaceDetail | null> {
   if (!PLACES_KEY || !placeId) return null;
@@ -97,4 +148,47 @@ export async function details(placeId: string): Promise<PlaceDetail | null> {
     latitude: p.location?.latitude,
     longitude: p.location?.longitude,
   };
+}
+
+// Reverse-geocode a GPS fix to a human-readable address. Used to stamp WHERE a
+// form was submitted (and other geo-stamped records) when the client app only
+// sent coordinates. Best-effort by design: returns null and NEVER throws when
+// there is no key, the fix is implausible (null-island / NaN), or Google returns
+// nothing usable — so the caller simply stores a null address, never a failed
+// write. Uses the classic Geocoding API with the same server key as autocomplete;
+// that key must have the Geocoding API enabled (a REQUEST_DENIED is logged once so
+// ops can enable it, then degrades to null).
+// Pin the language and region of every reverse-geocode so the server resolves ONE name per point that is the
+// same for every viewer (English / India) — the fix for "the same GPS fix shows a different, sometimes foreign,
+// place name to different admins". Overridable for a future non-India deployment.
+const GEOCODE_LANGUAGE = process.env.GOOGLE_GEOCODE_LANGUAGE || 'en';
+const GEOCODE_REGION = process.env.GOOGLE_GEOCODE_REGION || 'in';
+
+let reverseGeocodeDenied = false;
+export async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
+  if (!PLACES_KEY) return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  // (0,0) and anything hugging it means "no fix", not a real location.
+  if (Math.abs(lat) < 0.5 && Math.abs(lng) < 0.5) return null;
+  try {
+    const res = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}`
+      + `&language=${encodeURIComponent(GEOCODE_LANGUAGE)}&region=${encodeURIComponent(GEOCODE_REGION)}`
+      + `&key=${encodeURIComponent(PLACES_KEY)}`,
+    );
+    if (!res.ok) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await res.json();
+    if (data.status === 'REQUEST_DENIED') {
+      if (!reverseGeocodeDenied) {
+        reverseGeocodeDenied = true;
+        console.warn('[places] reverseGeocode REQUEST_DENIED — enable the Geocoding API on the Google key:', data.error_message || '');
+      }
+      return null;
+    }
+    if (data.status !== 'OK' || !Array.isArray(data.results) || !data.results.length) return null;
+    return (data.results[0].formatted_address as string) || null;
+  } catch {
+    return null; // best-effort — never fail the caller's write
+  }
 }

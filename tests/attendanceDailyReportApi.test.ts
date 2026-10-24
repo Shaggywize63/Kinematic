@@ -70,7 +70,7 @@ const TRAIL = [
   fix('09:40', P(1)), fix('09:50', P(2)), fix('10:00', P(2)), fix('10:10', P(2)), fix('10:20', P(2)),
   fix('10:40', P(3)), fix('11:00', P(4)), fix('11:10', P(4)), fix('11:20', P(4)), fix('11:40', P(5)),
 ];
-const VISIT = { id: 'sub-1', check_in_at: ist('11:00'), check_out_at: ist('11:20'), check_in_gps: `${P(4)[0]},${P(4)[1]}`, check_out_gps: `${P(4)[0]},${P(4)[1]}`, builder_forms: { title: 'Customer Visit' } };
+const VISIT = { id: 'sub-1', check_in_at: ist('11:00'), check_out_at: ist('11:20'), check_in_gps: `${P(4)[0]},${P(4)[1]}`, check_out_gps: `${P(4)[0]},${P(4)[1]}`, outlet_name: 'Acme Depot', builder_forms: { title: 'Customer Visit' } };
 
 const chainsOn = (table: string) => __mock.chainsFor(table);
 let CLIENTS: Record<string, { id: string; org_id: string; owner_org_id?: string | null; settings: Record<string, unknown> }>;
@@ -136,7 +136,7 @@ describe('GET /attendance/daily-report', () => {
     expect(d.travel.method).toBe('mixed');           // the legs with 2+ fixes ride the trail; the one with a single fix falls back to the straight line
     expect(d.travel.legs).toHaveLength(2);
     expect(d.travel.total_km).toBeGreaterThan(0);
-    expect(d.visits).toEqual([{ submission_id: 'sub-1', label: 'Customer Visit', arrival_at: ist('11:00'), departure_at: ist('11:20'), minutes: 20, lat: P(4)[0], lng: P(4)[1] }]);
+    expect(d.visits).toEqual([{ submission_id: 'sub-1', label: 'Customer Visit', customer_name: 'Acme Depot', arrival_at: ist('11:00'), departure_at: ist('11:20'), minutes: 20, lat: P(4)[0], lng: P(4)[1] }]);
     expect(d.halts).toHaveLength(1);
     expect(d.halts[0]).toMatchObject({ index: 0, start_at: ist('09:50'), end_at: ist('10:20'), minutes: 30, lat: P(2)[0], lng: P(2)[1] });
     expect(d.route.thinned).toBe(false);

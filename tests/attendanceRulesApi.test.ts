@@ -117,7 +117,7 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
       configured: true,
       rules: RESOLVED_A,
       defaults: DEFAULT_RULES,
-      bounds: { grace_minutes: { min: 0, max: 120 } },
+      bounds: { grace_minutes: { min: 0, max: 120 }, required_minutes: { min: 0, max: 1440 } },
     });
   });
 
@@ -247,9 +247,11 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
       expect(updatesOf('clients')).toHaveLength(0);
     });
 
-    it('lets the platform super_admin reach any client', async () => {
-      setUser({ ...orgAdmin, role: 'super_admin' });
+    it('lets a platform OPERATOR reach any client — but not just any super_admin', async () => {
+      setUser({ ...orgAdmin, role: 'super_admin', email: 's@kinematicapp.com' });
       expect((await request(app).get('/org-settings/attendance-rules').set('X-Client-Id', CX)).status).toBe(200);
+      setUser({ ...orgAdmin, role: 'super_admin', email: 'someone@else.example' });
+      expect((await request(app).get('/org-settings/attendance-rules').set('X-Client-Id', CX)).status).toBe(404);
     });
 
     it('is a 404 for an unknown client and 400 for a malformed header', async () => {

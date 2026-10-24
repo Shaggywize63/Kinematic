@@ -4,7 +4,6 @@ import { requireModule } from '../middleware/rbac';
 import {
   getRoutePlans,
   getRoutePlanSummary,
-  getEsgSummary,
   getMyRoutePlan,
   createRoutePlan,
   updateRoutePlan,
@@ -35,7 +34,6 @@ router.use(requireAuth);
 // ── Admin / Supervisor ──────────────────────────────
 router.get('/',                  requireSupervisorOrAbove, getRoutePlans);
 router.get('/summary',           requireSupervisorOrAbove, getRoutePlanSummary);
-router.get('/esg-summary',       requireSupervisorOrAbove, getEsgSummary);
 router.get('/imports',           requireSupervisorOrAbove, getImports);
 router.get('/outlet-frequency',  requireSupervisorOrAbove, getOutletFrequency);
 // Set an outlet's visit cadence + priority (feeds the optimizer's priority

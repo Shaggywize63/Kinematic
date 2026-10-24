@@ -24,6 +24,8 @@ export interface AuthUser {
   // read-only "view SRS + BMW leads only" account that is NOT a super_admin.
   viewer_org_ids?: string[];
   client_id?: string;             // client enterprise ID
+  // Companies (clients) this user may sell for; X-Client-Id picks one per request.
+  company_client_ids?: string[];
   permissions?: string[];       // legacy per-user grants from user_module_permissions
   assigned_cities?: string[];    // IDs of assigned cities
   // City NAMES resolved from user_city_assignments → cities.name. Used by
@@ -55,6 +57,8 @@ export interface AuthUser {
   role_permissions_write?: string[];
   enabled_modules?: string[];   // module IDs enabled for this user's client (entitlement)
   enabled_packages?: string[];  // package SKUs enabled for this user's client
+  /** True when enabled_modules is the complete list for this client: empty means none, not "unknown" (see lib/entitlements). */
+  entitlements_strict?: boolean;
   // Single-device login enforcement. Set by /auth/login on mobile platforms;
   // middleware compares X-Session-Id header against this. NULL = legacy or
   // dashboard session, enforcement is skipped.

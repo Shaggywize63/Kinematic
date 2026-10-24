@@ -60,6 +60,8 @@ export interface TravelAnchorOut<K extends string> {
   lat: number | null;
   lng: number | null;
   label: string;
+  /** Server-resolved place name (set by the daily-report controller after the pure computation); absent otherwise. */
+  place?: string | null;
 }
 
 export interface TravelLeg {
@@ -73,6 +75,8 @@ export interface TravelLeg {
 export interface TravelStop {
   submission_id: string;
   label: string;
+  /** The outlet / customer the form was checked in at (`outlet_name`, else `store_name`); null when the submission names none. */
+  customer_name: string | null;
   check_in_at: string;
   check_out_at: string;
   minutes: number;
@@ -173,6 +177,8 @@ export function shiftWindow(att: TravelAttendanceRow, nowMs: number): ShiftWindo
 interface Visit {
   id: string;
   label: string;
+  /** The outlet / customer this visit was logged at (see customerNameOf); null when the submission names none. */
+  customerName: string | null;
   inMs: number;
   outMs: number;
   inPt: LatLng;
@@ -183,6 +189,49 @@ function titleOf(row: Record<string, any>): string | null {
   const bf = Array.isArray(row.builder_forms) ? row.builder_forms[0] : row.builder_forms;
   const t = bf && typeof bf.title === 'string' ? bf.title.trim() : '';
   return t || null;
+}
+
+/** Question labels (lowercased) that name the customer/party a visit was logged at, most specific first. */
+const CUSTOMER_NAME_LABELS = [
+  'customer name', 'consumer name', 'client name', 'dealer name', 'party name',
+  'firm name', 'shop name', 'store name', 'outlet name', 'company name', 'name',
+];
+
+/**
+ * The customer named in the visit's own form answers. A form-builder submission stores each answer as a
+ * `form_responses` row ({ value_text, builder_questions: { label } }); a legacy builder submission carries
+ * them inline as `responses`. We take the value of the question whose label names the customer (by the
+ * priority list, else any label containing "name").
+ */
+function answeredCustomerName(row: Record<string, any>): string | null {
+  const resps = Array.isArray(row.form_responses) ? row.form_responses
+    : Array.isArray(row.responses) ? row.responses : [];
+  const byLabel = new Map<string, string>();
+  for (const r of resps) {
+    if (!r || typeof r !== 'object') continue;
+    const q = Array.isArray(r.builder_questions) ? r.builder_questions[0] : r.builder_questions;
+    const label = q && typeof q.label === 'string' ? q.label.trim().toLowerCase() : '';
+    const val = typeof r.value_text === 'string' ? r.value_text.trim() : '';
+    if (label && val && !byLabel.has(label)) byLabel.set(label, val);
+  }
+  for (const want of CUSTOMER_NAME_LABELS) { const v = byLabel.get(want); if (v) return v; }
+  for (const [label, val] of byLabel) if (label.includes('name')) return val;
+  return null;
+}
+
+/**
+ * The customer a form visit was logged at. For a form-builder visit (e.g. "Customer Visit") the rep types
+ * the customer into a form field, stored as a `form_responses` answer (question labelled "Customer Name" or
+ * similar); for an outlet check-in it is the denormalized `outlet_name` (else `store_name`). No lead link.
+ */
+function customerNameOf(row: Record<string, any>): string | null {
+  const answered = answeredCustomerName(row);
+  if (answered) return answered;
+  for (const k of ['outlet_name', 'store_name'] as const) {
+    const v = row[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
 }
 
 /**
@@ -201,8 +250,9 @@ export function normalizeVisit(raw: RawVisitRow): Visit | null {
   const inPt = gIn ?? fallback ?? gOut;
   const outPt = gOut ?? fallback ?? gIn;
   if (!inPt || !outPt || r.id == null) return null;
-  const label = titleOf(r) ?? (typeof r.outlet_name === 'string' && r.outlet_name.trim() ? r.outlet_name.trim() : 'Form visit');
-  return { id: String(r.id), label, inMs, outMs, inPt, outPt };
+  const customerName = customerNameOf(r);
+  const label = titleOf(r) ?? customerName ?? 'Form visit';
+  return { id: String(r.id), label, customerName, inMs, outMs, inPt, outPt };
 }
 
 // ── the computation ───────────────────────────────────────────────────────
@@ -292,7 +342,7 @@ export function computeDayTravel(input: BuildDayTravelInput): DayTravelComputati
     .filter((v): v is Visit => !!v && v.inMs >= win.startMs && v.outMs <= win.endMs)
     .sort((a, b) => a.inMs - b.inMs || a.outMs - b.outMs);
   base.stops = visits.map((v) => ({
-    submission_id: v.id, label: v.label, check_in_at: iso(v.inMs), check_out_at: iso(v.outMs),
+    submission_id: v.id, label: v.label, customer_name: v.customerName, check_in_at: iso(v.inMs), check_out_at: iso(v.outMs),
     minutes: Math.round((v.outMs - v.inMs) / 60_000), lat: v.inPt.lat, lng: v.inPt.lng,
   }));
 

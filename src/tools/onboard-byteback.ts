@@ -35,7 +35,8 @@ const ORG_NAME = 'ByteBack';
 const ORG_SLUG = 'byteback';
 
 // Placeholder credentials — replace the emails later via User Management.
-const TEMP_PASSWORD = 'ByteBack@2026';
+const TEMP_PASSWORD = process.env.BYTEBACK_TEMP_PASSWORD || '';
+if (!TEMP_PASSWORD) { console.error('Set BYTEBACK_TEMP_PASSWORD to run this tool.'); process.exit(1); }
 // Master admin login supplied by the Kinematic team. It's on kinematicapp.com,
 // which is in ACTIVE_CAP_BYPASS_DOMAINS (misc.controller), so this account is
 // EXEMPT from the seat cap — it never consumes a ByteBack seat and can always
@@ -43,7 +44,10 @@ const TEMP_PASSWORD = 'ByteBack@2026';
 // Distinct placeholder mobiles — the users table has a unique (org_id, mobile)
 // constraint, so every account needs its own value (an empty string collides).
 // Replace with real numbers later via User Management.
-const MASTER = { name: 'ByteBack Admin', email: 'byteback@kinematicapp.com', password: 'Manvik@1221', mobile: '9000000000' };
+// The password is supplied at run time (BYTEBACK_MASTER_PASSWORD), never kept in the repo.
+const MASTER_PASSWORD = process.env.BYTEBACK_MASTER_PASSWORD || '';
+if (!MASTER_PASSWORD) { console.error('Set BYTEBACK_MASTER_PASSWORD to run this tool.'); process.exit(1); }
+const MASTER = { name: 'ByteBack Admin', email: 'byteback@kinematicapp.com', password: MASTER_PASSWORD, mobile: '9000000000' };
 const MANAGER = { name: 'ByteBack Manager', email: 'hr@byteback.co.in', mobile: '9000000001' };
 const FIELD_USERS = [
   { name: 'ByteBack User 1', email: 'user1@byteback.example', mobile: '9000000002' },
@@ -257,8 +261,8 @@ async function main() {
 
   log(`\n=== ${dry ? 'DRY-RUN complete (nothing written)' : 'COMMIT complete'} ===`);
   log(`ByteBack org=${BYTEBACK_ORG_ID} client=${BYTEBACK_CLIENT_ID}`);
-  log(`Master (cap-exempt): ${MASTER.email} · password: ${MASTER.password}`);
-  log(`Manager: ${MANAGER.email} · Field users: ${FIELD_USERS.map((u) => u.email).join(', ')} · temp password: ${TEMP_PASSWORD}`);
+  log(`Master (cap-exempt): ${MASTER.email}`);
+  log(`Manager: ${MANAGER.email} · Field users: ${FIELD_USERS.map((u) => u.email).join(', ')}`);
   log(`Seat cap: ${SEAT_LIMIT} (1 manager + 3 users; master exempt). 5th byteback.example user → upgrade prompt.`);
 }
 

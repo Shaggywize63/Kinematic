@@ -1,10 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
-import { isLiveTrackingDisabled } from '../lib/liveTracking';
+import { isLiveTrackingDisabled, requiresOpenShift, shouldLogOffShift } from '../lib/liveTracking';
 import { isDuplicateHeartbeat, isNullIsland } from '../lib/heartbeatGuard';
 import { clearEmailProjectCache } from '../lib/projects';
-import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
+import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, isoDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
 import { AuthRequest } from '../types';
 import { logger } from '../lib/logger';
 import { routedData } from '../lib/notificationRoute';
@@ -12,7 +12,12 @@ import { DEMO_ORG_ID, isDemo, getMockZones, getMockClients, getMockSecurityAlert
 import * as hierarchy from '../services/crm/hierarchy.service';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { normalizeMobile, newUserContactProblem } from '../lib/userContact';
-import { userAccessRows } from '../lib/userAccessRows';
+import { userAccessRows, modulePermissionsForNewUser } from '../lib/userAccessRows';
+import { clientGrantedModuleIds } from '../lib/entitlements';
+import { assertMayManageUser, assertMayAssignRole } from '../lib/userGuard';
+import { allowedFlags, isProjectDisabled } from '../services/notificationPolicy';
+import { isPlatformOperator, usesStrictTenantScope } from '../lib/tenantScope';
+import { invalidateAuthCache } from '../middleware/auth';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -166,8 +171,14 @@ export const getNotifications = asyncHandler<AuthRequest>(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR')
   // Every row carries `data.kind` so a tap in the in-app list routes exactly like
   // a tap on the push (see lib/notificationRoute.ts).
-  const rows = (data || []).map((n: any) => ({ ...n, data: routedData(n) }))
-  sendPaginated(res, rows, count || 0, page, limit)
+  let rows = (data || []).map((n: any) => ({ ...n, data: routedData(n) }))
+  // The in-app list follows the same notification policy as the push (services/notificationPolicy.ts): a project or
+  // client with a kind switched off does not see it in the bell either.
+  const allowed = await allowedFlags(rows.map((n: any) => ({ orgId: user.org_id, kind: n.data.kind })))
+  rows = rows.filter((_: unknown, i: number) => allowed[i])
+  // A client without the Notifications module (a complete entitlement list that lacks it) has no in-app notifications.
+  if (user.entitlements_strict === true && !(user.enabled_modules ?? []).includes('notifications') && (user.role || '').toLowerCase() !== 'super_admin') rows = []
+  sendPaginated(res, rows, isProjectDisabled() || rows.length === 0 && (data || []).length > 0 ? 0 : (count || 0), page, limit)
 })
 
 export const markRead = asyncHandler<AuthRequest>(async (req, res) => {
@@ -529,6 +540,7 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   if (!name || !password) {
     throw new AppError(400, 'name and password are required', 'VALIDATION_ERROR')
   }
+  assertMayAssignRole(admin, typeof role === 'string' ? role : undefined, null, 'createUser')
   const mobile = normalizeMobile(rawMobile)
   const contactProblem = newUserContactProblem({ mobile, email })
   if (contactProblem) throw new AppError(400, contactProblem, 'VALIDATION_ERROR')
@@ -670,7 +682,15 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
   // by PostgREST; with the result never checked, the user was created without the modules and
   // cities the admin picked. Write the real columns, and if either insert fails undo the whole
   // creation (the profile delete cascades to any rows already written) and say what failed.
-  const { permissionRows, cityRows } = userAccessRows(authId, permissions, assigned_cities)
+  // A client-bound user created with neither a designation nor a module list starts on the client's own
+  // granted modules, not on "no list" (which the dashboard reads as the client's whole entitlement,
+  // including every always-on universal module). Derived from the client's grants, so it comes after the
+  // escalation guard above, which only checks what the caller chose. See modulePermissionsForNewUser.
+  const hasOrgRole = isUUID(org_role_id as string)
+  const clientGrants = pickedClientId && !hasOrgRole ? await clientGrantedModuleIds(pickedClientId) : []
+  const startingModules = modulePermissionsForNewUser(permissions, { hasOrgRole, clientGrants })
+
+  const { permissionRows, cityRows } = userAccessRows(authId, startingModules, assigned_cities)
   const writes = [
     permissionRows.length ? { what: 'module permissions', run: supabaseAdmin.from('user_module_permissions').insert(permissionRows) } : null,
     cityRows.length ? { what: 'city assignments', run: supabaseAdmin.from('user_city_assignments').insert(cityRows) } : null,
@@ -685,10 +705,16 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
     throw new AppError(badRef ? 400 : 500, `Could not save the user's ${writes[failedAt].what}: ${err.message}`, badRef ? 'VALIDATION_ERROR' : 'DB_ERROR')
   }
 
-  sendSuccess(res, { ...data, permissions: permissions || [], assigned_cities: assigned_cities || [] }, 'User created', 201)
+  // Report what was actually saved (the caller's list, or the client's modules when none was given).
+  sendSuccess(res, { ...data, permissions: permissionRows.map((r) => r.module_id), assigned_cities: assigned_cities || [] }, 'User created', 201)
 })
 
 export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
+  // Who may be edited at all (org / client ownership / super_admin / self-promotion) is decided before anything is
+  // written, including the GoTrue password change below, which used to run for whatever id the URL carried.
+  await assertMayManageUser(req.user!, req.params.id, 'updateUser')
+  assertMayAssignRole(req.user!, typeof req.body.role === 'string' ? req.body.role : undefined, req.params.id, 'updateUser')
+
   // `org_role_id` is allowed here so admins can reassign the hierarchy role
   // (and the modules it inherits) without having to delete + recreate. The
   // column exists on `users`; missing it from this list silently dropped
@@ -855,8 +881,10 @@ export const resetUserPassword = asyncHandler<AuthRequest>(async (req, res) => {
   if (!password || password.length < 6) {
     throw new AppError(400, 'Password must be at least 6 characters', 'VALIDATION_ERROR')
   }
+  await assertMayManageUser(req.user!, req.params.id, 'resetUserPassword')
   const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, { password })
   if (authErr) throw new AppError(500, authErr.message, 'AUTH_ERROR')
+  invalidateAuthCache((u) => u?.id === req.params.id)
 
   sendSuccess(res, { message: 'Password reset successfully' })
 })
@@ -866,6 +894,7 @@ export const resetUserPassword = asyncHandler<AuthRequest>(async (req, res) => {
 // it to the user, who then sets their own new password via the reset page.
 // Reuses the same service the self-service /auth/forgot-password endpoint uses.
 export const sendUserPasswordReset = asyncHandler<AuthRequest>(async (req, res) => {
+  await assertMayManageUser(req.user!, req.params.id, 'sendUserPasswordReset')
   const { data: u } = await supabaseAdmin
     .from('users')
     .select('email')
@@ -1103,14 +1132,30 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   // Bug Fix: 0% battery is valid.
   const batteryLevel = battery !== undefined ? battery : (battery_percentage !== undefined ? battery_percentage : null);
   
-  // 1. Run User Update and Attendance fetch concurrently
-  const today = now.split('T')[0];
-  
-  const [userUpdate, attResult, prevPingResult] = await Promise.all([
+  // The open shift (checked in, not checked out). Location is stored only while one exists — see requiresOpenShift.
+  // Today or yesterday (IST): a shift that started before midnight is still open until it is checked out.
+  const sinceDate = isoDate(new Date(Date.now() - 86_400_000));
+  const { data: att } = await supabaseAdmin
+    .from('attendance')
+    .select('id')
+    .eq('user_id', user.id)
+    .gte('date', sinceDate)
+    .not('checkin_at', 'is', null)
+    .is('checkout_at', null)
+    .order('date', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const storeLocation = hasFix && (!!att || !requiresOpenShift(user));
+  if (hasFix && !storeLocation && shouldLogOffShift(user.id)) {
+    logger.info(`[tracking] ignored a location ping from ${user.id} (${user.role ?? '-'}): no open shift (not checked in, or already checked out)`);
+  }
+
+  // Run the user update and the previous-fix lookup concurrently.
+  const [userUpdate, prevPingResult] = await Promise.all([
     supabaseAdmin
       .from('users')
       .update({
-        ...(hasFix && { last_latitude: latitude, last_longitude: longitude, last_location_updated_at: now }),
+        ...(storeLocation && { last_latitude: latitude, last_longitude: longitude, last_location_updated_at: now }),
         battery_percentage: batteryLevel,
         device_model: device_model || undefined,
         device_brand: device_brand || undefined,
@@ -1124,25 +1169,19 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
       })
       .eq('id', user.id),
 
-    supabaseAdmin
-      .from('attendance')
-      .select('id')
-      .eq('user_id', user.id)
-      .eq('date', today)
-      .maybeSingle(),
-
     // Previous fix — for the server-side teleport / impossible-speed check.
-    supabaseAdmin
-      .from('work_activity')
-      .select('lat, lng, captured_at')
-      .eq('user_id', user.id)
-      .order('captured_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+    storeLocation
+      ? supabaseAdmin
+          .from('work_activity')
+          .select('lat, lng, captured_at')
+          .eq('user_id', user.id)
+          .order('captured_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+      : Promise.resolve({ data: null })
   ]);
 
   if (userUpdate.error) throw new AppError(500, userUpdate.error.message, 'DB_ERROR');
-  const att = attResult.data;
 
   // Location-integrity: flag a ping that "moves" faster than any ground travel
   // (>100 m/s ≈ 360 km/h over >500 m) vs the previous fix — a classic GPS
@@ -1163,7 +1202,8 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
-  // 2. Insert into work_activity for history tracking (+ integrity signals)
+  // 2. Insert into work_activity for history tracking (+ integrity signals) — only for a position we are tracking.
+  if (!storeLocation) { sendSuccess(res, null, 'Status updated'); return; }
   await supabaseAdmin.from('work_activity').insert({
     org_id: user.org_id,
     client_id: user.client_id,
@@ -1206,6 +1246,11 @@ export const getClients = asyncHandler<AuthRequest>(async (req, res) => {
     query = query.in('org_id', Array.from(new Set([user.org_id, ...viewerOrgs])))
   } else if (!isManagement) {
     query = query.eq('org_id', user.org_id)
+  } else if (usesStrictTenantScope() && !isPlatformOperator(user) && isUUID(user.org_id)) {
+    // Org-per-client projects: an admin sees their own org's clients (and the ones their org owns), not every
+    // customer's name. The platform operator keeps the full list; the Tata `default` project keeps its historical
+    // all-clients list (its super-admins rely on it).
+    query = query.or(`org_id.eq.${user.org_id},owner_org_id.eq.${user.org_id}`)
   }
 
   const { data, error } = await query
@@ -1362,68 +1407,3 @@ export const getSecurityAlerts = asyncHandler(async (req: AuthRequest, res: Resp
   const { data, error, count } = await query.range(offset, offset + limit - 1)
   sendPaginated(res, data || [], count || 0, page, limit)
 })
-
-
-export const nukeTestData = asyncHandler<AuthRequest>(async (req, res) => {
-  const { user_name = 'Test FE' } = req.body;
-  logger.info(`🛡️ [DEBUG] Nuke initiated for user: ${user_name}`);
-
-  // 1. Find User
-  const { data: user, error: userErr } = await supabaseAdmin
-    .from('users')
-    .select('id, name')
-    .ilike('name', `%${user_name}%`)
-    .maybeSingle();
-
-  if (userErr || !user) {
-    throw new AppError(404, `User matching "${user_name}" not found`, 'USER_NOT_FOUND');
-  }
-
-  const userId = user.id;
-  const stats: Record<string, number> = {};
-
-  // --- FORMS ---
-  const { data: subs } = await supabaseAdmin.from('form_submissions').select('id').eq('user_id', userId);
-  const subIds = (subs || []).map(s => s.id);
-  if (subIds.length > 0) {
-    const { count: respCount } = await supabaseAdmin.from('form_responses').delete({ count: 'exact' }).in('submission_id', subIds);
-    const { count: subCount } = await supabaseAdmin.from('form_submissions').delete({ count: 'exact' }).eq('user_id', userId);
-    stats.form_responses = respCount || 0;
-    stats.form_submissions = subCount || 0;
-  }
-
-  // --- ATTENDANCE ---
-  const { count: attCount } = await supabaseAdmin.from('attendance').delete({ count: 'exact' }).eq('user_id', userId);
-  stats.attendance = attCount || 0;
-
-  // --- ROUTE PLANS ---
-  const { data: routes } = await supabaseAdmin.from('route_plans').select('id').eq('user_id', userId);
-  const routeIds = (routes || []).map(r => r.id);
-  if (routeIds.length > 0) {
-    const { count: actCount } = await supabaseAdmin.from('route_activities').delete({ count: 'exact' }).in('plan_id', routeIds);
-    const { count: outCount } = await supabaseAdmin.from('route_outlets').delete({ count: 'exact' }).in('plan_id', routeIds);
-    const { count: planCount } = await supabaseAdmin.from('route_plans').delete({ count: 'exact' }).eq('user_id', userId);
-    stats.route_activities = actCount || 0;
-    stats.route_outlets = outCount || 0;
-    stats.route_plans = planCount || 0;
-  }
-
-  // --- VISIT LOGS ---
-  const { count: visitCount } = await supabaseAdmin.from('visit_logs').delete({ count: 'exact' }).or(`user_id.eq.${userId},executive_id.eq.${userId}`);
-  stats.visit_logs = visitCount || 0;
-
-  // --- FEEDBACK & ALERTS ---
-  const { count: sosCount } = await supabaseAdmin.from('sos_alerts').delete({ count: 'exact' }).eq('user_id', userId);
-  const { count: gCount } = await supabaseAdmin.from('grievances').delete({ count: 'exact' }).eq('user_id', userId);
-  const { count: bCount } = await supabaseAdmin.from('broadcast_answers').delete({ count: 'exact' }).eq('user_id', userId);
-  stats.sos_alerts = sosCount || 0;
-  stats.grievances = gCount || 0;
-  stats.broadcast_answers = bCount || 0;
-
-  // --- TRACKING & LOGS ---
-  await supabaseAdmin.from('user_activity_logs').delete().eq('user_id', userId);
-  await supabaseAdmin.from('user_status_history').delete().eq('user_id', userId);
-  await supabaseAdmin.from('notifications').delete().eq('user_id', userId);
-
-  sendSuccess(res, { user_id: userId, user_name: user.name, stats }, 'Data Nuke Complete');
-});

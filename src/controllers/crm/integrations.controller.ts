@@ -37,6 +37,7 @@ import { emailInboundProvider } from '../../services/crm/integrations/providers/
 import { ivrMissedCallProvider } from '../../services/crm/integrations/providers/ivrMissedCall';
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
 import { ingestCallRecording } from '../../services/crm/ai/callRecordingIngest.service';
+import { deriveCallKey, claimForIngest, markIngested, markCallStatus } from '../../services/crm/ai/telephonyCallLog.service';
 import { logger } from '../../lib/logger';
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
@@ -48,7 +49,7 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   salesforce:      'Salesforce',
   email_inbound:   'Inbound Email',
   ivr_missed_call: 'IVR / Missed Call',
-  call_recording:  'Call Recording (Conversation Analysis)',
+  call_recording:  'Call Recording (Call Insights)',
 };
 
 // All v1 providers are push-mode: an external system POSTs leads to our
@@ -78,6 +79,12 @@ function sanitiseIntegration(row: any): IntegrationRow & { webhook_url?: string 
 
 // ── Admin CRUD ─────────────────────────────────────────────────────────
 
+/** Callers without the CRM-settings module (see integrationsGate) get a read that carries no secrets or config. */
+const limitedView = (res: { locals: Record<string, unknown> }): boolean => res.locals.integrationsLimitedView === true;
+const LIMITED_FIELDS = ['id', 'provider', 'label', 'source_id', 'status', 'created_at', 'updated_at'];
+const limited = <T extends Record<string, unknown>>(row: T): Partial<T> =>
+  Object.fromEntries(Object.entries(row).filter(([k]) => LIMITED_FIELDS.includes(k))) as Partial<T>;
+
 export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
   const { data, error } = await supabaseAdmin.from('crm_lead_source_integrations')
@@ -85,7 +92,7 @@ export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('org_id', org_id)
     .order('created_at', { ascending: false });
   if (error) return badRequest(res, error.message);
-  return ok(res, data ?? []);
+  return ok(res, limitedView(res) ? (data ?? []).map((r) => limited(r as Record<string, unknown>)) : (data ?? []));
 });
 
 export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
@@ -95,6 +102,7 @@ export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
     .eq('org_id', org_id).eq('id', req.params.id).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!data) return notFound(res, 'Integration not found');
+  if (limitedView(res)) return ok(res, limited(data as Record<string, unknown>));
   return ok(res, sanitiseIntegration(data));
 });
 
@@ -303,16 +311,25 @@ async function bumpIntegrationCounters(integration_id: string, errored: boolean,
   }).eq('id', integration_id);
 }
 
-/** Constant-time compare of the `?key=` / `x-webhook-key` secret against the
- *  integration's webhook_secret. Used for providers (e.g. call_recording) that
- *  don't ship their own verifyWebhook. */
+/** Constant-time compare of the webhook secret against the integration's
+ *  webhook_secret. Used for providers (e.g. call_recording) that don't ship
+ *  their own verifyWebhook. Providers transmit the shared secret differently:
+ *  most honour the `?key=` query param or an `x-webhook-key` header, but some
+ *  (e.g. CallerDesk) fold the URL's query param into the POST body as
+ *  `key`/`secret`. Accept any of those transports so a provider that can't send
+ *  a custom header or preserve the query string still authenticates. */
 function verifyKeySecret(req: Request, integration: IntegrationRow): boolean {
-  const provided = (req.query.key as string | undefined) ?? (req.headers['x-webhook-key'] as string | undefined);
-  if (!provided || !integration.webhook_secret) return false;
-  if (provided.length !== integration.webhook_secret.length) return false;
-  let diff = 0;
-  for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ integration.webhook_secret.charCodeAt(i);
-  return diff === 0;
+  const secret = integration.webhook_secret;
+  if (!secret) return false;
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+  const candidates: unknown[] = [req.query.key, req.headers['x-webhook-key'], body.key, body.secret];
+  const matches = (provided: unknown): boolean => {
+    if (typeof provided !== 'string' || provided.length !== secret.length) return false;
+    let diff = 0;
+    for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ secret.charCodeAt(i);
+    return diff === 0;
+  };
+  return candidates.some(matches);
 }
 
 export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
@@ -351,19 +368,40 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
       res.status(200).json({ ok: true });
       return;
     }
+    // Dedup across the webhook AND the pull reconcile (crm_telephony_calls): one
+    // recorded call is transcribed + analyzed at most once, whichever path sees
+    // it first. Keyed on campid (outgoing) / CallSid (incoming).
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const callKey = deriveCallKey({ campid: body.campid, call_sid: body.CallSid, uniqueid: body.Uniqueid });
+    if (callKey) {
+      const won = await claimForIngest(integration.org_id, 'callerdesk', callKey, {
+        client_id: (integration as { client_id?: string | null }).client_id ?? null,
+        integration_id,
+        campid: body.campid != null ? String(body.campid) : callKey,
+        call_sid: body.CallSid != null ? String(body.CallSid) : null,
+      });
+      if (!won) {
+        await finishEvent(event_id, { error: 'duplicate (already ingested)' });
+        res.status(200).json({ ok: true, deduped: true });
+        return;
+      }
+    }
     try {
       const r = await ingestCallRecording({
         org_id: integration.org_id,
         client_id: (integration as { client_id?: string | null }).client_id ?? null,
         source_id: integration.source_id,
         config: (integration as { config?: Record<string, unknown> | null }).config ?? null,
-      }, (req.body ?? {}) as Record<string, unknown>);
+      }, body);
+      if ('recording_id' in r) await markIngested(integration.org_id, 'callerdesk', callKey, { recording_id: r.recording_id, lead_id: r.lead_id });
+      else await markCallStatus(integration.org_id, 'callerdesk', callKey, 'skipped', r.skipped);
       await finishEvent(event_id, 'recording_id' in r ? { lead_id: r.lead_id } : { error: r.skipped });
       await bumpIntegrationCounters(integration_id, false);
       res.status(200).json({ ok: true, ...r });
     } catch (e) {
       const err = (e as Error).message;
       logger.error({ integration_id, err }, 'callRecordingWebhook: processing failed');
+      await markCallStatus(integration.org_id, 'callerdesk', callKey, 'error', err);
       await finishEvent(event_id, { error: err });
       await bumpIntegrationCounters(integration_id, true, err);
       res.status(200).json({ ok: true });
@@ -457,9 +495,24 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
 // matches what the admin stored in integration.config.verify_token.
 // Only meta_lead_ads uses this today; other providers return 405.
 
-export const verifyChallenge = asyncHandler<Request>(async (req, res) => {
+export const verifyChallenge = asyncHandler<Request>(async (req, res, next) => {
   const providerSlug = req.params.provider;
   const providerId = providerSlug.replace(/-/g, '_') as ProviderId;
+
+  // CallerDesk delivers the Call Report webhook as a GET with every field on the
+  // query string (SourceNumber / CallRecordingUrl / CallDuration / Status / key),
+  // not a POST body (see docs.callerdesk.io "Get Webhook payload"). Fold the query
+  // into req.body and run the exact same ingest + auth path as the POST handler, so
+  // the recording flows into Conversation Analysis. (POST handshake pings still work.)
+  if (providerId === 'call_recording') {
+    const q = req.query as Record<string, unknown>;
+    const existing = (req.body && typeof req.body === 'object' && !Array.isArray(req.body))
+      ? (req.body as Record<string, unknown>) : {};
+    req.body = { ...existing, ...q };
+    inboundWebhook(req, res, next);
+    return;
+  }
+
   if (providerId !== 'meta_lead_ads') {
     res.status(405).json({ ok: false, error: 'GET not supported for this provider' });
     return;

@@ -3,7 +3,7 @@ import { supabaseAdmin as supabase } from '../lib/supabase';
 import { ok, created, badRequest, notFound, isUUID, parseAppDate, dbToday, getISTSearchRange, todayDate } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { isDemo, getMockRoutePlans, getMockMyRoutePlan } from '../utils/demoData';
-import { resolveFactor, normalizeVehicleType, VEHICLE_TYPES, DEFAULT_VEHICLE_TYPE } from '../services/carbon.service';
+import { normalizeVehicleType, VEHICLE_TYPES, DEFAULT_VEHICLE_TYPE } from '../services/carbon.service';
 import { optimizeRoute, OutletPoint } from '../services/route-optimizer.service';
 import { buildRouteSuggestion, SuggestedOutlet } from '../services/route-suggestion.service';
 import { buildAutoPlanDraft } from '../services/route-autoplan.service';
@@ -13,23 +13,21 @@ import {
 import { haversineDistance } from '../lib/haversine';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { AuthRequest } from '../types';
+import { resolveTenantScope } from '../lib/tenantScope';
+import { assertUserReachable } from '../lib/userGuard';
 
 const orgId  = (req: Request) => (req as any).user.org_id as string;
 const userId = (req: Request) => (req as any).user.id as string;
-
-const round2 = (n: number): number => Math.round((Number(n) || 0) * 100) / 100;
 
 export const getRoutePlans = asyncHandler(async (req, res) => {
   const user = (req as any).user;
   if (isDemo(user)) return ok(res, getMockRoutePlans(todayDate()));
   const { client_id, date } = req.query;
-
-  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-
-  const isGlobal = isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) );
-  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
+  // One org's plans per request on every project; only a Tata platform operator in the "All clients" view is
+  // unfiltered (see lib/tenantScope). A client_id is resolved to its org and must be the caller's to use (404).
+  const scope = await resolveTenantScope(req, client_id);
+  const isGlobal = scope.isGlobal;
+  const effectiveOrgId = (scope.scopeOrgId ?? user.org_id) as string;
 
   const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
@@ -123,10 +121,11 @@ export const createRoutePlan = asyncHandler(async (req, res) => {
   const { user_id, plan_date, outlets, activity_ids, activity_id, vehicle_type } = req.body;
   const acts = activity_ids || (activity_id ? [activity_id] : []);
   if (!user_id || !plan_date || !acts.length || !outlets?.length) return badRequest(res, 'Missing required fields');
+  // The delete below is keyed on (user, date, activity) only, so the user must be someone the caller can reach.
+  await assertUserReachable((req as any).user, user_id, 'createRoutePlan');
 
   const pDate = parseAppDate(plan_date);
   const normVehicle = normalizeVehicleType(vehicle_type);
-  const factor = await resolveFactor(org, normVehicle);
 
   const createdPlans = [];
   for (const aid of acts) {
@@ -135,7 +134,6 @@ export const createRoutePlan = asyncHandler(async (req, res) => {
       org_id: org, user_id, plan_date: pDate, activity_id: aid, created_by: by,
       total_outlets: outlets.length, status: 'pending',
       vehicle_type: normVehicle,
-      emission_factor_kg_per_km: factor,
     }).select().single();
     if (error) continue;
     const rows = (outlets || []).map((o: any, i: number) => ({
@@ -156,9 +154,7 @@ export const updateRoutePlan = asyncHandler(async (req, res) => {
 
   const patch: Record<string, any> = { notes, status, territory_label, frequency };
   if (vehicle_type !== undefined) {
-    const norm = normalizeVehicleType(vehicle_type);
-    patch.vehicle_type = norm;
-    patch.emission_factor_kg_per_km = await resolveFactor(org, norm);
+    patch.vehicle_type = normalizeVehicleType(vehicle_type);
   }
 
   const { data, error } = await supabase.from('route_plans').update(patch).eq('id', id).eq('org_id', org).select().single();
@@ -188,12 +184,11 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
     });
   }
   const { client_id, date } = req.query;
-  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-
-  const isGlobal = isGlobalVal || ( (isSagar || isSuper) && (!client_id || !isUUID(client_id as string)) );
-  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
+  // One org's plans per request on every project; only a Tata platform operator in the "All clients" view is
+  // unfiltered (see lib/tenantScope). A client_id is resolved to its org and must be the caller's to use (404).
+  const scope = await resolveTenantScope(req, client_id);
+  const isGlobal = scope.isGlobal;
+  const effectiveOrgId = (scope.scopeOrgId ?? user.org_id) as string;
 
   const istDate = parseAppDate((date as string) || dbToday());
   const { start, end } = getISTSearchRange(istDate);
@@ -206,7 +201,8 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
 
   if (error) return badRequest(res, error.message);
   const rows = data || [];
-  const { count: rawTotal } = await supabase.from('route_plans').select('*', { count: 'exact', head: true });
+  // A whole-table count is a cross-tenant disclosure: only the all-clients operator view gets it.
+  const rawTotal = isGlobal ? (await supabase.from('route_plans').select('*', { count: 'exact', head: true })).count : null;
   return ok(res, {
     total_fes: rows.length,
     total_outlets: rows.reduce((s, r: any) => s + (r.total_outlets || 0), 0),
@@ -214,81 +210,6 @@ export const getRoutePlanSummary = asyncHandler(async (req, res) => {
     pending_plans: rows.filter((r: any) => r.status === 'pending').length,
     completed_plans: rows.filter((r: any) => r.status === 'completed').length,
     debug: { raw_total: rawTotal, isGlobal, effectiveOrgId, start, end }
-  });
-});
-
-export const getEsgSummary = asyncHandler(async (req, res) => {
-  const user = (req as any).user;
-  if (isDemo(user)) {
-    return ok(res, demoEsgPayload());
-  }
-
-  const { client_id, from, to } = req.query;
-  const isGlobalVal = (client_id === 'Kinematic' || client_id === '00000000-0000-0000-0000-000000000000');
-  const isSagar = (user.name || '').toLowerCase().includes('sagar');
-  const isSuper = (user.role || '').toLowerCase().includes('super_admin') || (user.role || '').toLowerCase().includes('admin');
-  const isGlobal = isGlobalVal || ((isSagar || isSuper) && (!client_id || !isUUID(client_id as string)));
-  const effectiveOrgId = (client_id && isUUID(client_id as string)) ? (client_id as string) : user.org_id;
-
-  const today = dbToday();
-  const monthStart = (today as string).slice(0, 7) + '-01';
-  const fromDate = (from as string) || monthStart;
-  const toDate = (to as string) || (today as string);
-
-  let q = supabase
-    .from('route_plans')
-    .select('vehicle_type, total_distance_km, actual_distance_km, co2_kg_planned, co2_kg_actual, plan_date, status')
-    .gte('plan_date', fromDate)
-    .lte('plan_date', toDate);
-  if (!isGlobal) q = q.eq('org_id', effectiveOrgId);
-
-  const { data, error } = await q;
-  if (error) return badRequest(res, error.message);
-
-  const rows = (data || []) as any[];
-  const num = (v: any): number => Number(v) || 0;
-  const totalCo2Planned = rows.reduce((s, r) => s + num(r.co2_kg_planned), 0);
-  const totalCo2Actual = rows.reduce((s, r) => s + num(r.co2_kg_actual), 0);
-  const totalKm = rows.reduce((s, r) => s + num(r.actual_distance_km), 0);
-
-  const byVehicle: Record<string, { km: number; co2_kg: number; plan_count: number }> = {};
-  for (const r of rows) {
-    const vt = r.vehicle_type || DEFAULT_VEHICLE_TYPE;
-    if (!byVehicle[vt]) byVehicle[vt] = { km: 0, co2_kg: 0, plan_count: 0 };
-    byVehicle[vt].km += num(r.actual_distance_km);
-    byVehicle[vt].co2_kg += num(r.co2_kg_actual);
-    byVehicle[vt].plan_count += 1;
-  }
-  Object.keys(byVehicle).forEach((k) => {
-    byVehicle[k].km = round2(byVehicle[k].km);
-    byVehicle[k].co2_kg = round2(byVehicle[k].co2_kg);
-  });
-
-  const daily: Record<string, number> = {};
-  for (const r of rows) {
-    if (!r.plan_date) continue;
-    daily[r.plan_date] = (daily[r.plan_date] || 0) + num(r.co2_kg_actual);
-  }
-  const dailySeries = Object.keys(daily).sort().map((day) => ({ day, co2_kg: round2(daily[day]) }));
-
-  const deltaPct = totalCo2Planned > 0
-    ? round2(((totalCo2Actual - totalCo2Planned) / totalCo2Planned) * 100)
-    : 0;
-
-  return ok(res, {
-    range: { from: fromDate, to: toDate },
-    total_co2_kg_planned: round2(totalCo2Planned),
-    total_co2_kg_actual: round2(totalCo2Actual),
-    total_km: round2(totalKm),
-    delta_vs_planned_pct: deltaPct,
-    by_vehicle: byVehicle,
-    daily_series: dailySeries,
-    equivalents: {
-      trees_year: round2(totalCo2Actual / 21),
-      home_days: round2(totalCo2Actual / 4.5),
-    },
-    plan_count: rows.length,
-    vehicle_types: VEHICLE_TYPES,
   });
 });
 
@@ -451,11 +372,10 @@ export const autoGenerateRoutePlan = asyncHandler(async (req, res) => {
     await supabase.from('route_plans').delete().eq('org_id', org).eq('user_id', targetUserId).eq('plan_date', planDate);
   }
 
-  const factor = await resolveFactor(org, draft.vehicle_type);
   const { data: plan, error } = await supabase.from('route_plans').insert({
     org_id: org, user_id: targetUserId, plan_date: planDate, activity_id: activityId,
     created_by: by, total_outlets: draft.stops.length, status: 'pending',
-    vehicle_type: draft.vehicle_type, emission_factor_kg_per_km: factor,
+    vehicle_type: draft.vehicle_type,
     optimized: true, total_distance_km: draft.total_km,
     notes: 'Auto-generated from outlet cadence & priority',
   }).select().single();
@@ -625,7 +545,6 @@ export const runTeamAutoPlan = asyncHandler(async (req, res) => {
   if (priorIds.length) await supabase.from('route_plans').delete().in('id', priorIds);
 
   const methodLabel = AUTOPLAN_METHODS.find((m) => m.id === eff.method)?.label || eff.method;
-  const factor = await resolveFactor(org, result.vehicle_type);
   const createdPlans: Array<{ user_id: string; plan_id: string; outlets: number; total_km: number }> = [];
 
   for (const d of drafts) {
@@ -641,7 +560,7 @@ export const runTeamAutoPlan = asyncHandler(async (req, res) => {
     const { data: plan, error } = await supabase.from('route_plans').insert({
       org_id: org, user_id: d.user_id, plan_date: planDate, activity_id: activityId,
       created_by: by, total_outlets: d.stops.length, status: 'pending',
-      vehicle_type: result.vehicle_type, emission_factor_kg_per_km: factor,
+      vehicle_type: result.vehicle_type,
       optimized: true, total_distance_km: d.total_km,
       notes: `${AUTOPLAN_NOTE_PREFIX} · ${methodLabel}`,
     }).select().single();
@@ -738,6 +657,17 @@ export const updateOutletVisit = asyncHandler(async (req, res) => {
   const { outletId } = req.params;
   const { status, checkin_lat, checkin_lng, photo_url, visit_notes, checkin_at, checkout_at } = req.body;
   const updates: any = { status, checkin_lat, checkin_lng, photo_url, visit_notes, checkin_at, checkout_at };
+
+  // The outlet must belong to a plan of someone the caller can reach (any role may call this for their own visits);
+  // it used to update whichever outlet id it was given, in any org.
+  if (!isUUID(outletId)) return badRequest(res, 'Invalid outlet id');
+  const { data: owning } = await supabase.from('route_plan_outlets').select('route_plan_id').eq('id', outletId).maybeSingle();
+  const { data: owningPlan } = owning?.route_plan_id
+    ? await supabase.from('route_plans').select('org_id, user_id').eq('id', owning.route_plan_id).maybeSingle()
+    : { data: null };
+  if (!owningPlan) return notFound(res, 'Outlet visit not found');
+  if (owningPlan.user_id) await assertUserReachable((req as any).user, owningPlan.user_id as string, 'updateOutletVisit');
+  else if (owningPlan.org_id !== orgId(req)) return notFound(res, 'Outlet visit not found');
 
   // When the mobile app sends check-in coordinates, record how far the rep was
   // from the planned outlet as checkin_distance_m. The route_deviation feature
@@ -891,34 +821,3 @@ export const getRouteDeviations = asyncHandler(async (req, res) => {
 
   return ok(res, deviations);
 });
-
-function demoEsgPayload() {
-  const today = new Date();
-  const days: { day: string; co2_kg: number }[] = [];
-  for (let i = 13; i >= 0; i--) {
-    const d = new Date(today.getTime() - i * 86400000);
-    const iso = d.toISOString().slice(0, 10);
-    days.push({ day: iso, co2_kg: round2(2 + Math.sin(i / 2) * 1.4 + (i % 3) * 0.4) });
-  }
-  const totalActual = round2(days.reduce((s, d) => s + d.co2_kg, 0));
-  const totalPlanned = round2(totalActual * 1.08);
-  return {
-    range: { from: days[0].day, to: days[days.length - 1].day },
-    total_co2_kg_planned: totalPlanned,
-    total_co2_kg_actual: totalActual,
-    total_km: round2(totalActual / 0.072),
-    delta_vs_planned_pct: round2(((totalActual - totalPlanned) / totalPlanned) * 100),
-    by_vehicle: {
-      '2w_petrol': { km: round2((totalActual * 0.55) / 0.072), co2_kg: round2(totalActual * 0.55), plan_count: 9 },
-      '4w_diesel': { km: round2((totalActual * 0.30) / 0.171), co2_kg: round2(totalActual * 0.30), plan_count: 4 },
-      '2w_ev':     { km: round2((totalActual * 0.15) / 0.022), co2_kg: round2(totalActual * 0.15), plan_count: 3 },
-    },
-    daily_series: days,
-    equivalents: {
-      trees_year: round2(totalActual / 21),
-      home_days: round2(totalActual / 4.5),
-    },
-    plan_count: 16,
-    vehicle_types: VEHICLE_TYPES,
-  };
-}
