@@ -1614,7 +1614,7 @@ leads.post('/bulk-assign', wrap(async (req, res) => {
 leads.post('/:id/assign-telecaller', wrap(async (req, res) => {
   const body = parse(v.assignTelecallerSchema, req.body ?? {});
   const updated = await telecaller.assignLeadToTelecaller(
-    orgId(req), clientScope(req), req.params.id, body.telecaller_id, body.campaign ?? null,
+    orgId(req), clientScope(req), req.params.id, body.telecaller_id, body.campaign ?? null, body.follow_up_date ?? null,
   );
   res.json(await stampOwnerName(updated));
 }));
