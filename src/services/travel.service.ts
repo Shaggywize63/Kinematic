@@ -5,14 +5,16 @@
  * Definition. For one user on one IST day that has an attendance row, the ANCHORS in time order are
  *
  *   attendance check-in
- *   → for each form visit inside the shift window [checkin_at, checkout_at ?? now] that has both
- *     `check_in_at` and `check_out_at` and a coordinate:  form check-in, form check-out
+ *   → each WAYPOINT inside the shift window [checkin_at, checkout_at ?? now], in time order — a form
+ *     visit (with both `check_in_at`/`check_out_at` and a coordinate) OR a detected halt (haltDetection.ts):
+ *     the waypoint's arrival point, then its departure point (a halt arrives and departs at its centroid)
  *   → attendance check-out  (or "now" while the shift is still open)
  *
- * A LEG is the travel between two consecutive anchors where the user is NOT at a form:
- *   (attendance check-in → first form check-in), (form_k check-out → form_k+1 check-in),
- *   (last form check-out → attendance check-out). With no forms there is one leg, check-in → check-out.
- * A visit that overlaps the previous one (or is out of order) gets no leg of its own.
+ * A LEG is the travel between two consecutive anchors where the user is NOT at a waypoint:
+ *   (attendance check-in → first waypoint), (waypoint_k departure → waypoint_k+1 arrival),
+ *   (last waypoint departure → attendance check-out). With no waypoints there is one leg,
+ *   check-in → check-out. A waypoint that overlaps the previous one (or is out of order) gets no leg
+ *   of its own but still moves where the rep last was.
  *
  * Leg km. The user's `work_activity` fixes inside the leg's time range (plus the two anchor points)
  * are summed with sumTrailKm — the very guards the expense mileage suggestion uses (mock/suspect
@@ -31,8 +33,9 @@
  *
  * Halts (EFocus wave 2). The same pings also yield the places the person STOPPED (haltDetection.ts):
  * the usable (non-mock, non-suspect) fixes inside the shift plus the attendance check-in / check-out
- * points, minus halts that are really a customer visit. Halts are reported separately from the legs and
- * never change `total_km`. The ordered ping sequence they were found in is also returned
+ * points, minus halts that are really a customer visit. Each halt is also a WAYPOINT, so the travel to
+ * and from it is counted in the legs and in `total_km` (a day of stops with no form visit still shows
+ * how far the rep moved). The ordered ping sequence they were found in is also returned
  * (computeDayTravel's `path`) so the daily report can draw the route from the SAME data.
  */
 import { istDateOf } from './attendanceRules.service';
@@ -68,8 +71,8 @@ export interface TravelLeg {
   index: number;
   km: number;
   method: LegMethod;
-  from: TravelAnchorOut<'checkin' | 'form_checkout'>;
-  to: TravelAnchorOut<'form_checkin' | 'checkout' | 'now'>;
+  from: TravelAnchorOut<'checkin' | 'form_checkout' | 'halt_out'>;
+  to: TravelAnchorOut<'form_checkin' | 'checkout' | 'now' | 'halt_in'>;
 }
 
 export interface TravelStop {
@@ -96,7 +99,8 @@ export interface DayTravel {
   method: TravelMethod;
   legs: TravelLeg[];
   stops: TravelStop[];
-  /** Places the person stopped (see haltDetection.ts); not part of the legs or of total_km. */
+  /** Places the person stopped (see haltDetection.ts). Each halt also anchors travel legs to and from
+   *  it, so the distance travelled between stops is counted in the legs and total_km. */
   halts: Halt[];
   points_used: number;
   points_excluded: number;
@@ -258,9 +262,21 @@ export function normalizeVisit(raw: RawVisitRow): Visit | null {
 // ── the computation ───────────────────────────────────────────────────────
 
 interface Anchor {
-  kind: 'checkin' | 'form_checkout' | 'form_checkin' | 'checkout' | 'now';
+  kind: 'checkin' | 'form_checkout' | 'form_checkin' | 'checkout' | 'now' | 'halt_in' | 'halt_out';
   at: number;
   pt: LatLng | null;
+  label: string;
+}
+
+/** A place the rep was while NOT travelling — a customer visit or a detected halt. Travel between
+ *  consecutive waypoints (and check-in → first, last → check-out/now) is what the legs measure. */
+interface Waypoint {
+  inMs: number;
+  outMs: number;
+  inPt: LatLng | null;
+  outPt: LatLng | null;
+  arriveKind: 'form_checkin' | 'halt_in';
+  departKind: 'form_checkout' | 'halt_out';
   label: string;
 }
 
@@ -346,6 +362,31 @@ export function computeDayTravel(input: BuildDayTravelInput): DayTravelComputati
     minutes: Math.round((v.outMs - v.inMs) / 60_000), lat: v.inPt.lat, lng: v.inPt.lng,
   }));
 
+  // The path the day is measured on: attendance check-in point, the usable (non-spoof) fixes, and the
+  // attendance check-out point. (Punches are normally also stored as CHECK_IN / CHECK_OUT fixes at the
+  // same instant — not added twice.) Halts are detected on this path up front, BEFORE the legs, so each
+  // stop can anchor the travel to and from it.
+  const usable = trail.filter((f) => !f.is_mock && !f.is_suspect);
+  const path: PathPing[] = usable.map((f) => ({ ms: f.ms, lat: f.lat, lng: f.lng, activity_type: f.activity_type }));
+  const inPt = toLatLng(att.checkin_lat, att.checkin_lng);
+  if (inPt && path[0]?.ms !== win.startMs) path.unshift({ ms: win.startMs, lat: inPt.lat, lng: inPt.lng, activity_type: 'CHECK_IN' });
+  const outPt = !win.open ? toLatLng(att.checkout_lat, att.checkout_lng) : null;
+  if (outPt && path[path.length - 1]?.ms !== win.endMs) path.push({ ms: win.endMs, lat: outPt.lat, lng: outPt.lng, activity_type: 'CHECK_OUT' });
+  base.halts = detectHalts(path, visits, { minMinutes: input.minHaltMinutes });
+
+  // Waypoints = customer visits AND detected halts, in time order. Travel between consecutive waypoints
+  // (and check-in → first, last → check-out/now) becomes a leg with its own distance, so a day of stops
+  // with no form visit still shows how far the rep moved. A halt arrives and departs at its centroid.
+  const waypoints: Waypoint[] = [
+    ...visits.map((v): Waypoint => ({ inMs: v.inMs, outMs: v.outMs, inPt: v.inPt, outPt: v.outPt, arriveKind: 'form_checkin', departKind: 'form_checkout', label: v.label })),
+    ...base.halts.map((h): Waypoint => {
+      const pt: LatLng = { lat: h.lat, lng: h.lng };
+      return { inMs: Date.parse(h.start_at), outMs: Date.parse(h.end_at), inPt: pt, outPt: pt, arriveKind: 'halt_in', departKind: 'halt_out', label: 'Stop' };
+    }),
+  ]
+    .filter((w) => Number.isFinite(w.inMs) && Number.isFinite(w.outMs))
+    .sort((a, b) => a.inMs - b.inMs || a.outMs - b.outMs);
+
   let used = 0;
   let excluded = 0;
 
@@ -378,21 +419,21 @@ export function computeDayTravel(input: BuildDayTravelInput): DayTravelComputati
     const r = legBetween(from, to);
     base.legs.push({
       index: base.legs.length, km: r.km, method: r.method,
-      from: anchorOut<'checkin' | 'form_checkout'>(from, from.pt),
-      to: anchorOut<'form_checkin' | 'checkout' | 'now'>(to, r.toPt),
+      from: anchorOut<'checkin' | 'form_checkout' | 'halt_out'>(from, from.pt),
+      to: anchorOut<'form_checkin' | 'checkout' | 'now' | 'halt_in'>(to, r.toPt),
     });
   };
 
   let cursor: Anchor = { kind: 'checkin', at: win.startMs, pt: toLatLng(att.checkin_lat, att.checkin_lng), label: 'Check-in' };
-  for (const v of visits) {
-    if (v.inMs >= cursor.at) {
-      pushLeg(cursor, { kind: 'form_checkin', at: v.inMs, pt: v.inPt, label: v.label });
-      cursor = { kind: 'form_checkout', at: v.outMs, pt: v.outPt, label: v.label };
-    } else if (v.outMs > cursor.at) {
-      // Overlaps the previous visit: no leg into it, but it moves where the rep last was.
-      cursor = { kind: 'form_checkout', at: v.outMs, pt: v.outPt, label: v.label };
+  for (const w of waypoints) {
+    if (w.inMs >= cursor.at) {
+      pushLeg(cursor, { kind: w.arriveKind, at: w.inMs, pt: w.inPt, label: w.label });
+      cursor = { kind: w.departKind, at: w.outMs, pt: w.outPt, label: w.label };
+    } else if (w.outMs > cursor.at) {
+      // Overlaps where the rep already is: no leg into it, but it moves where the rep last was.
+      cursor = { kind: w.departKind, at: w.outMs, pt: w.outPt, label: w.label };
     }
-    // else: wholly inside the previous visit — nothing to do.
+    // else: wholly inside the previous stop — nothing to do.
   }
 
   if (!win.open) {
@@ -411,16 +452,6 @@ export function computeDayTravel(input: BuildDayTravelInput): DayTravelComputati
   base.points_used = used;
   base.points_excluded = excluded;
 
-  // The path: attendance check-in point, the usable fixes, attendance check-out point. The punches are
-  // normally also stored as CHECK_IN / CHECK_OUT fixes at the very same instant — not added twice.
-  const usable = trail.filter((f) => !f.is_mock && !f.is_suspect);
-  const path: PathPing[] = usable.map((f) => ({ ms: f.ms, lat: f.lat, lng: f.lng, activity_type: f.activity_type }));
-  const inPt = toLatLng(att.checkin_lat, att.checkin_lng);
-  if (inPt && path[0]?.ms !== win.startMs) path.unshift({ ms: win.startMs, lat: inPt.lat, lng: inPt.lng, activity_type: 'CHECK_IN' });
-  const outPt = !win.open ? toLatLng(att.checkout_lat, att.checkout_lng) : null;
-  if (outPt && path[path.length - 1]?.ms !== win.endMs) path.push({ ms: win.endMs, lat: outPt.lat, lng: outPt.lng, activity_type: 'CHECK_OUT' });
-
-  base.halts = detectHalts(path, visits, { minMinutes: input.minHaltMinutes });
   return { travel: base, path };
 }
 
