@@ -53,8 +53,8 @@ const idParam = (req: Request) => {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new AppError(400, 'Invalid id', 'VALIDATION');
   return id;
 };
-const paged = (res: Response, r: { rows: unknown[]; total: number; page: number; limit: number }) =>
-  res.json({ success: true, data: r.rows, pagination: { total: r.total, page: r.page, limit: r.limit } });
+const paged = (res: Response, r: { rows: unknown[]; total: number; page: number; limit: number; totals?: Record<string, number> }) =>
+  res.json({ success: true, data: r.rows, pagination: { total: r.total, page: r.page, limit: r.limit }, ...(r.totals ? { totals: r.totals } : {}) });
 
 // ── schemas ─────────────────────────────────────────────────────────────────
 const blank = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? null : v);
