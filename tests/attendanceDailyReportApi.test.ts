@@ -133,8 +133,8 @@ describe('GET /attendance/daily-report', () => {
     expect(d.user).toEqual({ id: REP, name: 'Asha', employee_id: 'EF-001', role: 'field_executive' });
     expect(d.shift).toEqual({ attendance_id: 'att-1', checkin_at: ist('09:30'), checkout_at: ist('18:00'), total_hours: 8.5, in_progress: false });
     expect(d.transport).toEqual({ mode: 'public_transport', label: 'Public transport' });
-    expect(d.travel.method).toBe('mixed');           // the legs with 2+ fixes ride the trail; the one with a single fix falls back to the straight line
-    expect(d.travel.legs).toHaveLength(2);
+    expect(d.travel.method).toBe('straight_line');   // the halt and the visit split the day into 3 legs, each with a single mid fix → straight line
+    expect(d.travel.legs).toHaveLength(3);            // check-in → halt, halt → visit, visit → check-out
     expect(d.travel.total_km).toBeGreaterThan(0);
     expect(d.visits).toEqual([{ submission_id: 'sub-1', label: 'Customer Visit', customer_name: 'Acme Depot', arrival_at: ist('11:00'), departure_at: ist('11:20'), minutes: 20, lat: P(4)[0], lng: P(4)[1] }]);
     expect(d.halts).toHaveLength(1);

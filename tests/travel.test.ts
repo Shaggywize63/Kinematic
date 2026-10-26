@@ -432,18 +432,41 @@ describe('halts in the day travel (EFocus wave 2)', () => {
     fix('10:40', P(3)), fix('10:50', P(4)),
   ];
 
-  it('reports the stop with start, end, minutes and centroid, and does not touch the legs or total_km', () => {
+  it('reports the stop AND anchors travel legs to and from it (the centroid is a waypoint)', () => {
     const withHalts = run({ attendance: att(closing), trail: ride });
     expect(withHalts.halts).toHaveLength(1);
     expect(withHalts.halts[0]).toMatchObject({
       index: 0, start_at: t('09:50'), end_at: t('10:30'), minutes: 40, lat: P(2)[0], lng: P(2)[1], points: 5,
     });
-    // Same legs / km as a day where the very same pings are not considered for halts at all (min 120 min = none found).
+    // The halt is a waypoint now: a leg runs check-in -> the stop and another the stop -> check-out,
+    // and the pings DURING the halt are not counted as travel.
+    expect(withHalts.legs).toHaveLength(2);
+    expect(withHalts.legs[0].to).toMatchObject({ kind: 'halt_in', lat: P(2)[0], lng: P(2)[1] });
+    expect(withHalts.legs[1].from).toMatchObject({ kind: 'halt_out', lat: P(2)[0], lng: P(2)[1] });
+    expect(withHalts.total_km).toBeGreaterThan(0);
+    // The stop sits on the straight path here, so the SAME total distance is simply split across the two
+    // legs. A day where the pings are never read as a halt (min 120 min) is one leg, same total.
     const noHalts = run({ attendance: att(closing), trail: ride, minHaltMinutes: 120 });
     expect(noHalts.halts).toEqual([]);
-    expect(withHalts.legs).toEqual(noHalts.legs);
-    expect(withHalts.total_km).toBe(noHalts.total_km);
-    expect(withHalts.method).toBe(noHalts.method);
+    expect(noHalts.legs).toHaveLength(1);
+    expect(withHalts.total_km).toBeCloseTo(noHalts.total_km, 1);
+  });
+
+  it('a day of stops with no form visit still shows the distance across the stops (the Live Trailing bug)', () => {
+    // Stand at P(2) 10:00-10:30, ride to P(5) and stand 11:30-12:00, then home to P(6). There are no pings
+    // while moving, so the 60-min gap between stops would make the OLD single leg's trail drop to ~0 km.
+    const r = run({
+      attendance: att({ checkout_at: t('13:00'), checkout_lat: P(6)[0], checkout_lng: P(6)[1] }),
+      trail: [
+        fix('10:00', P(2)), fix('10:10', P(2)), fix('10:20', P(2)), fix('10:30', P(2)),
+        fix('11:30', P(5)), fix('11:40', P(5)), fix('11:50', P(5)), fix('12:00', P(5)),
+      ],
+    });
+    expect(r.halts).toHaveLength(2);
+    // Three legs — check-in → stop 1, stop 1 → stop 2, stop 2 → check-out — each with a real distance.
+    expect(r.legs).toHaveLength(3);
+    expect(r.legs.every((l) => l.km > 0 && l.method === 'straight_line')).toBe(true);
+    expect(r.total_km).toBeCloseTo(kmBetween(P(0), P(2)) + kmBetween(P(2), P(5)) + kmBetween(P(5), P(6)), 1);
   });
 
   it('uses the attendance check-in and check-out points as pings (a stop right at the start of the shift counts)', () => {
