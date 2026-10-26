@@ -130,18 +130,41 @@ export async function getPayment(s: FinanceScope, id: string) {
   return data;
 }
 
-export async function listPayments(s: FinanceScope, query: Record<string, unknown>) {
-  const { page, limit, from, to } = pageParams(query);
-  let q = scoped(db().from('finance_payments').select('*, customer:finance_customers(id,display_name)', { count: 'exact' }), s).is('deleted_at', null);
+/** Apply the shared list filters (customer / mode / date range / search) so the page query and the
+ *  totals query always match exactly the same payments — otherwise the footer total would drift from the list. */
+function filteredPayments(s: FinanceScope, query: Record<string, unknown>, select: string, opts?: { count: 'exact' }) {
+  let q = scoped(db().from('finance_payments').select(select, opts), s).is('deleted_at', null);
   if (query.customer_id) q = q.eq('customer_id', String(query.customer_id));
   if (query.mode) q = q.eq('mode', String(query.mode));
   if (query.from) q = q.gte('payment_date', String(query.from));
   if (query.to) q = q.lte('payment_date', String(query.to));
   const term = safeSearch(query.q);
   if (term) q = q.or(`payment_number.ilike.%${term}%,reference.ilike.%${term}%`);
-  const { data, error, count } = await q.order('payment_date', { ascending: false }).order('created_at', { ascending: false }).range(from, to);
+  return q;
+}
+
+/** Sum of amount / unused across EVERY payment matching the list filters (all pages, not just the one on screen). */
+async function sumPayments(s: FinanceScope, query: Record<string, unknown>) {
+  let amount = 0, unused = 0, count = 0;
+  for (let start = 0; ; start += 1000) {
+    const { data, error } = await filteredPayments(s, query, 'amount,unused_amount').order('id', { ascending: true }).range(start, start + 999);
+    if (error) throw fail(error);
+    const batch = (data ?? []) as unknown as Array<{ amount: number | string; unused_amount: number | string }>;
+    for (const r of batch) { amount += Number(r.amount); unused += Number(r.unused_amount); }
+    count += batch.length;
+    if (batch.length < 1000) break;
+    if (count >= 100_000) break; // safety valve
+  }
+  return { amount: round2(amount), unused: round2(unused), count };
+}
+
+export async function listPayments(s: FinanceScope, query: Record<string, unknown>) {
+  const { page, limit, from, to } = pageParams(query);
+  const { data, error, count } = await filteredPayments(s, query, '*, customer:finance_customers(id,display_name)', { count: 'exact' })
+    .order('payment_date', { ascending: false }).order('created_at', { ascending: false }).range(from, to);
   if (error) throw fail(error);
-  return { rows: data ?? [], total: count ?? 0, page, limit };
+  const totals = await sumPayments(s, query);
+  return { rows: data ?? [], total: count ?? 0, page, limit, totals };
 }
 
 export async function updatePayment(s: FinanceScope, id: string, patch: { payment_date?: string; mode?: PaymentInput['mode']; reference?: string | null; notes?: string | null }) {
