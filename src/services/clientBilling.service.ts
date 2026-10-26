@@ -54,6 +54,47 @@ export async function countActiveUsers(admin: SupabaseClient, orgId: string): Pr
   return (data || []).filter((u) => !STAFF_DOMAINS.has(domainOf((u as { email?: string }).email))).length;
 }
 
+/** Active, non-staff user counts for many orgs at once (one query). Keyed by org_id; absent = 0. */
+export async function countActiveUsersByOrg(admin: SupabaseClient, orgIds: string[]): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  if (!orgIds.length) return out;
+  const { data } = await admin.from('users').select('org_id, email').in('org_id', orgIds).eq('is_active', true);
+  for (const u of (data || []) as Array<{ org_id?: string; email?: string }>) {
+    if (!u.org_id || STAFF_DOMAINS.has(domainOf(u.email))) continue;
+    out[u.org_id] = (out[u.org_id] ?? 0) + 1;
+  }
+  return out;
+}
+
+/** The next unpaid invoice for many linked finance customers at once (one query per finance org).
+ *  Keyed by customer_id → the soonest-due open invoice; absent = nothing outstanding. */
+export async function nextUnpaidInvoicesByCustomer(financeOrgId: string, customerIds: string[]): Promise<Record<string, NextPayment>> {
+  const out: Record<string, NextPayment> = {};
+  if (!financeOrgId || !customerIds.length) return out;
+  const { data, error } = await supabaseAdmin
+    .from('finance_documents')
+    .select('id, number, due_date, total, balance, status, share_token, customer_id')
+    .eq('org_id', financeOrgId)
+    .eq('doc_type', 'invoice')
+    .in('customer_id', customerIds)
+    .is('deleted_at', null)
+    .in('status', ['sent', 'partially_paid'])
+    .gt('balance', 0)
+    .order('due_date', { ascending: true, nullsFirst: false })
+    .order('created_at', { ascending: true });
+  if (error || !data) return out;
+  for (const d of data as Array<{
+    id: string; number: string; due_date: string | null; total: number | string; balance: number | string; status: string; share_token: string | null; customer_id: string;
+  }>) {
+    if (out[d.customer_id]) continue; // ordered soonest-due first, so the first per customer wins
+    out[d.customer_id] = {
+      invoice_id: d.id, number: d.number, due_date: d.due_date ?? null,
+      total: Number(d.total), balance: Number(d.balance), status: d.status, share_token: d.share_token ?? null,
+    };
+  }
+  return out;
+}
+
 /**
  * The client's next unpaid invoice (soonest due first) for a linked finance
  * customer, looked up in the finance org that raised it (the managing org).

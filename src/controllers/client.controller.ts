@@ -12,7 +12,7 @@ import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
 import { readOrgSettings, writeOrgSettings } from '../services/notificationPolicy';
 import { cleanAppUiForStore } from '../lib/appItems';
-import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice } from '../services/clientBilling.service';
+import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, countActiveUsersByOrg, nextUnpaidInvoicesByCustomer, type NextPayment } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
@@ -141,6 +141,46 @@ async function readUserCaps(clients: Array<{ id: string; org_id?: string; data_p
   return out;
 }
 
+/** Active, non-staff user counts per client (batched for same-project, per-link for cross-project). */
+async function readActiveCounts(clients: Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  const isCross = (c: { data_project_key?: string; data_client_id?: string }) =>
+    !!(orgPerClient() && c.data_project_key && isKnownProject(c.data_project_key)
+      && c.data_project_key !== currentProjectKey() && c.data_client_id && isUUID(c.data_client_id));
+  const same = clients.filter((c) => !isCross(c));
+  const orgIds = Array.from(new Set(same.map((c) => c.org_id).filter(Boolean))) as string[];
+  if (orgIds.length) {
+    const byOrg = await countActiveUsersByOrg(supabaseAdmin, orgIds);
+    same.forEach((c) => { out[c.id] = (c.org_id && byOrg[c.org_id]) || 0; });
+  }
+  for (const c of clients.filter(isCross)) {
+    try { const { admin, orgId } = await resolveCapTarget(c); out[c.id] = orgId ? await countActiveUsers(admin, orgId) : 0; }
+    catch { out[c.id] = 0; }
+  }
+  return out;
+}
+
+/** The next unpaid invoice per client linked to a finance customer (batched by the managing org). */
+async function readNextPayments(clients: Array<Record<string, any>>, user: { org_id?: string }): Promise<Record<string, NextPayment | null>> {
+  const out: Record<string, NextPayment | null> = {};
+  const linked = clients
+    .map((c) => ({ c, cust: financeCustomerIdOf(c) }))
+    .filter((x): x is { c: Record<string, any>; cust: string } => !!x.cust);
+  if (!linked.length) return out;
+  const byOrg = new Map<string, Array<{ c: Record<string, any>; cust: string }>>();
+  for (const x of linked) {
+    const org = managingOrgId(x.c, user);
+    if (!org) continue;
+    const g = byOrg.get(org);
+    if (g) g.push(x); else byOrg.set(org, [x]);
+  }
+  for (const [org, group] of byOrg) {
+    const map = await nextUnpaidInvoicesByCustomer(org, Array.from(new Set(group.map((x) => x.cust))));
+    for (const x of group) out[x.c.id] = map[x.cust] ?? null;
+  }
+  return out;
+}
+
 /**
  * GET /api/v1/clients
  * Admin only: List all clients for the organization
@@ -187,11 +227,17 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
     .eq('enabled', true);
 
   const now = Date.now();
-  // Per-org active-user caps (from the org holding each client's users).
+  // Per-org active-user caps (from the org holding each client's users), the live active-user count,
+  // and the next unpaid invoice for clients linked to a finance customer — so the Client Management
+  // list can show seat usage and the next payment date per row without a round-trip per client.
   const caps = await readUserCaps(liveClients as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
+  const activeCounts = await readActiveCounts(liveClients as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
+  const nextPayments = await readNextPayments(liveClients as Array<Record<string, any>>, user);
   const results = liveClients.map(client => ({
     ...client,
     max_active_users: caps[client.id] ?? null,
+    active_users: activeCounts[client.id] ?? 0,
+    next_payment: nextPayments[client.id] ?? null,
     modules: (accessData || [])
       .filter(a => a.client_id === client.id
         && (!a.expires_at || new Date(a.expires_at).getTime() > now))
