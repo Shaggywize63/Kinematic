@@ -12,6 +12,8 @@ import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
 import { readOrgSettings, writeOrgSettings } from '../services/notificationPolicy';
 import { cleanAppUiForStore } from '../lib/appItems';
+import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice } from '../services/clientBilling.service';
+import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
 // its OWN org (a row-level tenant) for isolation, and the parent org that
@@ -243,7 +245,7 @@ async function syncClientUserModulePermissions(clientId: string, moduleIds: stri
  */
 export const createClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id, max_active_users, trial } = req.body;
+  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id, max_active_users, trial, finance_customer_id } = req.body;
 
   if (!name) {
     badRequest(res, 'Client name is required');
@@ -253,6 +255,15 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
   // Optional trial-period record set at creation time ({ start_date, days });
   // end_date is computed server-side. Stored under clients.settings.trial.
   const trialRec = computeTrial(trial);
+
+  // Optional billing link: the finance customer this client is invoiced as, so
+  // Client Management can surface the next unpaid invoice's due date/amount.
+  // Stored under clients.settings.billing.finance_customer_id.
+  const initialSettings: Record<string, unknown> = {};
+  if (trialRec) initialSettings.trial = trialRec;
+  if (typeof finance_customer_id === 'string' && isUUID(finance_customer_id)) {
+    initialSettings.billing = { finance_customer_id };
+  }
 
   // Parent-owns-sub-orgs (non-default projects): spin up a dedicated org for
   // this client so its data is isolated; the creating admin's org owns it.
@@ -282,8 +293,9 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
       ...(orgPerClient() && typeof data_client_id === 'string' && isUUID(data_client_id) ? { data_client_id } : {}),
       // Encrypted account password used by the "Login as client" button.
       ...(orgPerClient() && password ? { login_password_enc: encryptSecret(password) } : {}),
-      // Trial-period record (optional), stored on settings so no schema change.
-      ...(trialRec ? { settings: { trial: trialRec } } : {}),
+      // Trial-period record and/or billing link (optional), stored on settings
+      // so no schema change.
+      ...(Object.keys(initialSettings).length ? { settings: initialSettings } : {}),
       name,
       contact_person,
       email,
@@ -601,7 +613,7 @@ async function syncCeilingToLinkedProject(opts: {
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users, app_ui, trial } = req.body;
+  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users, app_ui, trial, finance_customer_id } = req.body;
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
   // 1. Update Core Client Details
@@ -740,6 +752,13 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     // Sent → set or clear (null when invalid/empty, which removes the record).
     trialOut = computeTrial(trial);
     settingsExtras.trial = trialOut;
+  }
+  // Billing link (finance customer this client is invoiced as). Sent → set a
+  // valid UUID or clear it (null). Merged into any existing billing sub-object.
+  if (finance_customer_id !== undefined) {
+    const curBilling = (((client as { settings?: { billing?: Record<string, unknown> } }).settings || {}).billing) || {};
+    const fid = (typeof finance_customer_id === 'string' && isUUID(finance_customer_id)) ? finance_customer_id : null;
+    settingsExtras.billing = { ...curBilling, finance_customer_id: fid };
   }
   if (Object.keys(settingsExtras).length > 0) {
     const curSettings = ((client as { settings?: any }).settings && typeof (client as any).settings === 'object' && !Array.isArray((client as any).settings))
@@ -959,4 +978,105 @@ export const setClientNotifications = asyncHandler(async (req: AuthRequest, res:
     return;
   }
   ok(res, await readOrgSettings(target.orgId, target.admin, target.project));
+});
+
+// ── Account & billing (Client Management → Account) ──────────────────────────
+// Seat usage (allocated vs active), plus the next payment date/amount pulled
+// from the client's next unpaid invoice via the linked finance customer, and
+// the two transactional emailers (welcome + payment reminder).
+
+/** Fetch a client the caller may manage (ownership-scoped unless a cross-org operator). */
+async function ownedClient(req: AuthRequest, res: Response): Promise<Record<string, any> | null> {
+  const user = req.user!;
+  const { id } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return null; }
+  let q = supabaseAdmin.from('clients').select('*').eq('id', id);
+  if (!seesAllClients(user)) q = q.eq(ownerColumn(), user.org_id);
+  const { data: client, error } = await q.maybeSingle();
+  if (error) { badRequest(res, error.message); return null; }
+  if (!client) { notFound(res, 'Client not found'); return null; }
+  return client as Record<string, any>;
+}
+
+/** The org that manages (and invoices) this client — where its finance data lives. */
+function managingOrgId(client: Record<string, any>, user: { org_id?: string }): string {
+  return String(client[ownerColumn()] || client.org_id || user.org_id || '');
+}
+
+/**
+ * GET /api/v1/clients/:id/account
+ * Seat allocation + live active count, the linked finance customer, and the
+ * client's next unpaid invoice (next payment date/amount), if any.
+ */
+export const getClientAccount = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const client = await ownedClient(req, res);
+  if (!client) return;
+
+  const { admin, orgId } = await resolveCapTarget(client as { org_id?: string; data_project_key?: string; data_client_id?: string });
+  const allocated = orgId ? await readSeatCap(admin, orgId) : null;
+  const active = orgId ? await countActiveUsers(admin, orgId) : 0;
+
+  const financeCustomerId = financeCustomerIdOf(client);
+  const nextPayment = financeCustomerId
+    ? await nextUnpaidInvoice(managingOrgId(client, user), financeCustomerId)
+    : null;
+
+  ok(res, {
+    name: client.name,
+    contact_person: client.contact_person ?? null,
+    contact_email: client.email ?? null,
+    allocated,
+    active,
+    finance_customer_id: financeCustomerId,
+    next_payment: nextPayment,
+  });
+});
+
+/** POST /api/v1/clients/:id/send-welcome — email the client's contact a welcome message. */
+export const sendClientWelcomeEmail = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const client = await ownedClient(req, res);
+  if (!client) return;
+
+  const to = String(client.email || '').trim();
+  if (!to) { badRequest(res, 'This client has no contact email. Add one before sending a welcome email.'); return; }
+
+  try {
+    const r = await sendClientWelcome({
+      orgId: managingOrgId(client, user), userId: user.id, to,
+      data: { clientName: client.name, contactName: client.contact_person },
+    });
+    const status = (r as { status?: string }).status;
+    ok(res, { sent: status !== 'failed', ...r });
+  } catch (e: any) {
+    badRequest(res, e?.message || 'Could not send the welcome email');
+  }
+});
+
+/** POST /api/v1/clients/:id/send-payment-reminder — remind the client about their next unpaid invoice. */
+export const sendClientPaymentReminderEmail = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const client = await ownedClient(req, res);
+  if (!client) return;
+
+  const to = String(client.email || '').trim();
+  if (!to) { badRequest(res, 'This client has no contact email. Add one before sending a payment reminder.'); return; }
+
+  const financeCustomerId = financeCustomerIdOf(client);
+  if (!financeCustomerId) { badRequest(res, 'Link this client to a finance customer first, so the reminder can reference an invoice.'); return; }
+
+  const invoice = await nextUnpaidInvoice(managingOrgId(client, user), financeCustomerId);
+  if (!invoice) { badRequest(res, 'No unpaid invoice found for this client — there is nothing to remind about.'); return; }
+
+  try {
+    const r = await sendClientPaymentReminder({
+      orgId: managingOrgId(client, user), userId: user.id, to,
+      data: { clientName: client.name, contactName: client.contact_person, invoice },
+    });
+    const status = (r as { status?: string }).status;
+    ok(res, { sent: status !== 'failed', invoice, ...r });
+  } catch (e: any) {
+    badRequest(res, e?.message || 'Could not send the payment reminder');
+  }
 });

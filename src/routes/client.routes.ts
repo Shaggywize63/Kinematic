@@ -22,5 +22,9 @@ router.post('/:id/packages',    requireAuth, requireRole('admin', 'super_admin')
 // Which notifications from the catalogue this client receives (none by default).
 router.get('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientNotifications);
 router.put('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.setClientNotifications);
+// Account & billing: seat usage, next unpaid invoice, and the two transactional emailers.
+router.get('/:id/account', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientAccount);
+router.post('/:id/send-welcome', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.sendClientWelcomeEmail);
+router.post('/:id/send-payment-reminder', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.sendClientPaymentReminderEmail);
 
 export default router;
