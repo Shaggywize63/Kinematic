@@ -275,12 +275,10 @@ export async function getDocument(s: FinanceScope, id: string, docType?: DocType
 
 const SORTS = new Set(['issue_date', 'number', 'total', 'balance', 'due_date', 'created_at']);
 
-export async function listDocuments(s: FinanceScope, docType: DocType, query: Record<string, unknown>) {
-  const { page, limit, from, to } = pageParams(query);
-  let q = scoped(db().from('finance_documents').select(
-    'id,number,reference_number,doc_type,status,customer_id,customer_snapshot,issue_date,due_date,expiry_date,total,amount_paid,balance,sent_at,created_at',
-    { count: 'exact' }), s).eq('doc_type', docType).is('deleted_at', null);
-
+/** Apply the shared list filters (status tab / customer / issue-date range / search) so the page query
+ *  and the totals query always match exactly the same documents — otherwise the footer total would drift. */
+function filteredDocuments(s: FinanceScope, docType: DocType, query: Record<string, unknown>, select: string, opts?: { count: 'exact' }) {
+  let q = scoped(db().from('finance_documents').select(select, opts), s).eq('doc_type', docType).is('deleted_at', null);
   const status = String(query.status ?? '');
   if (status === 'overdue') {
     q = q.in('status', ['sent', 'partially_paid']).lt('due_date', today()).gt('balance', 0);
@@ -296,14 +294,39 @@ export async function listDocuments(s: FinanceScope, docType: DocType, query: Re
   if (query.to) q = q.lte('issue_date', String(query.to));
   const term = safeSearch(query.q);
   if (term) q = q.or(`number.ilike.%${term}%,reference_number.ilike.%${term}%,customer_snapshot->>name.ilike.%${term}%`);
+  return q;
+}
 
+/** Sum of amount / outstanding across EVERY document matching the list filters (all pages). `amount`
+ *  mirrors the Amount column (every row's total); `balance` mirrors the Balance-due column, where a
+ *  void invoice shows "—" and so contributes nothing. */
+async function sumDocuments(s: FinanceScope, docType: DocType, query: Record<string, unknown>) {
+  let amount = 0, balance = 0, count = 0;
+  for (let start = 0; ; start += 1000) {
+    const { data, error } = await filteredDocuments(s, docType, query, 'total,balance,status').order('id', { ascending: true }).range(start, start + 999);
+    if (error) throw fail(error);
+    const batch = (data ?? []) as unknown as Array<{ total: number | string; balance: number | string; status: string }>;
+    for (const r of batch) { amount += Number(r.total); if (r.status !== 'void') balance += Number(r.balance); }
+    count += batch.length;
+    if (batch.length < 1000) break;
+    if (count >= 100_000) break; // safety valve
+  }
+  return { amount: round2(amount), balance: round2(balance), count };
+}
+
+export async function listDocuments(s: FinanceScope, docType: DocType, query: Record<string, unknown>) {
+  const { page, limit, from, to } = pageParams(query);
   const sort = SORTS.has(String(query.sort)) ? String(query.sort) : 'issue_date';
   const asc = String(query.order).toLowerCase() === 'asc';
-  const { data, error, count } = await q.order(sort, { ascending: asc }).order('created_at', { ascending: false }).range(from, to);
+  const { data, error, count } = await filteredDocuments(s, docType, query,
+    'id,number,reference_number,doc_type,status,customer_id,customer_snapshot,issue_date,due_date,expiry_date,total,amount_paid,balance,sent_at,created_at',
+    { count: 'exact' }).order(sort, { ascending: asc }).order('created_at', { ascending: false }).range(from, to);
   if (error) throw fail(error);
+  const totals = await sumDocuments(s, docType, query);
+  const rows = (data ?? []) as unknown as Array<Parameters<typeof displayStatus>[0] & Record<string, unknown>>;
   return {
-    rows: (data ?? []).map((d) => ({ ...d, display_status: displayStatus(d) })),
-    total: count ?? 0, page, limit,
+    rows: rows.map((d) => ({ ...d, display_status: displayStatus(d) })),
+    total: count ?? 0, page, limit, totals,
   };
 }
 
