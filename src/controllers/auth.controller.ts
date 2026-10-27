@@ -11,6 +11,7 @@ import { resolveEntitlements } from '../lib/entitlements';
 import { deriveAppUi } from '../lib/appItems';
 import { invalidateAuthCache } from '../middleware/auth';
 import { resolveProjectForEmailAsync } from '../lib/projects';
+import { checkClientAccess } from '../lib/clientAccess';
 import * as passwordReset from '../services/auth/passwordReset.service';
 
 // GET /api/v1/auth/project-for-email?email=...
@@ -279,6 +280,21 @@ export const login = asyncHandler<Request>(async (req, res) => {
   if (!userProfile.is_active) {
     console.warn(`[DEBUG] Account deactivated for ${email}`);
     return unauthorized(res, 'Account is deactivated. Contact your admin.');
+  }
+
+  // Client-level gate: a client whose trial has ended, or that was manually
+  // deactivated, blocks ALL of its users from signing in. Platform operators
+  // (super_admin, and users with no client_id) are never client-gated.
+  if (userProfile.role !== 'super_admin') {
+    const clientAccess = await checkClientAccess(userProfile.client_id);
+    if (clientAccess.blocked) {
+      logger.warn(`[Auth] Login blocked for ${email}: client ${userProfile.client_id} ${clientAccess.reason}`);
+      return res.status(403).json({
+        success: false,
+        error: clientAccess.message,
+        code: clientAccess.reason === 'trial_ended' ? 'TRIAL_ENDED' : 'CLIENT_INACTIVE',
+      });
+    }
   }
 
   // Fetch permissions separately (Bypass join relationship requirements)

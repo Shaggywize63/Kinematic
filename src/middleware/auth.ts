@@ -7,6 +7,7 @@ import { unauthorized, forbidden } from '../utils/response';
 import { logger } from '../lib/logger';
 import { resolveEntitlements } from '../lib/entitlements';
 import { isPlatformOperator, enforcedUnlessOff } from '../lib/tenantScope';
+import { checkClientAccess } from '../lib/clientAccess';
 
 // In-memory profile cache. Keyed by token (so a refreshed token re-validates).
 // TTL is min(5 min, JWT exp). Eliminates 3 sequential round-trips per request:
@@ -497,6 +498,18 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (verified.act_org_id && profile.role === 'super_admin') {
     logger.info(`[Auth] super_admin ${profile.id} impersonating org ${verified.act_org_id}`);
     profile.org_id = verified.act_org_id;
+  }
+
+  // Client-level gate (mirrors the /auth/login check): block a user whose
+  // client has been deactivated or whose trial has ended — so an
+  // already-issued session is cut on its next request, not just new logins.
+  // Exempt super_admins and users with no client_id (platform/org operators).
+  if (profile.role !== 'super_admin') {
+    const clientAccess = await checkClientAccess(profile.client_id);
+    if (clientAccess.blocked) {
+      logger.warn(`[Auth] Access blocked for user ${profile.id}: client ${profile.client_id} ${clientAccess.reason}`);
+      return forbidden(res, clientAccess.message);
+    }
   }
 
   const entitlements = await resolveEntitlements({

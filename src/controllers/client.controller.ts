@@ -14,6 +14,7 @@ import { readOrgSettings, writeOrgSettings } from '../services/notificationPolic
 import { cleanAppUiForStore } from '../lib/appItems';
 import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, countActiveUsersByOrg, nextUnpaidInvoicesByCustomer, type NextPayment } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
+import { invalidateAuthCache } from '../middleware/auth';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
 // its OWN org (a row-level tenant) for isolation, and the parent org that
@@ -705,6 +706,14 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
   if (!client) {
     notFound(res, 'Client not found or insufficient permissions');
     return;
+  }
+
+  // Deactivating a client cuts its users' live sessions at once (not just new
+  // logins): drop their cached auth so the next request re-runs the cold path,
+  // which the client-access gate (middleware/auth) now rejects. Trial-expiry is
+  // time-based and picked up by that same gate on the next cold path.
+  if (is_active === false) {
+    invalidateAuthCache((u) => (u as { client_id?: string } | undefined)?.client_id === id);
   }
 
   // 2. Handle Password Update (if provided)
