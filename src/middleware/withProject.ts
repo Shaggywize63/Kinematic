@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../types';
-import { runWithProject, isKnownProject, fallbackProjectKey, resolveProjectForIntegrationAsync, resolveProjectForTokenAsync, resolveProjectForCaptureTokenAsync, resolveProjectForEmailTrackingTokenAsync, resolveProjectForTallyIntegrationAsync, resolveProjectForTallyPairingAsync } from '../lib/projects';
+import { runWithProject, isKnownProject, fallbackProjectKey, resolveProjectForIntegrationAsync, resolveProjectForTokenAsync, resolveProjectForCaptureTokenAsync, resolveProjectForEmailTrackingTokenAsync, resolveProjectForTallyIntegrationAsync, resolveProjectForTallyPairingAsync, verifyProjectToken } from '../lib/projects';
 import { hashPairingCode, normalisePairingCode } from '../services/distribution/integrations/tally.onboarding';
 
 // Reads the X-Kinematic-Project header and runs the remainder of the request
@@ -28,17 +28,32 @@ export async function withProject(req: AuthRequest, _res: Response, next: NextFu
   const header = String(req.headers['x-kinematic-project'] || '').trim().toLowerCase();
   let project = isKnownProject(header) ? header : '';
 
-  if (!project) {
-    const auth = req.headers.authorization;
-    if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
-      const token = auth.slice('Bearer '.length).replace(/['"]+/g, '').trim();
-      // The demo placeholder isn't a real JWT — skip it and let it fall back.
-      if (token && token !== 'demo-token-jwt-placeholder') {
-        try {
-          const fromToken = await resolveProjectForTokenAsync(token);
-          if (fromToken) project = fromToken;
-        } catch { /* unresolved — fall through to the default below */ }
-      }
+  // Recover the project from the bearer token when the header is missing/unknown,
+  // OR when a KNOWN header was sent but the token does not verify against it. The
+  // latter rescues a stale/wrong header — e.g. an older mobile session pinned to
+  // 'default' — which would otherwise route a valid non-default (Kinematic) token
+  // to the wrong project and 401 EVERY request (observed: tenant users stuck on
+  // "Couldn't load your forms" while a freshly-logged-in admin, sending the right
+  // header, worked). The token is authoritative: it verifies against exactly one
+  // project's signing keys. Impersonation / login-as tokens verify against the
+  // header the client sends (minted with that project's secret), so a matching
+  // header passes the check below and is never second-guessed.
+  const auth = req.headers.authorization;
+  const token = (typeof auth === 'string' && auth.startsWith('Bearer '))
+    ? auth.slice('Bearer '.length).replace(/['"]+/g, '').trim()
+    : '';
+  // The demo placeholder isn't a real JWT — skip it and let it fall back.
+  if (token && token !== 'demo-token-jwt-placeholder') {
+    let headerTokenOk = false;
+    if (project) {
+      try { headerTokenOk = !!(await verifyProjectToken(project, token))?.payload?.sub; }
+      catch { /* header's project can't verify this token — recover below */ }
+    }
+    if (!headerTokenOk) {
+      try {
+        const fromToken = await resolveProjectForTokenAsync(token);
+        if (fromToken) project = fromToken;
+      } catch { /* unresolved — fall through to the default below */ }
     }
   }
 
