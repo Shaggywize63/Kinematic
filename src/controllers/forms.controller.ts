@@ -23,6 +23,38 @@ function parseGps(s: unknown): { lat: number; lng: number } | null {
   return Number.isFinite(a) && Number.isFinite(b) ? { lat: a, lng: b } : null;
 }
 
+// Normalise a builder question's `options` to an array of {label, value} objects.
+//
+// `builder_questions.options` is jsonb and has been written in two shapes over
+// time: bare string arrays (e.g. ["Nitrile","Plastic","Other"]) and object
+// arrays ([{label,value}]). iOS and the web dashboard both tolerate the string
+// form, but the Android app decodes `options` as List<FormOption> (a
+// {label,value} object) with plain Gson and no custom adapter — a bare string
+// cannot map onto that object, so Gson throws and the ENTIRE /forms/templates
+// response fails to parse. The symptom is Android-only "Couldn't load your
+// forms" even though the HTTP response is 200, and it takes down every form in
+// the list, not just the one with string options. Normalising here fixes all
+// Android users for all forms with no app release and no data migration, and is
+// backward-compatible (iOS/web already handle objects).
+function normalizeOptions(raw: unknown): Array<{ label: string; value: string }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ label: string; value: string }> = [];
+  for (const o of raw) {
+    if (o == null) continue;
+    if (typeof o === 'string' || typeof o === 'number' || typeof o === 'boolean') {
+      const s = String(o);
+      out.push({ label: s, value: s });
+    } else if (typeof o === 'object') {
+      const rec = o as Record<string, unknown>;
+      const label = rec.label ?? rec.value ?? rec.text ?? rec.name;
+      const value = rec.value ?? rec.label ?? rec.text ?? rec.name;
+      if (label == null && value == null) continue;
+      out.push({ label: String(label ?? value), value: String(value ?? label) });
+    }
+  }
+  return out;
+}
+
 /** Rajkamal Jewellers client id — mirrors the apps/dashboard isRajkamal gate. */
 const RAJKAMAL_CLIENT_ID = '0490f34d-d9a3-4f39-99e2-8f3adba8c583';
 
@@ -105,7 +137,7 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
       is_consent: q.is_consent,
       depends_on_id: q.depends_on_id,
       depends_on_value: q.depends_on_value,
-      options: q.options || [],
+      options: normalizeOptions(q.options),
       // Builder validation rules (e.g. a rating's "Max Stars" = validation.max, min/max length).
       // Additive: older app builds ignore the unknown key.
       validation: q.validation || {}
@@ -150,7 +182,7 @@ export const getTemplate = asyncHandler<AuthRequest>(async (req, res) => {
       is_consent: q.is_consent,
       depends_on_id: q.depends_on_id,
       depends_on_value: q.depends_on_value,
-      options: q.options || []
+      options: normalizeOptions(q.options)
     })).sort((a: any, b: any) => a.sort_order - b.sort_order)
   };
 
