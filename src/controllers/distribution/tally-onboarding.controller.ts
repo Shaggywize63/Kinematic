@@ -29,7 +29,7 @@ const MAX_MASTERS_PER_POST = 500;
 const isUuid = (s: unknown): s is string =>
   typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 
-interface Command { id: string; type: 'pull_masters' | 'tally_xml'; label?: string; xml?: string }
+interface Command { id: string; type: 'pull_masters' | 'pull_vouchers' | 'tally_xml'; label?: string; xml?: string }
 
 async function loadTallyIntegration(org_id: string, id: string, user?: { client_id?: string | null; company_client_ids?: string[] }) {
   if (!isUuid(id)) return null;
@@ -110,6 +110,15 @@ export const requestMasterPull = asyncHandler<AuthRequest>(async (req, res) => {
   await queueCommand(integ.id, integ.pending_commands, cmd);
   await supabaseAdmin.from('distribution_integrations')
     .update({ master_sync_requested_at: new Date().toISOString() }).eq('id', integ.id);
+  return ok(res, { queued: true });
+});
+
+/** Queue a "pull voucher/order status from Tally" command (the fetch-back half of 2-way order sync). */
+export const requestVoucherPull = asyncHandler<AuthRequest>(async (req, res) => {
+  const integ = await loadTallyIntegration(req.user!.org_id, req.params.id, req.user);
+  if (!integ) return notFound(res, 'Tally integration not found');
+  const cmd: Command = { id: crypto.randomUUID(), type: 'pull_vouchers' };
+  await queueCommand(integ.id, integ.pending_commands, cmd);
   return ok(res, { queued: true });
 });
 
@@ -194,6 +203,9 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
         credit_limit: Number(d.credit_limit) > 0 ? Number(d.credit_limit) : 0,
         payment_terms_days: Number.isFinite(days) && days > 0 ? Math.floor(days) : 0,
         customer_class: 'distributor', is_active: true,
+        // This dealer came FROM Tally — mark it in-sync so the enqueue poller doesn't
+        // immediately push it back up as an "edit" (two-way loop guard).
+        tally_synced_at: now,
       }).select('id').single();
       refId = row?.id ?? null; errMsg = e?.message ?? null;
     } else {
@@ -345,6 +357,53 @@ export const agentMasters = asyncHandler<Request>(async (req, res) => {
       .update({ last_master_sync_at: now, master_sync_requested_at: null }).eq('id', integ.id);
   }
   res.status(200).json({ ok: true, received: items.length });
+});
+
+/**
+ * Agent reports vouchers exported from Tally — the fetch-back half of two-way order sync.
+ * Each voucher carries the REMOTEID we stamped on push (KIN-ORD-/KIN-INV-/KIN-RET-<uuid>);
+ * we match it back to our push event and record the Tally status (present | cancelled) plus
+ * the Tally voucher id/number. For orders the status is also surfaced on the order row so the
+ * dashboard/app can show "Synced to Tally / Cancelled in Tally". Never clobbers the event's
+ * own push lifecycle status.
+ */
+const REMOTE_PREFIX: Record<string, string> = { 'KIN-ORD-': 'orders', 'KIN-INV-': 'invoices', 'KIN-RET-': 'returns' };
+export const agentVouchers = asyncHandler<Request>(async (req, res) => {
+  const integ = await authAgent(req, res); if (!integ) return;
+  const rawItems: unknown[] = Array.isArray(req.body?.items) ? req.body.items.slice(0, MAX_MASTERS_PER_POST) : [];
+  const now = new Date().toISOString();
+  let matched = 0;
+
+  for (const raw of rawItems) {
+    const it = (raw ?? {}) as Record<string, unknown>;
+    const remoteId = String(it.remote_id ?? it.remoteid ?? '').trim();
+    if (!remoteId) continue;
+    let ref_table: string | null = null; let ref_id: string | null = null;
+    for (const [p, t] of Object.entries(REMOTE_PREFIX)) {
+      if (remoteId.toUpperCase().startsWith(p)) { ref_table = t; ref_id = remoteId.slice(p.length); break; }
+    }
+    if (!ref_table || !isUuid(ref_id)) continue;
+
+    const isCancelled = it.is_cancelled === true || String(it.is_cancelled ?? '').toLowerCase() === 'yes';
+    const tallyStatus = isCancelled ? 'cancelled' : 'present';
+    const voucherId = typeof it.master_id === 'string' ? it.master_id.slice(0, 100)
+      : (typeof it.voucher_id === 'string' ? it.voucher_id.slice(0, 100) : null);
+    const voucherNo = typeof it.voucher_no === 'string' ? it.voucher_no.slice(0, 100) : null;
+
+    const evUpdate: Record<string, unknown> = { tally_status: tallyStatus, tally_checked_at: now };
+    if (voucherId) evUpdate.tally_voucher_id = voucherId;
+    const { data: evs } = await supabaseAdmin.from('distribution_integration_events')
+      .update(evUpdate)
+      .eq('integration_id', integ.id).eq('ref_table', ref_table).eq('ref_id', ref_id).select('id');
+    if ((evs ?? []).length) matched++;
+
+    if (ref_table === 'orders') {
+      await supabaseAdmin.from('orders')
+        .update({ tally_status: tallyStatus, tally_voucher_no: voucherNo, tally_checked_at: now })
+        .eq('id', ref_id).eq('org_id', integ.org_id);
+    }
+  }
+  res.status(200).json({ ok: true, received: rawItems.length, matched });
 });
 
 export const agentCommandResult = asyncHandler<Request>(async (req, res) => {

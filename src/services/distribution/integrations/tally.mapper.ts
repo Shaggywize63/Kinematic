@@ -10,21 +10,23 @@
  * source rows at render time so any post-create amendments (e.g. status
  * change on a payment) are reflected.
  *
- * v1 scope:
- *   • Sales Voucher  (invoices)        — with GST splits as separate ledger entries
- *   • Receipt Voucher (payments)        — with bill allocations against the original invoice
- *   • Credit Note    (returns)         — sales-return debit + party credit
+ * Covered:
+ *   • Sales Voucher   (invoices)   — GST splits + optional inventory lines
+ *   • Receipt Voucher (payments)   — bill allocations against the original invoice
+ *   • Credit Note     (returns)    — sales-return debit + party credit
+ *   • Sales Order     (orders)     — inventory lines, order tracking
+ *   • Ledger master   (distributors as Sundry Debtors) — Create and Alter (edit sync)
+ *   • Stock item      (SKUs)
  *
- * Deferred to v2:
- *   • Inventory entries (STOCKITEMNAME / ACTUALQTY)
- *   • Master sync (distributors as ledger masters, SKUs as stock items)
- *   • Multi-currency / multi-company
+ * Direction: this module renders OUR rows → Tally XML (push). The return
+ * direction (pull masters, pull voucher/order status) is handled by the agent
+ * export + the onboarding controller's agentMasters/agentVouchers endpoints.
  */
 import { supabaseAdmin } from '../../../lib/supabase';
 import { xmlEscape, tallyDate, amt, envelope } from './tally.xml';
 import { buildInventoryLines, unresolvedLines, buildDistributorLedger, buildStockItem, type StockName, type LineItem } from './tally.inventory';
 
-export type EventKind = 'invoice' | 'payment' | 'return' | 'credit_note' | 'order' | 'master_ledger' | 'master_stock_item';
+export type EventKind = 'invoice' | 'payment' | 'return' | 'credit_note' | 'order' | 'master_ledger' | 'master_ledger_update' | 'master_stock_item';
 
 export interface TallyIntegrationConfig {
   company_name?: string;                  // Tally company name (SVCURRENTCOMPANY)
@@ -454,8 +456,8 @@ ${lines.xml}
   return envelope(company, voucher);
 }
 
-// ── Render: new dealer → Sundry Debtor ledger ─────────────────────────────────────────────────
-export async function renderMasterLedger(integration: IntegrationRow, distributor_id: string): Promise<string> {
+// ── Render: dealer → Sundry Debtor ledger (Create for new, Alter for an edit) ──────────────────
+export async function renderMasterLedger(integration: IntegrationRow, distributor_id: string, action: 'Create' | 'Alter' = 'Create'): Promise<string> {
   const company = integration.config?.company_name ?? 'Default Company';
   const { data: d } = await supabaseAdmin.from('distributors')
     .select('name, legal_name, gstin, state_code, address, contact_mobile, email, credit_limit, payment_terms_days')
@@ -463,7 +465,7 @@ export async function renderMasterLedger(integration: IntegrationRow, distributo
   if (!d) throw new Error(`distributor ${distributor_id} not found`);
   // Same name the vouchers will use for this dealer, so invoices find the ledger we create.
   const ledgerName = await partyLedger(integration.id, distributor_id);
-  return envelope(company, buildDistributorLedger(d as never, ledgerName), 'All Masters');
+  return envelope(company, buildDistributorLedger(d as never, ledgerName, action), 'All Masters');
 }
 
 // ── Render: new product → stock item ──────────────────────────────────────────────────────────
@@ -486,7 +488,8 @@ export async function renderTallyXml(
   if (kind === 'payment')  return renderPayment(integration, ref_id);
   if (kind === 'return' || kind === 'credit_note') return renderReturn(integration, ref_id);
   if (kind === 'order')              return renderOrder(integration, ref_id);
-  if (kind === 'master_ledger')      return renderMasterLedger(integration, ref_id);
+  if (kind === 'master_ledger')         return renderMasterLedger(integration, ref_id, 'Create');
+  if (kind === 'master_ledger_update')  return renderMasterLedger(integration, ref_id, 'Alter');
   if (kind === 'master_stock_item')  return renderMasterStockItem(integration, ref_id);
   throw new Error(`Unsupported Tally event kind: ${kind}`);
 }

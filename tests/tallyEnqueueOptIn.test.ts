@@ -57,8 +57,12 @@ describe('Tally enqueue: a connection pinned to a company only syncs that compan
 
   it('filters invoices, payments and returns (and opt-in sources) by client_id', async () => {
     await enqueueForIntegration({ ...base, config: { client_id: CO, sync_orders: true, auto_create_ledgers: true, auto_create_stock_items: true } });
+    // Every source query is scoped to the pinned company. distributors is queried
+    // twice now (new dealers → Create, edited dealers → Alter), both still scoped.
     for (const t of ['invoices', 'payments', 'returns', 'orders', 'distributors', 'skus']) {
-      expect(matches(t)).toEqual([{ client_id: CO }]);
+      const ms = matches(t);
+      expect(ms.length).toBeGreaterThan(0);
+      for (const m of ms) expect(m).toEqual({ client_id: CO });
     }
   });
 
