@@ -1,4 +1,5 @@
 import { supabaseAdmin } from './supabase';
+import { logger } from './logger';
 
 /**
  * Client-level access gate.
@@ -86,8 +87,56 @@ export async function checkClientAccess(clientId: string | null | undefined): Pr
       .eq('id', clientId)
       .maybeSingle();
     if (error) return ALLOWED;
-    return evaluateClientAccess(data as ClientRow);
+    const access = evaluateClientAccess(data as ClientRow);
+    // Auto-deactivate the stored flag the first time we see an ended trial on a
+    // still-active client, so the Client Management "Active" toggle reflects the
+    // block (matching the daily sweep). Fire-and-forget and guarded on
+    // is_active=true so it writes only on the transition, never on every request
+    // once it is already off. Access is already blocked above, so a failed flip
+    // is harmless — the next request retries it.
+    if (access.reason === 'trial_ended' && (data as ClientRow)?.is_active === true) {
+      void Promise.resolve(
+        supabaseAdmin.from('clients').update({ is_active: false }).eq('id', clientId).eq('is_active', true),
+      ).then((res) => {
+        const e = (res as { error?: { message?: string } } | null)?.error;
+        if (e) logger.warn(`[clientAccess] trial auto-deactivate failed for ${clientId}: ${e.message}`);
+      }).catch((e: any) => logger.warn(`[clientAccess] trial auto-deactivate threw for ${clientId}: ${e?.message ?? e}`));
+    }
+    return access;
   } catch {
     return ALLOWED;
   }
+}
+
+/**
+ * Sweep: flip `is_active=false` for every client in the CURRENT project whose
+ * trial has ended but is still marked active, so the Client Management "Active"
+ * toggle automatically turns off at trial expiry (the access gate already blocks
+ * logins — this keeps the stored flag/toggle honest). Idempotent: only
+ * still-active clients are touched, so repeat runs (or several server instances)
+ * are no-ops once flipped. The `clients` table is the small per-tenant control
+ * table, so scanning it in full is cheap. Called by the daily in-process tick in
+ * server.ts via forEachProject.
+ */
+export async function deactivateExpiredTrials(): Promise<{ scanned: number; deactivated: number }> {
+  const { data, error } = await supabaseAdmin
+    .from('clients')
+    .select('id, settings')
+    .eq('is_active', true);
+  if (error || !Array.isArray(data)) return { scanned: 0, deactivated: 0 };
+  const today = istTodayISO();
+  const expiredIds = (data as Array<{ id: string; settings?: NonNullable<ClientRow>['settings'] }>)
+    .filter((c) => evaluateClientAccess({ is_active: true, settings: c.settings }, today).reason === 'trial_ended')
+    .map((c) => c.id);
+  if (expiredIds.length === 0) return { scanned: data.length, deactivated: 0 };
+  const { error: upErr } = await supabaseAdmin
+    .from('clients')
+    .update({ is_active: false })
+    .in('id', expiredIds)
+    .eq('is_active', true);
+  if (upErr) {
+    logger.warn(`[clientAccess] trial sweep update failed: ${upErr.message}`);
+    return { scanned: data.length, deactivated: 0 };
+  }
+  return { scanned: data.length, deactivated: expiredIds.length };
 }

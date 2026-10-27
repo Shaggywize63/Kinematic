@@ -18,6 +18,7 @@ import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './servi
 import { dispatchInvoiceRenewalReminders } from './services/finance/recurringReminders.service';
 import { runScheduledTasks, runProactiveNudges } from './services/crm/ai/kiniScheduler.service';
 import { reconcileCallRecordings } from './services/crm/ai/callRecordingPull.service';
+import { deactivateExpiredTrials } from './lib/clientAccess';
 import { knownProjectKeys, runWithProject } from './lib/projects';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -162,6 +163,27 @@ if (String(process.env.DIST_AUTO_REPLENISHMENT_ENABLED ?? 'true').toLowerCase() 
       .catch((e) => logger.warn(`[auto-replenishment] run failed: ${e?.message ?? e}`));
   }, 3600 * 1000).unref();
   logger.info(`[auto-replenishment] scheduler enabled (fires at ${hour}:00 UTC)`);
+}
+
+// Trial expiry → auto-deactivate. Hourly tick that fires once a day at the
+// configured UTC hour: every client whose trial end_date has passed is flipped
+// is_active=false across all projects, so the Client Management "Active" toggle
+// turns off at trial expiry (the client-access gate already blocks those logins
+// — this keeps the stored flag/toggle honest). Idempotent: only still-active
+// clients are touched, so multiple ticks / instances never thrash. A new login
+// after expiry is flipped lazily by checkClientAccess even before this tick runs.
+// Toggle with CLIENT_TRIAL_SWEEP_ENABLED=false; set the hour with
+// CLIENT_TRIAL_SWEEP_HOUR_UTC (0-23, default 2 ≈ 07:30 IST).
+if (String(process.env.CLIENT_TRIAL_SWEEP_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const hour = Math.min(23, Math.max(0, Number(process.env.CLIENT_TRIAL_SWEEP_HOUR_UTC ?? 2)));
+  setInterval(() => {
+    if (new Date().getUTCHours() !== hour) return;
+    forEachProject('trial-sweep', async () => {
+      const r = await deactivateExpiredTrials();
+      if (r.deactivated) logger.info(`[trial-sweep] deactivated ${r.deactivated} expired-trial client(s)`);
+    }).catch((e) => logger.warn(`[trial-sweep] run failed: ${e?.message ?? e}`));
+  }, 3600 * 1000).unref();
+  logger.info(`[trial-sweep] scheduler enabled (fires at ${hour}:00 UTC, all projects)`);
 }
 
 // Run a per-tenant job across every known Supabase project (Tata, Kinematic,
