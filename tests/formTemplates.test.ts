@@ -157,7 +157,9 @@ describe('GET /forms/templates — per-question validation', () => {
         is_consent: false,
         depends_on_id: 'q-0',
         depends_on_value: 'yes',
-        options: ['a', 'b'],
+        // getTemplates normalises bare-string options to {label,value} objects
+        // so Android's Gson decoder can read them (see normalizeOptions / #598).
+        options: [{ label: 'a', value: 'a' }, { label: 'b', value: 'b' }],
         validation: { max: 5 },
       },
     ]);
