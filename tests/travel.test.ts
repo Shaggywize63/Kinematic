@@ -94,13 +94,47 @@ describe('no forms: one leg, check-in -> check-out', () => {
     expect(r.points_used).toBe(1);
   });
 
-  it('fixes so far apart that every segment is a lost-trail gap also fall back to the straight line', () => {
+  it('counts the polyline across long gaps between real fixes (plausible speed), not just the anchors', () => {
     const r = run({
       attendance: att({ checkout_at: t('10:50'), checkout_lat: P(4)[0], checkout_lng: P(4)[1] }),
-      trail: [fix('09:55', P(1)), fix('10:20', P(2))],       // 25-minute gaps everywhere
+      trail: [fix('09:55', P(1)), fix('10:20', P(2))],       // 25-minute gaps — a sparse trail, not a lost one
     });
-    expect(r.method).toBe('straight_line');
+    // Two real fixes at plausible speed: the report rides the trail (check-in -> P1 -> P2 -> check-out),
+    // which for these collinear points equals the P0 -> P4 distance. (The old rule dropped every >15-min
+    // hop and fell back to the straight line; the expense-mileage path still does — see trail.ts.)
+    expect(r.method).toBe('gps_trail');
     expect(r.total_km).toBe(Math.round(kmBetween(P(0), P(4)) * 100) / 100);
+  });
+
+  it('a sparse trail (a few close fixes + a far loop with long gaps) counts the whole polyline, not ~0 km', () => {
+    // Regression for the real client day: 11 fixes over ~11 h. A couple of fixes near the start are
+    // minutes apart (tiny segments the old 15-min-gap rule DID count); the loop fixes are ~1 h apart
+    // (segments the old rule DROPPED). The old code summed only the tiny segments -> ~0.01 km while the
+    // map drew the whole loop. Now every plausible hop counts, so the number matches the drawn route.
+    const CI: Pt = [22.6955, 88.3937];
+    const CO: Pt = [22.6920, 88.3959];                       // check-out near the check-in (it is a loop)
+    const loop: Array<[string, Pt]> = [
+      ['10:02', [22.6956, 88.3938]],                         // clustered near the start — small gaps, metres apart
+      ['10:05', [22.6957, 88.3938]],
+      ['11:30', [22.7200, 88.4000]],                         // ~1 h gaps from here — the "lost trail" the old rule dropped
+      ['13:00', [22.7400, 88.4010]],
+      ['15:00', [22.7250, 88.3960]],
+      ['18:00', [22.7010, 88.3945]],
+    ];
+    const r = run({
+      attendance: att({
+        checkin_at: t('10:00'), checkout_at: t('21:00'),
+        checkin_lat: CI[0], checkin_lng: CI[1], checkout_lat: CO[0], checkout_lng: CO[1],
+      }),
+      trail: loop.map(([hm, p]) => fix(hm, p)),
+    });
+    const ordered: Pt[] = [CI, ...loop.map(([, p]) => p), CO];
+    const polyline = ordered.slice(1).reduce((s, p, i) => s + kmBetween(ordered[i], p), 0);
+    expect(r.legs).toHaveLength(1);
+    expect(r.method).toBe('gps_trail');
+    expect(Math.abs(r.total_km - polyline)).toBeLessThan(0.05);   // the drawn route's length...
+    expect(r.total_km).toBeGreaterThan(5);                        // ...not the old ~0.01 km
+    expect(r.total_km).toBeGreaterThan(kmBetween(CI, CO) * 3);    // and far beyond the check-in/out straight line
   });
 
   it('is 0 km / none when a coordinate is missing and the trail cannot help', () => {
@@ -329,8 +363,9 @@ describe('an open shift', () => {
     expect(r.legs).toHaveLength(1);
     expect(r.legs[0].to).toMatchObject({ kind: 'now', at: new Date(now).toISOString(), lat: P(9)[0], lng: P(9)[1], label: 'Now' });
     expect(r.method).toBe('gps_trail');
-    // 09:30 -> 09:40 -> 09:50 -> 10:00 counted (3 x 1.11); 10:00 -> 10:50 is a lost-trail gap
-    expect(Math.abs(r.total_km - kmBetween(P(0), P(3)))).toBeLessThan(0.02);
+    // Every plausible-speed hop counts now, including 10:00 -> 10:50 (a 50-min gap, not a lost trail):
+    // check-in P0 -> P1 -> P2 -> P3 -> latest-fix P9, collinear, so the P0 -> P9 distance.
+    expect(Math.abs(r.total_km - kmBetween(P(0), P(9)))).toBeLessThan(0.02);
   });
 
   it('with no fix yet there is nowhere to measure to: 0 km / none (not a made-up number)', () => {
