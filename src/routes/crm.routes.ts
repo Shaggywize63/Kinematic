@@ -11,6 +11,11 @@ import { z, ZodError } from 'zod';
 import { requireAuth, requireRole, MASTER_ADMIN_EMAIL } from '../middleware/auth';
 import { requireModule } from '../middleware/rbac';
 import * as rbac from '../middleware/rbac';
+// Replay protection for the CRM creates the mobile offline queue re-sends: the
+// Android/iOS write-queue attaches an Idempotency-Key per queued mutation, so a
+// flaky-ack retry must dedupe server-side instead of inserting a duplicate.
+// No-ops when the header is absent (ordinary online clients are unaffected).
+import { idempotency } from '../middleware/idempotency';
 import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { AuthRequest } from '../types';
@@ -752,7 +757,7 @@ leads.get('/', wrap(async (req, res) => {
     },
   });
 }));
-leads.post('/', wrap(async (req, res) => {
+leads.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
   // Tata Tiscon "Also log as Site Visit" checkbox — pop the meta flag
   // off before the lead insert (it's not a column on crm_leads), use it
@@ -1952,7 +1957,7 @@ contacts.get('/', wrap(async (req, res) => {
     await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds }))
   );
 }));
-contacts.post('/', wrap(async (req, res) => {
+contacts.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
   const { _consent: consentInput, ...rest } = parsed;
   const payload: Record<string, unknown> = { ...rest, client_id: clientId(req) };
@@ -2038,7 +2043,7 @@ accounts.get('/', wrap(async (req, res) => {
     await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds }))
   );
 }));
-accounts.post('/', wrap(async (req, res) => {
+accounts.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
@@ -2257,7 +2262,7 @@ deals.get('/export', wrap(async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(csv);
 }));
-deals.post('/', wrap(async (req, res) => {
+deals.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.dealSchema, req.body);
   // client_id derived server-side from scope, never from body (SECURITY_AUDIT H-2).
   const payload = { ...parsed, client_id: clientId(req) };
@@ -3375,7 +3380,7 @@ activities.get('/export-field-visits-report', wrap(async (req, res) => {
   sendReportCsv(req, res, 'field-visits-report', cols, [...rows, gt]);
 }));
 
-activities.post('/', wrap(async (req, res) => {
+activities.post('/', idempotency, wrap(async (req, res) => {
   const parsed = normalizeActivityPayload(parse(v.activitySchemaBase, req.body));
   // An activity must be anchored to SOMETHING. A CRM entity (lead /
   // contact / account / deal) is the normal case — but steel-dealer
@@ -3512,7 +3517,7 @@ const notes = express.Router();
 notes.get('/', wrap(async (req, res) => res.json(
   await crud.clientScopedList('crm_notes', orgId(req), clientScope(req).id, req.query, { softDelete: false, strictClient: clientScope(req).strict })
 )));
-notes.post('/', wrap(async (req, res) => {
+notes.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.noteSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   res.status(201).json(await crud.create('crm_notes', orgId(req), payload, userId(req)));
@@ -3526,7 +3531,7 @@ const tasks = express.Router();
 tasks.get('/', wrap(async (req, res) => res.json(
   await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientScope(req).id, { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at', strictClient: clientScope(req).strict }))
 )));
-tasks.post('/', wrap(async (req, res) => {
+tasks.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.taskSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, type: 'task' as const, client_id: clientId(req) };
   const createdTask = await crud.create('crm_activities', orgId(req), payload, userId(req)) as Record<string, unknown>;
