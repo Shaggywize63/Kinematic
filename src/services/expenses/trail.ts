@@ -48,8 +48,26 @@ export interface TrailSum {
   segments_skipped: number;
 }
 
+export interface SumTrailOptions {
+  /**
+   * Longest gap (minutes) between two consecutive fixes that still counts as one
+   * driven segment. The default (`MAX_GAP_MIN`) is tuned for ~10-min field cadence
+   * and is what the expense-mileage suggestion uses — a longer gap there means the
+   * device stopped reporting, so the segment is not counted (conservative: never
+   * over-reimburse). The daily travel report passes `Infinity` instead: on a sparse
+   * trail (fixes far apart in time) the straight line between two real,
+   * plausible-speed fixes is a sound LOWER bound on the distance travelled, and
+   * dropping it to zero made the report read ~0 km for trips the map clearly draws.
+   * The single-hop (`MAX_SEGMENT_KM`) and speed (`MAX_SPEED_KMH`) guards still reject
+   * teleports and bad fixes regardless of this value, so relaxing the gap can only
+   * move the total up toward the truth, never above the trail's polyline length.
+   */
+  maxGapMin?: number;
+}
+
 /** Sum the haversine distance over consecutive fixes (in the order given — callers sort by time). */
-export function sumTrailKm(pts: ReadonlyArray<TrailFix>): TrailSum {
+export function sumTrailKm(pts: ReadonlyArray<TrailFix>, opts: SumTrailOptions = {}): TrailSum {
+  const maxGapMin = opts.maxGapMin ?? MAX_GAP_MIN;
   let dist = 0, used = 0, excluded = 0, skipped = 0, counted = 0;
   let prev: TrailFix | null = null;
   for (const p of pts) {
@@ -58,7 +76,7 @@ export function sumTrailKm(pts: ReadonlyArray<TrailFix>): TrailSum {
       const seg = haversineKm(Number(prev.lat), Number(prev.lng), Number(p.lat), Number(p.lng));
       const dtMin = (new Date(p.captured_at).getTime() - new Date(prev.captured_at).getTime()) / 60_000;
       const speed = dtMin > 0 ? seg / (dtMin / 60) : Infinity;
-      if (dtMin > 0 && dtMin <= MAX_GAP_MIN && seg <= MAX_SEGMENT_KM && speed <= MAX_SPEED_KMH) {
+      if (dtMin > 0 && dtMin <= maxGapMin && seg <= MAX_SEGMENT_KM && speed <= MAX_SPEED_KMH) {
         dist += seg;
         counted++;
       } else {
