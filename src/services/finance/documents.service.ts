@@ -297,19 +297,28 @@ function filteredDocuments(s: FinanceScope, docType: DocType, query: Record<stri
   return q;
 }
 
-/** Sum of amount / outstanding across EVERY document matching the list filters (all pages). `amount`
- *  mirrors the Amount column (every row's total); `balance` mirrors the Balance-due column, where a
- *  void invoice shows "—" and so contributes nothing. */
-async function sumDocuments(s: FinanceScope, docType: DocType, query: Record<string, unknown>) {
+/** Totals for a page of list rows. A VOID invoice was cancelled, so it is never part of sales: it adds
+ *  nothing to the amount, the outstanding balance or the invoice count (it still appears in the list rows). */
+export function sumRows(rows: Array<{ total: number | string; balance: number | string; status: string }>) {
   let amount = 0, balance = 0, count = 0;
+  for (const r of rows) {
+    if (r.status === 'void') continue;
+    amount += Number(r.total); balance += Number(r.balance); count++;
+  }
+  return { amount, balance, count };
+}
+
+/** Sum of amount / outstanding across EVERY non-void document matching the list filters (all pages). */
+async function sumDocuments(s: FinanceScope, docType: DocType, query: Record<string, unknown>) {
+  let amount = 0, balance = 0, count = 0, fetched = 0;
   for (let start = 0; ; start += 1000) {
     const { data, error } = await filteredDocuments(s, docType, query, 'total,balance,status').order('id', { ascending: true }).range(start, start + 999);
     if (error) throw fail(error);
     const batch = (data ?? []) as unknown as Array<{ total: number | string; balance: number | string; status: string }>;
-    for (const r of batch) { amount += Number(r.total); if (r.status !== 'void') balance += Number(r.balance); }
-    count += batch.length;
+    const t = sumRows(batch);
+    amount += t.amount; balance += t.balance; count += t.count; fetched += batch.length;
     if (batch.length < 1000) break;
-    if (count >= 100_000) break; // safety valve
+    if (fetched >= 100_000) break; // safety valve
   }
   return { amount: round2(amount), balance: round2(balance), count };
 }

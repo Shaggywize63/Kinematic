@@ -224,7 +224,7 @@ export async function paymentsReceived(s: FinanceScope, query: Record<string, un
 export async function invoiceDetails(s: FinanceScope, query: Record<string, unknown>): Promise<Report> {
   const { from, to } = range(query);
   const docs = await fetchAll((a, b) => scoped(db().from('finance_documents').select('number,issue_date,due_date,status,customer_snapshot,taxable_value,tax_total,total,amount_paid,balance'), s)
-    .eq('doc_type', 'invoice').neq('status', 'draft').is('deleted_at', null).gte('issue_date', from).lte('issue_date', to).order('issue_date', { ascending: true }).range(a, b));
+    .eq('doc_type', 'invoice').not('status', 'in', '(draft,void)').is('deleted_at', null).gte('issue_date', from).lte('issue_date', to).order('issue_date', { ascending: true }).range(a, b));
   const t = todayIso();
   const rows = docs.map((d) => ({
     date: d.issue_date, number: d.number, customer: (d.customer_snapshot as { name?: string })?.name ?? '—', due_date: d.due_date,
