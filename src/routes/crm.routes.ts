@@ -34,6 +34,7 @@ import { validateAndStampCustomFields } from '../services/crm/customFields.servi
 import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as upsellsSvc from '../services/crm/upsells.service';
 import * as leadsSvc from '../services/crm/leads.service';
+import { isWalkInCapture } from '../services/crm/walkIn';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
 import * as leadFollowUpSvc from '../services/crm/leadFollowUp.service';
 import * as leadBalanceSvc from '../services/crm/leadBalance.service';
@@ -808,7 +809,25 @@ leads.post('/', idempotency, wrap(async (req, res) => {
   // mirroring enforceLeadRequiredFields above for built-ins. Inbound webhooks /
   // CSV imports / KINI call createLead without this flag and still capture
   // partial leads.
-  const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload, enforceRequired: true });
+  //
+  // EXCEPTION — walk-in "Not Purchased" quick-capture (reception's minimal
+  // intake, shared by the Android + web walk-in forms). It deliberately
+  // collects only name / phone / visit details, NOT the full sales-lead field
+  // set. A client admin can mark lead custom fields required for the MAIN lead
+  // form (e.g. Rajkamal marks "Approx. Budget" and "Area / Locality" required);
+  // enforcing those here 400'd every walk-in save ("Couldn't save the lead").
+  // So skip required-*custom*-field enforcement for walk-in captures. Built-in
+  // required fields (name / phone) are still enforced above via
+  // enforceLeadRequiredFields, and custom-field *type* coercion still runs.
+  // Detected off the capture contract the clients share: custom_fields.campaign
+  // === 'Walk-in' (with purchase_status 'not_purchased' as a fallback marker).
+  const walkInCapture = isWalkInCapture(payload.custom_fields);
+  const lead = await leadsSvc.createLead({
+    org_id: orgId(req),
+    user_id: userId(req),
+    payload,
+    enforceRequired: !walkInCapture,
+  });
 
   // Record the consent event against the new lead in the crm_consents ledger
   // (who/when/how/purpose), so consent is demonstrable — best-effort: a ledger
