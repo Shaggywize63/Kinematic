@@ -217,6 +217,8 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     pipeline_id, stage_id,
     name: payload.name,
     account_id: payload.account_id ?? null,
+    site_id: payload.site_id ?? null,
+    product_id: payload.product_id ?? null,
     primary_contact_id: payload.primary_contact_id ?? null,
     lead_id: payload.lead_id ?? null,
     amount: payload.amount ?? 0,

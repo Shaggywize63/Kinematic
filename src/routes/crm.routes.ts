@@ -46,6 +46,7 @@ import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
 import * as afterSales from '../services/crm/afterSales.service';
 import * as dealsSvc from '../services/crm/deals.service';
+import * as visitBridge from '../services/crm/visitBridge.service';
 import * as importSvc from '../services/crm/import.service';
 import * as activityImportSvc from '../services/crm/activityImport.service';
 import * as analyticsSvc from '../services/crm/analytics.service';
@@ -266,6 +267,8 @@ function clientScope(req: Request): { id: string | null; strict: boolean } {
 }
 
 function clientId(req: Request): string | null { return clientScope(req).id; }
+const bridgeCtx = (req: Request): visitBridge.BridgeCtx =>
+  ({ org_id: orgId(req), client_id: clientScope(req).id, user_id: userId(req) });
 
 // Tenant gate for KINI / AI features. The cross-tenant ("all clients at once")
 // view is allowed ONLY for super_admin; every other caller must resolve to a
@@ -2110,7 +2113,66 @@ accounts.get('/:id/notes', wrap(async (req, res) => res.json(
 )));
 accounts.post('/:id/summarize', wrap(async (req, res) =>
   res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), clientId(req), req.params.id) })));
+// Sites (plants) under an account.
+accounts.get('/:id/sites', wrap(async (req, res) => res.json(
+  await crud.list('crm_sites', orgId(req), { account_id: req.params.id, ...req.query }, { defaultSort: { column: 'name', ascending: true } })
+)));
+// One payload the field app pre-fills from when a rep opens an existing
+// company: account + its sites + contacts + open deals.
+accounts.get('/:id/bundle', wrap(async (req, res) => res.json(
+  await visitBridge.getAccountBundle(bridgeCtx(req), req.params.id)
+)));
 router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
+
+// ---------- SITES (plants) -------------------------------------------
+const sites = express.Router();
+sites.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  return res.json(await crud.clientScopedList('crm_sites', orgId(req), scope.id, req.query, {
+    searchColumns: ['name', 'city', 'state', 'code'], strictClient: scope.strict,
+    defaultSort: { column: 'name', ascending: true },
+  }));
+}));
+sites.post('/', wrap(async (req, res) => {
+  const payload: Record<string, unknown> = { ...parse(v.siteSchema, req.body), client_id: clientId(req) };
+  res.status(201).json(await crud.create('crm_sites', orgId(req), payload, userId(req)));
+}));
+sites.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_sites', orgId(req), req.params.id, true, clientScope(req).id))));
+sites.patch('/:id', wrap(async (req, res) => {
+  const payload = parse(v.siteUpdateSchema, req.body) as Record<string, unknown>;
+  res.json(await crud.update('crm_sites', orgId(req), req.params.id, payload, userId(req), clientScope(req).id));
+}));
+sites.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_sites', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
+router.use('/sites', rbac.requireModuleAccess('crm_accounts'), sites);
+
+// ---------- VISITS (plant trips) -------------------------------------
+const visits = express.Router();
+visits.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  return res.json(await crud.clientScopedList('crm_visits', orgId(req), scope.id, req.query, {
+    strictClient: scope.strict, defaultSort: { column: 'visit_date', ascending: false },
+  }));
+}));
+visits.post('/', wrap(async (req, res) => {
+  const payload: Record<string, unknown> = { ...parse(v.visitSchema, req.body), client_id: clientId(req), user_id: userId(req) };
+  res.status(201).json(await crud.create('crm_visits', orgId(req), payload, userId(req)));
+}));
+visits.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_visits', orgId(req), req.params.id, true, clientScope(req).id))));
+visits.patch('/:id', wrap(async (req, res) => {
+  const payload = parse(v.visitUpdateSchema, req.body) as Record<string, unknown>;
+  res.json(await crud.update('crm_visits', orgId(req), req.params.id, payload, userId(req), clientScope(req).id));
+}));
+visits.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_visits', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
+router.use('/visits', rbac.requireModuleAccess('crm_accounts'), visits);
+
+// ---------- VISIT INTAKE ---------------------------------------------
+// Resolve (find-or-create) customer + plant + people met and open a visit,
+// de-duping against existing CRM records. Returns the ids the app then stamps
+// onto each product-form submission.
+router.post('/visit-intake', rbac.requireModuleAccess('crm_accounts'), wrap(async (req, res) => {
+  const payload = parse(v.visitIntakeSchema, req.body) as visitBridge.VisitIntakeInput;
+  res.status(201).json(await visitBridge.resolveVisitIntake(bridgeCtx(req), payload));
+}));
 
 // ---------- DEALS ----------------------------------------------------
 const deals = express.Router();
