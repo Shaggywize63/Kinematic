@@ -70,6 +70,19 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
 
   let q = supabaseAdmin.from('builder_forms').select('*, builder_questions(*)').eq('org_id', user.org_id);
 
+  // Per-client isolation (mirrors the builder GET /forms filter): a caller sees
+  // org-shared forms (client_id IS NULL) plus any scoped to their own client.
+  // Mobile reps carry client_id on their JWT, so a client-scoped form (e.g. the
+  // DVGPL Retailer Survey) reaches only that client's apps. Platform admins with
+  // no client scope (targetCid null) see every form. Combined with the activity
+  // filter below as AND, so a form must be both in scope and match the activity.
+  const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
+  const targetCid: string | null = isUUID(user.client_id) ? (user.client_id as string)
+    : isUUID(req.query.client_id as string) ? (req.query.client_id as string)
+    : isUUID(headerClientId) ? (headerClientId as string)
+    : null;
+  if (targetCid) q = q.or(`client_id.is.null,client_id.eq.${targetCid}`);
+
   // If activity_id is provided, filter for forms matching it OR global forms (activity_id is null)
   if (activity_id && isUUID(activity_id as string)) {
     q = q.or(`activity_id.eq.${activity_id},activity_id.is.null`);

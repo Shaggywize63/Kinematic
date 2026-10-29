@@ -1,6 +1,6 @@
 import { Router, Response } from "express";
 import { requireAuth } from "../middleware/auth";
-import { asyncHandler, sendSuccess, AppError } from "../utils";
+import { asyncHandler, sendSuccess, AppError, isUUID } from "../utils";
 import { supabaseAdmin } from "../lib/supabase";
 import { AuthRequest } from "../types";
 import { resolveVisitTimes } from "../services/formVisit.store";
@@ -16,6 +16,22 @@ const router = Router();
  * a tenant fills in a form another of its orgs owns.
  */
 const builderEnforced = () => enforcedUnlessOff("BUILDER_ORG_ENFORCE");
+
+/**
+ * The client the caller is scoped to, for per-client form isolation.
+ * Precedence mirrors buildCRUD in management.controller.ts:
+ *   1. JWT client_id  — client-pinned users stay in their tenant.
+ *   2. ?client_id=    — explicit query param (server-to-server).
+ *   3. X-Client-Id    — the dashboard's global client picker.
+ *   4. none           — platform admin with no picker → sees all in org.
+ */
+function callerClientId(req: AuthRequest): string | null {
+  const header = (req.headers["x-client-id"] as string | undefined) || undefined;
+  return isUUID(req.user?.client_id) ? (req.user!.client_id as string)
+    : isUUID(req.query.client_id as string) ? (req.query.client_id as string)
+    : isUUID(header) ? (header as string)
+    : null;
+}
 
 async function assertFormReachable(req: AuthRequest, formId: string, opts: { shadow?: boolean; what: string }): Promise<void> {
   const actor = req.user;
@@ -56,11 +72,15 @@ router.get(
     const orgId = req.user?.org_id;
     if (!orgId) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
 
-    const { data, error } = await supabaseAdmin
-      .from("builder_forms")
-      .select("*")
-      .eq("org_id", orgId)
-      .order("created_at", { ascending: false });
+    // Per-client isolation: a caller sees org-shared forms (client_id IS NULL)
+    // plus any scoped to their own client. A platform admin with no client
+    // picker (targetCid null) sees every form in the org. Existing forms have
+    // client_id NULL, so this is backward-compatible.
+    const targetCid = callerClientId(req);
+    let q = supabaseAdmin.from("builder_forms").select("*").eq("org_id", orgId);
+    if (targetCid) q = q.or(`client_id.is.null,client_id.eq.${targetCid}`);
+
+    const { data, error } = await q.order("created_at", { ascending: false });
 
     if (error) throw new AppError(500, error.message, "DB_ERROR");
 
@@ -76,15 +96,26 @@ router.post(
     const orgId = req.user?.org_id;
     if (!orgId) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
 
-    const { title, description, icon, cover_color, activity_id } = req.body;
+    const { title, description, icon, cover_color, activity_id, client_id } = req.body;
 
     if (!title?.trim())
       throw new AppError(400, "title is required", "VALIDATION_ERROR");
+
+    // Stamp the new form with the caller's client so it is isolated to that
+    // tenant (precedence matches the read filter / buildCRUD create). A form
+    // created by an org-level admin with no client scope stays NULL (shared).
+    const header = (req.headers["x-client-id"] as string | undefined) || undefined;
+    const pickedClientId: string | null =
+      isUUID(client_id) ? (client_id as string)
+      : isUUID(header) ? (header as string)
+      : isUUID(req.user?.client_id) ? (req.user!.client_id as string)
+      : null;
 
     const { data, error } = await supabaseAdmin
       .from("builder_forms")
       .insert({
         org_id: orgId,
+        client_id: pickedClientId,
         title: title.trim(),
         description,
         icon: icon || "📋",
@@ -110,7 +141,7 @@ router.patch(
     const orgId = req.user?.org_id;
     if (!orgId) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
 
-    const allowed = ["title", "description", "status", "icon", "cover_color", "activity_id", "requires_photo", "requires_gps", "allow_offline"];
+    const allowed = ["title", "description", "status", "icon", "cover_color", "activity_id", "client_id", "requires_photo", "requires_gps", "allow_offline"];
 
     const updates: any = {};
     allowed.forEach((k) => {
