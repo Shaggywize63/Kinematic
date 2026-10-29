@@ -198,8 +198,10 @@ async function ensureActivity(orgId: string, clientId: string): Promise<string> 
   const id = randomUUID();
   log(`   · activity "${ACTIVITY_NAME}" — create (${id})`);
   if (!dry) {
+    // `activities.type` is a NOT-NULL enum (no default). SURVEY is the
+    // field-force activity type for a retailer market survey.
     const { error } = await db.from('activities').insert({
-      id, org_id: orgId, client_id: clientId, name: ACTIVITY_NAME, icon: '🍦', color: '#E01E2C', is_active: true,
+      id, org_id: orgId, client_id: clientId, name: ACTIVITY_NAME, type: 'SURVEY', icon: '🍦', color: '#E01E2C', is_active: true,
     });
     if (error) throw new Error(`activities insert: ${error.message}`);
   }
