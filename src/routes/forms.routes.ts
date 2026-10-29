@@ -20,6 +20,10 @@ router.post('/scan-card',                    ctrl.scanBusinessCard);
 router.post('/submit',                       ctrl.submitForm);
 router.get('/submissions',                   ctrl.getMySubmissions);
 router.get('/submissions/:id',               ctrl.getSubmission);
+// Edit a submitted report — a tenant admin (any rep's) or the submitter (own);
+// the gate lives in the controller so the submitter keeps edit of their own.
+router.patch('/submissions/:id',             ctrl.updateSubmission);
+router.get('/submissions/:id/history',       ctrl.getSubmissionHistory);
 router.get('/admin/submissions',             requireSupervisorOrAbove, ctrl.getAllSubmissions);
 
 export default router;

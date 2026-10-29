@@ -15,6 +15,7 @@ import { resolveVisitTimes } from '../services/formVisit.store';
 import { scanCard, CardMediaType } from '../services/crm/ai/cardScan.service';
 import { resolveTenantScope, callerMayReadOrg, enforcedUnlessOff } from '../lib/tenantScope';
 import { orgRowReachable } from '../lib/userGuard';
+import { isTenantAdmin } from '../middleware/auth';
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
 function parseGps(s: unknown): { lat: number; lng: number } | null {
@@ -482,6 +483,115 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
   if (bSub && (bSub as { user_id?: string }).user_id !== user.id && !callerMayReadOrg(user, (bSub as { org_id?: string | null }).org_id)) return notFound(res);
   if (bSub) return ok(res, { ...bSub, activities: { name: bSub.builder_forms?.title }, form_responses: bSub.responses || [] });
   return notFound(res);
+});
+
+// Admin edit of a submitted report. A TENANT ADMIN (isTenantAdmin) may edit any
+// submission in their org; the submitting rep may edit their own. Edits the
+// answers (form_responses) and a couple of submission scalars (outlet_name /
+// address), stamps updated_by/updated_at, and writes one form_submission_history
+// row per changed field so every change is auditable.
+export const updateSubmission = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, { id: req.params.id, ...req.body });
+  const { id } = req.params;
+  if (!isUUID(id)) return badRequest(res, 'Invalid submission id');
+
+  const { data: sub } = await supabaseAdmin.from('form_submissions').select('*').eq('id', id).single();
+  if (!sub) return notFound(res, 'Submission not found');
+
+  const isOwner = (sub as { user_id?: string }).user_id === user.id;
+  const sameOrg = callerMayReadOrg(user, (sub as { org_id?: string | null }).org_id);
+  // Cross-org / cross-user without admin rights: 404 (don't reveal the row).
+  if (!sameOrg && !isOwner) return notFound(res);
+  // In-org but neither admin nor the submitter → forbidden.
+  if (!isTenantAdmin(user) && !isOwner) {
+    return res.status(403).json({ success: false, error: 'Only an admin or the submitting rep can edit this report.', code: 'FORBIDDEN' });
+  }
+
+  const body = req.body as {
+    responses?: Array<{ field_id?: string; question_id?: string; value?: unknown; photo?: unknown; gps?: string | null }>;
+    outlet_name?: string | null;
+    address?: string | null;
+  };
+  const orgIdVal = (sub as { org_id?: string | null }).org_id ?? user.org_id;
+  const clientIdVal = (sub as { client_id?: string | null }).client_id ?? null;
+  const history: Array<Record<string, unknown>> = [];
+  const nowIso = new Date().toISOString();
+
+  const subPatch: Record<string, unknown> = { updated_by: user.id, updated_at: nowIso };
+  if (typeof body.outlet_name === 'string' && body.outlet_name !== (sub as any).outlet_name) {
+    history.push({ field: 'outlet_name', field_label: 'Outlet', old_value: (sub as any).outlet_name ?? null, new_value: body.outlet_name });
+    subPatch.outlet_name = body.outlet_name;
+  }
+  if (typeof body.address === 'string' && body.address !== (sub as any).address) {
+    history.push({ field: 'address', field_label: 'Address', old_value: (sub as any).address ?? null, new_value: body.address });
+    subPatch.address = body.address;
+  }
+
+  if (Array.isArray(body.responses) && body.responses.length) {
+    const { data: existing } = await supabaseAdmin.from('form_responses').select('*').eq('submission_id', id);
+    const byField = new Map<string, any>((existing || []).map((r: any) => [String(r.field_id), r]));
+    const fieldIds = body.responses.map((r) => String(r.field_id ?? r.question_id ?? '')).filter(Boolean);
+    const labels = new Map<string, string>();
+    if (fieldIds.length) {
+      const { data: qs } = await supabaseAdmin.from('builder_questions').select('id,label').in('id', fieldIds);
+      for (const q of (qs || []) as Array<{ id: string; label: string | null }>) labels.set(String(q.id), q.label ?? '');
+    }
+    const display = (r: any): string | null => r == null ? null
+      : (r.photo_url ?? r.value_text ?? (r.value_number != null ? String(r.value_number) : (r.value_bool != null ? String(r.value_bool) : null)));
+    for (const r of body.responses) {
+      const fieldId = String(r.field_id ?? r.question_id ?? '');
+      if (!fieldId) continue;
+      const photoVal: string | null = (typeof r.photo === 'string' && r.photo.length > 0) ? r.photo : null;
+      const rawVal: unknown = r.value ?? null;
+      const textVal = typeof rawVal === 'string' ? rawVal : (rawVal == null ? null : JSON.stringify(rawVal));
+      const row = {
+        value_text: textVal,
+        value_number: typeof rawVal === 'number' ? rawVal : null,
+        value_bool: typeof rawVal === 'boolean' ? rawVal : null,
+        photo_url: photoVal,
+        gps: r.gps ?? null,
+      };
+      const prev = byField.get(fieldId);
+      const oldDisplay = display(prev);
+      const newDisplay = photoVal ?? textVal ?? (row.value_number != null ? String(row.value_number) : (row.value_bool != null ? String(row.value_bool) : null));
+      if (oldDisplay === newDisplay) continue; // unchanged
+      if (prev) {
+        await supabaseAdmin.from('form_responses').update(row).eq('id', prev.id);
+      } else {
+        await supabaseAdmin.from('form_responses').insert({ submission_id: id, field_id: fieldId, field_key: fieldId, ...row });
+      }
+      history.push({ field: fieldId, field_label: labels.get(fieldId) ?? null, old_value: oldDisplay, new_value: newDisplay });
+    }
+  }
+
+  const { error: upErr } = await supabaseAdmin.from('form_submissions').update(subPatch).eq('id', id);
+  if (upErr) return badRequest(res, upErr.message);
+
+  if (history.length) {
+    await supabaseAdmin.from('form_submission_history').insert(
+      history.map((h) => ({ ...h, submission_id: id, org_id: orgIdVal, client_id: clientIdVal, changed_by: user.id })),
+    );
+  }
+
+  const { data: fresh } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title)').eq('id', id).single();
+  const { data: resp } = await supabaseAdmin.from('form_responses').select('*, builder_questions(*)').eq('submission_id', id);
+  return ok(res, { ...(fresh || sub), form_responses: resp || [], changed: history.length });
+});
+
+// Read the edit trail for a submission — admin or the submitting rep only.
+export const getSubmissionHistory = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, []);
+  const { id } = req.params;
+  const { data: sub } = await supabaseAdmin.from('form_submissions').select('user_id, org_id').eq('id', id).single();
+  if (!sub) return notFound(res, 'Submission not found');
+  const isOwner = (sub as { user_id?: string }).user_id === user.id;
+  if (!callerMayReadOrg(user, (sub as { org_id?: string | null }).org_id) && !isOwner) return notFound(res);
+  if (!isTenantAdmin(user) && !isOwner) return res.status(403).json({ success: false, error: 'Forbidden', code: 'FORBIDDEN' });
+  const { data } = await supabaseAdmin.from('form_submission_history')
+    .select('*').eq('submission_id', id).order('changed_at', { ascending: false });
+  return ok(res, data || []);
 });
 
 export const getAllSubmissions = asyncHandler<AuthRequest>(async (req, res) => {

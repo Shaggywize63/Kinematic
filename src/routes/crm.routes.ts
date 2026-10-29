@@ -8,7 +8,7 @@
 import express, { Request, Response, NextFunction, Router } from 'express';
 import multer from 'multer';
 import { z, ZodError } from 'zod';
-import { requireAuth, requireRole, MASTER_ADMIN_EMAIL } from '../middleware/auth';
+import { requireAuth, requireRole, MASTER_ADMIN_EMAIL, isTenantAdmin } from '../middleware/auth';
 import { requireModule } from '../middleware/rbac';
 import * as rbac from '../middleware/rbac';
 // Replay protection for the CRM creates the mobile offline queue re-sends: the
@@ -1535,12 +1535,12 @@ leads.patch('/:id', wrap(async (req, res) => {
   // Edit RBAC — across the whole hierarchy, only the rep who CREATED
   // the lead may edit it. owner_id / assigned_to grant view, but not
   // edit. ASOs viewing a Consumer Champion's lead can read it (it
-  // surfaces under their team scope) but can't change it. Only
-  // system-tier admins ('admin' / 'sub_admin' / 'super_admin') bypass
-  // this check.
+  // surfaces under their team scope) but can't change it. A TENANT ADMIN
+  // (isTenantAdmin — incl. the per-tenant `client` owner account and
+  // city_manager, not just system-tier) bypasses this check and may edit
+  // any rep's lead, so the admin can correct records across the team.
   const meEdit = (req as AuthRequest).user;
-  const sysRole = (meEdit?.role ?? '').toLowerCase();
-  const isAdminTier = ['super_admin', 'admin', 'sub_admin'].includes(sysRole);
+  const isAdminTier = isTenantAdmin(meEdit);
   if (!isAdminTier) {
     const { data: target } = await supabaseAdmin.from('crm_leads')
       .select('created_by')

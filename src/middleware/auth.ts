@@ -620,6 +620,20 @@ export function requireAdminOrAbove(req: AuthRequest, res: Response, next: NextF
   return requireRole('super_admin', 'admin', 'main_admin', 'client', 'city_manager')(req, res, next);
 }
 
+// The single "tenant admin" predicate — a user who may VIEW and EDIT every
+// record in their tenant (reports / leads / activities) regardless of who
+// created or owns it. Collapses the historically-divergent admin role lists
+// (leads edit was system-tier only, activities used a wider set) into one rule
+// so "an admin can edit everything" means the same thing everywhere.
+// super_admin/admin/main_admin/sub_admin are system-tier; `client` is the
+// per-tenant owner account (e.g. the Spark & Ray admin); city_manager runs a
+// city. Deeper data_scope='own' / hierarchy limits still apply where enforced.
+export const TENANT_ADMIN_ROLES: UserRole[] = ['super_admin', 'admin', 'main_admin', 'sub_admin', 'client', 'city_manager'];
+export function isTenantAdmin(user: { role?: string | null } | null | undefined): boolean {
+  const r = (user?.role ?? '').toLowerCase();
+  return (TENANT_ADMIN_ROLES as string[]).includes(r);
+}
+
 export function requireModule(moduleName: string) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) return unauthorized(res);
