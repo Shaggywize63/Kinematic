@@ -58,6 +58,17 @@ function normalizeOptions(raw: unknown): Array<{ label: string; value: string }>
 /** Rajkamal Jewellers client id — mirrors the apps/dashboard isRajkamal gate. */
 const RAJKAMAL_CLIENT_ID = '0490f34d-d9a3-4f39-99e2-8f3adba8c583';
 
+// Clients for which a form's "follow-up date" field auto-creates a planned
+// crm_activities reminder (which then flows to the calendar + Google + push).
+// Rajkamal is always included (original behaviour); add more client UUIDs via
+// FORM_FOLLOWUP_ACTIVITY_CLIENT_IDS (comma-separated) — e.g. the Spark & Ray
+// client. Kept as a lowercase Set so the submit path needs no DB lookup.
+const FOLLOWUP_ACTIVITY_CLIENT_IDS = new Set<string>(
+  [RAJKAMAL_CLIENT_ID, ...(process.env.FORM_FOLLOWUP_ACTIVITY_CLIENT_IDS || '').split(',')]
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+);
+
 /** A form date field counts as a follow-up date when its label reads like one. */
 const FOLLOWUP_LABEL_RE = /follow[\s-]?up|preferred\s+date/i;
 
@@ -376,14 +387,12 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   // mechanism Schedule-Visit and the marketing-visit follow-up already use.
   // form_submissions has no lead_id, so the reminder is addressed to the
   // submitting rep (assigned_to). Best-effort: a failure never fails the submit.
-  // Enabled for Rajkamal (original) and any client with the
-  // `form_followup_activity` flag (Spark & Ray etc.) — kept flag-gated so other
-  // tenants' date fields don't silently start spawning activities.
-  const followupEnabled = !!submitterClientId && (
-    submitterClientId === RAJKAMAL_CLIENT_ID ||
-    await clientHasFlag(submitterClientId, 'form_followup_activity')
-  );
-  if (followupEnabled && template_id && Array.isArray(responses) && responses.length) {
+  // Enabled for Rajkamal (original) plus any client id in
+  // FORM_FOLLOWUP_ACTIVITY_CLIENT_IDS (Spark & Ray etc.). A pure in-memory set
+  // check — no DB round-trip per submit — so other tenants' date fields never
+  // start spawning activities and the submit path stays as lean as before.
+  if (submitterClientId && FOLLOWUP_ACTIVITY_CLIENT_IDS.has(submitterClientId.toLowerCase())
+      && template_id && Array.isArray(responses) && responses.length) {
     try {
       const { data: dateQs } = await supabaseAdmin
         .from('builder_questions')
