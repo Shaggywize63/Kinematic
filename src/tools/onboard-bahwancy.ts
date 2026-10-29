@@ -3,14 +3,17 @@
  * Onboard "Bahwancy" — a PLANOGRAM-ONLY client under the KINEMATIC tenant.
  *
  * Bahwancy's field rep gets a deliberately stripped-down app with a single
- * action — "Store audit": open the camera, shoot the shelf, submit. The
- * compliance analysis is read back in the dashboard ("the backend"). The store
- * name is entered by hand on-device (free text), so this client needs NO
- * `stores` module and NO backend store list — it mirrors the MoiSoi storeless
- * planogram shell exactly. The app-side single-purpose shell is gated by this
- * client's id (a compile-time constant in Kinematic-App `Entitlements.kt` and
- * Kinematic-iOS `ClientFeatureGates.swift`, mirroring `isMoiSoi`); run this tool
- * in --inspect FIRST to print the real org_id / client_id to wire those gates.
+ * action — "Store audit": pick a store from a DROPDOWN, open the camera, shoot
+ * the shelf, submit. The compliance analysis is read back in the dashboard
+ * ("the backend"). The store dropdown is populated from the backend store list
+ * (GET /api/v1/stores, module-gated on `stores`), and the chosen store tags the
+ * capture's store_id — so this client needs BOTH the `planograms` and `stores`
+ * modules, and its stores must be populated (Client Management / dashboard).
+ * It mirrors the MoiSoi planogram shell but store-backed, not storeless. The
+ * app-side single-purpose shell is gated by this client's id (a compile-time
+ * constant in Kinematic-App `Entitlements.kt` and Kinematic-iOS
+ * `ClientFeatureGates.swift`, mirroring `isMoiSoi`); run this tool in --inspect
+ * FIRST to print the real org_id / client_id to wire those gates.
  *
  * ADOPTS an already-created client (operator chose "adopt existing"): the org +
  * client + its existing admin were created in Client Management, so this tool
@@ -87,9 +90,11 @@ if (SEAT_LIMIT !== undefined && (!Number.isInteger(SEAT_LIMIT) || SEAT_LIMIT < 1
   process.exit(1);
 }
 
-// The only module Bahwancy buys. The planogram routes (/api/v1/planograms) are
-// module-gated on `planograms`, so without this grant every capture 403s.
-const GRANT_MODULES = ['planograms'];
+// The modules Bahwancy buys. The planogram routes (/api/v1/planograms) are
+// module-gated on `planograms`, so without that grant every capture 403s; the
+// "Store audit" store dropdown fetches GET /api/v1/stores, module-gated on
+// `stores` (readOpen), so the list is empty/403 without it.
+const GRANT_MODULES = ['planograms', 'stores'];
 // The app menu entry Bahwancy's rep sees, relabelled from the default "Planogram".
 const MENU_ID = 'planogram';
 const MENU_LABEL = 'Store audit';
@@ -271,8 +276,9 @@ async function main() {
 
   log(`\n=== ${dry ? 'DRY-RUN complete (nothing written)' : 'COMMIT complete'} ===`);
   log(`Bahwancy org=${orgId} client=${clientId}`);
-  log(`Module: ${GRANT_MODULES.join(', ')} · Field seat: ${FIELD_EMAIL} · Menu label: "${MENU_LABEL}"`);
-  log('Next: wire isBahwancy(client_id above) in Kinematic-App Entitlements.kt + Kinematic-iOS ClientFeatureGates.swift so the app opens the planogram-only "Store audit" shell.');
+  log(`Modules: ${GRANT_MODULES.join(', ')} · Field seat: ${FIELD_EMAIL} · Menu label: "${MENU_LABEL}"`);
+  log('Reminder: populate Bahwancy stores (Client Management / dashboard) so the "Store audit" dropdown has entries — GET /api/v1/stores drives it.');
+  log('Next: wire isBahwancy(client_id above) in Kinematic-App Entitlements.kt + Kinematic-iOS ClientFeatureGates.swift so the app opens the planogram "Store audit" shell with the store dropdown.');
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error('[onboard-bahwancy] FAILED:', e?.message || e); process.exit(1); });
