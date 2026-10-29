@@ -76,7 +76,7 @@ export const getTemplates = asyncHandler<AuthRequest>(async (req, res) => {
   // DVGPL Retailer Survey) reaches only that client's apps. Platform admins with
   // no client scope (targetCid null) see every form. Combined with the activity
   // filter below as AND, so a form must be both in scope and match the activity.
-  const headerClientId = (req.headers['x-client-id'] as string | undefined) || undefined;
+  const headerClientId = (req.headers?.['x-client-id'] as string | undefined) || undefined;
   const targetCid: string | null = isUUID(user.client_id) ? (user.client_id as string)
     : isUUID(req.query.client_id as string) ? (req.query.client_id as string)
     : isUUID(headerClientId) ? (headerClientId as string)

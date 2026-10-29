@@ -26,7 +26,7 @@ const builderEnforced = () => enforcedUnlessOff("BUILDER_ORG_ENFORCE");
  *   4. none           — platform admin with no picker → sees all in org.
  */
 function callerClientId(req: AuthRequest): string | null {
-  const header = (req.headers["x-client-id"] as string | undefined) || undefined;
+  const header = (req.headers?.["x-client-id"] as string | undefined) || undefined;
   return isUUID(req.user?.client_id) ? (req.user!.client_id as string)
     : isUUID(req.query.client_id as string) ? (req.query.client_id as string)
     : isUUID(header) ? (header as string)
@@ -104,7 +104,7 @@ router.post(
     // Stamp the new form with the caller's client so it is isolated to that
     // tenant (precedence matches the read filter / buildCRUD create). A form
     // created by an org-level admin with no client scope stays NULL (shared).
-    const header = (req.headers["x-client-id"] as string | undefined) || undefined;
+    const header = (req.headers?.["x-client-id"] as string | undefined) || undefined;
     const pickedClientId: string | null =
       isUUID(client_id) ? (client_id as string)
       : isUUID(header) ? (header as string)
