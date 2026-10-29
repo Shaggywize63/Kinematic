@@ -6,6 +6,7 @@
 import {
   buildTransportModes, validateTransportMode, labelForTransportMode, humanizeTransportMode, isFixedTransportMode,
   hasTransportModeValue, trackTransportModeOn, TRANSPORT_MODE_ID_RE, FIXED_TRANSPORT_MODES, DEFAULT_VEHICLE_TRANSPORT_MODES,
+  extraTransportModesFromSettings,
 } from '../src/services/transportMode.service';
 
 const POLICY_VEHICLES = [
@@ -45,6 +46,52 @@ describe('buildTransportModes', () => {
     expect(FIXED_TRANSPORT_MODES[0].label).toBe('Public transport');
     expect(DEFAULT_VEHICLE_TRANSPORT_MODES.map((m) => m.id)).toEqual(['two_wheeler', 'car']);
   });
+
+  it('inserts the client\'s extra modes (Train, Walk) after the vehicles, as non-vehicle, before public transport / other', () => {
+    const extra = [{ id: 'train', label: 'Train' }, { id: 'walk', label: 'Walk' }];
+    expect(buildTransportModes(POLICY_VEHICLES, extra)).toEqual([
+      { id: 'own_bike', label: 'Own Bike', vehicle: true },
+      { id: 'own_car', label: 'Own Car', vehicle: true },
+      { id: 'train', label: 'Train', vehicle: false },
+      { id: 'walk', label: 'Walk', vehicle: false },
+      { id: 'public_transport', label: 'Public transport', vehicle: false },
+      { id: 'other', label: 'Other', vehicle: false },
+    ]);
+  });
+
+  it('extra modes also apply on the default-vehicle path and ignore malformed / duplicate entries', () => {
+    const extra = [
+      { id: 'train', label: 'Train' },
+      { id: 'BAD ID', label: 'x' } as any,   // id fails the regex → dropped
+      { id: 'walk', label: '  ' } as any,     // blank label → dropped
+      { id: 'other', label: 'My Other' },      // dupes a fixed id → first-wins keeps the extra's label
+    ];
+    const modes = buildTransportModes(null, extra);
+    expect(modes.map((m) => m.id)).toEqual(['two_wheeler', 'car', 'train', 'other', 'public_transport']);
+    expect(modes.find((m) => m.id === 'train')).toEqual({ id: 'train', label: 'Train', vehicle: false });
+    expect(modes.find((m) => m.id === 'other')).toEqual({ id: 'other', label: 'My Other', vehicle: false });
+  });
+});
+
+describe('extraTransportModesFromSettings', () => {
+  it('reads attendance_rules.extra_transport_modes, keeping only well-formed {id,label} and trimming labels', () => {
+    const settings = { attendance_rules: { extra_transport_modes: [
+      { id: 'train', label: ' Train ' },
+      { id: 'walk', label: 'Walk' },
+      { id: 'Bad', label: 'nope' },  // uppercase id fails the regex
+      { id: 'x', label: 42 },         // non-string label
+      'garbage',
+    ] } };
+    expect(extraTransportModesFromSettings(settings)).toEqual([
+      { id: 'train', label: 'Train' },
+      { id: 'walk', label: 'Walk' },
+    ]);
+  });
+
+  it.each([[null], [undefined], [{}], [{ attendance_rules: {} }], [{ attendance_rules: { extra_transport_modes: 'no' } }]])(
+    'returns [] for missing / malformed config (%p) so existing clients are unchanged', (s) => {
+      expect(extraTransportModesFromSettings(s as any)).toEqual([]);
+    });
 });
 
 describe('validateTransportMode', () => {
