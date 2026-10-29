@@ -52,6 +52,28 @@ describe('GET /forms/templates', () => {
 });
 
 /**
+ * Per-client isolation: a client-scoped rep (client_id on their JWT) only sees
+ * org-shared forms (client_id IS NULL) plus their own client's forms, so a
+ * form scoped to another client (e.g. the DVGPL Retailer Survey) never reaches
+ * them. A platform admin with no client scope sees every form (no client or-filter).
+ */
+describe('GET /forms/templates — per-client isolation', () => {
+  const CLIENT_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const clientOrs = () => __mock.chainsFor('builder_forms')[0].ors.filter((o) => o.includes('client_id'));
+
+  it('scopes a client-pinned rep to shared + own forms', async () => {
+    const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    await (getTemplates as any)({ user: { ...USER, client_id: CLIENT_ID }, query: {} }, res, jest.fn());
+    expect(clientOrs()).toEqual([`client_id.is.null,client_id.eq.${CLIENT_ID}`]);
+  });
+
+  it('does not add a client filter for a platform admin with no client scope', async () => {
+    await listTemplates({});
+    expect(clientOrs()).toEqual([]);
+  });
+});
+
+/**
  * The Android/iOS shape built by getTemplates used to drop the builder's per-question `validation`
  * (a rating's "Max Stars" = validation.max, min/max length, …). It is now passed through — additively.
  */
