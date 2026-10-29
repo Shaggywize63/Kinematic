@@ -30,6 +30,7 @@ import { hasTransportModeValue, trackTransportModeOn, validateTransportMode } fr
 import { annotateTransportLabels, transportModesForUser } from '../services/transportMode.store';
 import { resolveTenantScope } from '../lib/tenantScope';
 import { assertUserReachable } from '../lib/userGuard';
+import { openCheckinSession, closeOpenSession, dayMinutes, attachSessions } from '../services/attendanceSessions.service';
 
 const checkinSchema = z.object({
   latitude: z.number().min(-90).max(90),
@@ -154,14 +155,24 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
 
   const existing = existingResult.data;
 
-  if (existing) {
-    logger.info(`[Attendance] user=${user.id} already has a record for ${attendanceDate}. Returning existing.`);
+  // A shift already OPEN today (checked_in / on_break): a repeat tap is idempotent —
+  // return the open record rather than 409-ing a double-punch, exactly as before.
+  if (existing && existing.status !== 'checked_out') {
+    logger.info(`[Attendance] user=${user.id} already has an open shift for ${attendanceDate}. Returning existing.`);
     const existingRecord = enrichWithHours(existing);
     await annotateLate([existingRecord], user.client_id);
     await annotateTransportLabels([existingRecord], { orgId: user.org_id, clientId: user.client_id });
+    await attachSessions(existingRecord, user.id);
     ok(res, existingRecord);
     return;
   }
+
+  // existing && status === 'checked_out' → the rep checked out earlier and is checking
+  // in again: multiple check-in/out per day. We REOPEN today's attendance row (the daily
+  // rollup — keeping its first check-in) and record a fresh session below, instead of
+  // inserting a second daily row. Selfie / geofence / transport are still enforced below
+  // exactly as for a first check-in.
+  const isReopen = !!existing;
 
   // Enforce selfie for field executives — unless the client opted out with the
   // attendance rule `selfie_required:false` (a GPS-only punch; the selfie columns
@@ -251,15 +262,53 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
     .select('*, breaks(*)')
     .single();
 
-  let { data, error } = await saveCheckin(transportMode === undefined ? checkinRow : { ...checkinRow, transport_mode: transportMode });
-  if (error && transportMode !== undefined && /transport_mode/i.test(error.message ?? '')) {
-    // The client turned the rule on but this project has no `attendance.transport_mode` column yet
-    // (migrations/attendance_transport_mode.sql not applied here). The punch itself must not fail.
-    logger.warn(`[Attendance] transport_mode column missing; checked user=${user.id} in without it: ${error.message}`);
-    ({ data, error } = await saveCheckin(checkinRow));
+  // Reopen patch for a re-check-in: flip the daily row back on-shift and clear the
+  // prior checkout, WITHOUT touching its first check-in (the rollup keeps the day's
+  // first punch). `withTransport` lets us retry without the column if it's absent.
+  const saveReopen = (withTransport: boolean) => supabaseAdmin
+    .from('attendance')
+    .update({
+      status: 'checked_in',
+      checkout_at: null,
+      checkout_selfie_url: null,
+      ...(activity_id !== undefined && { activity_id }),
+      ...(resolvedZoneId != null && { zone_id: resolvedZoneId }),
+      ...(withTransport && transportMode !== undefined && { transport_mode: transportMode }),
+    })
+    .eq('id', existing!.id)
+    .select('*, breaks(*)')
+    .single();
+
+  let data: any, error: any;
+  if (isReopen) {
+    ({ data, error } = await saveReopen(true));
+    if (error && transportMode !== undefined && /transport_mode/i.test(error.message ?? '')) {
+      logger.warn(`[Attendance] transport_mode column missing; reopened user=${user.id} without it: ${error.message}`);
+      ({ data, error } = await saveReopen(false));
+    }
+  } else {
+    ({ data, error } = await saveCheckin(transportMode === undefined ? checkinRow : { ...checkinRow, transport_mode: transportMode }));
+    if (error && transportMode !== undefined && /transport_mode/i.test(error.message ?? '')) {
+      // The client turned the rule on but this project has no `attendance.transport_mode` column yet
+      // (migrations/attendance_transport_mode.sql not applied here). The punch itself must not fail.
+      logger.warn(`[Attendance] transport_mode column missing; checked user=${user.id} in without it: ${error.message}`);
+      ({ data, error } = await saveCheckin(checkinRow));
+    }
   }
 
   if (error) { badRequest(res, error.message); return; }
+
+  // Record THIS punch as an open session on top of the daily row. Best-effort:
+  // the daily row is already written and authoritative.
+  await openCheckinSession({
+    attendanceId: data.id,
+    userId: user.id,
+    orgId: user.org_id,
+    clientId: user.client_id ?? null,
+    date: attendanceDate,
+    checkinAt: checkinAt.toISOString(),
+    punch: { latitude, longitude, selfie_url, distance_m: distanceMetres, is_mock, accuracy_m: location_accuracy_m, transport_mode: transportMode },
+  });
 
   // Respond IMMEDIATELY. The two follow-up writes below are pure telemetry
   // (work_activity log + last-known-location for the live tracking map);
@@ -268,7 +317,12 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   const checkinRecord = enrichWithHours(data);
   await annotateLate([checkinRecord], user.client_id);
   await annotateTransportLabels([checkinRecord], { orgId: user.org_id, clientId: user.client_id });
+  await attachSessions(checkinRecord, user.id);
   created(res, checkinRecord, 'Checked in successfully');
+
+  // This punch's own time — equals data.checkin_at on a first check-in; on a re-check-in
+  // the daily row keeps the day's FIRST check-in, so use the live punch for telemetry.
+  const punchAtIso = checkinAt.toISOString();
 
   // Fire-and-forget telemetry. Errors are logged but never returned.
   Promise.all([
@@ -280,14 +334,14 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
       activity_type: 'CHECK_IN',
       lat: latitude,
       lng: longitude,
-      captured_at: data.checkin_at,
+      captured_at: punchAtIso,
     }),
     // A backdated (offline-synced) punch must not overwrite a fresher live position.
     isBackdated(capture) ? Promise.resolve() : supabaseAdmin.from('users').update({
       last_latitude: latitude,
       last_longitude: longitude,
       battery_percentage: battery_percentage !== undefined ? battery_percentage : undefined,
-      last_location_updated_at: data.checkin_at,
+      last_location_updated_at: punchAtIso,
     }).eq('id', user.id),
   ]).catch((err) => {
     logger.warn(`[Attendance] post-checkin telemetry failed for user=${user.id}: ${err?.message || err}`);
@@ -334,7 +388,20 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
 
   if (findError) { badRequest(res, findError.message); return; }
   if (!record) { badRequest(res, 'No check-in found. Please check in first.'); return; }
-  if (record.status === 'checked_out') { conflict(res, 'Already checked out for this shift'); return; }
+
+  // The rep's currently-open session for this shift's day (multiple check-in/out).
+  const { data: openSession } = await supabaseAdmin
+    .from('attendance_sessions')
+    .select('id, checkin_at')
+    .eq('user_id', user.id)
+    .eq('date', record.date)
+    .eq('status', 'open')
+    .order('seq', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  // Fully closed for the day: the rollup says checked out AND no session is open.
+  if (record.status === 'checked_out' && !openSession) { conflict(res, 'Already checked out for this shift'); return; }
 
   // Enforce selfie for field executives (see selfieRequiredFor — opt-out per client).
   if (user.role === 'executive' && !selfie_url && await selfieRequiredFor(user.client_id)) {
@@ -342,14 +409,29 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
     return;
   }
 
-  // Offline capture (see decideCapturedAt); a checkout can never precede the shift's check-in.
-  const capture = await resolveCapture(req, 'checkout', {
-    notBeforeMs: record.checkin_at ? Date.parse(record.checkin_at) : null,
-  });
+  // Offline capture (see decideCapturedAt); a checkout can never precede the punch it
+  // closes — the open session's check-in when there is one, else the day's check-in.
+  const sessionCheckinMs = openSession?.checkin_at
+    ? Date.parse(openSession.checkin_at as string)
+    : (record.checkin_at ? Date.parse(record.checkin_at) : null);
+  const capture = await resolveCapture(req, 'checkout', { notBeforeMs: sessionCheckinMs });
   const checkoutTime = capture.at ?? new Date();
-  const checkinTime = new Date(record.checkin_at!);
-  const totalMinutes = Math.round((checkoutTime.getTime() - checkinTime.getTime()) / 60000);
-  const workingMinutes = totalMinutes - (record.break_minutes || 0);
+
+  // Close the open session (if any) and roll the day's worked minutes up into the
+  // daily attendance row. Sessions-tracked day → SUM of closed sessions (excludes
+  // the gaps between punches); legacy day with no sessions → the single
+  // check-in → check-out span, exactly as before. Break minutes are subtracted once.
+  await closeOpenSession({
+    userId: user.id,
+    date: record.date,
+    checkoutAt: checkoutTime.toISOString(),
+    punch: { latitude, longitude, selfie_url, is_mock, accuracy_m: location_accuracy_m },
+  });
+  const { sum: sessionSum, count: sessionCount } = await dayMinutes(user.id, record.date);
+  const grossMinutes = sessionCount > 0
+    ? sessionSum
+    : Math.round((checkoutTime.getTime() - new Date(record.checkin_at!).getTime()) / 60000);
+  const workingMinutes = grossMinutes - (record.break_minutes || 0);
 
   const { data: updatedRecord, error } = await supabaseAdmin
     .from('attendance')
@@ -378,6 +460,7 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   const checkoutRecord = enrichWithHours(updatedRecord);
   await annotateLate([checkoutRecord], user.client_id);
   await annotateTransportLabels([checkoutRecord], { orgId: user.org_id, clientId: user.client_id });
+  await attachSessions(checkoutRecord, user.id);
   ok(res, checkoutRecord, 'Checked out successfully');
 
   // Fire-and-forget: work_activity log + clear live location.
@@ -553,6 +636,7 @@ export const getToday = asyncHandler<AuthRequest>(async (req, res) => {
   const todayRecord = enrichWithHours(record);
   await annotateLate([todayRecord], user.client_id);
   await annotateTransportLabels([todayRecord], { orgId: user.org_id, clientId: user.client_id });
+  if (todayRecord) await attachSessions(todayRecord, user.id);
   ok(res, todayRecord);
 });
 
