@@ -226,10 +226,14 @@ export const scanBusinessCard = asyncHandler<AuthRequest>(async (req, res) => {
 export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return created(res, { id: 'demo-sub-id', ...req.body }, 'Submission successful (Demo)');
-  const { 
-    template_id, activity_id, outlet_id, outlet_name, latitude, longitude, 
-    check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address, responses 
+  const {
+    template_id, activity_id, outlet_id, outlet_name, latitude, longitude,
+    check_in_at, check_out_at, check_in_gps, check_out_gps, gps, address, responses,
+    // CRM visit links (optional; stamped by the field app's visit flow). Old
+    // app builds send none, so these fall back to null — fully backward-compatible.
+    account_id, site_id, contact_id, deal_id, visit_id
   } = req.body;
+  const isUuid = (x: unknown): x is string => typeof x === 'string' && isUUID(x);
   // Optional geo-gate: tenants that require every submission to be geo-stamped
   // set the client flag `require_location_for_forms`. Default OFF, so existing
   // tenants keep submitting exactly as before. When ON and no fix is attached,
@@ -314,7 +318,14 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     template_id, activity_id, outlet_id, outlet_name,
     latitude, longitude, submitted_at: new Date().toISOString(),
     check_in_at: visit.check_in_at, check_out_at: visit.check_out_at, check_in_gps, check_out_gps, gps, address: resolvedAddress,
-    duration_minutes: visit.duration_minutes
+    duration_minutes: visit.duration_minutes,
+    // CRM visit links — only persist valid UUIDs so a malformed value never
+    // fails the submission (the field stays null, matching old-app behaviour).
+    account_id: isUuid(account_id) ? account_id : null,
+    site_id: isUuid(site_id) ? site_id : null,
+    contact_id: isUuid(contact_id) ? contact_id : null,
+    deal_id: isUuid(deal_id) ? deal_id : null,
+    visit_id: isUuid(visit_id) ? visit_id : null,
   }).select().single();
   if (subErr) return badRequest(res, subErr.message);
   const respRows = (responses || []).map((r: any) => {
@@ -365,7 +376,14 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   // mechanism Schedule-Visit and the marketing-visit follow-up already use.
   // form_submissions has no lead_id, so the reminder is addressed to the
   // submitting rep (assigned_to). Best-effort: a failure never fails the submit.
-  if (submitterClientId === RAJKAMAL_CLIENT_ID && template_id && Array.isArray(responses) && responses.length) {
+  // Enabled for Rajkamal (original) and any client with the
+  // `form_followup_activity` flag (Spark & Ray etc.) — kept flag-gated so other
+  // tenants' date fields don't silently start spawning activities.
+  const followupEnabled = !!submitterClientId && (
+    submitterClientId === RAJKAMAL_CLIENT_ID ||
+    await clientHasFlag(submitterClientId, 'form_followup_activity')
+  );
+  if (followupEnabled && template_id && Array.isArray(responses) && responses.length) {
     try {
       const { data: dateQs } = await supabaseAdmin
         .from('builder_questions')
@@ -398,6 +416,13 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
               owner_id: user.id,
               assigned_to: user.id,
               due_at: due.toISOString(),
+              // Link to the visit's CRM records (when the field app stamped them)
+              // so the follow-up shows on the account/deal timeline + calendar and
+              // syncs to Google Calendar, not just as a standalone rep reminder.
+              account_id: isUuid(account_id) ? account_id : null,
+              contact_id: isUuid(contact_id) ? contact_id : null,
+              deal_id: isUuid(deal_id) ? deal_id : null,
+              site_id: isUuid(site_id) ? site_id : null,
               metadata: { kind: 'form_followup', source_submission_id: sub.id, field_label: followupField.label ?? null },
             }, user.id);
           }
