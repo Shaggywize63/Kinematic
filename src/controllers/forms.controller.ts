@@ -494,7 +494,7 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockSubmissionDetails(req.params.id));
   const { id } = req.params;
-  const { data: sub } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title), activities(name)').eq('id', id).single();
+  const { data: sub } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title), activities(name), crm_accounts(name)').eq('id', id).single();
   // One org's rows only, on every project: a submission id from another org is a 404, not a read.
   if (sub && (sub as { user_id?: string }).user_id !== user.id && !callerMayReadOrg(user, (sub as { org_id?: string | null }).org_id)) return notFound(res);
   if (sub) {
