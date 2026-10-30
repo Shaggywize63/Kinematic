@@ -253,6 +253,12 @@ router.get('/analytics/store-ranking', asyncHandler(async (req: AuthRequest, res
 router.get('/analytics/chronic-gaps', asyncHandler(async (req: AuthRequest, res: Response) => {
   res.json({ success: true, data: await PlanogramAnalyticsService.chronicGaps(req.user.org_id) });
 }));
+// On-shelf availability rolled up by channel (store_type). Org-scoped; last
+// `days` (default 30, max 365).
+router.get('/analytics/osa-by-channel', asyncHandler(async (req: AuthRequest, res: Response) => {
+  const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+  res.json({ success: true, data: await PlanogramAnalyticsService.osaByChannel(req.user.org_id, days) });
+}));
 router.get('/analytics/sku-visibility', asyncHandler(async (req: AuthRequest, res: Response) => {
   const days = Math.min(60, Math.max(1, Number(req.query.days) || 14));
   res.json({ success: true, data: await PlanogramAnalyticsService.skuVisibility(req.user.org_id, days) });
