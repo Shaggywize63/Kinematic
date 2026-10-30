@@ -1662,6 +1662,17 @@ leads.get('/:id/activities', wrap(async (req, res) => {
 leads.get('/:id/deals', wrap(async (req, res) => res.json(
   await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query })
 )));
+// Contacts captured on this lead — the B2B contact-persons and each one's
+// `requirement`. Org-scoped only (mirrors accounts/:id/contacts), NOT owner-
+// filtered, so a revisit by ANY field rep sees everyone logged on the lead,
+// not just the caller's own contacts. The dashboard auto-attaches the global
+// city scope to every /leads/* GET; crm_contacts.city would then drop a
+// contact whose city is blank or differs, even though lead_id already scopes
+// to one lead — so strip the geo keys, exactly as /:id/activities does.
+leads.get('/:id/contacts', wrap(async (req, res) => {
+  const { city: _c, state: _s, district: _d, block: _b, ...rest } = req.query as Record<string, unknown>;
+  return res.json(await crud.list('crm_contacts', orgId(req), { lead_id: req.params.id, ...rest }));
+}));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   // owner_assignment = 'admin_only': assigning is the whole point of this endpoint, so a non-admin is refused (403).
