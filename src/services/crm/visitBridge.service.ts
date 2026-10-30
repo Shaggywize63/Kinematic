@@ -148,6 +148,7 @@ export interface ContactInput {
   id?: string | null;
   account_id?: string | null;
   site_id?: string | null;
+  lead_id?: string | null;
   first_name?: string | null;
   last_name?: string | null;
   email?: string | null;
@@ -155,6 +156,8 @@ export interface ContactInput {
   mobile?: string | null;
   title?: string | null;
   department?: string | null;
+  /** What this person at the customer is asking for (B2B multi-contact capture). */
+  requirement?: string | null;
   owner_id?: string | null;
 }
 
@@ -191,6 +194,7 @@ export async function findOrCreateContact(ctx: BridgeCtx, input: ContactInput): 
   const insert = stamp(ctx, {
     account_id: input.account_id ?? null,
     site_id: input.site_id ?? null,
+    lead_id: input.lead_id ?? null,
     first_name: first || null,
     last_name: last || null,
     email: email || null,
@@ -198,6 +202,7 @@ export async function findOrCreateContact(ctx: BridgeCtx, input: ContactInput): 
     mobile: norm(input.mobile) || null,
     title: norm(input.title) || null,
     department: norm(input.department) || null,
+    requirement: norm(input.requirement) || null,
     owner_id: input.owner_id ?? ctx.user_id ?? null,
   });
   const { data, error } = await supabaseAdmin.from('crm_contacts').insert(insert).select('id').single();
@@ -211,15 +216,23 @@ async function attachSite(ctx: BridgeCtx, contactId: string, input: ContactInput
   if (input.site_id) patch.site_id = input.site_id;
   // Back-fill only columns that are currently blank, never overwrite real data.
   const { data: cur } = await supabaseAdmin.from('crm_contacts')
-    .select('site_id, title, department, email, phone, mobile')
+    .select('site_id, lead_id, title, department, email, phone, mobile, requirement')
     .eq('org_id', ctx.org_id).eq('id', contactId).maybeSingle();
   if (cur) {
     if (!cur.site_id && input.site_id) patch.site_id = input.site_id;
+    if (!cur.lead_id && input.lead_id) patch.lead_id = input.lead_id;
     if (!cur.title && norm(input.title)) patch.title = norm(input.title);
     if (!cur.department && norm(input.department)) patch.department = norm(input.department);
     if (!cur.email && norm(input.email)) patch.email = norm(input.email).toLowerCase();
     if (!cur.phone && norm(input.phone)) patch.phone = norm(input.phone);
     if (!cur.mobile && norm(input.mobile)) patch.mobile = norm(input.mobile);
+    // A fresh requirement from this visit is appended, never silently dropped or
+    // overwritten — the same person can ask for different things on different trips.
+    if (norm(input.requirement)) {
+      patch.requirement = cur.requirement
+        ? `${cur.requirement}\n• ${norm(input.requirement)}`
+        : norm(input.requirement);
+    }
   }
   if (Object.keys(patch).length) {
     await supabaseAdmin.from('crm_contacts').update(patch).eq('org_id', ctx.org_id).eq('id', contactId);
@@ -313,5 +326,191 @@ export async function resolveVisitIntake(ctx: BridgeCtx, input: VisitIntakeInput
       account: account.created,
       contacts: contacts.filter((c) => c.created).length,
     },
+  };
+}
+
+// ─────────────────────────────────────────────────────────── lead → company
+
+export interface LeadCompanyInput {
+  lead_id: string;
+  /** An existing account the rep picked; takes priority over resolving by name. */
+  account_id?: string | null;
+  company?: string | null;
+  industry?: string | null;
+  owner_id?: string | null;
+  contacts?: ContactInput[];
+}
+
+/**
+ * B2B lead capture: turn the lead's company into a real CRM account (de-duped),
+ * link the lead to it, and resolve every contact-with-requirement the rep logged
+ * against both the account and the lead. Idempotent — re-opening the same company
+ * converges on the one account and its existing contacts instead of duplicating.
+ * Returns the resolved account id and the contact ids (nothing created when there
+ * is no company name to anchor on).
+ */
+export async function linkLeadToCompany(
+  ctx: BridgeCtx,
+  input: LeadCompanyInput,
+): Promise<{ account_id: string | null; contact_ids: string[] }> {
+  const company = norm(input.company);
+  if (!company && !input.account_id) return { account_id: null, contact_ids: [] };
+
+  const account = await findOrCreateAccount(ctx, {
+    id: input.account_id ?? null,
+    name: company || null,
+    industry: input.industry ?? null,
+    owner_id: input.owner_id ?? null,
+  });
+  // Pin the lead to its account (additive column; see migration_b2b_lead_account_contacts.sql).
+  await supabaseAdmin.from('crm_leads')
+    .update({ account_id: account.id })
+    .eq('org_id', ctx.org_id).eq('id', input.lead_id);
+
+  const contactIds: string[] = [];
+  for (const c of input.contacts ?? []) {
+    // Skip an entirely empty contact row from the form.
+    if (!norm(c.first_name) && !norm(c.last_name) && !norm(c.email) && !norm(c.phone) && !norm(c.mobile)) continue;
+    const resolved = await findOrCreateContact(ctx, {
+      ...c,
+      account_id: account.id,
+      lead_id: input.lead_id,
+      owner_id: c.owner_id ?? input.owner_id ?? null,
+    });
+    contactIds.push(resolved.id);
+  }
+  return { account_id: account.id, contact_ids: contactIds };
+}
+
+// ─────────────────────────────────────────────────────────── account timeline
+
+/** A single thing that happened at a customer — a visit, a form, or a follow-up. */
+export interface TimelineEvent {
+  kind: 'visit' | 'submission' | 'activity';
+  id: string;
+  at: string | null;
+  user_id: string | null;
+  user_name: string | null;
+  site_id?: string | null;
+  title: string;
+  detail?: string | null;
+  status?: string | null;
+  form_title?: string | null;
+  answers?: Array<{ label: string; value: string | null; photo_url: string | null }>;
+}
+
+/**
+ * The management timeline for one customer account: every visit, form submission
+ * and follow-up logged against it, who did it (the acting FE), and the answers
+ * each form captured — plus a per-FE rollup ("how many FEs visited, who, and
+ * what they captured"). Tenant-scoped exactly like getAccountBundle.
+ */
+export async function getAccountTimeline(ctx: BridgeCtx, accountId: string) {
+  const { data: account } = await scoped(supabaseAdmin.from('crm_accounts').select('*'), ctx)
+    .eq('id', accountId).maybeSingle();
+  if (!account) throw new AppError(404, 'Account not found', 'NOT_FOUND');
+
+  // Pull the three event sources for this account in parallel. form_submissions /
+  // crm_visits carry the acting FE as user_id; crm_activities as assigned_to/created_by.
+  const [visitsRes, subsRes, actsRes] = await Promise.all([
+    scoped(supabaseAdmin.from('crm_visits').select('*'), ctx)
+      .eq('account_id', accountId).order('visit_date', { ascending: false }).limit(500),
+    scoped(supabaseAdmin.from('form_submissions').select('id, user_id, template_id, site_id, submitted_at, created_at, builder_forms(title)'), ctx)
+      .eq('account_id', accountId).order('submitted_at', { ascending: false }).limit(500),
+    scoped(supabaseAdmin.from('crm_activities').select('*'), ctx)
+      .eq('account_id', accountId).order('created_at', { ascending: false }).limit(500),
+  ]);
+  const visits = visitsRes.data ?? [];
+  const subs = subsRes.data ?? [];
+  const acts = actsRes.data ?? [];
+
+  // The answers captured on each submission (one query), grouped by submission.
+  const subIds = subs.map((s: { id: string }) => s.id);
+  const answersBySub = new Map<string, Array<{ label: string; value: string | null; photo_url: string | null }>>();
+  if (subIds.length) {
+    const { data: resp } = await supabaseAdmin.from('form_responses')
+      .select('submission_id, value_text, value_number, value_bool, photo_url, builder_questions(label, qtype)')
+      .in('submission_id', subIds);
+    for (const r of (resp ?? []) as Array<Record<string, unknown>>) {
+      const sid = r.submission_id as string;
+      const q = (r.builder_questions ?? {}) as { label?: string; qtype?: string };
+      const value = (r.value_text as string | null)
+        ?? (r.value_number != null ? String(r.value_number) : null)
+        ?? (r.value_bool != null ? String(r.value_bool) : null);
+      const list = answersBySub.get(sid) ?? [];
+      list.push({ label: q.label ?? 'Field', value, photo_url: (r.photo_url as string | null) ?? null });
+      answersBySub.set(sid, list);
+    }
+  }
+
+  // Resolve FE names in one query across all three sources.
+  const userIds = new Set<string>();
+  for (const v of visits) if (v.user_id) userIds.add(v.user_id as string);
+  for (const s of subs) if (s.user_id) userIds.add(s.user_id as string);
+  for (const a of acts) { if (a.assigned_to) userIds.add(a.assigned_to as string); else if (a.created_by) userIds.add(a.created_by as string); }
+  const names = new Map<string, string>();
+  if (userIds.size) {
+    const { data: users } = await supabaseAdmin.from('users').select('id, name').in('id', Array.from(userIds));
+    for (const u of (users ?? []) as Array<{ id: string; name: string | null }>) names.set(u.id, u.name ?? '');
+  }
+  const nameOf = (id: string | null | undefined): string | null => (id ? (names.get(id) || null) : null);
+
+  const events: TimelineEvent[] = [];
+  for (const v of visits) {
+    events.push({
+      kind: 'visit', id: v.id as string,
+      at: (v.started_at as string) ?? (v.visit_date as string) ?? (v.created_at as string) ?? null,
+      user_id: (v.user_id as string) ?? null, user_name: nameOf(v.user_id as string),
+      site_id: (v.site_id as string) ?? null,
+      title: 'Plant visit', detail: (v.purpose as string) ?? null, status: (v.status as string) ?? null,
+    });
+  }
+  for (const s of subs) {
+    const form = (s.builder_forms ?? {}) as { title?: string };
+    events.push({
+      kind: 'submission', id: s.id as string,
+      at: (s.submitted_at as string) ?? (s.created_at as string) ?? null,
+      user_id: (s.user_id as string) ?? null, user_name: nameOf(s.user_id as string),
+      site_id: (s.site_id as string) ?? null,
+      title: form.title || 'Form submission', form_title: form.title || null,
+      answers: answersBySub.get(s.id as string) ?? [],
+    });
+  }
+  for (const a of acts) {
+    const actor = (a.assigned_to as string) ?? (a.created_by as string) ?? null;
+    events.push({
+      kind: 'activity', id: a.id as string,
+      at: (a.completed_at as string) ?? (a.due_at as string) ?? (a.created_at as string) ?? null,
+      user_id: actor, user_name: nameOf(actor),
+      site_id: (a.site_id as string) ?? null,
+      title: (a.subject as string) || (a.type as string) || 'Activity',
+      detail: (a.body as string) ?? null, status: (a.status as string) ?? null,
+    });
+  }
+  events.sort((x, y) => (Date.parse(y.at ?? '') || 0) - (Date.parse(x.at ?? '') || 0));
+
+  // Per-FE rollup: who visited, and how much each captured.
+  const feMap = new Map<string, { user_id: string; name: string | null; visits: number; submissions: number; last_at: string | null }>();
+  const bump = (uid: string | null, kind: 'visit' | 'submission', at: string | null) => {
+    if (!uid) return;
+    const row = feMap.get(uid) ?? { user_id: uid, name: nameOf(uid), visits: 0, submissions: 0, last_at: null };
+    if (kind === 'visit') row.visits += 1; else row.submissions += 1;
+    if (at && (!row.last_at || Date.parse(at) > Date.parse(row.last_at))) row.last_at = at;
+    feMap.set(uid, row);
+  };
+  for (const v of visits) bump((v.user_id as string) ?? null, 'visit', (v.started_at as string) ?? (v.visit_date as string) ?? null);
+  for (const s of subs) bump((s.user_id as string) ?? null, 'submission', (s.submitted_at as string) ?? null);
+  const fes = Array.from(feMap.values()).sort((a, b) => (Date.parse(b.last_at ?? '') || 0) - (Date.parse(a.last_at ?? '') || 0));
+
+  return {
+    account,
+    summary: {
+      fe_count: fes.length,
+      visit_count: visits.length,
+      submission_count: subs.length,
+      activity_count: acts.length,
+      fes,
+    },
+    timeline: events,
   };
 }

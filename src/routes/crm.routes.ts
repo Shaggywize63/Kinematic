@@ -270,6 +270,16 @@ function clientId(req: Request): string | null { return clientScope(req).id; }
 const bridgeCtx = (req: Request): visitBridge.BridgeCtx =>
   ({ org_id: orgId(req), client_id: clientScope(req).id, user_id: userId(req) });
 
+// Clients whose lead form is B2B: on create, the lead's company becomes a CRM
+// account and the logged contacts-with-requirements are resolved against it.
+// Spark & Ray by default; extend via env B2B_LEAD_CLIENT_IDS (comma-separated).
+// Any other tenant's lead create is completely unchanged.
+const SPARK_CLIENT_ID = 'c0218852-0a19-4dd0-b9fa-72f9e32ed0d8';
+const B2B_LEAD_CLIENT_IDS = new Set<string>(
+  [SPARK_CLIENT_ID, ...(process.env.B2B_LEAD_CLIENT_IDS ?? '').split(',')]
+    .map((s) => s.trim().toLowerCase()).filter(Boolean),
+);
+
 // Tenant gate for KINI / AI features. The cross-tenant ("all clients at once")
 // view is allowed ONLY for super_admin; every other caller must resolve to a
 // single client — either their JWT-pinned client_id or an X-Client-Id picker.
@@ -767,7 +777,10 @@ leads.post('/', idempotency, wrap(async (req, res) => {
   // off before the lead insert (it's not a column on crm_leads), use it
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, schedule_visit: scheduleVisit, ...rest } = parsed;
+  // `contacts` and `account_id` are B2B capture inputs, NOT crm_leads columns —
+  // pop them before the insert and resolve them into the CRM graph afterwards.
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, schedule_visit: scheduleVisit,
+          contacts: leadContacts, account_id: leadAccountId, ...rest } = parsed;
   // client_id is the tenant boundary — always derive it server-side from the
   // caller's scope (which honours a super-admin's X-Client-Id header), never from
   // the request body. See SECURITY_AUDIT_2026-07.md finding H-2.
@@ -924,7 +937,29 @@ leads.post('/', idempotency, wrap(async (req, res) => {
     }
   }
 
-  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse, ...followUpResponse });
+  // B2B (Spark & Ray): the lead's company becomes a CRM account and the logged
+  // contacts-with-requirements are resolved against it + the lead. Best-effort —
+  // the lead already exists, so a linking failure must not fail the create.
+  let b2bResponse: Record<string, unknown> = {};
+  const leadClientId = String(payload.client_id ?? '').toLowerCase();
+  const hasCompany = String(payload.company ?? '').trim().length > 0;
+  if (lead?.id && B2B_LEAD_CLIENT_IDS.has(leadClientId) && (hasCompany || leadAccountId)) {
+    try {
+      const linked = await visitBridge.linkLeadToCompany(bridgeCtx(req), {
+        lead_id: lead.id,
+        account_id: (leadAccountId as string | undefined) ?? null,
+        company: payload.company as string | null ?? null,
+        industry: payload.industry as string | null ?? null,
+        owner_id: (payload.owner_id as string | null) ?? userId(req) ?? null,
+        contacts: (leadContacts as visitBridge.ContactInput[] | undefined) ?? [],
+      });
+      b2bResponse = { account_id: linked.account_id, contact_ids: linked.contact_ids };
+    } catch (e) {
+      console.warn(`[b2b_lead] could not link lead ${lead.id} to its company: ${(e as Error).message}`);
+    }
+  }
+
+  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse, ...followUpResponse, ...b2bResponse });
 }));
 // Approve / reject a pending lead. Restricted to managers — a supervisor/admin
 // role, or any user with HR-module access (matches "notify the manager or a
@@ -2121,6 +2156,11 @@ accounts.get('/:id/sites', wrap(async (req, res) => res.json(
 // company: account + its sites + contacts + open deals.
 accounts.get('/:id/bundle', wrap(async (req, res) => res.json(
   await visitBridge.getAccountBundle(bridgeCtx(req), req.params.id)
+)));
+// Management timeline for one customer: every visit / form / follow-up, which FEs
+// visited and what each captured. Tenant-scoped exactly like /bundle.
+accounts.get('/:id/timeline', wrap(async (req, res) => res.json(
+  await visitBridge.getAccountTimeline(bridgeCtx(req), req.params.id)
 )));
 router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
 

@@ -126,8 +126,30 @@ const b2cBase = {
   alternate_mobiles: z.array(z.string().min(3).max(40)).optional(),
 };
 
+// One person met at a B2B lead's company, with what they asked for. The field
+// apps can log several of these on a single lead (the primary contact plus other
+// stakeholders), each resolved to a crm_contacts row linked to the account + lead.
+// Every part is optional so a half-filled row is tolerated; the service skips a
+// row that carries no identity at all.
+export const leadContactSchema = z.object({
+  first_name: z.string().max(120).optional().nullable(),
+  last_name: z.string().max(120).optional().nullable(),
+  email: z.string().email().optional().nullable(),
+  phone: z.string().max(40).optional().nullable(),
+  mobile: z.string().max(40).optional().nullable(),
+  title: z.string().max(120).optional().nullable(),
+  requirement: z.string().max(4000).optional().nullable(),
+});
+
 const leadCreateBase = z.object({
   client_id: optionalUuid,
+  // B2B: an explicit account to link to (when the rep picked an existing company).
+  // When absent, the service resolves/creates the account from `company` by name.
+  account_id: optionalUuid,
+  // Extra people met at the company, each with their own requirement. Resolved to
+  // crm_contacts (de-duped) and linked to the lead's account. B2B capture only;
+  // absent for every other flow, so nothing changes for them.
+  contacts: z.array(leadContactSchema).max(50).optional(),
   // Name: a lead needs *a* name, but not specifically both parts. Many
   // tenants (e.g. SRS retail construction customers) capture a single
   // given name, and an admin can hide the Last Name field entirely via
