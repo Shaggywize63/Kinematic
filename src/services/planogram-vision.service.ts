@@ -20,6 +20,7 @@
 import { AIService } from './ai.service';
 import { AppError } from '../utils';
 import { logger } from '../lib/logger';
+import { recordVisionUsage } from '../lib/aiUsageMeter';
 
 /** Where a price reading came from. */
 export type PriceSource = 'shelf_tag' | 'on_pack' | 'promo';
@@ -1382,6 +1383,10 @@ export class PlanogramVisionService {
           `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`,
       );
     }
+    // Meter the call for the admin Billing section. Fire-and-forget: attributes
+    // to the request's org/client/capture via AsyncLocalStorage (set by
+    // withMeter around the recognizeShelf call), and never affects the capture.
+    void recordVisionUsage(opts.model, opts.toolName, u);
     const block = Array.isArray(data?.content)
       ? data.content.find((c: any) => c?.type === 'tool_use' && c?.name === opts.toolName)
       : null;
