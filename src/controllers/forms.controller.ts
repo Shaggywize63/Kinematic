@@ -317,6 +317,28 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
+  // A `company`-type field links the whole submission to a CRM account. When the
+  // visit flow didn't already stamp a top-level account_id, adopt the account the
+  // rep picked in that field so Form Activity shows the company. The field stores
+  // the account UUID as its value; mirrors the phone pre-scan above.
+  let effectiveAccountId: unknown = account_id;
+  if (!isUuid(effectiveAccountId) && template_id && Array.isArray(responses) && responses.length) {
+    const { data: companyQs } = await supabaseAdmin
+      .from('builder_questions')
+      .select('id')
+      .eq('form_id', template_id)
+      .eq('qtype', 'company');
+    const companyFields = new Set<string>((companyQs || []).map((q: any) => String(q.id)));
+    if (companyFields.size) {
+      for (const r of responses) {
+        const fieldId = String(r.field_id ?? r.question_id ?? '');
+        if (!companyFields.has(fieldId)) continue;
+        const raw = r.value ?? r.response;
+        if (isUuid(raw)) { effectiveAccountId = raw; break; }
+      }
+    }
+  }
+
   // Stamp the submitter's client_id so the per-client picker on the
   // dashboard scopes correctly. Org-level admins (no JWT client_id) fall
   // back to NULL which keeps the row visible to every picker selection.
@@ -346,7 +368,7 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     duration_minutes: visit.duration_minutes,
     // CRM visit links — only persist valid UUIDs so a malformed value never
     // fails the submission (the field stays null, matching old-app behaviour).
-    account_id: isUuid(account_id) ? account_id : null,
+    account_id: isUuid(effectiveAccountId) ? effectiveAccountId : null,
     site_id: isUuid(site_id) ? site_id : null,
     contact_id: isUuid(contact_id) ? contact_id : null,
     deal_id: isUuid(deal_id) ? deal_id : null,
