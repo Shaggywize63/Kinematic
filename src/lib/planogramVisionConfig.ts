@@ -39,12 +39,22 @@ const DEFAULT_MOISOI_CLIENT_IDS = ['d0000000-0000-4000-a000-000000000002'];
 // Opus for a capture-quality comparison via MOISOI_VISION_MODEL=claude-opus-4-8.
 const DEFAULT_MOISOI_VISION_MODEL = 'claude-sonnet-5';
 
+// AVOD (Bahwancy) dedicated vision key. Fully env-driven with NO default ids, so
+// it is inert until configured: set AVOD_ANTHROPIC_API_KEY plus AVOD's real id
+// (AVOD_CLIENT_IDS=<client_id from onboard-bahwancy --inspect>, and/or
+// AVOD_ORG_IDS). Optional AVOD_VISION_MODEL pins the model; otherwise AVOD runs
+// on its dedicated key with the standard default vision model. Until the key is
+// set, AVOD captures use the shared functional key + default model like everyone
+// else, so nothing changes before the key is integrated.
+const DEFAULT_AVOD_ORG_IDS: string[] = [];
+const DEFAULT_AVOD_CLIENT_IDS: string[] = [];
+
 export interface VisionOverride {
   /** Dedicated key; undefined → caller uses the shared functional key. */
   apiKey?: string;
   /** Model id; undefined → caller uses the default vision model. */
   model?: string;
-  /** 'moisoi' | 'default' — for logging. NEVER the key value. */
+  /** 'moisoi' | 'avod' | 'default' — for logging. NEVER the key value. */
   label: string;
 }
 
@@ -56,12 +66,26 @@ function parseIds(env: string | undefined, fallback: string[]): Set<string> {
   return new Set((raw.length ? raw : fallback).map((s) => s.toLowerCase()));
 }
 
-function isMoiSoi(ctx: { orgId?: string | null; clientId?: string | null }): boolean {
-  const orgIds = parseIds(process.env.MOISOI_ORG_IDS, DEFAULT_MOISOI_ORG_IDS);
-  const clientIds = parseIds(process.env.MOISOI_CLIENT_IDS, DEFAULT_MOISOI_CLIENT_IDS);
+function matchesIds(ctx: { orgId?: string | null; clientId?: string | null }, orgIds: Set<string>, clientIds: Set<string>): boolean {
   const o = (ctx.orgId || '').toLowerCase();
   const c = (ctx.clientId || '').toLowerCase();
   return (!!o && orgIds.has(o)) || (!!c && clientIds.has(c));
+}
+
+function isMoiSoi(ctx: { orgId?: string | null; clientId?: string | null }): boolean {
+  return matchesIds(
+    ctx,
+    parseIds(process.env.MOISOI_ORG_IDS, DEFAULT_MOISOI_ORG_IDS),
+    parseIds(process.env.MOISOI_CLIENT_IDS, DEFAULT_MOISOI_CLIENT_IDS),
+  );
+}
+
+function isAvod(ctx: { orgId?: string | null; clientId?: string | null }): boolean {
+  return matchesIds(
+    ctx,
+    parseIds(process.env.AVOD_ORG_IDS, DEFAULT_AVOD_ORG_IDS),
+    parseIds(process.env.AVOD_CLIENT_IDS, DEFAULT_AVOD_CLIENT_IDS),
+  );
 }
 
 /**
@@ -76,12 +100,23 @@ export function resolveVisionOverride(ctx: {
   orgId?: string | null;
   clientId?: string | null;
 }): VisionOverride {
-  if (!isMoiSoi(ctx)) return { label: 'default' };
-  const apiKey = (process.env.MOISOI_ANTHROPIC_API_KEY || '').trim() || undefined;
-  const explicitModel = (process.env.MOISOI_VISION_MODEL || '').trim() || undefined;
-  const model = explicitModel || (apiKey ? DEFAULT_MOISOI_VISION_MODEL : undefined);
-  if (!apiKey && !model) return { label: 'default' };
-  return { apiKey, model, label: 'moisoi' };
+  if (isMoiSoi(ctx)) {
+    const apiKey = (process.env.MOISOI_ANTHROPIC_API_KEY || '').trim() || undefined;
+    const explicitModel = (process.env.MOISOI_VISION_MODEL || '').trim() || undefined;
+    const model = explicitModel || (apiKey ? DEFAULT_MOISOI_VISION_MODEL : undefined);
+    if (!apiKey && !model) return { label: 'default' };
+    return { apiKey, model, label: 'moisoi' };
+  }
+  // AVOD (Bahwancy): its own dedicated key. No forced model — AVOD runs on the
+  // standard default vision model unless AVOD_VISION_MODEL pins one. Inert until
+  // AVOD_ANTHROPIC_API_KEY (or AVOD_VISION_MODEL) is set.
+  if (isAvod(ctx)) {
+    const apiKey = (process.env.AVOD_ANTHROPIC_API_KEY || '').trim() || undefined;
+    const model = (process.env.AVOD_VISION_MODEL || '').trim() || undefined;
+    if (!apiKey && !model) return { label: 'default' };
+    return { apiKey, model, label: 'avod' };
+  }
+  return { label: 'default' };
 }
 
 /**
