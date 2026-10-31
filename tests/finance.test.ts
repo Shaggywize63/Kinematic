@@ -1,5 +1,5 @@
 import { computeDocument, amountInWords, round2, durationLabel, durationOf } from '../src/services/finance/money';
-import { displayStatus } from '../src/services/finance/documents.service';
+import { displayStatus, sumRows } from '../src/services/finance/documents.service';
 import { reportToCsv } from '../src/services/finance/reports.service';
 import { isMasterCaller, requireFinanceAccess } from '../src/middleware/financeAccess';
 
@@ -144,5 +144,25 @@ describe('line duration (rate is per month)', () => {
     expect(durationLabel(18)).toBe('18 months');
     expect(durationLabel(null)).toBeNull();
     expect(durationOf('3')).toBe(3);
+  });
+});
+
+describe('list totals', () => {
+  const rows = [
+    { total: 1000, balance: 1000, status: 'sent' },
+    { total: '2500.50', balance: '500.25', status: 'partially_paid' },
+    { total: 4000, balance: 0, status: 'paid' },
+    { total: 800, balance: 800, status: 'draft' },
+    { total: 9999, balance: 9999, status: 'void' },
+  ];
+  it('leaves a voided invoice out of the amount, the outstanding balance and the count', () => {
+    expect(sumRows(rows.filter((r) => r.status !== 'draft'))).toEqual({ amount: 7500.5, balance: 1500.25, count: 3 });
+  });
+  it('outstanding counts only issued invoices (sent / partially paid), never a draft or a void', () => {
+    // the draft's balance equals its total (₹800) but it has not been issued, so it is not outstanding
+    expect(sumRows(rows)).toEqual({ amount: 8300.5, balance: 1500.25, count: 4 });
+  });
+  it('is zero when everything in the list is void', () => {
+    expect(sumRows([{ total: 500, balance: 500, status: 'void' }])).toEqual({ amount: 0, balance: 0, count: 0 });
   });
 });

@@ -126,8 +126,30 @@ const b2cBase = {
   alternate_mobiles: z.array(z.string().min(3).max(40)).optional(),
 };
 
+// One person met at a B2B lead's company, with what they asked for. The field
+// apps can log several of these on a single lead (the primary contact plus other
+// stakeholders), each resolved to a crm_contacts row linked to the account + lead.
+// Every part is optional so a half-filled row is tolerated; the service skips a
+// row that carries no identity at all.
+export const leadContactSchema = z.object({
+  first_name: z.string().max(120).optional().nullable(),
+  last_name: z.string().max(120).optional().nullable(),
+  email: z.string().email().optional().nullable(),
+  phone: z.string().max(40).optional().nullable(),
+  mobile: z.string().max(40).optional().nullable(),
+  title: z.string().max(120).optional().nullable(),
+  requirement: z.string().max(4000).optional().nullable(),
+});
+
 const leadCreateBase = z.object({
   client_id: optionalUuid,
+  // B2B: an explicit account to link to (when the rep picked an existing company).
+  // When absent, the service resolves/creates the account from `company` by name.
+  account_id: optionalUuid,
+  // Extra people met at the company, each with their own requirement. Resolved to
+  // crm_contacts (de-duped) and linked to the lead's account. B2B capture only;
+  // absent for every other flow, so nothing changes for them.
+  contacts: z.array(leadContactSchema).max(50).optional(),
   // Name: a lead needs *a* name, but not specifically both parts. Many
   // tenants (e.g. SRS retail construction customers) capture a single
   // given name, and an admin can hide the Last Name field entirely via
@@ -357,6 +379,92 @@ export const accountSchema = z.object({
   custom_fields: z.record(z.unknown()).optional(),
 });
 
+// Plant / site under a customer account (multi-site customers).
+export const siteSchema = z.object({
+  account_id: uuid,
+  name: z.string().min(1).max(200),
+  code: z.string().max(80).optional().nullable(),
+  site_type: z.string().max(80).optional().nullable(),
+  address_line1: z.string().max(300).optional().nullable(),
+  address_line2: z.string().max(300).optional().nullable(),
+  city: z.string().max(120).optional().nullable(),
+  district: z.string().max(120).optional().nullable(),
+  state: z.string().max(120).optional().nullable(),
+  postal_code: z.string().max(20).optional().nullable(),
+  country: z.string().max(80).optional().nullable(),
+  latitude: z.number().optional().nullable(),
+  longitude: z.number().optional().nullable(),
+  phone: z.string().max(40).optional().nullable(),
+  notes: z.string().max(2000).optional().nullable(),
+  is_active: z.boolean().optional(),
+  tags: z.array(z.string()).optional(),
+  custom_fields: z.record(z.unknown()).optional(),
+});
+export const siteUpdateSchema = siteSchema.partial();
+
+// A plant visit that groups many product forms + many contacts met.
+export const visitSchema = z.object({
+  account_id: optionalUuid,
+  site_id: optionalUuid,
+  visit_date: isoDate,
+  started_at: isoDate,
+  ended_at: isoDate,
+  check_in_gps: z.string().max(80).optional().nullable(),
+  check_out_gps: z.string().max(80).optional().nullable(),
+  latitude: z.number().optional().nullable(),
+  longitude: z.number().optional().nullable(),
+  purpose: z.string().max(500).optional().nullable(),
+  notes: z.string().max(2000).optional().nullable(),
+  status: z.enum(['open', 'completed', 'cancelled']).optional(),
+  activity_id: optionalUuid,
+  custom_fields: z.record(z.unknown()).optional(),
+});
+export const visitUpdateSchema = visitSchema.partial();
+
+// Visit intake — one call resolves customer + plant + people met and opens a
+// visit. Powers the merged lead/activity capture flow on mobile.
+const intakeContactSchema = z.object({
+  id: optionalUuid,
+  first_name: z.string().max(120).optional().nullable(),
+  last_name: z.string().max(120).optional().nullable(),
+  email: z.string().email().optional().nullable(),
+  phone: z.string().max(40).optional().nullable(),
+  mobile: z.string().max(40).optional().nullable(),
+  title: z.string().max(120).optional().nullable(),
+  department: z.string().max(120).optional().nullable(),
+});
+export const visitIntakeSchema = z.object({
+  visit_id: optionalUuid,
+  account: z.object({
+    id: optionalUuid,
+    name: z.string().max(200).optional().nullable(),
+    domain: z.string().max(200).optional().nullable(),
+    industry: z.string().max(120).optional().nullable(),
+    phone: z.string().max(40).optional().nullable(),
+    website: z.string().url().optional().nullable(),
+  }),
+  site: z.object({
+    id: optionalUuid,
+    name: z.string().max(200).optional().nullable(),
+    code: z.string().max(80).optional().nullable(),
+    site_type: z.string().max(80).optional().nullable(),
+    address_line1: z.string().max(300).optional().nullable(),
+    address_line2: z.string().max(300).optional().nullable(),
+    city: z.string().max(120).optional().nullable(),
+    district: z.string().max(120).optional().nullable(),
+    state: z.string().max(120).optional().nullable(),
+    postal_code: z.string().max(20).optional().nullable(),
+    country: z.string().max(80).optional().nullable(),
+    latitude: z.number().optional().nullable(),
+    longitude: z.number().optional().nullable(),
+  }).optional().nullable(),
+  contacts: z.array(intakeContactSchema).optional(),
+  purpose: z.string().max(500).optional().nullable(),
+  latitude: z.number().optional().nullable(),
+  longitude: z.number().optional().nullable(),
+  check_in_gps: z.string().max(80).optional().nullable(),
+});
+
 export const dealSchema = z.object({
   client_id: optionalUuid,
   name: z.string().min(1).max(200),
@@ -370,6 +478,8 @@ export const dealSchema = z.object({
   pipeline_id: optionalUuid,
   stage_id: optionalUuid,
   account_id: optionalUuid,
+  site_id: optionalUuid,
+  product_id: optionalUuid,
   primary_contact_id: optionalUuid,
   lead_id: optionalUuid,
   amount: z.number().nonnegative().default(0),

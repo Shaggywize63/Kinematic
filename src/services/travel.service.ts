@@ -17,10 +17,13 @@
  *   of its own but still moves where the rep last was.
  *
  * Leg km. The user's `work_activity` fixes inside the leg's time range (plus the two anchor points)
- * are summed with sumTrailKm — the very guards the expense mileage suggestion uses (mock/suspect
- * fixes skipped; hops > 20 km, gaps > 15 min and speeds > 150 km/h dropped). When the trail cannot
- * carry the leg the straight-line haversine between the two anchors is used instead
- * (method `straight_line`), and when even that is impossible the leg is 0 km / `none`.
+ * are summed with sumTrailKm (mock/suspect fixes skipped; single hops > 20 km and speeds > 150 km/h
+ * dropped as jumps/teleports). Unlike the expense-mileage suggestion, the report does NOT drop a hop
+ * just because the two fixes are far apart in time (`maxGapMin: Infinity`): a plausible-speed straight
+ * line between two real fixes is a lower bound on the distance travelled, and it is the same polyline
+ * the map draws, so the number and the route agree — a sparse trail no longer collapses to ~0 km. When
+ * the trail cannot carry the leg (fewer than 2 usable fixes) the straight-line haversine between the two
+ * anchors is used instead (method `straight_line`), and when even that is impossible the leg is 0 km / `none`.
  *
  * Interpretation notes (where the definition leaves room):
  *   - "the trail cannot carry the leg" = fewer than 2 usable (non-mock) fixes strictly inside the
@@ -407,7 +410,11 @@ export function computeDayTravel(input: BuildDayTravelInput): DayTravelComputati
     if (from.pt) pts.push({ lat: from.pt.lat, lng: from.pt.lng, captured_at: from.at });
     for (const f of fixes) pts.push({ lat: f.lat, lng: f.lng, captured_at: f.ms, is_mock: f.is_mock, is_suspect: f.is_suspect });
     if (to.kind !== 'now' && toPt) pts.push({ lat: toPt.lat, lng: toPt.lng, captured_at: to.at });
-    const sum = sumTrailKm(pts);
+    // Count distance across every plausible hop, however far apart the fixes are in time: the report
+    // must match the route the map draws, and the straight line between two real, plausible-speed fixes
+    // is a sound lower bound. The hop-size and speed guards still reject jumps/teleports. (The expense
+    // mileage suggestion keeps the strict ~10-min gap — see sumTrailKm's SumTrailOptions.)
+    const sum = sumTrailKm(pts, { maxGapMin: Infinity });
 
     if (valid.length >= 2 && sum.segments_counted >= 1) return { km: round2(sum.km), method: 'gps_trail', toPt };
     if (from.pt && toPt) return { km: round2(haversineKm(from.pt.lat, from.pt.lng, toPt.lat, toPt.lng)), method: 'straight_line', toPt };

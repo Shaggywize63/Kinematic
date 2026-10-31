@@ -155,6 +155,8 @@ export interface Deal {
   stage_id: string;
   name: string;
   account_id?: string | null;
+  site_id?: string | null;
+  product_id?: string | null;
   primary_contact_id?: string | null;
   lead_id?: string | null;
   amount: number;

@@ -40,9 +40,18 @@ export function trackTransportModeOn(rules: { track_transport_mode?: unknown } |
   return rules?.track_transport_mode === true;
 }
 
-/** The allowed modes for a policy's vehicle rates (undefined / empty = the two defaults). */
+/**
+ * The allowed modes, in the order the apps show them:
+ *   1. the policy's vehicle rates (undefined / empty = the two defaults), `vehicle:true`;
+ *   2. the client's own `extraModes` (e.g. Train, Walk) — non-vehicle, admin-configured
+ *      per client via `attendance_rules.extra_transport_modes`, so a tenant can offer modes
+ *      beyond the built-in set without a code change (and no other client is affected);
+ *   3. the fixed `public_transport` and `other`, `vehicle:false`.
+ * Deduped by id, first occurrence wins (a policy vehicle or extra that reuses a fixed id keeps its own label).
+ */
 export function buildTransportModes(
   vehicleRates?: ReadonlyArray<{ id: string; label: string }> | null,
+  extraModes?: ReadonlyArray<{ id: string; label: string }> | null,
 ): TransportMode[] {
   const out: TransportMode[] = [];
   const seen = new Set<string>();
@@ -54,7 +63,33 @@ export function buildTransportModes(
   const vehicles = (vehicleRates ?? []).filter((v) => v && typeof v.id === 'string' && v.id && typeof v.label === 'string');
   if (vehicles.length) for (const v of vehicles) add({ id: v.id, label: v.label, vehicle: true });
   else for (const v of DEFAULT_VEHICLE_TRANSPORT_MODES) add(v);
+  // Client-configured extra modes (Train, Walk, …): validated like a policy id, never a vehicle.
+  for (const e of extraModes ?? []) {
+    if (e && typeof e.id === 'string' && TRANSPORT_MODE_ID_RE.test(e.id) && typeof e.label === 'string' && e.label.trim()) {
+      add({ id: e.id, label: e.label.trim(), vehicle: false });
+    }
+  }
   for (const m of FIXED_TRANSPORT_MODES) add(m);
+  return out;
+}
+
+/**
+ * The client's admin-configured extra transport modes, read defensively from the
+ * `attendance_rules.extra_transport_modes` jsonb: an array of `{id, label}`. Anything malformed is
+ * dropped. Returns [] for every client that hasn't set the key, so existing tenants are unchanged.
+ */
+export function extraTransportModesFromSettings(settings: unknown): Array<{ id: string; label: string }> {
+  const rules = (settings as { attendance_rules?: { extra_transport_modes?: unknown } } | null)?.attendance_rules;
+  const raw = rules?.extra_transport_modes;
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ id: string; label: string }> = [];
+  for (const e of raw) {
+    const id = (e as { id?: unknown })?.id;
+    const label = (e as { label?: unknown })?.label;
+    if (typeof id === 'string' && TRANSPORT_MODE_ID_RE.test(id) && typeof label === 'string' && label.trim()) {
+      out.push({ id, label: label.trim() });
+    }
+  }
   return out;
 }
 

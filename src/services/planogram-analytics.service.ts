@@ -22,6 +22,17 @@ export interface RollupRow {
   competitor_share: number;
 }
 
+/** One channel's on-shelf-availability rollup (GET /analytics/osa-by-channel). */
+export interface OsaChannelRow {
+  channel: string;               // stores.store_type, or "Unspecified"
+  captures: number;
+  avg_availability_rate: number; // mean % of expected own SKUs present (0..100)
+  oos_count: number;             // total expected own SKUs found out of stock
+  avg_oos_per_capture: number;
+  low_stock_count: number;       // total low-stock own SKUs
+  oos_capture_rate: number;      // % of captures with >= 1 OOS
+}
+
 // ── Redesigned module: Captures list + Overview contracts ──────────────────
 // These mirror the pinned dashboard contract (kinematic-dashboard
 // src/types/planogram.ts: CaptureListItem / CapturesListResponse /
@@ -227,6 +238,63 @@ export class PlanogramAnalyticsService {
 
     rows.sort((a, b) => b.avg_score - a.avg_score);
     return rows.slice(0, limit);
+  }
+
+  /**
+   * On-shelf availability (OSA) rolled up by CHANNEL — the store's `store_type`
+   * (Hypermarket / Supermarket / Kirana …), which is also the format the engine
+   * matches planograms on. Averages availability_rate and sums the out-of-stock
+   * / low-stock counts per channel over the last `days`. Captures with no store,
+   * or a store with no store_type, bucket under "Unspecified" so nothing is
+   * dropped. Sorted worst-availability first — the channel to act on.
+   */
+  static async osaByChannel(orgId: string, days = 30): Promise<OsaChannelRow[]> {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabaseAdmin
+      .from('planogram_compliance')
+      .select('store_id, availability_rate, oos_count, low_stock_count')
+      .eq('org_id', orgId)
+      .gte('created_at', since);
+    if (error) throw error;
+    const rows = (data as Array<{
+      store_id: string | null; availability_rate: number | null; oos_count: number | null; low_stock_count: number | null;
+    }> | null) || [];
+
+    // Resolve each capture's channel from its store's store_type.
+    const storeIds = Array.from(new Set(rows.map((r) => r.store_id).filter((s): s is string => !!s)));
+    const channelByStore = new Map<string, string>();
+    if (storeIds.length) {
+      const { data: sd } = await supabaseAdmin.from('stores').select('id, store_type').in('id', storeIds);
+      for (const s of (sd as Array<{ id: string; store_type: string | null }> | null) || []) {
+        channelByStore.set(s.id, (s.store_type || '').trim() || 'Unspecified');
+      }
+    }
+
+    type Acc = { channel: string; captures: number; availSum: number; oos: number; lowStock: number; oosCaptures: number };
+    const map = new Map<string, Acc>();
+    for (const r of rows) {
+      const channel = (r.store_id && channelByStore.get(r.store_id)) || 'Unspecified';
+      let a = map.get(channel);
+      if (!a) { a = { channel, captures: 0, availSum: 0, oos: 0, lowStock: 0, oosCaptures: 0 }; map.set(channel, a); }
+      a.captures += 1;
+      a.availSum += num(r.availability_rate);
+      const oos = num(r.oos_count);
+      a.oos += oos;
+      a.lowStock += num(r.low_stock_count);
+      if (oos > 0) a.oosCaptures += 1;
+    }
+
+    const out: OsaChannelRow[] = Array.from(map.values()).map((a) => ({
+      channel: a.channel,
+      captures: a.captures,
+      avg_availability_rate: round1(a.availSum / a.captures),
+      oos_count: a.oos,
+      avg_oos_per_capture: round1(a.oos / a.captures),
+      low_stock_count: a.lowStock,
+      oos_capture_rate: round1((a.oosCaptures / a.captures) * 100),
+    }));
+    out.sort((x, y) => x.avg_availability_rate - y.avg_availability_rate);
+    return out;
   }
 
   /** Stores with chronic compliance gaps (<70 score on >= 3 of last 5 captures). */

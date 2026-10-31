@@ -8,10 +8,12 @@
  * Nothing in this file throws on a policy read failure: a mode picker or a label must never break
  * attendance. Failures are logged and degrade to the default modes / a humanised label.
  */
+import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { resolvePoliciesForUsers, resolvePolicyForUserId } from './expenses/policy.service';
 import {
-  buildTransportModes, isFixedTransportMode, labelForTransportMode, type TransportMode,
+  buildTransportModes, extraTransportModesFromSettings, isFixedTransportMode, labelForTransportMode,
+  type TransportMode,
 } from './transportMode.service';
 
 /** People per policy lookup (keeps the `id in (...)` URL short). */
@@ -29,14 +31,31 @@ export interface ResolvedTransportModes {
   resolved: boolean;
 }
 
-/** The modes `user` may pick (their policy's vehicles first, then public transport and other). */
+/**
+ * The admin-configured extra transport modes (e.g. Train, Walk) for a client, from
+ * `clients.settings.attendance_rules.extra_transport_modes`. [] for a user with no client or when the
+ * key isn't set, and never throws — a read failure just means no extras, not a broken picker.
+ */
+async function extraModesForClient(clientId: string | null | undefined): Promise<Array<{ id: string; label: string }>> {
+  if (!clientId) return [];
+  try {
+    const { data } = await supabaseAdmin.from('clients').select('settings').eq('id', clientId).maybeSingle();
+    return extraTransportModesFromSettings((data as { settings?: unknown } | null)?.settings);
+  } catch (e) {
+    logger.warn(`[transport-mode] could not read extra modes for client=${clientId}: ${(e as Error)?.message ?? e}`);
+    return [];
+  }
+}
+
+/** The modes `user` may pick (their policy's vehicles, then the client's extra modes, then public transport and other). */
 export async function transportModesForUser(user: TransportModeUser): Promise<ResolvedTransportModes> {
+  const extra = await extraModesForClient(user.client_id ?? null);
   try {
     const policy = await resolvePolicyForUserId(user.org_id, user.client_id ?? null, user.id);
-    return { modes: buildTransportModes(policy.rules.vehicle_rates), resolved: true };
+    return { modes: buildTransportModes(policy.rules.vehicle_rates, extra), resolved: true };
   } catch (e) {
     logger.warn(`[transport-mode] could not resolve the expense policy for user=${user.id}: ${(e as Error)?.message ?? e}`);
-    return { modes: buildTransportModes(null), resolved: false };
+    return { modes: buildTransportModes(null, extra), resolved: false };
   }
 }
 
@@ -80,6 +99,8 @@ export async function annotateTransportLabels<T extends LabelledRow>(
   }
 
   await Promise.all(Array.from(needPolicy.values()).map(async (g) => {
+    // The client's own extra modes (Train, Walk, …) label those ids exactly, even if the policy read fails.
+    const extra = await extraModesForClient(g.clientId);
     // Distinct people, in chunks: the lookup is an `id in (...)` filter and a long list overflows the URL.
     const people = Array.from(new Set(g.rows.map((r) => String(r.user_id))));
     let policies: Map<string, Awaited<ReturnType<typeof resolvePolicyForUserId>>> | null = null;
@@ -92,7 +113,7 @@ export async function annotateTransportLabels<T extends LabelledRow>(
       logger.warn(`[transport-mode] could not resolve policies to label modes: ${(e as Error)?.message ?? e}`);
     }
     for (const r of g.rows) {
-      const modes = policies ? buildTransportModes(policies.get(String(r.user_id))?.rules.vehicle_rates) : null;
+      const modes = buildTransportModes(policies ? policies.get(String(r.user_id))?.rules.vehicle_rates : null, extra);
       r.transport_label = labelForTransportMode(r.transport_mode as string, modes);
     }
   }));

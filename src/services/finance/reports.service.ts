@@ -49,6 +49,12 @@ export async function dashboard(s: FinanceScope, query: Record<string, unknown>)
   const settings = await getSettings(s);
   const fy = fiscalYear(Number(settings.fiscal_year_start_month) || 4, String(query.period || 'this_fy'));
   const fyFrom = iso(fy.start), fyTo = iso(fy.end);
+  // Optional ?month=YYYY-MM narrows Sales / Receipts (totals + chart, by day) to that calendar month.
+  // Receivables, drafts and open quotes are a point-in-time snapshot and are unaffected.
+  const mm = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(String(query.month ?? ''));
+  const monthKey = mm ? `${mm[1]}-${mm[2]}` : null;
+  const from = mm ? iso(new Date(Date.UTC(+mm[1], +mm[2] - 1, 1))) : fyFrom;
+  const to = mm ? iso(new Date(Date.UTC(+mm[1], +mm[2], 0))) : fyTo;
 
   const open = await fetchAll((a, b) => scoped(db().from('finance_documents').select('balance,due_date,status'), s)
     .eq('doc_type', 'invoice').in('status', ['sent', 'partially_paid']).gt('balance', 0).is('deleted_at', null).range(a, b));
@@ -63,20 +69,31 @@ export async function dashboard(s: FinanceScope, query: Record<string, unknown>)
   }
 
   const invoices = await fetchAll((a, b) => scoped(db().from('finance_documents').select('issue_date,total'), s)
-    .eq('doc_type', 'invoice').in('status', REVENUE_STATUSES).is('deleted_at', null).gte('issue_date', fyFrom).lte('issue_date', fyTo).range(a, b));
+    .eq('doc_type', 'invoice').in('status', REVENUE_STATUSES).is('deleted_at', null).gte('issue_date', from).lte('issue_date', to).range(a, b));
   const pays = await fetchAll((a, b) => scoped(db().from('finance_payments').select('payment_date,amount'), s)
-    .is('deleted_at', null).gte('payment_date', fyFrom).lte('payment_date', fyTo).range(a, b));
+    .is('deleted_at', null).gte('payment_date', from).lte('payment_date', to).range(a, b));
 
+  // Buckets: the 12 months of the fiscal year, or — for a chosen month — one bucket per day.
   const months: Array<{ month: string; label: string; sales: number; receipts: number }> = [];
   const idx = new Map<string, number>();
-  for (let i = 0; i < 12; i++) {
-    const d = new Date(Date.UTC(fy.start.getUTCFullYear(), fy.start.getUTCMonth() + i, 1));
-    const key = iso(d).slice(0, 7);
-    idx.set(key, months.length);
-    months.push({ month: key, label: d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }), sales: 0, receipts: 0 });
+  const keyLen = monthKey ? 10 : 7; // 'YYYY-MM-DD' vs 'YYYY-MM'
+  if (monthKey) {
+    const days = Number(to.slice(8, 10));
+    for (let day = 1; day <= days; day++) {
+      const key = `${monthKey}-${String(day).padStart(2, '0')}`;
+      idx.set(key, months.length);
+      months.push({ month: key, label: String(day), sales: 0, receipts: 0 });
+    }
+  } else {
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(Date.UTC(fy.start.getUTCFullYear(), fy.start.getUTCMonth() + i, 1));
+      const key = iso(d).slice(0, 7);
+      idx.set(key, months.length);
+      months.push({ month: key, label: d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }), sales: 0, receipts: 0 });
+    }
   }
-  for (const r of invoices) { const i = idx.get(String(r.issue_date).slice(0, 7)); if (i !== undefined) months[i].sales += Number(r.total); }
-  for (const r of pays) { const i = idx.get(String(r.payment_date).slice(0, 7)); if (i !== undefined) months[i].receipts += Number(r.amount); }
+  for (const r of invoices) { const i = idx.get(String(r.issue_date).slice(0, keyLen)); if (i !== undefined) months[i].sales += Number(r.total); }
+  for (const r of pays) { const i = idx.get(String(r.payment_date).slice(0, keyLen)); if (i !== undefined) months[i].receipts += Number(r.amount); }
   months.forEach((m) => { m.sales = round2(m.sales); m.receipts = round2(m.receipts); });
 
   const counts = await Promise.all([
@@ -85,7 +102,8 @@ export async function dashboard(s: FinanceScope, query: Record<string, unknown>)
   ]);
   const totalReceivables = Object.values(buckets).reduce((x, y) => x + y, 0);
   return {
-    period: { from: fyFrom, to: fyTo, label: `${fy.startYear}-${String(fy.startYear + 1).slice(2)}` },
+    period: { from, to, label: `${fy.startYear}-${String(fy.startYear + 1).slice(2)}`, fy_from: fyFrom, fy_to: fyTo, month: monthKey },
+    granularity: monthKey ? 'day' : 'month',
     receivables: {
       total: round2(totalReceivables), current: round2(buckets.current), d1_15: round2(buckets.d1_15), d16_30: round2(buckets.d16_30),
       d31_45: round2(buckets.d31_45), d45_plus: round2(buckets.d45_plus), open_invoices: open.length, overdue_invoices: overdueCount,
@@ -224,7 +242,7 @@ export async function paymentsReceived(s: FinanceScope, query: Record<string, un
 export async function invoiceDetails(s: FinanceScope, query: Record<string, unknown>): Promise<Report> {
   const { from, to } = range(query);
   const docs = await fetchAll((a, b) => scoped(db().from('finance_documents').select('number,issue_date,due_date,status,customer_snapshot,taxable_value,tax_total,total,amount_paid,balance'), s)
-    .eq('doc_type', 'invoice').neq('status', 'draft').is('deleted_at', null).gte('issue_date', from).lte('issue_date', to).order('issue_date', { ascending: true }).range(a, b));
+    .eq('doc_type', 'invoice').not('status', 'in', '(draft,void)').is('deleted_at', null).gte('issue_date', from).lte('issue_date', to).order('issue_date', { ascending: true }).range(a, b));
   const t = todayIso();
   const rows = docs.map((d) => ({
     date: d.issue_date, number: d.number, customer: (d.customer_snapshot as { name?: string })?.name ?? '—', due_date: d.due_date,

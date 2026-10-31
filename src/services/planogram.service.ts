@@ -24,6 +24,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { AppError } from '../utils';
 import { resolveVisionOverride, resolveScoringBasis, ScoringBasis } from '../lib/planogramVisionConfig';
+import { withMeter } from '../lib/aiUsageMeter';
 import {
   PlanogramVisionService,
   ShelfRecognition,
@@ -1788,7 +1789,9 @@ export class PlanogramService {
     }
     let recognition: ShelfRecognition;
     try {
-      recognition = await PlanogramVisionService.recognizeShelf({
+      recognition = await withMeter(
+        { orgId: args.orgId, clientId: cap.client_id ?? null, captureId: args.captureId, feature: 'planogram_vision' },
+        () => PlanogramVisionService.recognizeShelf({
         imageBase64: img.base64,
         imageMediaType: img.mediaType,
         expectedSkus: layout.expected_skus.map((s) => ({
@@ -1810,7 +1813,7 @@ export class PlanogramService {
         brandTerms: layout.brand_terms,
         apiKey: vision.apiKey,
         model: vision.model,
-      });
+      }));
     } catch (e: any) {
       logger.warn(`[planogram] reprocess vision failed for capture ${args.captureId}: ${e?.message || e}`);
       throw new AppError(
@@ -2041,7 +2044,13 @@ export class PlanogramService {
       logger.info(`[planogram] vision override "${vision.label}" (model=${vision.model || 'default'}, dedicatedKey=${vision.apiKey ? 'yes' : 'no'})`);
     }
 
-    const recognition = await PlanogramVisionService.recognizeShelf({
+    // Allocate the capture id up front so the vision usage meter can attribute
+    // this capture's API cost to it (the capture row is inserted below with the
+    // same id after scoring).
+    const captureId = randomUUID();
+    const recognition = await withMeter(
+      { orgId: args.orgId, clientId: args.clientId ?? null, captureId, feature: 'planogram_vision' },
+      () => PlanogramVisionService.recognizeShelf({
       imageBase64: args.imageBase64,
       imageMediaType: args.imageMediaType,
       // Pass brand + category so the model matches by packaging and constrains
@@ -2071,7 +2080,7 @@ export class PlanogramService {
       brandTerms: layout.brand_terms,
       apiKey: vision.apiKey,
       model: vision.model,
-    });
+    }));
 
     // MoiSoi is scored on a present basis (not-stocked SKUs don't penalise);
     // every other tenant keeps the catalog basis.
@@ -2090,6 +2099,7 @@ export class PlanogramService {
     const { data: cap, error: capErr } = await supabaseAdmin
       .from('planogram_captures')
       .insert({
+        id: captureId,
         org_id: args.orgId,
         client_id: args.clientId ?? null,
         fe_id: args.feId,

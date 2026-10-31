@@ -8,11 +8,17 @@
 import express, { Request, Response, NextFunction, Router } from 'express';
 import multer from 'multer';
 import { z, ZodError } from 'zod';
-import { requireAuth, requireRole, MASTER_ADMIN_EMAIL } from '../middleware/auth';
+import { requireAuth, requireRole, MASTER_ADMIN_EMAIL, isTenantAdmin } from '../middleware/auth';
 import { requireModule } from '../middleware/rbac';
 import * as rbac from '../middleware/rbac';
+// Replay protection for the CRM creates the mobile offline queue re-sends: the
+// Android/iOS write-queue attaches an Idempotency-Key per queued mutation, so a
+// flaky-ack retry must dedupe server-side instead of inserting a duplicate.
+// No-ops when the header is absent (ordinary online clients are unaffected).
+import { idempotency } from '../middleware/idempotency';
 import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
+import { B2B_LEAD_CLIENT_IDS } from '../lib/b2bClients';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
 import { runWithProject, currentProjectKey, DEFAULT_PROJECT } from '../lib/projects';
@@ -29,6 +35,7 @@ import { validateAndStampCustomFields } from '../services/crm/customFields.servi
 import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as upsellsSvc from '../services/crm/upsells.service';
 import * as leadsSvc from '../services/crm/leads.service';
+import { isWalkInCapture } from '../services/crm/walkIn';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
 import * as leadFollowUpSvc from '../services/crm/leadFollowUp.service';
 import * as leadBalanceSvc from '../services/crm/leadBalance.service';
@@ -40,6 +47,7 @@ import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
 import * as afterSales from '../services/crm/afterSales.service';
 import * as dealsSvc from '../services/crm/deals.service';
+import * as visitBridge from '../services/crm/visitBridge.service';
 import * as importSvc from '../services/crm/import.service';
 import * as activityImportSvc from '../services/crm/activityImport.service';
 import * as analyticsSvc from '../services/crm/analytics.service';
@@ -260,6 +268,14 @@ function clientScope(req: Request): { id: string | null; strict: boolean } {
 }
 
 function clientId(req: Request): string | null { return clientScope(req).id; }
+const bridgeCtx = (req: Request): visitBridge.BridgeCtx =>
+  ({ org_id: orgId(req), client_id: clientScope(req).id, user_id: userId(req) });
+
+// Clients whose lead form is B2B: on create, the lead's company becomes a CRM
+// account and the logged contacts-with-requirements are resolved against it.
+// The client set lives in ../lib/b2bClients (shared with the expenses service,
+// which links expenses to an account + form) so the gate can never drift.
+// Any other tenant's lead create is completely unchanged.
 
 // Tenant gate for KINI / AI features. The cross-tenant ("all clients at once")
 // view is allowed ONLY for super_admin; every other caller must resolve to a
@@ -752,13 +768,16 @@ leads.get('/', wrap(async (req, res) => {
     },
   });
 }));
-leads.post('/', wrap(async (req, res) => {
+leads.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
   // Tata Tiscon "Also log as Site Visit" checkbox — pop the meta flag
   // off before the lead insert (it's not a column on crm_leads), use it
   // after to spawn a sibling crm_activities row.
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, schedule_visit: scheduleVisit, ...rest } = parsed;
+  // `contacts` and `account_id` are B2B capture inputs, NOT crm_leads columns —
+  // pop them before the insert and resolve them into the CRM graph afterwards.
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, schedule_visit: scheduleVisit,
+          contacts: leadContacts, account_id: leadAccountId, ...rest } = parsed;
   // client_id is the tenant boundary — always derive it server-side from the
   // caller's scope (which honours a super-admin's X-Client-Id header), never from
   // the request body. See SECURITY_AUDIT_2026-07.md finding H-2.
@@ -803,7 +822,25 @@ leads.post('/', wrap(async (req, res) => {
   // mirroring enforceLeadRequiredFields above for built-ins. Inbound webhooks /
   // CSV imports / KINI call createLead without this flag and still capture
   // partial leads.
-  const lead = await leadsSvc.createLead({ org_id: orgId(req), user_id: userId(req), payload, enforceRequired: true });
+  //
+  // EXCEPTION — walk-in "Not Purchased" quick-capture (reception's minimal
+  // intake, shared by the Android + web walk-in forms). It deliberately
+  // collects only name / phone / visit details, NOT the full sales-lead field
+  // set. A client admin can mark lead custom fields required for the MAIN lead
+  // form (e.g. Rajkamal marks "Approx. Budget" and "Area / Locality" required);
+  // enforcing those here 400'd every walk-in save ("Couldn't save the lead").
+  // So skip required-*custom*-field enforcement for walk-in captures. Built-in
+  // required fields (name / phone) are still enforced above via
+  // enforceLeadRequiredFields, and custom-field *type* coercion still runs.
+  // Detected off the capture contract the clients share: custom_fields.campaign
+  // === 'Walk-in' (with purchase_status 'not_purchased' as a fallback marker).
+  const walkInCapture = isWalkInCapture(payload.custom_fields);
+  const lead = await leadsSvc.createLead({
+    org_id: orgId(req),
+    user_id: userId(req),
+    payload,
+    enforceRequired: !walkInCapture,
+  });
 
   // Record the consent event against the new lead in the crm_consents ledger
   // (who/when/how/purpose), so consent is demonstrable — best-effort: a ledger
@@ -897,7 +934,29 @@ leads.post('/', wrap(async (req, res) => {
     }
   }
 
-  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse, ...followUpResponse });
+  // B2B (Spark & Ray): the lead's company becomes a CRM account and the logged
+  // contacts-with-requirements are resolved against it + the lead. Best-effort —
+  // the lead already exists, so a linking failure must not fail the create.
+  let b2bResponse: Record<string, unknown> = {};
+  const leadClientId = String(payload.client_id ?? '').toLowerCase();
+  const hasCompany = String(payload.company ?? '').trim().length > 0;
+  if (lead?.id && B2B_LEAD_CLIENT_IDS.has(leadClientId) && (hasCompany || leadAccountId)) {
+    try {
+      const linked = await visitBridge.linkLeadToCompany(bridgeCtx(req), {
+        lead_id: lead.id,
+        account_id: (leadAccountId as string | undefined) ?? null,
+        company: payload.company as string | null ?? null,
+        industry: payload.industry as string | null ?? null,
+        owner_id: (payload.owner_id as string | null) ?? userId(req) ?? null,
+        contacts: (leadContacts as visitBridge.ContactInput[] | undefined) ?? [],
+      });
+      b2bResponse = { account_id: linked.account_id, contact_ids: linked.contact_ids };
+    } catch (e) {
+      console.warn(`[b2b_lead] could not link lead ${lead.id} to its company: ${(e as Error).message}`);
+    }
+  }
+
+  res.status(201).json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...scheduledVisitResponse, ...followUpResponse, ...b2bResponse });
 }));
 // Approve / reject a pending lead. Restricted to managers — a supervisor/admin
 // role, or any user with HR-module access (matches "notify the manager or a
@@ -1508,12 +1567,12 @@ leads.patch('/:id', wrap(async (req, res) => {
   // Edit RBAC — across the whole hierarchy, only the rep who CREATED
   // the lead may edit it. owner_id / assigned_to grant view, but not
   // edit. ASOs viewing a Consumer Champion's lead can read it (it
-  // surfaces under their team scope) but can't change it. Only
-  // system-tier admins ('admin' / 'sub_admin' / 'super_admin') bypass
-  // this check.
+  // surfaces under their team scope) but can't change it. A TENANT ADMIN
+  // (isTenantAdmin — incl. the per-tenant `client` owner account and
+  // city_manager, not just system-tier) bypasses this check and may edit
+  // any rep's lead, so the admin can correct records across the team.
   const meEdit = (req as AuthRequest).user;
-  const sysRole = (meEdit?.role ?? '').toLowerCase();
-  const isAdminTier = ['super_admin', 'admin', 'sub_admin'].includes(sysRole);
+  const isAdminTier = isTenantAdmin(meEdit);
   if (!isAdminTier) {
     const { data: target } = await supabaseAdmin.from('crm_leads')
       .select('created_by')
@@ -1600,6 +1659,17 @@ leads.get('/:id/activities', wrap(async (req, res) => {
 leads.get('/:id/deals', wrap(async (req, res) => res.json(
   await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query })
 )));
+// Contacts captured on this lead — the B2B contact-persons and each one's
+// `requirement`. Org-scoped only (mirrors accounts/:id/contacts), NOT owner-
+// filtered, so a revisit by ANY field rep sees everyone logged on the lead,
+// not just the caller's own contacts. The dashboard auto-attaches the global
+// city scope to every /leads/* GET; crm_contacts.city would then drop a
+// contact whose city is blank or differs, even though lead_id already scopes
+// to one lead — so strip the geo keys, exactly as /:id/activities does.
+leads.get('/:id/contacts', wrap(async (req, res) => {
+  const { city: _c, state: _s, district: _d, block: _b, ...rest } = req.query as Record<string, unknown>;
+  return res.json(await crud.list('crm_contacts', orgId(req), { lead_id: req.params.id, ...rest }));
+}));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   // owner_assignment = 'admin_only': assigning is the whole point of this endpoint, so a non-admin is refused (403).
@@ -1952,7 +2022,7 @@ contacts.get('/', wrap(async (req, res) => {
     await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds }))
   );
 }));
-contacts.post('/', wrap(async (req, res) => {
+contacts.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.contactSchema, req.body);
   const { _consent: consentInput, ...rest } = parsed;
   const payload: Record<string, unknown> = { ...rest, client_id: clientId(req) };
@@ -2038,7 +2108,7 @@ accounts.get('/', wrap(async (req, res) => {
     await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds }))
   );
 }));
-accounts.post('/', wrap(async (req, res) => {
+accounts.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
@@ -2086,7 +2156,71 @@ accounts.get('/:id/notes', wrap(async (req, res) => res.json(
 )));
 accounts.post('/:id/summarize', wrap(async (req, res) =>
   res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), clientId(req), req.params.id) })));
+// Sites (plants) under an account.
+accounts.get('/:id/sites', wrap(async (req, res) => res.json(
+  await crud.list('crm_sites', orgId(req), { account_id: req.params.id, ...req.query }, { defaultSort: { column: 'name', ascending: true } })
+)));
+// One payload the field app pre-fills from when a rep opens an existing
+// company: account + its sites + contacts + open deals.
+accounts.get('/:id/bundle', wrap(async (req, res) => res.json(
+  await visitBridge.getAccountBundle(bridgeCtx(req), req.params.id)
+)));
+// Management timeline for one customer: every visit / form / follow-up, which FEs
+// visited and what each captured. Tenant-scoped exactly like /bundle.
+accounts.get('/:id/timeline', wrap(async (req, res) => res.json(
+  await visitBridge.getAccountTimeline(bridgeCtx(req), req.params.id)
+)));
 router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
+
+// ---------- SITES (plants) -------------------------------------------
+const sites = express.Router();
+sites.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  return res.json(await crud.clientScopedList('crm_sites', orgId(req), scope.id, req.query, {
+    searchColumns: ['name', 'city', 'state', 'code'], strictClient: scope.strict,
+    defaultSort: { column: 'name', ascending: true },
+  }));
+}));
+sites.post('/', wrap(async (req, res) => {
+  const payload: Record<string, unknown> = { ...parse(v.siteSchema, req.body), client_id: clientId(req) };
+  res.status(201).json(await crud.create('crm_sites', orgId(req), payload, userId(req)));
+}));
+sites.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_sites', orgId(req), req.params.id, true, clientScope(req).id))));
+sites.patch('/:id', wrap(async (req, res) => {
+  const payload = parse(v.siteUpdateSchema, req.body) as Record<string, unknown>;
+  res.json(await crud.update('crm_sites', orgId(req), req.params.id, payload, userId(req), clientScope(req).id));
+}));
+sites.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_sites', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
+router.use('/sites', rbac.requireModuleAccess('crm_accounts'), sites);
+
+// ---------- VISITS (plant trips) -------------------------------------
+const visits = express.Router();
+visits.get('/', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  return res.json(await crud.clientScopedList('crm_visits', orgId(req), scope.id, req.query, {
+    strictClient: scope.strict, defaultSort: { column: 'visit_date', ascending: false },
+  }));
+}));
+visits.post('/', wrap(async (req, res) => {
+  const payload: Record<string, unknown> = { ...parse(v.visitSchema, req.body), client_id: clientId(req), user_id: userId(req) };
+  res.status(201).json(await crud.create('crm_visits', orgId(req), payload, userId(req)));
+}));
+visits.get('/:id', wrap(async (req, res) => res.json(await crud.get('crm_visits', orgId(req), req.params.id, true, clientScope(req).id))));
+visits.patch('/:id', wrap(async (req, res) => {
+  const payload = parse(v.visitUpdateSchema, req.body) as Record<string, unknown>;
+  res.json(await crud.update('crm_visits', orgId(req), req.params.id, payload, userId(req), clientScope(req).id));
+}));
+visits.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_visits', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
+router.use('/visits', rbac.requireModuleAccess('crm_accounts'), visits);
+
+// ---------- VISIT INTAKE ---------------------------------------------
+// Resolve (find-or-create) customer + plant + people met and open a visit,
+// de-duping against existing CRM records. Returns the ids the app then stamps
+// onto each product-form submission.
+router.post('/visit-intake', rbac.requireModuleAccess('crm_accounts'), wrap(async (req, res) => {
+  const payload = parse(v.visitIntakeSchema, req.body) as visitBridge.VisitIntakeInput;
+  res.status(201).json(await visitBridge.resolveVisitIntake(bridgeCtx(req), payload));
+}));
 
 // ---------- DEALS ----------------------------------------------------
 const deals = express.Router();
@@ -2257,7 +2391,7 @@ deals.get('/export', wrap(async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(csv);
 }));
-deals.post('/', wrap(async (req, res) => {
+deals.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.dealSchema, req.body);
   // client_id derived server-side from scope, never from body (SECURITY_AUDIT H-2).
   const payload = { ...parsed, client_id: clientId(req) };
@@ -3375,7 +3509,7 @@ activities.get('/export-field-visits-report', wrap(async (req, res) => {
   sendReportCsv(req, res, 'field-visits-report', cols, [...rows, gt]);
 }));
 
-activities.post('/', wrap(async (req, res) => {
+activities.post('/', idempotency, wrap(async (req, res) => {
   const parsed = normalizeActivityPayload(parse(v.activitySchemaBase, req.body));
   // An activity must be anchored to SOMETHING. A CRM entity (lead /
   // contact / account / deal) is the normal case — but steel-dealer
@@ -3512,7 +3646,7 @@ const notes = express.Router();
 notes.get('/', wrap(async (req, res) => res.json(
   await crud.clientScopedList('crm_notes', orgId(req), clientScope(req).id, req.query, { softDelete: false, strictClient: clientScope(req).strict })
 )));
-notes.post('/', wrap(async (req, res) => {
+notes.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.noteSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   res.status(201).json(await crud.create('crm_notes', orgId(req), payload, userId(req)));
@@ -3526,7 +3660,7 @@ const tasks = express.Router();
 tasks.get('/', wrap(async (req, res) => res.json(
   await stampOwnerNames(await crud.clientScopedList('crm_activities', orgId(req), clientScope(req).id, { type: 'task', ...req.query }, { defaultSort: { column: 'due_at', ascending: true }, dateRangeColumn: 'due_at', strictClient: clientScope(req).strict }))
 )));
-tasks.post('/', wrap(async (req, res) => {
+tasks.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.taskSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, type: 'task' as const, client_id: clientId(req) };
   const createdTask = await crud.create('crm_activities', orgId(req), payload, userId(req)) as Record<string, unknown>;

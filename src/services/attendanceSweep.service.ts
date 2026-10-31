@@ -207,6 +207,12 @@ export async function autoCheckoutOverdue(now: number = Date.now()): Promise<Aut
     result.closed++;
     closedUsers.add(row.user_id);
     if (breaks.length) await supabaseAdmin.from('breaks').update({ ended_at: endIso }).in('id', breaks.map((b) => b.id));
+    // Mirror the auto-checkout onto any still-open session for this shift. The daily
+    // row above stays authoritative for every reader; this just keeps the per-punch
+    // session list consistent (no session left 'open' on a closed day).
+    await supabaseAdmin.from('attendance_sessions')
+      .update({ status: 'closed', checkout_at: endIso })
+      .eq('attendance_id', row.id).eq('status', 'open');
   }
 
   // Like a real check-out, take the rep off the live map — but only when they have no other open shift

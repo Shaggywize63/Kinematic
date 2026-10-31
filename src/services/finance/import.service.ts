@@ -416,7 +416,7 @@ export async function previewInvoiceImport(s: FinanceScope, fileName: string, bu
       errors: plan.filter((p) => p.action === 'error').length,
       with_warnings: importable.filter((p) => p.warnings.length).length,
       new_customers: newCustomers.size,
-      total_value: round2(importable.reduce((x, p) => x + p.calc_total, 0)),
+      total_value: round2(importable.filter((p) => p.status !== 'void').reduce((x, p) => x + p.calc_total, 0)), // void invoices are not sales
       outstanding: round2(importable.filter((p) => p.status !== 'void' && p.status !== 'draft').reduce((x, p) => x + p.balance, 0)),
     },
     invoices: plan.slice(0, PREVIEW_LIMIT).map((p) => ({

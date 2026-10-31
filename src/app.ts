@@ -72,6 +72,7 @@ import assetsRoutes       from './routes/assets.routes';
 import citiesRoutes       from './routes/cities.routes';
 import managementRoutes   from './routes/management.routes';
 import mcpConnectorRoutes from './routes/mcpConnector.routes';
+import adminBillingRoutes from './routes/admin-billing.routes';
 import broadcastEntitlementRoutes from './routes/broadcastEntitlement.routes';
 import emailCampaignEntitlementRoutes from './routes/emailCampaignEntitlement.routes';
 import skusRoutes         from './routes/skus.routes';
@@ -624,6 +625,9 @@ app.use(`${V1}/org-settings`,  requireAuth, orgSettingsRoutes);
 
 // ── Platform admin: AI-assistant / MCP connector entitlement (super-admin) ──
 app.use(`${V1}/admin/mcp-connector`, requireAuth, mcpConnectorRoutes);
+
+// ── Admin Billing: planogram vision API cost per client/period (admin-tier) ──
+app.use(`${V1}/admin/billing`, requireAuth, adminBillingRoutes);
 
 // ── Platform admin: WhatsApp Campaigns entitlement (super-admin) ──
 app.use(`${V1}/admin/broadcast-entitlement`, requireAuth, broadcastEntitlementRoutes);
