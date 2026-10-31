@@ -141,7 +141,7 @@ router.patch(
     const orgId = req.user?.org_id;
     if (!orgId) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
 
-    const allowed = ["title", "description", "status", "icon", "cover_color", "activity_id", "client_id", "requires_photo", "requires_gps", "allow_offline"];
+    const allowed = ["title", "description", "status", "icon", "cover_color", "activity_id", "client_id", "requires_photo", "requires_gps", "allow_offline", "expense_linked"];
 
     const updates: any = {};
     allowed.forEach((k) => {

@@ -118,6 +118,12 @@ const itemSchema = z.object({
 });
 const createSchema = z.object({
   title: z.string().max(200).optional().nullable(),
+  // Connected-B2B flow (Spark & Ray): the mandatory purpose/justification, and
+  // the CRM account + builder form this expense is linked to. Accepted for any
+  // client but only stored/enforced for B2B clients (see expenses.service).
+  clarification: z.string().max(2000).optional().nullable(),
+  account_id: uuid.optional().nullable(),
+  form_id: uuid.optional().nullable(),
   items: z.array(itemSchema).max(100).optional(),
 });
 const checkSchema = z.object({ items: z.array(itemSchema).max(100).optional(), claim_id: uuid.optional() });
