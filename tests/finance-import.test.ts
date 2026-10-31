@@ -1,6 +1,6 @@
 import * as ExcelJS from 'exceljs';
 import {
-  parseNumber, parseDate, normaliseStatus, detectColumns, buildInvoices, readTable,
+  parseNumber, parseDate, normaliseStatus, detectColumns, buildInvoices, readTable, itemText,
 } from '../src/services/finance/import.service';
 import { stateCodeFromText } from '../src/services/finance/gstStates';
 
@@ -182,5 +182,31 @@ describe('reading files', () => {
     await expect(readTable('x.pdf', Buffer.from('x'))).rejects.toMatchObject({ statusCode: 400, code: 'UNSUPPORTED' });
     await expect(readTable('x.csv', csv([['Invoice Number']]))).rejects.toMatchObject({ code: 'EMPTY' });
     await expect(readTable('x.xlsx', Buffer.from('not a zip'))).rejects.toMatchObject({ code: 'BAD_FILE' });
+  });
+});
+
+describe('item name fallback', () => {
+  it('keeps a given name and its description as they are', () => {
+    expect(itemText('Kinematic', '1st August - 1st September')).toEqual({ name: 'Kinematic', description: '1st August - 1st September' });
+    expect(itemText('Seat', '')).toEqual({ name: 'Seat', description: null });
+  });
+  it('uses the description as the name when the name is empty (first line = name, the rest stays as description)', () => {
+    expect(itemText('', 'Video Development - Nagpur Airport Website')).toEqual({ name: 'Video Development - Nagpur Airport Website', description: null });
+    expect(itemText('  ', 'Web build\nPhase 1 and 2\n')).toEqual({ name: 'Web build', description: 'Phase 1 and 2' });
+  });
+  it('truncates a very long first line to a 200-character name and keeps the full text as the description', () => {
+    const long = 'x'.repeat(300);
+    const r = itemText('', long);
+    expect(r.name).toHaveLength(200);
+    expect(r.description).toBe(long);
+  });
+  it('only falls back to the placeholder when there is no text at all', () => {
+    expect(itemText('', '')).toEqual({ name: '(no description)', description: null });
+  });
+  it('a Zoho row with an empty Item Name takes the Item Desc as the line name end to end', () => {
+    const H = ['Invoice Date', 'Invoice Number', 'Customer Name', 'Item Name', 'Item Desc', 'Quantity', 'Item Price'];
+    const { mapping } = detectColumns(H);
+    const [inv] = buildInvoices({ headers: H, rows: [Object.fromEntries(H.map((h, i) => [h, ['2026-06-25', 'INV-JUN-000001', 'Neuronimbus', '', 'Video Development - Nagpur Airport Website', '1', '40000'][i]]))] }, mapping);
+    expect(inv.lines[0]).toMatchObject({ name: 'Video Development - Nagpur Airport Website', description: null, quantity: 1, rate: 40000 });
   });
 });

@@ -229,6 +229,22 @@ export interface ParsedInvoice {
   lines: ParsedLine[]; synthesised_line: boolean; problems: string[]; warnings: string[];
 }
 
+const MAX_ITEM_NAME = 200;
+/**
+ * Item name + description for one line. Some exports (Zoho, for one-off lines) leave "Item Name" empty and
+ * put the text in "Item Description" — use that as the name instead of "(no description)". The first line
+ * becomes the name; whatever else there is stays as the description.
+ */
+export function itemText(name: string, desc: string): { name: string; description: string | null } {
+  const n = name.trim(), d = desc.trim();
+  if (n) return { name: n, description: d || null };
+  if (!d) return { name: '(no description)', description: null };
+  const lines = d.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const first = lines[0];
+  if (first.length > MAX_ITEM_NAME) return { name: first.slice(0, MAX_ITEM_NAME).trimEnd(), description: d }; // keep the full text
+  return { name: first, description: lines.slice(1).join('\n') || null };
+}
+
 export function buildInvoices(table: Table, mapping: Mapping): ParsedInvoice[] {
   const get = (row: Record<string, string>, f: Field) => (mapping[f] ? (row[mapping[f] as string] ?? '').trim() : '');
   // Zoho prefixes text that starts with "-", "+" or "=" with an apostrophe so spreadsheets don't read it as a formula.
@@ -275,6 +291,7 @@ export function buildInvoices(table: Table, mapping: Mapping): ParsedInvoice[] {
 
     // ── the line on this row
     const name = get(row, 'item_name');
+    const text = itemText(name, get(row, 'item_desc'));
     const qtyRaw = get(row, 'qty'), rateRaw = get(row, 'rate'), totalRaw = get(row, 'line_total');
     if (!name && !qtyRaw && !rateRaw && !totalRaw) return; // header-only row
     let qty = parseNumber(qtyRaw);
@@ -296,7 +313,7 @@ export function buildInvoices(table: Table, mapping: Mapping): ParsedInvoice[] {
     }
     if (tax !== null && (tax < 0 || tax > 100)) { inv.problems.push(`Row ${rowNo}: tax % must be between 0 and 100`); return; }
     inv.lines.push({
-      name: name || '(no description)', description: get(row, 'item_desc') || null, hsn_sac: get(row, 'hsn') || null,
+      name: text.name, description: text.description, hsn_sac: get(row, 'hsn') || null,
       quantity: qty, rate, discount_pct: Math.min(100, Math.max(0, disc)), gst_rate: tax ?? 0,
     });
     if (tax === null && (mapping.tax_pct || mapping.igst_pct || mapping.cgst_pct)) inv.warnings.push(`Row ${rowNo}: no tax % given, treated as 0%`);
