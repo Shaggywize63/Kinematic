@@ -145,7 +145,7 @@ export interface StockSummary {
   total_units: number;            // own + competitor estimated units on shelf
   own_units: number;
   competitor_units: number;
-  availability_rate: number;      // % of expected own SKUs present on shelf (0..100)
+  availability_rate: number | null; // % of expected own SKUs present on shelf (0..100); null in share-only mode (no expected SKUs)
   oos_count: number;              // expected own SKUs not found (out of stock)
   low_count: number;              // detected own SKUs flagged low / near-empty
   out_of_stock_skus: Array<{ sku_id: string; sku_name: string }>;
@@ -199,9 +199,9 @@ export interface ComplianceResult {
   stock_summary: StockSummary;             // NEW — stock-count-from-image rollup
   posm: PosmCompliance;                    // NEW — POSM / merchandising compliance
   posm_score: number | null;               // NEW — scalar POSM score (mirror of posm.score)
-  availability_rate: number;               // NEW — scalar (mirror of stock_summary.availability_rate)
-  oos_count: number;                        // NEW — scalar (mirror of stock_summary.oos_count)
-  low_stock_count: number;                  // NEW — scalar (mirror of stock_summary.low_count)
+  availability_rate: number | null;        // NEW — scalar (mirror of stock_summary.availability_rate); null in share-only mode (no expected SKUs)
+  oos_count: number | null;                 // NEW — scalar (mirror of stock_summary.oos_count); null in share-only mode
+  low_stock_count: number | null;           // NEW — scalar (mirror of stock_summary.low_count); null in share-only mode
   methodology: Methodology;                // NEW
   missing_skus: Array<{ sku_id: string; sku_name: string; expected_facings: number }>;
   misplaced_skus: Array<{
@@ -253,9 +253,14 @@ export class PlanogramService {
     const expected = layout.expected_skus || [];
     const detected = recognition.detected_skus || [];
 
-    if (expected.length === 0) {
-      throw new AppError(400, 'Planogram has no expected SKUs.', 'PLANOGRAM_EMPTY');
-    }
+    // "Share-only" mode: when the planogram has no expected SKUs there is nothing
+    // to grade compliance / availability against, but share-of-shelf + competitor
+    // presence can still be measured from the detections alone. Rather than
+    // hard-fail the whole scan (which surfaced as "no expected SKUs" on every
+    // audit), fall through and report share-of-shelf; compliance %, position and
+    // on-shelf availability come back null so the UI shows them as "N/A".
+    // `availability_rate === null` is the persisted signal for share-only.
+    const shareOnly = expected.length === 0;
 
     // ── Lever 2 — competitor matching ──────────────────────────────────
     // Bind each competitor detection to a tracked competitor in
@@ -556,15 +561,17 @@ export class PlanogramService {
       out_of_stock_skus,
       low_stock_skus,
     };
+    // Share-only: OSA is undefined without an expected catalogue → null (N/A).
+    if (shareOnly) stock_summary.availability_rate = null;
 
     // ── POSM / merchandising compliance (expected-vs-found) ────────────
     const posm = this.scorePosm(layout.expected_posm || [], recognition.posm || []);
 
     return {
-      score: finalScore,
-      presence_score: round1(presence_score),
-      facing_score: round1(facing_score),
-      position_score: round1(position_score),
+      score: shareOnly ? 0 : finalScore,
+      presence_score: shareOnly ? 0 : round1(presence_score),
+      facing_score: shareOnly ? 0 : round1(facing_score),
+      position_score: shareOnly ? 0 : round1(position_score),
       competitor_share: round1(competitor_share),
       occupancy_score: round1(occupancy_score),
       shelf_share_own: round1(shelf_share_own),
@@ -576,9 +583,9 @@ export class PlanogramService {
       stock_summary,
       posm,
       posm_score: posm.score,
-      availability_rate,
-      oos_count: stock_summary.oos_count,
-      low_stock_count: stock_summary.low_count,
+      availability_rate: shareOnly ? null : availability_rate,
+      oos_count: shareOnly ? null : stock_summary.oos_count,
+      low_stock_count: shareOnly ? null : stock_summary.low_count,
       methodology: this.buildMethodology({
         basis,
         occupancyDenominator,
@@ -623,14 +630,31 @@ export class PlanogramService {
       missing_skus,
       misplaced_skus,
       facing_deltas,
-      recommendations: this.buildRecommendations({
-        missing_skus,
-        misplaced_skus,
-        facing_deltas,
-        competitor_share,
-        promotions,
-        expected,
-      }),
+      recommendations: shareOnly
+        ? [
+            {
+              priority: 'high' as const,
+              action: 'Add a planogram with expected SKUs',
+              rationale:
+                'This scan has no planogram to compare against, so compliance % and on-shelf availability are N/A. Share of shelf is still measured. Create or assign a planogram with expected SKUs to unlock full scoring.',
+            },
+            ...this.buildRecommendations({
+              missing_skus,
+              misplaced_skus,
+              facing_deltas,
+              competitor_share,
+              promotions,
+              expected,
+            }),
+          ]
+        : this.buildRecommendations({
+            missing_skus,
+            misplaced_skus,
+            facing_deltas,
+            competitor_share,
+            promotions,
+            expected,
+          }),
     };
   }
 
