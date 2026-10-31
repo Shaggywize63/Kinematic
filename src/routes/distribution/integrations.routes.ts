@@ -12,9 +12,10 @@ import {
   deleteIntegration,
   listIntegrationEvents,
   getEventXml,
+  pushDistributorNow,
 } from '../../controllers/distribution/integrations.controller';
 import {
-  createPairingCode, getHealth, createMissingLedgers, requestMasterPull, listMasters, actOnMasters,
+  createPairingCode, getHealth, createMissingLedgers, requestMasterPull, requestVoucherPull, listMasters, actOnMasters,
 } from '../../controllers/distribution/tally-onboarding.controller';
 
 const router = Router();
@@ -34,8 +35,12 @@ router.post('/:id/pairing-code',      createPairingCode);
 router.get('/:id/health',             getHealth);
 router.post('/:id/create-ledgers',    createMissingLedgers);
 router.post('/:id/pull-masters',      requestMasterPull);
+// Fetch-back half of two-way order sync: pull voucher/order status from Tally.
+router.post('/:id/pull-vouchers',     requestVoucherPull);
 router.get('/:id/masters',            listMasters);
 router.post('/:id/masters/act',       actOnMasters);
+// On-demand push of a single dealer's ledger to Tally (Create or Alter).
+router.post('/:id/push/distributor/:distributorId', pushDistributorNow);
 router.get('/:id/events',             listIntegrationEvents);
 // Manual XML download (admin fallback when the bridge agent isn't running).
 router.get('/events/:eventId/xml',    getEventXml);

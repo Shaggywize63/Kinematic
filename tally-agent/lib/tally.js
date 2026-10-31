@@ -76,6 +76,29 @@ async function listStockItems(url, company) {
   }).filter(i => i.name);
 }
 
+/**
+ * Export vouchers for the status fetch-back (two-way order sync). Only vouchers we
+ * pushed carry a REMOTEID of the form KIN-ORD-/KIN-INV-/KIN-RET-<uuid>, so the rest
+ * are filtered out here and never leave the PC. Returns the Tally state (cancelled or
+ * present) + voucher number / masterid so the server can reconcile against our events.
+ */
+async function listVouchers(url, company) {
+  const xml = await tallyPost(url, collectionRequest({ id: 'KinVouchers', type: 'Voucher', company,
+    fetch: ['RemoteId', 'VoucherNumber', 'VoucherTypeName', 'Date', 'IsCancelled', 'MasterId', 'GUID'] }));
+  return blocks(xml, 'VOUCHER').map(b => {
+    const remote_id = (b.attrs.REMOTEID || child(b.inner, 'REMOTEID') || '').trim();
+    const cancelled = /^yes$/i.test(child(b.inner, 'ISCANCELLED') || '');
+    return {
+      remote_id,
+      voucher_no: child(b.inner, 'VOUCHERNUMBER'),
+      vch_type: child(b.inner, 'VOUCHERTYPENAME'),
+      date: child(b.inner, 'DATE'),
+      master_id: child(b.inner, 'MASTERID') || b.attrs.REMOTEID || '',
+      is_cancelled: cancelled,
+    };
+  }).filter(v => /^KIN-(ORD|INV|RET)-/i.test(v.remote_id));
+}
+
 function parseAmount(s) {
   const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
   return Number.isFinite(n) ? Math.abs(n) : 0;
@@ -113,4 +136,4 @@ function parseImportResponse(xml, opts = {}) {
   return { ok: true, tally_voucher_id: lastVchId || undefined };
 }
 
-module.exports = { tallyPost, listCompanies, listLedgers, listGroups, listVoucherTypes, listStockItems, partiesFrom, parseImportResponse };
+module.exports = { tallyPost, listCompanies, listLedgers, listGroups, listVoucherTypes, listStockItems, listVouchers, partiesFrom, parseImportResponse };
