@@ -60,12 +60,30 @@ async function pullMasters(ctx, wantedCompany) {
   await send('party', parties, true);
 }
 
+/** Export the vouchers we pushed and report their Tally status back (two-way order-status sync). */
+async function pullVouchers(ctx, wantedCompany) {
+  const { cfg, log } = ctx;
+  const companies = await T.listCompanies(cfg.tally_url);
+  const company = companies.find(c => c.toLowerCase() === String(wantedCompany || '').toLowerCase()) || companies[0];
+  if (!company) throw new Error('No company is open in Tally');
+  const vouchers = await T.listVouchers(cfg.tally_url, company);
+  log(`  pulled ${vouchers.length} Kinematic voucher(s) from "${company}"`);
+  const url = endpoint(cfg, '/vouchers');
+  if (vouchers.length === 0) { await postJson(url, { items: [], final: true }); return; }
+  for (let i = 0; i < vouchers.length; i += BATCH) {
+    await postJson(url, { items: vouchers.slice(i, i + BATCH), final: i + BATCH >= vouchers.length });
+  }
+}
+
 async function handleCommand(ctx, cmd, serverCompany) {
   const { cfg, log } = ctx;
   let result;
   try {
     if (cmd.type === 'pull_masters') {
       await pullMasters(ctx, serverCompany);
+      result = { ok: true };
+    } else if (cmd.type === 'pull_vouchers') {
+      await pullVouchers(ctx, serverCompany);
       result = { ok: true };
     } else if (cmd.type === 'tally_xml' && typeof cmd.xml === 'string') {
       const r = T.parseImportResponse(await T.tallyPost(cfg.tally_url, cmd.xml));
@@ -121,4 +139,4 @@ async function cycle(ctx) {
 
 const newContext = (cfg, log) => ({ cfg, log, done: new Set(), lastProfileAt: 0 });
 
-module.exports = { VERSION, collectProfile, sendProfile, pullMasters, cycle, newContext };
+module.exports = { VERSION, collectProfile, sendProfile, pullMasters, pullVouchers, cycle, newContext };

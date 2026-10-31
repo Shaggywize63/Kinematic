@@ -240,6 +240,38 @@ export const getEventXml = asyncHandler<AuthRequest>(async (req, res) => {
   }
 });
 
+/**
+ * Push one distributor to Tally on demand (admin "Sync to Tally now" action).
+ * Queues a ledger Create if the dealer was never pushed, else re-queues the
+ * existing event as an Alter so the current details go up. The agent picks it
+ * up on its next poll.
+ */
+export const pushDistributorNow = asyncHandler<AuthRequest>(async (req, res) => {
+  const { org_id } = req.user!;
+  const integration_id = String(req.params.id);
+  const distributor_id = String(req.params.distributorId);
+  if (!(await integrationVisible(req.user!, integration_id))) return notFound(res, 'Integration not found');
+  const { data: dist } = await supabaseAdmin.from('distributors')
+    .select('id').eq('id', distributor_id).eq('org_id', org_id).maybeSingle();
+  if (!dist) return notFound(res, 'Distributor not found');
+
+  const nowIso = new Date().toISOString();
+  const { data: existing } = await supabaseAdmin.from('distribution_integration_events')
+    .select('id').eq('integration_id', integration_id).eq('ref_table', 'distributors').eq('ref_id', distributor_id).maybeSingle();
+  if (existing) {
+    await supabaseAdmin.from('distribution_integration_events')
+      .update({ kind: 'master_ledger_update', status: 'pending', attempts: 0, next_attempt_at: nowIso, error: null })
+      .eq('id', existing.id as string);
+  } else {
+    const { error } = await supabaseAdmin.from('distribution_integration_events').insert({
+      org_id, integration_id, kind: 'master_ledger', ref_table: 'distributors', ref_id: distributor_id,
+      xml_payload: '', status: 'pending', next_attempt_at: nowIso,
+    });
+    if (error) return badRequest(res, error.message);
+  }
+  return ok(res, { queued: true });
+});
+
 // ── Public agent endpoints ──────────────────────────────────────────────────────────────
 //
 // Mounted at /api/v1/integrations/tally/* BEFORE the auth catch-all so
@@ -360,16 +392,23 @@ export const agentReportResult = asyncHandler<Request>(async (req, res) => {
   if (!event_id) { res.status(400).json({ ok: false, error: 'event_id required' }); return; }
 
   const { data: ev } = await supabaseAdmin.from('distribution_integration_events')
-    .select('id, attempts').eq('id', event_id).eq('integration_id', integration_id).maybeSingle();
+    .select('id, attempts, kind, ref_table, ref_id, org_id').eq('id', event_id).eq('integration_id', integration_id).maybeSingle();
   if (!ev) { res.status(200).json({ ok: true, message: 'event not found' }); return; }
 
   if (success) {
+    const nowIso = new Date().toISOString();
     await supabaseAdmin.from('distribution_integration_events').update({
       status: 'synced',
       tally_voucher_id: tally_voucher_id ?? null,
-      synced_at: new Date().toISOString(),
+      synced_at: nowIso,
       error: null,
     }).eq('id', event_id);
+    // Loop guard: record that this distributor's ledger is now in sync with Tally, so a
+    // subsequent poll doesn't treat its (unchanged) updated_at as a fresh edit to re-push.
+    if ((ev.kind === 'master_ledger' || ev.kind === 'master_ledger_update') && ev.ref_table === 'distributors') {
+      await supabaseAdmin.from('distributors')
+        .update({ tally_synced_at: nowIso }).eq('id', ev.ref_id as string).eq('org_id', ev.org_id as string);
+    }
     res.status(200).json({ ok: true });
     return;
   }

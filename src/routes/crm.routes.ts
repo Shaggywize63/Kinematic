@@ -18,6 +18,7 @@ import * as rbac from '../middleware/rbac';
 import { idempotency } from '../middleware/idempotency';
 import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
+import { B2B_LEAD_CLIENT_IDS } from '../lib/b2bClients';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
 import { runWithProject, currentProjectKey, DEFAULT_PROJECT } from '../lib/projects';
@@ -272,13 +273,9 @@ const bridgeCtx = (req: Request): visitBridge.BridgeCtx =>
 
 // Clients whose lead form is B2B: on create, the lead's company becomes a CRM
 // account and the logged contacts-with-requirements are resolved against it.
-// Spark & Ray by default; extend via env B2B_LEAD_CLIENT_IDS (comma-separated).
+// The client set lives in ../lib/b2bClients (shared with the expenses service,
+// which links expenses to an account + form) so the gate can never drift.
 // Any other tenant's lead create is completely unchanged.
-const SPARK_CLIENT_ID = 'c0218852-0a19-4dd0-b9fa-72f9e32ed0d8';
-const B2B_LEAD_CLIENT_IDS = new Set<string>(
-  [SPARK_CLIENT_ID, ...(process.env.B2B_LEAD_CLIENT_IDS ?? '').split(',')]
-    .map((s) => s.trim().toLowerCase()).filter(Boolean),
-);
 
 // Tenant gate for KINI / AI features. The cross-tenant ("all clients at once")
 // view is allowed ONLY for super_admin; every other caller must resolve to a
@@ -1662,6 +1659,17 @@ leads.get('/:id/activities', wrap(async (req, res) => {
 leads.get('/:id/deals', wrap(async (req, res) => res.json(
   await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query })
 )));
+// Contacts captured on this lead — the B2B contact-persons and each one's
+// `requirement`. Org-scoped only (mirrors accounts/:id/contacts), NOT owner-
+// filtered, so a revisit by ANY field rep sees everyone logged on the lead,
+// not just the caller's own contacts. The dashboard auto-attaches the global
+// city scope to every /leads/* GET; crm_contacts.city would then drop a
+// contact whose city is blank or differs, even though lead_id already scopes
+// to one lead — so strip the geo keys, exactly as /:id/activities does.
+leads.get('/:id/contacts', wrap(async (req, res) => {
+  const { city: _c, state: _s, district: _d, block: _b, ...rest } = req.query as Record<string, unknown>;
+  return res.json(await crud.list('crm_contacts', orgId(req), { lead_id: req.params.id, ...rest }));
+}));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   // owner_assignment = 'admin_only': assigning is the whole point of this endpoint, so a non-admin is refused (403).

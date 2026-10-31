@@ -84,15 +84,20 @@ export interface DistributorForTally {
   credit_limit?: number | string | null; payment_terms_days?: number | string | null;
 }
 
-/** Ledger master (Sundry Debtors) for a Kinematic distributor. `ledgerName` is the exact Tally name to create. */
-export function buildDistributorLedger(d: DistributorForTally, ledgerName: string): string {
+/**
+ * Ledger master (Sundry Debtors) for a Kinematic distributor. `ledgerName` is the
+ * exact Tally name. `action` is 'Create' for a new dealer or 'Alter' to push an edit
+ * to an existing ledger (same NAME → Tally matches and updates in place; the two-way
+ * sync re-pushes as 'Alter' when a linked distributor is edited).
+ */
+export function buildDistributorLedger(d: DistributorForTally, ledgerName: string, action: 'Create' | 'Alter' = 'Create'): string {
   const gstin = (d.gstin || '').trim().toUpperCase();
   const state = d.state_code ? GST_STATE_NAMES[d.state_code] : undefined;
   const a = (d.address ?? {}) as Record<string, unknown>;
   const addrLines = [a.line1, a.city, a.pincode].map(x => String(x ?? '').trim()).filter(Boolean);
   const days = Number(d.payment_terms_days);
   const limit = Number(d.credit_limit);
-  return `          <LEDGER NAME="${xmlEscape(ledgerName)}" ACTION="Create">
+  return `          <LEDGER NAME="${xmlEscape(ledgerName)}" ACTION="${action}">
             <NAME>${xmlEscape(ledgerName)}</NAME>
             <PARENT>Sundry Debtors</PARENT>
             <ISBILLWISEON>Yes</ISBILLWISEON>

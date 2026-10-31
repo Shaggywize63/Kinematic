@@ -108,6 +108,26 @@ async function linkedRefIds(integration_id: string, kind: 'party' | 'stock_item'
   return new Set(((data ?? []) as Array<{ matched_ref_id: string }>).map(r => r.matched_ref_id));
 }
 
+/**
+ * Re-queue the existing ledger-push event for each edited distributor as an
+ * `master_ledger_update` (ACTION="Alter"), so the edit is pushed to Tally. Only
+ * touches events that are done (synced / failed / retry_scheduled) — an in-flight
+ * or still-pending push is left to finish first. Returns how many were re-queued.
+ */
+async function requeueLedgerUpdates(integration_id: string, distributor_ids: string[]): Promise<number> {
+  if (distributor_ids.length === 0) return 0;
+  const { data, error } = await supabaseAdmin.from('distribution_integration_events')
+    .update({ kind: 'master_ledger_update', status: 'pending', attempts: 0, next_attempt_at: new Date().toISOString(), error: null })
+    .eq('integration_id', integration_id).eq('ref_table', 'distributors')
+    .in('ref_id', distributor_ids).in('status', ['synced', 'failed', 'retry_scheduled'])
+    .select('id');
+  if (error) {
+    logger.error({ integration_id, err: error.message }, 'tally poller: ledger-update requeue failed');
+    return 0;
+  }
+  return (data ?? []).length;
+}
+
 export async function enqueueForIntegration(integration: IntegrationLite) {
   const since = integration.last_sync_at
     ? new Date(integration.last_sync_at)
@@ -172,6 +192,22 @@ export async function enqueueForIntegration(integration: IntegrationLite) {
     const linked = await linkedRefIds(integration.id, 'party');
     enqueued += await insertEvents(integration.id, integration.org_id, 'master_ledger', 'distributors',
       (dists ?? []).map(r => r.id as string).filter(id => !linked.has(id)));
+
+    // Edited dealers -> re-push the ledger as an Alter (two-way sync of edits). A change that
+    // arrived FROM Tally (import) stamps tally_synced_at, so `updated_at > tally_synced_at` means
+    // a genuine app-side edit and never bounces an imported change back. Only dealers that already
+    // have an event row (i.e. were pushed before) are re-queued; the create path above handles new ones.
+    const { data: edited } = await supabaseAdmin.from('distributors')
+      .select('id, updated_at, tally_synced_at').eq('org_id', integration.org_id).match(scope)
+      .gt('updated_at', sinceIso).limit(500);
+    const changedIds = (edited ?? [])
+      .filter(d => {
+        const u = d.updated_at as string | null;
+        const s = (d as { tally_synced_at?: string | null }).tally_synced_at ?? null;
+        return !!u && (!s || new Date(u).getTime() > new Date(s).getTime());
+      })
+      .map(d => d.id as string);
+    enqueued += await requeueLedgerUpdates(integration.id, changedIds);
   }
 
   // New products -> stock items (skipping products already linked to a Tally stock item).

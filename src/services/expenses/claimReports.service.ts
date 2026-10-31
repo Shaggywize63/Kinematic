@@ -12,7 +12,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { Actor, isApprover } from './access';
-import { stampNames } from './expenses.service';
+import { stampNames, stampLinks } from './expenses.service';
 
 export interface ClaimFilters {
   status?: string;        // comma separated
@@ -102,7 +102,7 @@ export async function listAllClaims(actor: Actor, f: ClaimFilters) {
     .order('created_at', { ascending: false }).range((page - 1) * limit, page * limit - 1);
   if (error) throw new AppError(500, error.message, 'DB');
   const rows = await applyCity((data as any[]) ?? [], f.city);
-  return { rows: await stampNames(rows), total: f.city ? rows.length : (count ?? rows.length), page, limit };
+  return { rows: await stampLinks(await stampNames(rows)), total: f.city ? rows.length : (count ?? rows.length), page, limit };
 }
 
 async function fetchForReport(actor: Actor, f: ClaimFilters) {
@@ -110,7 +110,7 @@ async function fetchForReport(actor: Actor, f: ClaimFilters) {
   if (!built) return [];
   const { data, error } = await built.q.order('submitted_at', { ascending: false, nullsFirst: false }).limit(EXPORT_CAP);
   if (error) throw new AppError(500, error.message, 'DB');
-  return stampNames(await applyCity((data as any[]) ?? [], f.city));
+  return stampLinks(await stampNames(await applyCity((data as any[]) ?? [], f.city)));
 }
 
 async function itemsFor(claimIds: string[]) {
@@ -198,6 +198,10 @@ export function buildClaimsCsv(claims: any[], items: any[]): string {
   // every other tenant's export keeps exactly the columns it has always had.
   const withTrip = items.some((it) => it.vehicle_type || it.odometer_start != null || it.odometer_end != null);
   if (withTrip) head.push('Distance (km)', 'Vehicle', 'Odometer before', 'Odometer after');
+  // Connected-B2B links: appended only when a claim in this report carries one,
+  // so every other tenant's export keeps exactly the columns it always had.
+  const withLinks = claims.some((c) => c.clarification || c.account_name || c.form_title);
+  if (withLinks) head.push('Clarification', 'Account', 'Form');
   const out: string[] = [head.map(cell).join(',')];
   const day = (d: unknown) => (d ? String(d).slice(0, 10) : '');
   for (const c of claims) {
@@ -208,6 +212,7 @@ export function buildClaimsCsv(claims: any[], items: any[]): string {
         it.category, day(it.item_date), it.merchant, it.description, it.amount, it.decision ?? '', it.decision_note, it.receipt_url ? 'Yes' : 'No',
         c.total_amount, c.approved_amount ?? '', day(c.reimbursed_at), c.reimbursed_ref,
         ...(withTrip ? [it.distance_km ?? '', it.vehicle_type ?? '', it.odometer_start ?? '', it.odometer_end ?? ''] : []),
+        ...(withLinks ? [c.clarification ?? '', c.account_name ?? '', c.form_title ?? ''] : []),
       ].map(cell).join(','));
     }
   }

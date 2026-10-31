@@ -31,6 +31,7 @@ import { dayTravel } from '../travel.store';
 import { isValidYmd } from '../attendanceRules.service';
 import { notifyUsers } from '../notify';
 import { Actor, isApprover } from './access';
+import { isB2bClient } from '../../lib/b2bClients';
 import {
   CATEGORIES, ExpensePolicy, PolicyViolation, canAutoApprove, createPolicy, evaluateAgainstPolicy, hasPolicyV2,
   listPolicies, policyUserOf, priorMonthSpend, resolvePolicy, resolvePolicyForUserId, toClientShape, updatePolicy,
@@ -166,6 +167,34 @@ export async function stampNames(rows: any[]): Promise<any[]> {
     r.employee_id = m.get(r.user_id)?.employee_id ?? null;
     r.approver_name = r.approver_id ? (m.get(r.approver_id)?.name ?? null) : null;
     r.reviewer_name = r.reviewed_by ? (m.get(r.reviewed_by)?.name ?? null) : null;
+  }
+  return rows;
+}
+
+/**
+ * Attach the linked CRM account name (`account_name`) and builder-form title
+ * (`form_title`) to claims that carry those links (the connected-B2B expense ↔
+ * account/form feature). A no-op for rows without the columns populated — e.g. a
+ * non-B2B claim, or a tenant whose DB has not run the link migration — so it is
+ * safe on the shared list/report/detail paths.
+ */
+export async function stampLinks(rows: any[]): Promise<any[]> {
+  if (!rows.length) return rows;
+  const accIds = Array.from(new Set(rows.map((r) => r.account_id).filter(Boolean)));
+  const formIds = Array.from(new Set(rows.map((r) => r.form_id).filter(Boolean)));
+  const accNames = new Map<string, string>();
+  const formTitles = new Map<string, string>();
+  if (accIds.length) {
+    const { data } = await supabaseAdmin.from('crm_accounts').select('id, name').in('id', accIds);
+    for (const a of (data as any[]) ?? []) accNames.set(a.id, a.name);
+  }
+  if (formIds.length) {
+    const { data } = await supabaseAdmin.from('builder_forms').select('id, title').in('id', formIds);
+    for (const f of (data as any[]) ?? []) formTitles.set(f.id, f.title);
+  }
+  for (const r of rows) {
+    if (r.account_id) r.account_name = accNames.get(r.account_id) ?? null;
+    if (r.form_id) r.form_title = formTitles.get(r.form_id) ?? null;
   }
   return rows;
 }
@@ -349,7 +378,7 @@ export async function listMyClaims(actor: Actor, status?: string) {
   if (statuses.length) q = q.in('status', statuses);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB');
-  return stampNames(data ?? []);
+  return stampLinks(await stampNames(data ?? []));
 }
 
 export async function getClaim(actor: Actor, id: string) {
@@ -363,6 +392,7 @@ export async function getClaim(actor: Actor, id: string) {
   const { data: approvals } = await supabaseAdmin.from('expense_approvals').select('*').eq('claim_id', id)
     .order('round', { ascending: true }).order('level', { ascending: true });
   await stampNames([c]);
+  await stampLinks([c]);
   await stampNames((approvals as any[]) ?? []);
   // A viewable link per receipt (short-lived; gated by the visibility check above).
   const withReceipts = await Promise.all(items.map(async (it) => ({
@@ -377,8 +407,47 @@ export async function getClaim(actor: Actor, id: string) {
   return { ...c, items: withReceipts, approvals: approvals ?? [] };
 }
 
+/**
+ * The claim-level inputs beyond the lines. `clarification` / `account_id` /
+ * `form_id` are the connected-B2B links; they are only validated and stored for
+ * B2B clients (see resolveLinks), so every other tenant's claim is unchanged.
+ */
+export interface ClaimBody {
+  title?: string | null;
+  clarification?: string | null;
+  account_id?: string | null;
+  form_id?: string | null;
+  items?: ClaimItemInput[];
+}
+
+/**
+ * The connected-B2B link columns to write, validated against the actor's org.
+ * Returns {} for a non-B2B client (so the insert/update is byte-identical to
+ * before, and a tenant whose DB lacks these columns never has them written).
+ */
+async function resolveLinks(actor: Actor, body: ClaimBody): Promise<Record<string, unknown>> {
+  if (!isB2bClient(actor.client_id)) return {};
+  const out: Record<string, unknown> = {};
+  if (body.clarification !== undefined) out.clarification = (body.clarification ?? '').trim() || null;
+  if (body.account_id !== undefined) {
+    if (body.account_id) {
+      const { data } = await supabaseAdmin.from('crm_accounts').select('id').eq('org_id', actor.org_id).eq('id', body.account_id).maybeSingle();
+      if (!data) throw new AppError(400, 'Linked account not found', 'VALIDATION');
+      out.account_id = body.account_id;
+    } else out.account_id = null;
+  }
+  if (body.form_id !== undefined) {
+    if (body.form_id) {
+      const { data } = await supabaseAdmin.from('builder_forms').select('id').eq('org_id', actor.org_id).eq('id', body.form_id).maybeSingle();
+      if (!data) throw new AppError(400, 'Linked form not found', 'VALIDATION');
+      out.form_id = body.form_id;
+    } else out.form_id = null;
+  }
+  return out;
+}
+
 /** Create a draft claim with its lines. Totals are computed from the lines. */
-export async function createClaim(actor: Actor, body: { title?: string | null; items?: ClaimItemInput[] }) {
+export async function createClaim(actor: Actor, body: ClaimBody) {
   const policy = await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
   const items = await applyGpsDistance(actor, policy.rules, priceItems(validItems(body.items), policy.rules));
   assertReceiptsOwned(actor, items);
@@ -386,11 +455,13 @@ export async function createClaim(actor: Actor, body: { title?: string | null; i
   await assertOdometerStorable(items);
   const total = round2(items.reduce((s, i) => s + Number(i.amount || 0), 0));
   const distance = round2(items.filter((i) => i.category === 'mileage').reduce((s, i) => s + Number(i.distance_km || 0), 0));
+  const links = await resolveLinks(actor, body);
 
   const { data: claim, error } = await supabaseAdmin.from('expense_claims').insert({
     org_id: actor.org_id, client_id: actor.client_id ?? null, user_id: actor.id, claim_no: genClaimNo(),
     title: body.title ?? null, status: 'draft', currency: policy.currency, total_amount: total,
     distance_km: distance || null, current_level: 1, created_by: actor.id,
+    ...links,
   }).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB');
 
@@ -500,7 +571,7 @@ async function persistFlags(items: any[], flaggedItemIds: Record<string, string>
  * with their id are updated in place (keeping their receipt and history); lines
  * without one are added; lines left out are removed.
  */
-export async function updateClaim(actor: Actor, id: string, body: { title?: string | null; items?: ClaimItemInput[] }) {
+export async function updateClaim(actor: Actor, id: string, body: ClaimBody) {
   const c = await loadOwnClaim(actor, id);
   if (!['draft', 'submitted', 'rejected'].includes(c.status)) {
     throw new AppError(400, 'This claim has already been approved and can no longer be edited', 'BAD_STATE');
@@ -543,6 +614,7 @@ export async function updateClaim(actor: Actor, id: string, body: { title?: stri
   const update: any = {
     title: body.title !== undefined ? body.title : c.title, total_amount: total, distance_km: claimedKm || null,
     updated_at: new Date().toISOString(),
+    ...(await resolveLinks(actor, body)),
   };
 
   // A claim already with an approver is re-checked so they see current numbers.
@@ -578,6 +650,13 @@ export async function cancelClaim(actor: Actor, id: string) {
 export async function submitClaim(actor: Actor, id: string) {
   const c = await loadOwnClaim(actor, id);
   if (!['draft', 'rejected'].includes(c.status)) throw new AppError(400, 'Only a draft or rejected claim can be submitted', 'BAD_STATE');
+
+  // Connected-B2B flow (Spark & Ray): a clarification (the purpose of the spend)
+  // is mandatory before an expense can be submitted. Mirrors the mandatory-remark
+  // machinery on reject. No effect for any other tenant.
+  if (isB2bClient(actor.client_id) && !String(c.clarification ?? '').trim()) {
+    throw new AppError(400, 'Add a clarification (the purpose of this expense) before submitting', 'CLARIFICATION_REQUIRED');
+  }
 
   const v2 = await hasPolicyV2();
   const policy = await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
