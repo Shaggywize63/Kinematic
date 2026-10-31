@@ -54,6 +54,9 @@ export interface CaptureListItem {
   score: number | null;
   presence_score: number | null;
   shelf_share_own: number | null;
+  // null in "share-only" mode (no expected SKUs → no compliance/OSA graded). The
+  // list uses this to show "—" for compliance score instead of a misleading 0.
+  availability_rate: number | null;
   needs_review: boolean;
   recovered_count: number;
   competitor_present: boolean;
@@ -163,6 +166,9 @@ interface EnrichedCapture extends CaptureListItem {
   blur_score: number | null;
   glare_score: number | null;
   angle_score: number | null;
+  // null in "share-only" mode (planogram has no expected SKUs → no compliance /
+  // OSA to grade). Used to exclude such captures from compliance averages.
+  availability_rate: number | null;
 }
 
 export class PlanogramAnalyticsService {
@@ -273,6 +279,10 @@ export class PlanogramAnalyticsService {
     type Acc = { channel: string; captures: number; availSum: number; oos: number; lowStock: number; oosCaptures: number };
     const map = new Map<string, Acc>();
     for (const r of rows) {
+      // Share-only captures (planogram with no expected SKUs) have no on-shelf
+      // availability to measure — availability_rate is null — so they must not
+      // drag a channel's OSA average toward 0. Skip them from the OSA rollup.
+      if (r.availability_rate == null) continue;
       const channel = (r.store_id && channelByStore.get(r.store_id)) || 'Unspecified';
       let a = map.get(channel);
       if (!a) { a = { channel, captures: 0, availSum: 0, oos: 0, lowStock: 0, oosCaptures: 0 }; map.set(channel, a); }
@@ -667,21 +677,26 @@ export class PlanogramAnalyticsService {
     }
     // Only captures that were actually scored feed the headline aggregates.
     const scored = enriched.filter((r) => r.score != null);
+    // "Share-only" captures (planogram with no expected SKUs) carry a placeholder
+    // score of 0 and availability_rate === null — they measure share-of-shelf but
+    // NOT compliance. Exclude them from compliance averages / trend / needs-attention
+    // so they don't drag the numbers to ~0, while still counting as analysed.
+    const complianceScored = scored.filter((r) => r.availability_rate != null);
 
     const captures_count = scored.length;
     const stores_count = new Set(scored.map((r) => r.store_id).filter(Boolean) as string[]).size;
     const flagged_count = scored.filter((r) => r.needs_review).length;
-    const avg_compliance = captures_count
-      ? round1(scored.reduce((s, r) => s + (r.score as number), 0) / captures_count)
+    const avg_compliance = complianceScored.length
+      ? round1(complianceScored.reduce((s, r) => s + (r.score as number), 0) / complianceScored.length)
       : 0;
     const shareRows = scored.filter((r) => r.shelf_share_own != null);
     const own_shelf_share = shareRows.length
       ? round1(shareRows.reduce((s, r) => s + (r.shelf_share_own as number), 0) / shareRows.length)
       : 0;
 
-    // Daily average-score trend (ascending by date).
+    // Daily average-compliance trend (ascending by date), compliance-scored only.
     const byDay = new Map<string, { sum: number; count: number }>();
-    for (const r of scored) {
+    for (const r of complianceScored) {
       const day = (r.captured_at || '').slice(0, 10);
       if (!day) continue;
       const b = byDay.get(day) || { sum: 0, count: 0 };
@@ -693,8 +708,9 @@ export class PlanogramAnalyticsService {
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([date, b]) => ({ date, avg_score: round1(b.sum / b.count) }));
 
-    // Needs attention: lowest-scoring first (tie-break newest), top 5.
-    const needs_attention = scored
+    // Needs attention: lowest-compliance first (tie-break newest), top 5. Only
+    // compliance-scored captures — a share-only scan isn't "low compliance".
+    const needs_attention = complianceScored
       .slice()
       .sort((a, b) => (a.score as number) - (b.score as number) || b.captured_at.localeCompare(a.captured_at))
       .slice(0, 5)
@@ -767,12 +783,12 @@ export class PlanogramAnalyticsService {
     // Compliance (1:1 with capture) → score + shares + missing count.
     const complianceByCapture = new Map<
       string,
-      { score: number | null; presence_score: number | null; shelf_share_own: number | null; competitor_share: number | null; missing_count: number }
+      { score: number | null; presence_score: number | null; shelf_share_own: number | null; competitor_share: number | null; availability_rate: number | null; missing_count: number }
     >();
     {
       const { data } = await supabaseAdmin
         .from('planogram_compliance')
-        .select('capture_id, score, presence_score, shelf_share_own, competitor_share, missing_skus')
+        .select('capture_id, score, presence_score, shelf_share_own, competitor_share, availability_rate, missing_skus')
         .in('capture_id', capIds);
       for (const r of (data || []) as any[]) {
         complianceByCapture.set(r.capture_id as string, {
@@ -780,6 +796,7 @@ export class PlanogramAnalyticsService {
           presence_score: r.presence_score ?? null,
           shelf_share_own: r.shelf_share_own ?? null,
           competitor_share: r.competitor_share ?? null,
+          availability_rate: r.availability_rate ?? null,
           missing_count: Array.isArray(r.missing_skus) ? r.missing_skus.length : 0,
         });
       }
@@ -857,6 +874,7 @@ export class PlanogramAnalyticsService {
         recovered_count: rec?.recovered ?? 0,
         competitor_present: rec?.competitor ?? false,
         competitor_share: comp?.competitor_share ?? null,
+        availability_rate: comp?.availability_rate ?? null,
         missing_count: comp?.missing_count ?? 0,
         blur_score: c.blur_score ?? null,
         glare_score: c.glare_score ?? null,
@@ -880,6 +898,7 @@ function toCaptureListItem(c: EnrichedCapture): CaptureListItem {
     score: c.score,
     presence_score: c.presence_score,
     shelf_share_own: c.shelf_share_own,
+    availability_rate: c.availability_rate,
     needs_review: c.needs_review,
     recovered_count: c.recovered_count,
     competitor_present: c.competitor_present,
