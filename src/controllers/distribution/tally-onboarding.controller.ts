@@ -194,7 +194,7 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
     if (kind === 'party') {
       const gstin = cleanGstin(d.gstin);
       const days = Number(d.credit_period_days);
-      const { data: row, error: e } = await supabaseAdmin.from('distributors').insert({
+      const dealerRow = {
         org_id: user.org_id, client_id: companyId, created_by: user.id,
         name: it.name, code: partyCode(it.tally_guid as string), legal_name: it.name,
         gstin, pan: gstin ? gstin.slice(2, 12) : null, state_code: gstin ? gstin.slice(0, 2) : null,
@@ -206,7 +206,14 @@ export const actOnMasters = asyncHandler<AuthRequest>(async (req, res) => {
         // This dealer came FROM Tally — mark it in-sync so the enqueue poller doesn't
         // immediately push it back up as an "edit" (two-way loop guard).
         tally_synced_at: now,
-      }).select('id').single();
+      };
+      // `tally_synced_at` comes with the two-way-sync migration; on a database without it, import without the loop guard.
+      let ins = await supabaseAdmin.from('distributors').insert(dealerRow).select('id').single();
+      if (ins.error && /tally_synced_at/i.test(ins.error.message)) {
+        const { tally_synced_at: _omit, ...withoutGuard } = dealerRow;
+        ins = await supabaseAdmin.from('distributors').insert(withoutGuard).select('id').single();
+      }
+      const row = ins.data; const e = ins.error;
       refId = row?.id ?? null; errMsg = e?.message ?? null;
     } else {
       const { data: row, error: e } = await supabaseAdmin.from('skus').insert({
@@ -395,7 +402,8 @@ export const agentVouchers = asyncHandler<Request>(async (req, res) => {
     const { data: evs } = await supabaseAdmin.from('distribution_integration_events')
       .update(evUpdate)
       .eq('integration_id', integ.id).eq('ref_table', ref_table).eq('ref_id', ref_id).select('id');
-    if ((evs ?? []).length) matched++;
+    if (!(evs ?? []).length) continue;     // not pushed through THIS connection: never touch the row (other companies' connections share the org)
+    matched++;
 
     if (ref_table === 'orders') {
       await supabaseAdmin.from('orders')

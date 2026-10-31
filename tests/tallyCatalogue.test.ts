@@ -5,7 +5,7 @@ jest.mock('../src/lib/supabase', () => {
   return { supabaseAdmin: m.client, supabase: m.client, getUserClient: () => m.client };
 });
 
-import { actOnMasters } from '../src/controllers/distribution/tally-onboarding.controller';
+import { actOnMasters, agentVouchers } from '../src/controllers/distribution/tally-onboarding.controller';
 import { pickPriceList, isCompanyScoped } from '../src/services/distribution/priceListPicker';
 import { tallyPrice } from '../src/services/distribution/companyPriceList';
 
@@ -97,5 +97,44 @@ describe('pickPriceList', () => {
     expect(isCompanyScoped({ company_client_ids: [CO] })).toBe(false);
     expect(isCompanyScoped({ company_client_ids: [CO, PL] })).toBe(true);
     expect(isCompanyScoped(undefined)).toBe(false);
+  });
+});
+
+describe('agentVouchers only touches what this connection pushed', () => {
+  const ORDER = '99999999-9999-4999-8999-999999999999';
+  const asAgent = () => supa().queue('distribution_integrations', { data: { id: INT, org_id: ORG, provider: 'tally', agent_secret: 'k', config: {} }, error: null });
+  const post = () => call(agentVouchers, { params: { id: INT }, query: { key: 'k' }, body: { items: [{ remote_id: `KIN-ORD-${ORDER}`, is_cancelled: 'Yes', voucher_no: 'V1' }] } });
+  const orderUpdates = () => supa().chainsFor('orders').filter((c: any) => c.ops.some((o: any) => o.method === 'update'));
+
+  it('records the Tally status on the order when this connection pushed it', async () => {
+    asAgent();
+    supa().queue('distribution_integration_events', { data: [{ id: 'e1' }], error: null });
+    const r = await post();
+    expect(r.body.matched).toBe(1);
+    expect(orderUpdates()).toHaveLength(1);
+    expect(orderUpdates()[0].ops.find((o: any) => o.method === 'update').args[0]).toMatchObject({ tally_status: 'cancelled', tally_voucher_no: 'V1' });
+  });
+
+  it('leaves the order alone when no event of this connection matches (another company\'s order)', async () => {
+    asAgent();
+    supa().queue('distribution_integration_events', { data: [], error: null });
+    const r = await post();
+    expect(r.body.matched).toBe(0);
+    expect(orderUpdates()).toHaveLength(0);
+  });
+});
+
+describe('importing dealers on a database without the two-way-sync column', () => {
+  it('retries without tally_synced_at instead of failing the import', async () => {
+    supa().queue('distribution_integrations', { data: { id: INT, org_id: ORG, config: {} }, error: null });
+    supa().queue('distribution_tally_masters', { data: [{ id: MASTER, name: 'Shree Traders', tally_guid: 'guid-abcdef12', status: 'new', data: {} }], error: null });
+    supa().queue('distributors', { data: null, error: { message: 'column "tally_synced_at" of relation "distributors" does not exist' } });
+    supa().queue('distributors', { data: { id: SKU }, error: null });
+    const r = await call(actOnMasters, { user: { id: 'u', org_id: ORG, role: 'admin', client_id: null }, params: { id: INT }, body: { kind: 'party', action: 'import', all_new: true } });
+    expect(r.body.data.created).toBe(1);
+    const ins = inserts('distributors');
+    expect(ins).toHaveLength(2);
+    expect('tally_synced_at' in ins[0]).toBe(true);
+    expect('tally_synced_at' in ins[1]).toBe(false);
   });
 });
