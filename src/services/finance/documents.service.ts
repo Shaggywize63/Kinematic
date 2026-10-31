@@ -297,13 +297,18 @@ function filteredDocuments(s: FinanceScope, docType: DocType, query: Record<stri
   return q;
 }
 
-/** Totals for a page of list rows. A VOID invoice was cancelled, so it is never part of sales: it adds
- *  nothing to the amount, the outstanding balance or the invoice count (it still appears in the list rows). */
+/** Totals for a page of list rows.
+ *  - A VOID invoice was cancelled: it adds nothing to the amount, the outstanding balance or the count
+ *    (it still appears in the list rows).
+ *  - Outstanding is money a customer still owes on an ISSUED invoice (sent / partially paid) — the same
+ *    definition as the Overview's receivables. A draft has not been issued, so its balance (which starts
+ *    out equal to its total) is not outstanding. */
 export function sumRows(rows: Array<{ total: number | string; balance: number | string; status: string }>) {
   let amount = 0, balance = 0, count = 0;
   for (const r of rows) {
     if (r.status === 'void') continue;
-    amount += Number(r.total); balance += Number(r.balance); count++;
+    amount += Number(r.total); count++;
+    if (r.status === 'sent' || r.status === 'partially_paid') balance += Number(r.balance);
   }
   return { amount, balance, count };
 }
