@@ -132,6 +132,11 @@ const b2cBase = {
 // Every part is optional so a half-filled row is tolerated; the service skips a
 // row that carries no identity at all.
 export const leadContactSchema = z.object({
+  // When the rep linked this person to an existing CRM contact via the form's
+  // typeahead, its id is sent so findOrCreateContact resolves to that exact
+  // record (it already honours `id` ahead of email/phone matching). Absent for
+  // a freshly typed person, which is then de-duped by email/phone or created.
+  id: optionalUuid,
   first_name: z.string().max(120).optional().nullable(),
   last_name: z.string().max(120).optional().nullable(),
   email: z.string().email().optional().nullable(),
