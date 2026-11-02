@@ -158,6 +158,8 @@ export interface ContactInput {
   department?: string | null;
   /** What this person at the customer is asking for (B2B multi-contact capture). */
   requirement?: string | null;
+  /** A builder form connected to this person's requirement (org-validated). */
+  form_id?: string | null;
   owner_id?: string | null;
 }
 
@@ -168,6 +170,15 @@ export interface ContactInput {
  * visit converges on the one contact record instead of spawning duplicates.
  */
 export async function findOrCreateContact(ctx: BridgeCtx, input: ContactInput): Promise<{ id: string; created: boolean }> {
+  // Validate a connected form against the caller's own org/client forms before
+  // it ever touches a row — a form from another org/client is dropped, not
+  // linked. Done once up front so both the match (back-fill) and create paths
+  // use the cleaned value.
+  if (input.form_id) {
+    const { data: form } = await scoped(supabaseAdmin.from('builder_forms').select('id'), ctx)
+      .eq('id', input.form_id).maybeSingle();
+    input = { ...input, form_id: form?.id ? input.form_id : null };
+  }
   if (input.id) {
     const { data } = await scoped(supabaseAdmin.from('crm_contacts').select('id'), ctx).eq('id', input.id).maybeSingle();
     if (data?.id) return attachSite(ctx, data.id, input);
@@ -203,6 +214,7 @@ export async function findOrCreateContact(ctx: BridgeCtx, input: ContactInput): 
     title: norm(input.title) || null,
     department: norm(input.department) || null,
     requirement: norm(input.requirement) || null,
+    form_id: input.form_id ?? null,
     owner_id: input.owner_id ?? ctx.user_id ?? null,
   });
   const { data, error } = await supabaseAdmin.from('crm_contacts').insert(insert).select('id').single();
@@ -216,11 +228,12 @@ async function attachSite(ctx: BridgeCtx, contactId: string, input: ContactInput
   if (input.site_id) patch.site_id = input.site_id;
   // Back-fill only columns that are currently blank, never overwrite real data.
   const { data: cur } = await supabaseAdmin.from('crm_contacts')
-    .select('site_id, lead_id, title, department, email, phone, mobile, requirement')
+    .select('site_id, lead_id, title, department, email, phone, mobile, requirement, form_id')
     .eq('org_id', ctx.org_id).eq('id', contactId).maybeSingle();
   if (cur) {
     if (!cur.site_id && input.site_id) patch.site_id = input.site_id;
     if (!cur.lead_id && input.lead_id) patch.lead_id = input.lead_id;
+    if (!cur.form_id && input.form_id) patch.form_id = input.form_id;
     if (!cur.title && norm(input.title)) patch.title = norm(input.title);
     if (!cur.department && norm(input.department)) patch.department = norm(input.department);
     if (!cur.email && norm(input.email)) patch.email = norm(input.email).toLowerCase();
