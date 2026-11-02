@@ -866,6 +866,29 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     }
   }
 
+  // Any update to a lead refreshes its AI intelligence. Recompute the heuristic
+  // score SYNCHRONOUSLY from the updated row so the response we return already
+  // carries the new score / grade / breakdown (the UI folds this straight in, so
+  // the score reflects the edit immediately — no manual "Re-score"). Invalidate
+  // the cached next-best-action (next_action_updated_at = null) so the next NBA
+  // read is derived from the updated lead. The profile-field LLM rerank stays
+  // fire-and-forget (a ±15 polish, one Anthropic call). Scoring is wrapped so a
+  // hiccup can never fail or slow the update itself.
+  try {
+    const result = await scoring.computeUnifiedScore(
+      org_id, (data as any).client_id ?? null, data as Lead, { skipEngagement: false },
+    );
+    const scored = {
+      score: result.score,
+      score_grade: result.grade,
+      score_breakdown: result.breakdown,
+      score_updated_at: new Date().toISOString(),
+      next_action_updated_at: null as string | null,
+    };
+    await supabaseAdmin.from('crm_leads').update(scored).eq('org_id', org_id).eq('id', id);
+    Object.assign(data as Record<string, unknown>, scored);
+  } catch { /* scoring must never break a lead update */ }
+
   const profileChanged = ['title','company','industry','country','source_id'].some(k =>
     asRow(payload)[k] !== undefined);
   if (profileChanged) {
@@ -911,6 +934,36 @@ export async function rescoreLead(org_id: string, id: string, opts: { skipLlmRer
   // manual rescore), which call rescoreLead with no opts.
   if (!opts.skipLlmRerank) scoring.rerankLeadAsync(org_id, id).catch(() => {});
   return { score: result.score, breakdown: result.breakdown, grade: result.grade };
+}
+
+/**
+ * Keep a lead's AI intelligence in step with any change to it: recompute and
+ * persist the heuristic score (live `crm_leads` columns only — NO
+ * `crm_lead_scores` history row, so frequent edits don't bloat the score log)
+ * and invalidate the cached next-best-action so it is recomputed on the next
+ * read. Best-effort and fire-and-forget: wrapped so a scoring hiccup can never
+ * fail or slow the mutation that triggered it.
+ *
+ * `updateLead` recomputes inline (so it can return the fresh score on the row);
+ * the status-transition and lead-note paths call this instead.
+ */
+export async function recomputeLeadIntelligence(
+  org_id: string, id: string, opts: { llmRerank?: boolean } = {},
+): Promise<void> {
+  try {
+    const lead = await getLead(org_id, id);
+    const result = await scoring.computeUnifiedScore(
+      org_id, (lead as any).client_id ?? null, lead, { skipEngagement: false },
+    );
+    await supabaseAdmin.from('crm_leads').update({
+      score: result.score,
+      score_grade: result.grade,
+      score_breakdown: result.breakdown,
+      score_updated_at: new Date().toISOString(),
+      next_action_updated_at: null,
+    }).eq('org_id', org_id).eq('id', id);
+    if (opts.llmRerank) scoring.rerankLeadAsync(org_id, id).catch(() => {});
+  } catch { /* best-effort — never break the mutation that triggered this */ }
 }
 
 // ── Bulk rescore ────────────────────────────────────────────────────────────
@@ -1064,6 +1117,9 @@ export async function markLeadAsWon(
     org_id, user_id, entity: 'lead', entity_id: id,
     data: { lead: data, won_reason: reason ?? null, client_id: asRow(data).client_id },
   }).catch(() => {});
+
+  // Won is a status change — refresh score + NBA (fire-and-forget).
+  void recomputeLeadIntelligence(org_id, id);
 
   return data;
 }
@@ -1572,6 +1628,9 @@ export async function reopenLead(
     new_value: { reason: body.reason ?? null },
     changed_by: user_id ?? null,
   });
+
+  // Reactivating a lead brings it back into play — refresh score + NBA.
+  void recomputeLeadIntelligence(org_id, id);
 
   return data as Lead;
 }
