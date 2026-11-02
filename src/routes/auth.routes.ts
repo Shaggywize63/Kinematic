@@ -100,9 +100,13 @@ router.post('/impersonate/start', requireAuth, async (req, res) => {
     res.status(403).json({ success: false, error: 'Impersonation is restricted to the platform master admin.' });
     return;
   }
-  const body = (req.body ?? {}) as { user_id?: unknown; project?: unknown };
+  const body = (req.body ?? {}) as { user_id?: unknown; project?: unknown; read_only?: unknown };
   const userId = String(body.user_id ?? '');
   const project = String(body.project ?? '');
+  // The mirror is READ-ONLY by default (look-but-don't-touch — the whole point
+  // of "view as user"). The master can opt into a full-write session only by
+  // sending an explicit read_only:false.
+  const readOnly = body.read_only !== false;
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (!UUID_RE.test(userId)) { res.status(400).json({ success: false, error: 'Invalid user_id' }); return; }
   if (!isKnownProject(project)) { res.status(400).json({ success: false, error: 'Unknown project' }); return; }
@@ -126,6 +130,10 @@ router.post('/impersonate/start', requireAuth, async (req, res) => {
     email: target.email,
     // Audit breadcrumb — who minted this impersonation session.
     imp_by: realUser?.email,
+    // Read-only mirror: `ro:true` forces users.is_read_only in the auth context
+    // (see requireAuth), so the backend readOnlyGuard rejects every write from
+    // this session while the identity stays an exact mirror of the target.
+    ...(readOnly ? { ro: true } : {}),
   })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setSubject(target.id)
@@ -134,13 +142,14 @@ router.post('/impersonate/start', requireAuth, async (req, res) => {
     .sign(key);
 
   // eslint-disable-next-line no-console
-  console.info(`[Impersonate] master ${realUser?.email} started session as user ${target.id} (${target.email}) in project ${project}`);
+  console.info(`[Impersonate] master ${realUser?.email} started ${readOnly ? 'READ-ONLY' : 'full-write'} session as user ${target.id} (${target.email}) in project ${project}`);
 
   res.json({
     success: true,
     data: {
       token,
       project,
+      read_only: readOnly,
       user: {
         id: target.id, name: target.name, email: target.email, role: target.role,
         org_id: target.org_id, client_id: target.client_id,
