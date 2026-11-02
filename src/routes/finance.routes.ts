@@ -9,6 +9,7 @@
  *   payments                  list / create / get / update / delete, apply
  *   import/invoices/preview|commit   bring in previously issued invoices from a CSV/XLSX export
  *   reports/dashboard         overview (receivables ageing, sales vs receipts)
+ *   reports/projection        12-month billing projection from recurring invoices (+ scenarios)
  *   reports/:name             tabular reports; ?format=csv exports the same filters
  *
  * Public, no-login invoice links live in finance-public.routes.ts.
@@ -26,6 +27,7 @@ import * as masters from '../services/finance/masters.service';
 import * as docs from '../services/finance/documents.service';
 import * as payments from '../services/finance/payments.service';
 import * as reports from '../services/finance/reports.service';
+import * as projectionSvc from '../services/finance/projection.service';
 import * as importer from '../services/finance/import.service';
 
 const router = Router();
@@ -250,6 +252,7 @@ router.post('/import/invoices/commit', withFile, asyncHandler(async (req: Reques
 }));
 
 // ── reports ─────────────────────────────────────────────────────────────────
+router.get('/reports/projection', asyncHandler(async (req: Request, res: Response) => res.json({ success: true, data: await projectionSvc.projection(scopeOf(req), req.query) })));
 router.get('/reports/dashboard', asyncHandler(async (req: Request, res: Response) => res.json(await reports.dashboard(scopeOf(req), req.query))));
 router.get('/reports/:name', asyncHandler(async (req: Request, res: Response) => {
   const fn = reports.REPORTS[req.params.name];

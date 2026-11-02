@@ -11,7 +11,7 @@ const todayIso = () => iso(new Date());
 const REVENUE_STATUSES = ['sent', 'partially_paid', 'paid'];
 
 /** Page through a PostgREST query (1000-row server cap). */
-async function fetchAll<T>(make: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
+export async function fetchAll<T>(make: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
   const out: T[] = [];
   for (let from = 0; ; from += 1000) {
     const { data, error } = await make(from, from + 999);
