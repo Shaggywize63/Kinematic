@@ -1563,7 +1563,11 @@ leads.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.leadUpdateSchema, req.body);
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
   // _consent is dropped here (not a column); consent capture is wired on create.
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: _dropConsent, ...rest } = parsed;
+  // `contacts` is a B2B capture input, NOT a crm_leads column — pop it before the
+  // update and resolve it into the CRM graph afterwards (same as the create path).
+  // `account_id` stays in `rest`: it IS a column, so an explicit link persists
+  // directly, and the B2B block below reuses it when resolving the contacts.
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: _dropConsent, contacts: leadContacts, ...rest } = parsed;
   // Edit RBAC — across the whole hierarchy, only the rep who CREATED
   // the lead may edit it. owner_id / assigned_to grant view, but not
   // edit. ASOs viewing a Consumer Champion's lead can read it (it
@@ -1600,7 +1604,36 @@ leads.patch('/:id', wrap(async (req, res) => {
   const autoLogResponse = autoLogSiteVisit && lead?.id
     ? { auto_log_site_visit_prefill: { lead_id: lead.id, subject: buildSiteVisitSubject(lead), type: 'meeting' } }
     : {};
-  res.json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse });
+  // B2B (Spark & Ray): resolve the people captured on the edit the same way the
+  // create path does — each becomes/links a crm_contact under the lead's account
+  // (via linkLeadToCompany → findOrCreateContact), using the updated row's own
+  // account_id/company so an explicit account link or a typed company both work.
+  // Only runs when the edit actually carried contacts, so a plain field edit is
+  // unchanged. Best-effort — the lead is already saved, so a linking hiccup must
+  // not fail the update.
+  let b2bResponse: Record<string, unknown> = {};
+  const l = lead as unknown as Record<string, unknown>;
+  const editClientId = String(l?.client_id ?? clientId(req) ?? '').toLowerCase();
+  const editContacts = (leadContacts as visitBridge.ContactInput[] | undefined) ?? [];
+  const editAccountId = l?.account_id as string | null | undefined;
+  const editCompany = l?.company as string | null | undefined;
+  if (lead?.id && editContacts.length > 0 && B2B_LEAD_CLIENT_IDS.has(editClientId)
+      && (String(editCompany ?? '').trim().length > 0 || editAccountId)) {
+    try {
+      const linked = await visitBridge.linkLeadToCompany(bridgeCtx(req), {
+        lead_id: lead.id,
+        account_id: editAccountId ?? null,
+        company: editCompany ?? null,
+        industry: l?.industry as string | null ?? null,
+        owner_id: l?.owner_id as string | null ?? userId(req) ?? null,
+        contacts: editContacts,
+      });
+      b2bResponse = { account_id: linked.account_id, contact_ids: linked.contact_ids };
+    } catch (e) {
+      console.warn(`[b2b_lead] could not resolve contacts on lead ${lead.id} edit: ${(e as Error).message}`);
+    }
+  }
+  res.json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...b2bResponse });
 }));
 leads.delete('/:id', wrap(async (req, res) => { await leadsSvc.deleteLead(orgId(req), req.params.id); res.status(204).end(); }));
 leads.post('/:id/score', wrap(async (req, res) => {
