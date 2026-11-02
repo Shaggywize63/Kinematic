@@ -323,11 +323,15 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   //    deleted account, never links),
   //  - store the company NAME as the answer, so exports / Form Activity / the
   //    submission modal read "Acme Ltd" instead of a raw UUID,
-  //  - and, when the visit flow didn't already stamp a top-level account_id,
-  //    adopt that account for the submission (shows on the account timeline).
+  //  - and adopt that account for the submission (shows on the account timeline).
+  //    The rep's explicit pick WINS over a top-level account_id: the apps stamp the
+  //    visit's account automatically and also pre-fill this question with it, so a
+  //    rep who changes the company must not end up linked to the pre-filled one.
+  //    With no company picked (free text / blank) the top-level account_id stands.
   // A rep can also type a company that isn't in the CRM yet: free text is kept as
   // the answer and simply isn't linked. Mirrors the phone pre-scan above.
   let effectiveAccountId: unknown = account_id;
+  let pickedAccount = false; // first resolved company answer wins
   if (template_id && Array.isArray(responses) && responses.length) {
     const { data: companyQs } = await supabaseAdmin
       .from('builder_questions')
@@ -349,7 +353,7 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
           .maybeSingle();
         if (!acct) continue; // not in this org: don't link, don't leak
         r.value = (acct as { name?: string | null }).name || String(raw);
-        if (!isUuid(effectiveAccountId)) effectiveAccountId = (acct as { id: string }).id;
+        if (!pickedAccount) { effectiveAccountId = (acct as { id: string }).id; pickedAccount = true; }
       }
     }
   }
