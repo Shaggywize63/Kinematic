@@ -143,7 +143,7 @@ export async function salesByCustomer(s: FinanceScope, query: Record<string, unk
   };
 }
 
-async function itemLines(s: FinanceScope, from: string, to: string) {
+export async function itemLines(s: FinanceScope, from: string, to: string) {
   return fetchAll((a, b) => db().from('finance_document_items')
     .select('name,hsn_sac,unit,quantity,taxable_value,cgst,sgst,igst,total,gst_rate, document:finance_documents!inner(doc_type,status,issue_date,org_id,client_id,deleted_at)')
     .eq('document.org_id', s.org_id)
