@@ -4,6 +4,7 @@
  */
 jest.mock('../src/lib/supabase', () => ({ supabaseAdmin: {} }));
 jest.mock('../src/lib/clientFlags', () => ({ getClientSettings: jest.fn(async () => ({})) }));
+import { getClientSettings } from '../src/lib/clientFlags';
 jest.mock('../src/lib/logger', () => ({ logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn() } }));
 
 import { financialYearCode, formatFormRef, normalizePrefix, allocateFormRef } from '../src/lib/formRef';
@@ -55,7 +56,12 @@ describe('allocateFormRef', () => {
     await expect(allocateFormRef(null)).resolves.toBeNull();
     await expect(allocateFormRef(undefined)).resolves.toBeNull();
   });
-  it('gives nothing for a client with no prefix setting (their submissions are untouched)', async () => {
+  it('gives nothing for a connected-B2B client with no prefix setting (their submissions are untouched)', async () => {
     await expect(allocateFormRef('c0218852-0a19-4dd0-b9fa-72f9e32ed0d8')).resolves.toBeNull();
+  });
+  it('never looks anything up for a client outside the connected-B2B flow (no extra DB call on their submits)', async () => {
+    (getClientSettings as jest.Mock).mockClear();
+    await expect(allocateFormRef('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).resolves.toBeNull();
+    expect(getClientSettings).not.toHaveBeenCalled();
   });
 });

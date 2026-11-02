@@ -6,12 +6,15 @@
  *   2627   the Indian financial year (Apr 2026 – Mar 2027)
  *   1      a running number, restarting at 1 each financial year
  *
- * Opt-in per client: a client with no `form_ref_prefix` setting gets no reference
- * and its submissions are written exactly as before (so a tenant whose database
- * has not run migration_form_ref_no.sql is never touched).
+ * Opt-in, twice over: only connected-B2B clients (Spark & Ray — an in-memory check,
+ * so every other tenant makes no extra database call at all) AND only when the client
+ * has a `form_ref_prefix` setting. Everyone else gets no reference and their
+ * submissions are written exactly as before (so a tenant whose database has not run
+ * migration_form_ref_no.sql is never touched).
  */
 import { supabaseAdmin } from './supabase';
 import { getClientSettings } from './clientFlags';
+import { isB2bClient } from './b2bClients';
 import { logger } from './logger';
 
 /** `2627` for any moment from 1 Apr 2026 to 31 Mar 2027, IST. */
@@ -42,7 +45,7 @@ export function formatFormRef(prefix: string, fyCode: string, n: number): string
  * so a numbering problem just leaves the reference empty (and is logged).
  */
 export async function allocateFormRef(clientId: string | null | undefined, at: Date = new Date()): Promise<string | null> {
-  if (!clientId) return null;
+  if (!clientId || !isB2bClient(clientId)) return null;
   try {
     const prefix = normalizePrefix((await getClientSettings(clientId)).form_ref_prefix);
     if (!prefix) return null;

@@ -1,8 +1,8 @@
 -- Form reference numbers (e.g. SRPR2627-1) + expense claim -> filled form link.
 -- Additive and idempotent. Apply to the Kinematic tenant DB, then
 --   NOTIFY pgrst, 'reload schema';
--- Numbering is opt-in per client (clients.settings.form_ref_prefix), so nothing
--- changes for a client without that setting.
+-- Numbering is opt-in: connected-B2B clients (Spark & Ray) that also carry
+-- clients.settings.form_ref_prefix, so nothing changes for any other client.
 begin;
 
 -- 1. The reference on each filled form; unique per client.
