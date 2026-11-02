@@ -317,12 +317,18 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     }
   }
 
-  // A `company`-type field links the whole submission to a CRM account. When the
-  // visit flow didn't already stamp a top-level account_id, adopt the account the
-  // rep picked in that field so Form Activity shows the company. The field stores
-  // the account UUID as its value; mirrors the phone pre-scan above.
+  // A `company`-type field ("Customer / Company") links the whole submission to a
+  // CRM account. The apps send the picked account's UUID as the answer; here we
+  //  - resolve it WITHIN the submitter's org (a UUID from another tenant, or a
+  //    deleted account, never links),
+  //  - store the company NAME as the answer, so exports / Form Activity / the
+  //    submission modal read "Acme Ltd" instead of a raw UUID,
+  //  - and, when the visit flow didn't already stamp a top-level account_id,
+  //    adopt that account for the submission (shows on the account timeline).
+  // A rep can also type a company that isn't in the CRM yet: free text is kept as
+  // the answer and simply isn't linked. Mirrors the phone pre-scan above.
   let effectiveAccountId: unknown = account_id;
-  if (!isUuid(effectiveAccountId) && template_id && Array.isArray(responses) && responses.length) {
+  if (template_id && Array.isArray(responses) && responses.length) {
     const { data: companyQs } = await supabaseAdmin
       .from('builder_questions')
       .select('id')
@@ -334,7 +340,16 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
         const fieldId = String(r.field_id ?? r.question_id ?? '');
         if (!companyFields.has(fieldId)) continue;
         const raw = r.value ?? r.response;
-        if (isUuid(raw)) { effectiveAccountId = raw; break; }
+        if (!isUuid(raw)) continue; // free text: keep as typed, no link
+        const { data: acct } = await supabaseAdmin
+          .from('crm_accounts')
+          .select('id, name')
+          .eq('org_id', user.org_id)
+          .eq('id', raw)
+          .maybeSingle();
+        if (!acct) continue; // not in this org: don't link, don't leak
+        r.value = (acct as { name?: string | null }).name || String(raw);
+        if (!isUuid(effectiveAccountId)) effectiveAccountId = (acct as { id: string }).id;
       }
     }
   }
