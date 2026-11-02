@@ -144,6 +144,10 @@ export const leadContactSchema = z.object({
   mobile: z.string().max(40).optional().nullable(),
   title: z.string().max(120).optional().nullable(),
   requirement: z.string().max(4000).optional().nullable(),
+  // Optional builder form connected to this person's requirement, so the ask
+  // stays linked to the form that captures it. Validated against the org's own
+  // forms server-side; ignored when absent (every non-B2B flow).
+  form_id: optionalUuid,
 });
 
 const leadCreateBase = z.object({
