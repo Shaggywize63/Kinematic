@@ -14,6 +14,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { extractSignalsFromUpdate } from './ai/competitorIntel.service';
+import { recomputeLeadIntelligence } from './leads.service';
 
 export interface LeadUpdate {
   id: string;
@@ -102,6 +103,10 @@ export async function createUpdate(
     .eq('id', lead_id)
     .eq('org_id', org_id);
 
+  // A new note changes the lead's engagement signal — recompute its score (the
+  // NBA cache was just invalidated above). Fire-and-forget; never blocks the note.
+  void recomputeLeadIntelligence(org_id, lead_id);
+
   // Hydrate the author's display name on the way out — listUpdates does
   // the same lookup for historic rows, but the FE prepends this single
   // row into its in-memory list without a refetch, so without this the
@@ -170,6 +175,9 @@ async function resyncLatest(org_id: string, lead_id: string): Promise<void> {
     })
     .eq('id', lead_id)
     .eq('org_id', org_id);
+
+  // Editing/deleting a note changes the engagement history — refresh the score.
+  void recomputeLeadIntelligence(org_id, lead_id);
 }
 
 /**
