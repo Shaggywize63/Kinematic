@@ -125,7 +125,8 @@ const createSchema = z.object({
   clarification: z.string().max(2000).optional().nullable(),
   account_id: uuid.optional().nullable(),
   form_id: uuid.optional().nullable(),
-  form_submission_id: uuid.optional().nullable(),
+  // null or '' clears the link (a client that cannot send an explicit null sends '').
+  form_submission_id: z.union([uuid, z.literal('')]).optional().nullable(),
   items: z.array(itemSchema).max(100).optional(),
 });
 const checkSchema = z.object({ items: z.array(itemSchema).max(100).optional(), claim_id: uuid.optional() });
