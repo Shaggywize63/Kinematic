@@ -10,6 +10,7 @@
  *   import/invoices/preview|commit   bring in previously issued invoices from a CSV/XLSX export
  *   reports/dashboard         overview (receivables ageing, sales vs receipts)
  *   reports/projection        12-month billing projection from recurring invoices (+ scenarios)
+ *   expenses                  business bills + GST-bearing approved field-expense claim lines (ITC)
  *   reports/:name             tabular reports; ?format=csv exports the same filters
  *
  * Public, no-login invoice links live in finance-public.routes.ts.
@@ -27,6 +28,7 @@ import * as masters from '../services/finance/masters.service';
 import * as docs from '../services/finance/documents.service';
 import * as payments from '../services/finance/payments.service';
 import * as reports from '../services/finance/reports.service';
+import * as expensesSvc from '../services/finance/expenses.service';
 import * as projectionSvc from '../services/finance/projection.service';
 import * as importer from '../services/finance/import.service';
 
@@ -155,6 +157,23 @@ const paymentSchema = z.object({
   mode: z.enum(['cash', 'bank_transfer', 'upi', 'cheque', 'card', 'other']).optional(), reference: str(120), notes: str(1000),
   allocations: allocations.optional(), auto_apply: z.boolean().optional(),
 });
+const expenseSchema = z.object({
+  expense_date: dateStr,
+  vendor_name: z.string().trim().min(1, 'Vendor is required').max(200),
+  vendor_gstin: gstin,
+  bill_number: str(60),
+  category: z.string().trim().max(40).optional(),
+  description: str(500),
+  place_of_supply: stateCode,
+  amount: money,
+  tax_inclusive: z.boolean().optional(),
+  gst_rate: z.coerce.number().finite().min(0).max(40),
+  gst_amount: z.preprocess((v) => (v === '' ? null : v), z.coerce.number().finite().min(0).max(1e9).nullable().optional()),
+  itc_eligible: z.boolean().nullable().optional(),
+  itc_reason: str(200),
+  receipt_url: z.preprocess(blank, z.string().url().max(2048).refine((u) => /^https?:\/\//i.test(u), 'Receipt must be a web link').nullable().optional()),
+  notes: str(1000),
+});
 const paymentPatch = z.object({ payment_date: dateStr, mode: z.enum(['cash', 'bank_transfer', 'upi', 'cheque', 'card', 'other']), reference: str(120), notes: str(1000) }).partial();
 
 // ── meta / settings ─────────────────────────────────────────────────────────
@@ -251,11 +270,21 @@ router.post('/import/invoices/commit', withFile, asyncHandler(async (req: Reques
   res.status(201).json(await importer.commitInvoiceImport(scopeOf(req), f.name, f.buffer, f.opts));
 }));
 
+// ── expenses (business bills + GST-bearing field claims) ────────────────────
+router.get('/expenses', asyncHandler(async (req: Request, res: Response) => {
+  const r = await expensesSvc.listExpenses(scopeOf(req), req.query);
+  res.json({ success: true, data: r.rows, pagination: { total: r.total, page: r.page, limit: r.limit }, totals: r.totals, meta: r.meta });
+}));
+router.post('/expenses', asyncHandler(async (req: Request, res: Response) => res.status(201).json(await expensesSvc.createExpense(scopeOf(req), parse(expenseSchema, req.body)))));
+router.get('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.getExpense(scopeOf(req), idParam(req)))));
+router.put('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.updateExpense(scopeOf(req), idParam(req), parse(expenseSchema, req.body)))));
+router.delete('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.deleteExpense(scopeOf(req), idParam(req)))));
+
 // ── reports ─────────────────────────────────────────────────────────────────
 router.get('/reports/projection', asyncHandler(async (req: Request, res: Response) => res.json({ success: true, data: await projectionSvc.projection(scopeOf(req), req.query) })));
 router.get('/reports/dashboard', asyncHandler(async (req: Request, res: Response) => res.json(await reports.dashboard(scopeOf(req), req.query))));
 router.get('/reports/:name', asyncHandler(async (req: Request, res: Response) => {
-  const fn = reports.REPORTS[req.params.name];
+  const fn = reports.REPORTS[req.params.name] ?? expensesSvc.EXPENSE_REPORTS[req.params.name];
   if (!fn) throw new AppError(404, 'Unknown report', 'NOT_FOUND');
   const report = await fn(scopeOf(req), req.query);
   if (String(req.query.format).toLowerCase() === 'csv') {

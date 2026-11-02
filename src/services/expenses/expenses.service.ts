@@ -292,6 +292,12 @@ export interface ClaimItemInput {
   merchant?: string | null;
   receipt_url?: string | null;
   ai_extracted?: any;
+  // GST on the bill (feeds Finance's input-tax-credit report). Written only when the client sends them.
+  supplier_gstin?: string | null;
+  supplier_invoice_no?: string | null;
+  gst_rate?: number | null;
+  gst_amount?: number | null;
+  itc_eligible?: boolean | null;
   // Travel allowance by vehicle — only meaningful under a policy with vehicle_rates.
   vehicle_type?: string | null;
   odometer_start?: number | null;
@@ -414,6 +420,8 @@ async function applyGpsDistance<T extends ClaimItemInput>(
   return out;
 }
 
+const GST_KEYS = ['supplier_gstin', 'supplier_invoice_no', 'gst_rate', 'gst_amount', 'itc_eligible'] as const;
+
 const itemRow = (claim_id: string, org_id: string, i: ClaimItemInput) => {
   const row: Record<string, unknown> = {
     claim_id, org_id, category: i.category, item_date: i.item_date ?? null, description: i.description ?? null,
@@ -424,6 +432,11 @@ const itemRow = (claim_id: string, org_id: string, i: ClaimItemInput) => {
   // Odometer columns only exist after migrations/expense_odometer.sql, so they are written only
   // when the line actually carries them — every other claim's insert is byte-for-byte unchanged.
   for (const k of ODOMETER_KEYS) {
+    const v = (i as any)[k];
+    if (v !== undefined) row[k] = v ?? null;
+  }
+  // Same for the GST columns (migrations/finance_expenses_gst.sql).
+  for (const k of GST_KEYS) {
     const v = (i as any)[k];
     if (v !== undefined) row[k] = v ?? null;
   }

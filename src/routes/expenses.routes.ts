@@ -116,6 +116,13 @@ const itemSchema = z.object({
     z.string().url().max(2048).refine((u) => /^https?:\/\//i.test(u), 'Receipt must be a web link'),
   ]).optional().nullable(),
   ai_extracted: z.any().optional(),
+  // GST on the bill — feeds Finance's GST-on-expenses / input-tax-credit report.
+  supplier_gstin: z.preprocess((v) => (typeof v === 'string' ? (v.trim() === '' ? null : v.trim().toUpperCase()) : v),
+    z.string().regex(/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/, 'Invalid supplier GSTIN').nullable().optional()),
+  supplier_invoice_no: z.string().max(60).optional().nullable(),
+  gst_rate: num(40).optional().nullable(),
+  gst_amount: num(10_000_000).optional().nullable(),
+  itc_eligible: z.boolean().optional().nullable(),
 });
 const createSchema = z.object({
   title: z.string().max(200).optional().nullable(),
