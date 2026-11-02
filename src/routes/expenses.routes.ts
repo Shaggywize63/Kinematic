@@ -10,6 +10,7 @@
  *              POST claims/check              what would the policy say about these lines?
  *              GET  claims[?status]           my claims
  *              GET  claims/:id                a claim with lines, receipts and trail
+ *              GET  linkable-submissions[?account_id]  my filled forms (reference + date) to link a claim to
  *              POST claims · PATCH claims/:id · POST claims/:id/submit · PATCH claims/:id/cancel
  *   Approver:  GET  claims/pending            waiting on me
  *              GET  claims/all                everything I may see, filtered + paged
@@ -124,6 +125,8 @@ const createSchema = z.object({
   clarification: z.string().max(2000).optional().nullable(),
   account_id: uuid.optional().nullable(),
   form_id: uuid.optional().nullable(),
+  // null or '' clears the link (a client that cannot send an explicit null sends '').
+  form_submission_id: z.union([uuid, z.literal('')]).optional().nullable(),
   items: z.array(itemSchema).max(100).optional(),
 });
 const checkSchema = z.object({ items: z.array(itemSchema).max(100).optional(), claim_id: uuid.optional() });
@@ -351,6 +354,11 @@ router.post('/claims/bulk-decision', requireApprover, asyncHandler<AuthRequest>(
 }));
 
 // ── claims (the claimant) ───────────────────────────────────────────────────
+// My filled forms (with their unique reference + date) an expense can be linked to.
+router.get('/linkable-submissions', asyncHandler<AuthRequest>(async (req, res) => {
+  const acc = uuid.safeParse(req.query.account_id);
+  res.json({ success: true, data: await expenses.listLinkableSubmissions(actor(req), acc.success ? acc.data : null) });
+}));
 router.get('/claims', asyncHandler<AuthRequest>(async (req, res) => {
   const status = req.query.status ? String(req.query.status) : undefined;
   res.json({ success: true, data: await expenses.listMyClaims(actor(req), status) });
