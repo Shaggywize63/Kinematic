@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { supabase, supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
-import { ok, created, badRequest, unauthorized, serverError, isDemo } from '../utils';
+import { ok, created, badRequest, unauthorized, forbidden, serverError, isDemo } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
 import { logger } from '../lib/logger';
 import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
@@ -509,6 +509,10 @@ const changePasswordSchema = z.object({
 });
 export const changePassword = asyncHandler<AuthRequest>(async (req, res) => {
   if (!req.user) return unauthorized(res);
+  // A read-only impersonation mirror must not change the target's password.
+  if ((req.user as { impersonation_read_only?: boolean }).impersonation_read_only) {
+    return forbidden(res, 'This is a read-only view and cannot change this user’s password.');
+  }
   const body = changePasswordSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'Validation failed', body.error.errors);
 
@@ -719,6 +723,11 @@ export const me = asyncHandler<AuthRequest>(async (req, res) => {
 // affect access control or routing.
 export const updateMe = asyncHandler<AuthRequest>(async (req, res) => {
   if (!req.user) return unauthorized(res);
+  // A read-only impersonation mirror must not mutate the target's own profile.
+  // (The /auth routes bypass the V1 readOnlyGuard, so we gate it here.)
+  if ((req.user as { impersonation_read_only?: boolean }).impersonation_read_only) {
+    return forbidden(res, 'This is a read-only view and cannot change this user’s profile.');
+  }
   const allowed = ['avatar_url', 'name'] as const;
   const updates: Record<string, unknown> = {};
   for (const key of allowed) {

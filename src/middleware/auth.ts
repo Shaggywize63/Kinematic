@@ -317,13 +317,13 @@ export function invalidateAuthCache(predicate?: (u: AuthRequest['user']) => bool
 //      and supabaseAdmin already points at the current project's gotrue.
 // A token minted by one project will NOT verify against another project's
 // keys, so cross-project token confusion fails closed.
-async function verifyToken(token: string): Promise<{ sub: string; exp?: number; email?: string; act_org_id?: string } | null> {
+async function verifyToken(token: string): Promise<{ sub: string; exp?: number; email?: string; act_org_id?: string; ro?: boolean } | null> {
   const projectKey = currentProjectKey();
 
   // 1 + 2. Local verification against this project's keys.
   const result = await verifyProjectToken(projectKey, token);
   if (result?.payload?.sub) {
-    const p = result.payload as { email?: string; act?: boolean; act_org_id?: string };
+    const p = result.payload as { email?: string; act?: boolean; act_org_id?: string; ro?: boolean };
     return {
       sub: result.payload.sub,
       exp: result.payload.exp,
@@ -331,6 +331,9 @@ async function verifyToken(token: string): Promise<{ sub: string; exp?: number; 
       // Super-admin "Login as client" impersonation claim (minted by
       // POST /clients/:id/impersonate, signed with this project's HS256 secret).
       act_org_id: p.act === true && typeof p.act_org_id === 'string' ? p.act_org_id : undefined,
+      // Master-admin READ-ONLY user mirror claim (minted by
+      // POST /auth/impersonate/start). Forces a look-but-don't-touch session.
+      ro: p.ro === true ? true : undefined,
     };
   }
 
@@ -498,6 +501,23 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   if (verified.act_org_id && profile.role === 'super_admin') {
     logger.info(`[Auth] super_admin ${profile.id} impersonating org ${verified.act_org_id}`);
     profile.org_id = verified.act_org_id;
+  }
+
+  // Master-admin READ-ONLY user mirror: the token minted by
+  // /auth/impersonate/start carries `ro:true`. Its identity IS the target user
+  // (an EXACT mirror of their dashboard), but we force the session read-only so
+  // the readOnlyGuard mounted on the V1 catch-all blocks every write. The
+  // target's own users.is_read_only is almost always false — this override is
+  // what makes "view as user" look-but-don't-touch. It does NOT change what the
+  // target can SEE, only what this session can change.
+  if (verified.ro) {
+    profile.is_read_only = true;
+    // Non-persisted marker: this session is a read-only impersonation MIRROR
+    // (distinct from a standalone read-only "Lead Viewer" account). The /auth
+    // session routes bypass the V1 readOnlyGuard, so the /auth/me + change-
+    // password controllers use this flag to stop the mirror mutating the
+    // TARGET's own account. It never blocks a genuine read-only account.
+    (profile as { impersonation_read_only?: boolean }).impersonation_read_only = true;
   }
 
   // Client-level gate (mirrors the /auth/login check): block a user whose
