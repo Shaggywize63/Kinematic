@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { supabaseAdmin } from '../lib/supabase';
 import { clientHasFlag } from '../lib/clientFlags';
+import { allocateFormRef } from '../lib/formRef';
 import { AuthRequest } from '../types';
 import { asyncHandler, ok, created, badRequest, notFound, parseAppDate, getISTSearchRange, sendSuccess, buildPaginatedResult, isUUID, sanitisePostgrestSearch } from '../utils';
 import { getPagination } from '../utils/pagination';
@@ -379,8 +380,14 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     resolvedAddress = await reverseGeocode(Number(latitude), Number(longitude));
   }
 
+  // Unique human-readable reference (e.g. SRPR2627-1) — only for clients with a
+  // `form_ref_prefix` setting; null (and omitted from the insert) for everyone
+  // else, so their writes are byte-identical to before.
+  const refNo = await allocateFormRef(submitterClientId);
+
   const { data: sub, error: subErr } = await supabaseAdmin.from('form_submissions').insert({
     user_id: user.id, org_id: user.org_id, client_id: submitterClientId,
+    ...(refNo ? { ref_no: refNo } : {}),
     template_id, activity_id, outlet_id, outlet_name,
     latitude, longitude, submitted_at: new Date().toISOString(),
     check_in_at: visit.check_in_at, check_out_at: visit.check_out_at, check_in_gps, check_out_gps, gps, address: resolvedAddress,

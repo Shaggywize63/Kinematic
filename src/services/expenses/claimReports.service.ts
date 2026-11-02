@@ -200,8 +200,8 @@ export function buildClaimsCsv(claims: any[], items: any[]): string {
   if (withTrip) head.push('Distance (km)', 'Vehicle', 'Odometer before', 'Odometer after');
   // Connected-B2B links: appended only when a claim in this report carries one,
   // so every other tenant's export keeps exactly the columns it always had.
-  const withLinks = claims.some((c) => c.clarification || c.account_name || c.form_title);
-  if (withLinks) head.push('Clarification', 'Account', 'Form');
+  const withLinks = claims.some((c) => c.clarification || c.account_name || c.form_title || c.form_ref_no);
+  if (withLinks) head.push('Clarification', 'Account', 'Form', 'Form ref', 'Form date');
   const out: string[] = [head.map(cell).join(',')];
   const day = (d: unknown) => (d ? String(d).slice(0, 10) : '');
   for (const c of claims) {
@@ -212,7 +212,7 @@ export function buildClaimsCsv(claims: any[], items: any[]): string {
         it.category, day(it.item_date), it.merchant, it.description, it.amount, it.decision ?? '', it.decision_note, it.receipt_url ? 'Yes' : 'No',
         c.total_amount, c.approved_amount ?? '', day(c.reimbursed_at), c.reimbursed_ref,
         ...(withTrip ? [it.distance_km ?? '', it.vehicle_type ?? '', it.odometer_start ?? '', it.odometer_end ?? ''] : []),
-        ...(withLinks ? [c.clarification ?? '', c.account_name ?? '', c.form_title ?? ''] : []),
+        ...(withLinks ? [c.clarification ?? '', c.account_name ?? '', c.form_title ?? '', c.form_ref_no ?? '', day(c.form_submitted_at)] : []),
       ].map(cell).join(','));
     }
   }

@@ -181,22 +181,81 @@ export async function stampNames(rows: any[]): Promise<any[]> {
 export async function stampLinks(rows: any[]): Promise<any[]> {
   if (!rows.length) return rows;
   const accIds = Array.from(new Set(rows.map((r) => r.account_id).filter(Boolean)));
-  const formIds = Array.from(new Set(rows.map((r) => r.form_id).filter(Boolean)));
+  const subIds = Array.from(new Set(rows.map((r) => r.form_submission_id).filter(Boolean)));
   const accNames = new Map<string, string>();
   const formTitles = new Map<string, string>();
+  // A claim may link to a FILLED form (its unique reference + date are shown).
+  const subs = new Map<string, { ref_no: string | null; submitted_at: string | null; template_id: string | null }>();
+  if (subIds.length) {
+    const { data } = await supabaseAdmin.from('form_submissions').select('id, ref_no, submitted_at, template_id').in('id', subIds);
+    for (const f of (data as any[]) ?? []) subs.set(f.id, { ref_no: f.ref_no ?? null, submitted_at: f.submitted_at ?? null, template_id: f.template_id ?? null });
+  }
+  const formIds = Array.from(new Set([
+    ...rows.map((r) => r.form_id).filter(Boolean),
+    ...Array.from(subs.values()).map((x) => x.template_id).filter(Boolean),
+  ]));
   if (accIds.length) {
     const { data } = await supabaseAdmin.from('crm_accounts').select('id, name').in('id', accIds);
     for (const a of (data as any[]) ?? []) accNames.set(a.id, a.name);
   }
   if (formIds.length) {
-    const { data } = await supabaseAdmin.from('builder_forms').select('id, title').in('id', formIds);
+    const { data } = await supabaseAdmin.from('builder_forms').select('id, title').in('id', formIds as string[]);
     for (const f of (data as any[]) ?? []) formTitles.set(f.id, f.title);
   }
   for (const r of rows) {
     if (r.account_id) r.account_name = accNames.get(r.account_id) ?? null;
     if (r.form_id) r.form_title = formTitles.get(r.form_id) ?? null;
+    const sub = r.form_submission_id ? subs.get(r.form_submission_id) : undefined;
+    if (sub) {
+      r.form_ref_no = sub.ref_no;
+      r.form_submitted_at = sub.submitted_at;
+      if (sub.template_id) r.form_title = formTitles.get(sub.template_id) ?? r.form_title ?? null;
+    }
   }
   return rows;
+}
+
+/**
+ * The caller's own filled forms that carry a reference (e.g. SRPR2627-1), newest
+ * first — the options for linking an expense to a form. Optionally narrowed to one
+ * CRM account. When an admin has flagged forms as expense-linked, only those forms'
+ * entries are offered. Connected-B2B clients only (else empty).
+ */
+export async function listLinkableSubmissions(actor: Actor, accountId?: string | null): Promise<any[]> {
+  if (!isB2bClient(actor.client_id)) return [];
+  const { data: flagged } = await supabaseAdmin.from('builder_forms').select('id').eq('org_id', actor.org_id).eq('expense_linked', true);
+  const flaggedIds = ((flagged as any[]) ?? []).map((f) => f.id);
+  let q = supabaseAdmin.from('form_submissions')
+    .select('id, ref_no, submitted_at, template_id, account_id')
+    .eq('org_id', actor.org_id).eq('user_id', actor.id)
+    .not('ref_no', 'is', null)
+    .order('submitted_at', { ascending: false })
+    .limit(50);
+  if (flaggedIds.length) q = q.in('template_id', flaggedIds);
+  if (accountId) q = q.eq('account_id', accountId);
+  const { data } = await q;
+  const rows = ((data as any[]) ?? []);
+  if (!rows.length) return [];
+  const tplIds = Array.from(new Set(rows.map((r) => r.template_id).filter(Boolean)));
+  const accIds = Array.from(new Set(rows.map((r) => r.account_id).filter(Boolean)));
+  const titles = new Map<string, string>();
+  const names = new Map<string, string>();
+  if (tplIds.length) {
+    const { data: t } = await supabaseAdmin.from('builder_forms').select('id, title').in('id', tplIds);
+    for (const f of (t as any[]) ?? []) titles.set(f.id, f.title);
+  }
+  if (accIds.length) {
+    const { data: a } = await supabaseAdmin.from('crm_accounts').select('id, name').in('id', accIds);
+    for (const x of (a as any[]) ?? []) names.set(x.id, x.name);
+  }
+  return rows.map((r) => ({
+    id: r.id,
+    ref_no: r.ref_no,
+    submitted_at: r.submitted_at,
+    form_title: r.template_id ? (titles.get(r.template_id) ?? null) : null,
+    account_id: r.account_id ?? null,
+    account_name: r.account_id ? (names.get(r.account_id) ?? null) : null,
+  }));
 }
 
 function genClaimNo(): string {
@@ -417,6 +476,8 @@ export interface ClaimBody {
   clarification?: string | null;
   account_id?: string | null;
   form_id?: string | null;
+  /** A filled form (shown by its unique reference + date) this expense is linked to. */
+  form_submission_id?: string | null;
   items?: ClaimItemInput[];
 }
 
@@ -442,6 +503,15 @@ async function resolveLinks(actor: Actor, body: ClaimBody): Promise<Record<strin
       if (!data) throw new AppError(400, 'Linked form not found', 'VALIDATION');
       out.form_id = body.form_id;
     } else out.form_id = null;
+  }
+  // A filled form: must be the claimant's own entry in this org.
+  if (body.form_submission_id !== undefined) {
+    if (body.form_submission_id) {
+      const { data } = await supabaseAdmin.from('form_submissions').select('id')
+        .eq('org_id', actor.org_id).eq('user_id', actor.id).eq('id', body.form_submission_id).maybeSingle();
+      if (!data) throw new AppError(400, 'Linked form entry not found', 'VALIDATION');
+      out.form_submission_id = body.form_submission_id;
+    } else out.form_submission_id = null;
   }
   return out;
 }
