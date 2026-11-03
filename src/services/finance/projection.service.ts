@@ -248,8 +248,10 @@ export const ROLE_CATALOG: RoleDef[] = [
     trigger_text: '40 or more recurring customers' },
 ];
 
-export interface GrowthOptions { cap_pct: number; oncost_pct: number; existing: number; costs: Record<string, number> }
-export const DEFAULT_GROWTH: GrowthOptions = { cap_pct: 50, oncost_pct: 12, existing: 0, costs: {} };
+export interface GrowthOptions { cap_pct: number; oncost_pct: number; existing: number; founder: number; costs: Record<string, number> }
+/** Founder pay is a fixed cost the plan always carries: ₹2,00,000 a month, before any hire is affordable. */
+export const FOUNDER_MONTHLY = 200_000;
+export const DEFAULT_GROWTH: GrowthOptions = { cap_pct: 50, oncost_pct: 12, existing: 0, founder: FOUNDER_MONTHLY, costs: {} };
 
 type ScenarioKey = 'conservative' | 'base' | 'upside';
 
@@ -260,12 +262,15 @@ export function growthOptionsFrom(q: Record<string, unknown>): GrowthOptions {
     cap_pct: num(q.cap, DEFAULT_GROWTH.cap_pct, 10, 100),
     oncost_pct: num(q.oncost, DEFAULT_GROWTH.oncost_pct, 0, 60),
     existing: num(q.existing, DEFAULT_GROWTH.existing, 0, 100_000_000),
+    founder: num(q.founder, DEFAULT_GROWTH.founder, 0, 100_000_000),
     costs,
   };
 }
 
 export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: GrowthOptions) {
   const cap = g.cap_pct / 100;
+  // Costs that exist whether or not anyone is hired: founder pay + any other monthly costs entered.
+  const fixed = g.existing + g.founder;
   const customersNow = proj.summary.recurring_customers;
   const mrr0 = proj.summary.mrr;
   const avgMrr = customersNow > 0 ? mrr0 / customersNow : 0;
@@ -278,7 +283,7 @@ export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: Gro
   // Unlock MRR assumes every higher-priority role is already on the payroll.
   let cum = 0;
   const unlock = new Map<string, number>();
-  for (const r of roles) { cum += r.loaded; unlock.set(r.key, round2((g.existing + cum) / cap)); }
+  for (const r of roles) { cum += r.loaded; unlock.set(r.key, round2((fixed + cum) / cap)); }
 
   const plans = {} as Record<ScenarioKey, unknown>;
   for (const sc of ['conservative', 'base', 'upside'] as ScenarioKey[]) {
@@ -294,7 +299,7 @@ export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: Gro
       for (const r of roles) {
         if (hiredAt.has(r.key)) continue;
         const trigger = custAt(k) >= r.min_customers && proj.summary.outstanding >= r.min_outstanding;
-        const afford = mrrAt(k) >= (g.existing + payroll + r.loaded) / cap;
+        const afford = mrrAt(k) >= (fixed + payroll + r.loaded) / cap;
         if (trigger && afford) { hiredAt.set(r.key, k); payroll += r.loaded; }
       }
     }
@@ -312,7 +317,7 @@ export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: Gro
       return {
         key: r.key, title: r.title, why: r.why, expertise: r.expertise, trigger: r.trigger_text, note: r.note ?? null, priority: r.priority,
         monthly_salary: r.monthly, monthly_loaded: r.loaded, one_time: r.one_time,
-        unlock_mrr: need, unlock_alone: round2((g.existing + r.loaded) / cap), gap_mrr: round2(gap), more_customers: avgMrr > 0 ? Math.ceil(gap / avgMrr) : null,
+        unlock_mrr: need, unlock_alone: round2((fixed + r.loaded) / cap), gap_mrr: round2(gap), more_customers: avgMrr > 0 ? Math.ceil(gap / avgMrr) : null,
         hire_month: k === undefined ? null : proj.months[k].month, hire_label: k === undefined ? null : proj.months[k].label,
         status: k === undefined ? 'beyond' : k === 0 ? 'now' : 'planned',
         year1_cost: k === undefined ? 0 : round2(r.loaded * (12 - k) + r.one_time), blocker,
@@ -324,19 +329,19 @@ export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: Gro
       const oneTime = starting.reduce((x, r) => x + r.one_time, 0);
       payrollK += starting.reduce((x, r) => x + r.loaded, 0);
       const billings = m[sc === 'conservative' ? 'conservative' : sc === 'base' ? 'base' : 'upside'];
-      const net = round2(billings - payrollK - oneTime - g.existing);
+      const net = round2(billings - payrollK - oneTime - fixed);
       cumNet += net; peak = Math.max(peak, payrollK); oneTimeTotal += oneTime; payrollTotal += payrollK;
       return {
         month: m.month, label: m.label, mrr: round2(mrrAt(k)), customers: custAt(k), billings, payroll: round2(payrollK), one_time: round2(oneTime),
-        existing: g.existing, net, cum_net: round2(cumNet), hires: starting.map((r) => r.title),
-        payroll_pct: mrrAt(k) > 0 ? Math.round(((payrollK + g.existing) / mrrAt(k)) * 1000) / 10 : 0,
+        existing: g.existing, founder: g.founder, net, cum_net: round2(cumNet), hires: starting.map((r) => r.title),
+        payroll_pct: mrrAt(k) > 0 ? Math.round(((payrollK + fixed) / mrrAt(k)) * 1000) / 10 : 0,
       };
     });
     const hires = out.filter((r) => r.status !== 'beyond').sort((a, b) => (a.hire_month as string).localeCompare(b.hire_month as string));
     const next = out.filter((r) => r.status === 'beyond').sort((a, b) => a.priority - b.priority)[0] ?? null;
     plans[sc] = {
       roles: out, timeline,
-      budget: { year1_total: round2(payrollTotal + oneTimeTotal), payroll: round2(payrollTotal), one_time: round2(oneTimeTotal), peak_monthly: round2(peak), end_net: round2(cumNet) },
+      budget: { year1_total: round2(payrollTotal + oneTimeTotal), payroll: round2(payrollTotal), one_time: round2(oneTimeTotal), peak_monthly: round2(peak), founder_year1: round2(g.founder * 12), end_net: round2(cumNet) },
       headline: {
         hires: hires.length,
         first_hire: hires[0] ? { title: hires[0].title, month: hires[0].hire_month, label: hires[0].hire_label, status: hires[0].status } : null,
@@ -349,8 +354,9 @@ export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: Gro
     assumptions: [
       'Salaries are typical market estimates for a small SaaS team in Gurugram — your books hold no payroll data. Edit them below.',
       `Employer cost on top of salary: ${g.oncost_pct}% (PF, insurance, equipment). One-time cost per hire: one month's salary (recruiting + setup).`,
-      `Team cost is kept under ${g.cap_pct}% of monthly recurring revenue; the rest covers infrastructure, tools, founders and profit.`,
-      'Sales commission, founders\' pay and AWS / software costs are not included unless you enter them under "existing monthly costs".',
+      `Founder pay is held at ₹${Math.round(g.founder).toLocaleString('en-IN')} a month throughout and counted before any hire. Fixed costs (founder + other) plus the team are kept under ${g.cap_pct}% of monthly recurring revenue; the rest covers infrastructure, tools and profit.`,
+      ...(mrr0 * cap < g.founder ? [`Today's recurring revenue (₹${Math.round(mrr0).toLocaleString('en-IN')}/month) does not yet cover the founder pay inside the ${g.cap_pct}% limit, so no hire is affordable until it reaches about ₹${Math.round(g.founder / cap).toLocaleString('en-IN')}/month even before the first salary.`] : []),
+      'Sales commission and AWS / software costs are not included unless you enter them under "other monthly costs".',
     ],
     plans,
   };

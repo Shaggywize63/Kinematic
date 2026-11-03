@@ -88,7 +88,9 @@ describe('billing projection', () => {
 
 describe('growth / hiring plan', () => {
   const p = buildProjection(INVOICES, QUOTES, PAYMENTS, AS_OF);
-  const g = buildGrowthPlan(p, DEFAULT_GROWTH);
+  // The hiring maths is exercised with founder pay switched off; founder pay has its own tests below.
+  const NO_FOUNDER = { ...DEFAULT_GROWTH, founder: 0 };
+  const g = buildGrowthPlan(p, NO_FOUNDER);
   const role = (sc: 'conservative' | 'base' | 'upside', key: string) => (g.plans[sc] as { roles: Array<Record<string, unknown>> }).roles.find((r) => r.key === key) as Record<string, unknown>;
 
   it('computes the revenue each hire needs: loaded cost ÷ payroll cap, cumulative in priority order', () => {
@@ -118,9 +120,38 @@ describe('growth / hiring plan', () => {
   });
 
   it('reacts to the inputs: a lower cap or higher existing costs delays hiring, edited salaries change the budget', () => {
-    const strict = buildGrowthPlan(p, { ...DEFAULT_GROWTH, existing: 40000 });
+    const strict = buildGrowthPlan(p, { ...NO_FOUNDER, existing: 40000 });
     expect((strict.plans.base as { roles: Array<{ key: string; status: string }> }).roles.find((r) => r.key === 'accounts')?.status).toBe('beyond');
-    const pricey = buildGrowthPlan(p, growthOptionsFrom({ cost_accounts: '20000', cap: '50' }));
+    const pricey = buildGrowthPlan(p, growthOptionsFrom({ cost_accounts: '20000', cap: '50', founder: '0' }));
     expect((pricey.plans.base as { budget: { year1_total: number } }).budget.year1_total).toBe(22400 * 12 + 20000);
+  });
+  it('keeps founder pay at ₹2,00,000 a month by default and carries it in every month', () => {
+    expect(DEFAULT_GROWTH.founder).toBe(200000);
+    expect(growthOptionsFrom({}).founder).toBe(200000);
+    const f = buildGrowthPlan(p, DEFAULT_GROWTH);
+    const base = f.plans.base as { timeline: Array<Record<string, number>>; budget: Record<string, number> };
+    expect(base.timeline.every((t) => t.founder === 200000)).toBe(true);
+    expect(base.budget.founder_year1).toBe(2400000);
+    expect(f.assumptions.join(' ')).toMatch(/Founder pay is held at ₹2,00,000/);
+  });
+
+  it('counts founder pay as a fixed cost: it raises every unlock level and lowers monthly net', () => {
+    const f = buildGrowthPlan(p, DEFAULT_GROWTH);
+    const fr = (f.plans.base as { roles: Array<{ key: string; unlock_mrr: number; unlock_alone: number }> }).roles.find((r) => r.key === 'accounts')!;
+    // (200,000 founder + 16,800 loaded) / 50% cap
+    expect(fr.unlock_alone).toBe(433600);
+    expect(fr.unlock_mrr).toBe(433600);
+    const noF = (g.plans.base as { timeline: Array<{ net: number }> }).timeline[1].net;
+    const withF = (f.plans.base as { timeline: Array<{ net: number }> }).timeline[1].net;
+    // founder pay costs ₹2,00,000 a month, less the ₹16,800 accountant that is no longer affordable
+    expect(noF - withF).toBe(200000 - 16800);
+  });
+
+  it('hires nobody and says why when revenue cannot yet fund founder pay, and accepts a founder override', () => {
+    const f = buildGrowthPlan(p, DEFAULT_GROWTH);
+    expect((f.plans.base as { headline: { hires: number } }).headline.hires).toBe(0);
+    expect(f.assumptions.join(' ')).toMatch(/does not yet cover the founder pay/);
+    expect(growthOptionsFrom({ founder: '150000' }).founder).toBe(150000);
+    expect(growthOptionsFrom({ founder: '-5' }).founder).toBe(0);
   });
 });
