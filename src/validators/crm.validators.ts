@@ -500,9 +500,24 @@ export const dealSchema = z.object({
   next_step: z.string().max(500).optional().nullable(),
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
+  // Connected-B2B (Spark & Ray): a quotation number and the products quoted, each with a quantity and
+  // price. The deal's amount becomes the total of the lines. Dropped for every other client.
+  quotation_no: z.string().trim().max(60).optional().nullable(),
+  items: z.array(z.object({
+    product_id: optionalUuid,
+    name: z.string().trim().min(1).max(200),
+    quantity: z.number().positive().max(1_000_000_000).default(1),
+    unit_price: z.number().nonnegative().max(1_000_000_000_000),
+  })).max(50).optional(),
 });
 
 export const dealUpdateSchema = dealSchema.partial();
+
+// A dated update on an account, optionally from a named contact person (connected-B2B).
+export const accountUpdateSchema = z.object({
+  body: z.string().trim().min(1).max(4000),
+  contact_id: optionalUuid,
+});
 
 export const moveStageSchema = z.object({ stage_id: uuid });
 export const winSchema = z.object({
@@ -549,6 +564,14 @@ export const activitySchemaBase = z.object({
   // crm_custom_field_defs (entity_type='activity'). Same shape as lead /
   // deal / contact / account custom_fields. Persists into the jsonb column.
   custom_fields: z.record(z.unknown()).optional(),
+  // Connected-B2B (Spark & Ray) extras — honoured for those clients only, dropped for everyone else
+  // (see services/crm/activityExtras.service.ts):
+  //  - several field executives on one activity (first = primary assignee, stays in assigned_to)
+  //  - "product interested" (catalogue product ids)
+  //  - the filled form this activity relates to, by its serial (e.g. SRPR2627-12); '' / null clears it
+  assignee_ids: z.array(uuid).max(20).optional(),
+  product_ids: z.array(uuid).max(20).optional().nullable(),
+  form_serial: z.string().trim().max(40).optional().nullable(),
 });
 
 // Create-side schema enforces a linked entity. Activities without a

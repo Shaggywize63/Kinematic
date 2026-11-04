@@ -62,3 +62,14 @@ export async function allocateFormRef(clientId: string | null | undefined, at: D
     return null;
   }
 }
+
+/**
+ * What a person types for a form serial, as stored: trimmed, upper-case, any dash look-alike (– — − ‑) turned into a
+ * plain hyphen and inner spaces removed. Null unless it looks like PREFIX + 4-digit year code + "-" + number
+ * (e.g. SRPR2627-12), so a stray string never reaches the database lookup.
+ */
+export function normalizeFormSerial(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const s = raw.replace(/[‐-―−]/g, '-').replace(/\s+/g, '').toUpperCase();
+  return /^[A-Z0-9]{1,12}\d{4}-\d{1,9}$/.test(s) ? s : null;
+}

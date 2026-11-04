@@ -231,6 +231,9 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     tags: payload.tags ?? [],
     custom_fields: cleanedCustomFields,
     created_by: user_id ?? null,
+    // Connected-B2B quotation number: only written when one is supplied (the route drops it for every other client).
+    ...(typeof (payload as { quotation_no?: unknown }).quotation_no === 'string' && (payload as { quotation_no: string }).quotation_no
+      ? { quotation_no: (payload as { quotation_no: string }).quotation_no } : {}),
   };
   const { data, error } = await supabaseAdmin.from('crm_deals').insert(insertRow).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
