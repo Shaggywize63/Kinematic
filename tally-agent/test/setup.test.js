@@ -12,7 +12,7 @@ async function fakeApi() {
   const seen = [];
   const s = await listen(async (req, res) => {
     const b = JSON.parse(await body(req) || '{}');
-    seen.push(b.code);
+    if (req.url.endsWith('/pair')) seen.push(b.code);   // /pair only — ignore best-effort /pair-diag reports
     res.setHeader('Content-Type', 'application/json');
     if (String(b.code).toUpperCase().replace(/[^A-Z0-9]/g, '') === 'K7F29X') {
       return res.end(JSON.stringify({ ok: true, company_name: 'Gomant', config: { integration_id: 'i1', agent_secret: 's', polling_endpoint: 'http://x/jobs/i1?key=s', report_endpoint: 'http://x/r?key=s' } }));

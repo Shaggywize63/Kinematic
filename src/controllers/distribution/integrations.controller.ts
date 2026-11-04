@@ -56,7 +56,7 @@ export function sanitiseIntegration<T extends Record<string, unknown>>(row: T): 
 export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
   const { data, error } = await scopeIntegrations(supabaseAdmin.from('distribution_integrations')
-    .select('id, org_id, provider, label, status, config, last_seen_at, last_sync_at, last_error, last_event_count, created_at, updated_at')
+    .select('id, org_id, client_id, provider, label, status, config, last_seen_at, last_sync_at, last_error, last_event_count, agent_last_error, agent_last_error_at, created_at, updated_at')
     .eq('org_id', org_id), req.user)
     .order('created_at', { ascending: false });
   if (error) return badRequest(res, error.message);
@@ -66,7 +66,7 @@ export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
 export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
   const { data, error } = await scopeIntegrations(supabaseAdmin.from('distribution_integrations')
-    .select('id, org_id, provider, label, status, config, last_seen_at, last_sync_at, last_error, last_event_count, created_at, updated_at')
+    .select('id, org_id, client_id, provider, label, status, config, last_seen_at, last_sync_at, last_error, last_event_count, agent_last_error, agent_last_error_at, created_at, updated_at')
     .eq('org_id', org_id).eq('id', req.params.id), req.user).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!data) return notFound(res, 'Integration not found');
@@ -106,6 +106,17 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   }
   if (!(await companyInOrg(config, org_id, req.user))) return badRequest(res, 'That company is not in your organisation');
 
+  const client_id = (config?.client_id as string | undefined) || null;
+
+  // One Tally connection per client: if this client already has a live Tally connection,
+  // return it instead of creating a duplicate (we were accumulating orphan rows per client).
+  if (provider === 'tally' && client_id) {
+    const { data: dupes } = await supabaseAdmin.from('distribution_integrations')
+      .select('*').eq('org_id', org_id).eq('provider', 'tally').eq('client_id', client_id)
+      .in('status', ['pending', 'active']).order('created_at', { ascending: false }).limit(1);
+    if (dupes && dupes.length) return ok(res, sanitiseIntegration(dupes[0]));
+  }
+
   const agent_secret = crypto.randomBytes(24).toString('base64url');
 
   const { data: integration, error: intErr } = await supabaseAdmin.from('distribution_integrations')
@@ -115,6 +126,7 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
       label: label?.trim() || PROVIDER_LABEL[provider],
       status: 'pending',
       config: config ?? {},
+      client_id,
       agent_secret,
       created_by: user_id,
     })
