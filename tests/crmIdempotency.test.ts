@@ -157,9 +157,11 @@ describe('idempotency middleware — wired onto the CRM create routes', () => {
     expect(hit!.handlers).toContain('idempotency');
   });
 
-  it('every CRM create route that carries idempotency is a POST "/" (sanity on the walker)', () => {
+  it('every CRM create route that carries idempotency is a POST "/" or an explicit sub-resource create (sanity on the walker)', () => {
+    // Sub-resource creates that opt in: account updates (the contact-attributed feed, retried by the offline queue).
+    const SUB_CREATES = new Set(['/:id/updates']);
     const carrying = hits.filter((h) => h.handlers.includes('idempotency'));
     expect(carrying.length).toBeGreaterThanOrEqual(CREATE_ENTITIES.length);
-    for (const h of carrying) { expect(h.method).toBe('post'); expect(h.path).toBe('/'); }
+    for (const h of carrying) { expect(h.method).toBe('post'); expect(h.path === '/' || SUB_CREATES.has(h.path)).toBe(true); }
   });
 });

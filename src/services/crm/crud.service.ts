@@ -30,6 +30,10 @@ export interface CrudOpts {
   // syntax is safe — no escaping needed.
   visibleOwnerIds?: string[] | null;
   ownerColumns?: string[];
+  // Ids of rows the caller may ALSO see because they are co-assigned to them (connected-B2B activities'
+  // assignee list). Folded into the same OR as userScope / visibleOwnerIds, so it only ever widens a scope
+  // that is already applied, never removes the scope. UUIDs come from our own table: safe to interpolate.
+  coAssignedIds?: string[];
   // Caller-supplied extra filters applied after the standard ones.
   // Lets specific routes (e.g. /activities?view=overdue) layer in
   // date / null / range predicates the generic helper doesn't know
@@ -44,6 +48,9 @@ export interface CrudOpts {
 // extraFilters — we don't want the generic helper to also try to
 // .eq() against a 'view' column that doesn't exist.
 const RESERVED = ['limit','page','q','sort','order','from','to','view'];
+
+const coAssignedClause = (opts: Partial<CrudOpts>): string[] =>
+  opts.coAssignedIds && opts.coAssignedIds.length ? [`id.in.(${opts.coAssignedIds.join(',')})`] : [];
 
 export async function list(table: string, org_id: string, query: Record<string, unknown> = {}, opts: Partial<CrudOpts> = {}) {
   let q = supabaseAdmin.from(table).select('*').eq('org_id', org_id);
@@ -75,14 +82,14 @@ export async function list(table: string, org_id: string, query: Record<string, 
   }
   if (opts.userScope) {
     // user_id is JWT-derived UUID — safe to interpolate.
-    const orExpr = opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`).join(',');
+    const orExpr = [...opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`), ...coAssignedClause(opts)].join(',');
     q = q.or(orExpr);
   }
   if (opts.visibleOwnerIds !== undefined && opts.visibleOwnerIds !== null) {
     if (opts.visibleOwnerIds.length === 0) return [];
     const cols = opts.ownerColumns && opts.ownerColumns.length ? opts.ownerColumns : ['owner_id'];
     const ids = opts.visibleOwnerIds.join(',');
-    const orExpr = cols.map((c) => `${c}.in.(${ids})`).join(',');
+    const orExpr = [...cols.map((c) => `${c}.in.(${ids})`), ...coAssignedClause(opts)].join(',');
     q = q.or(orExpr);
   }
   if (opts.extraFilters) q = opts.extraFilters(q);
@@ -156,14 +163,14 @@ export async function clientScopedListWithCount(
     }
   }
   if (opts.userScope) {
-    const orExpr = opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`).join(',');
+    const orExpr = [...opts.userScope.columns.map(c => `${c}.eq.${opts.userScope!.user_id}`), ...coAssignedClause(opts)].join(',');
     q = q.or(orExpr);
   }
   if (opts.visibleOwnerIds !== undefined && opts.visibleOwnerIds !== null) {
     if (opts.visibleOwnerIds.length === 0) return { rows: [], total: 0, page, limit };
     const cols = opts.ownerColumns && opts.ownerColumns.length ? opts.ownerColumns : ['owner_id'];
     const ids = opts.visibleOwnerIds.join(',');
-    const orExpr = cols.map((c) => `${c}.in.(${ids})`).join(',');
+    const orExpr = [...cols.map((c) => `${c}.in.(${ids})`), ...coAssignedClause(opts)].join(',');
     q = q.or(orExpr);
   }
   // Apply caller-supplied predicate filters (e.g. the activities list's

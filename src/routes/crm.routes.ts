@@ -18,12 +18,14 @@ import * as rbac from '../middleware/rbac';
 import { idempotency } from '../middleware/idempotency';
 import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
-import { B2B_LEAD_CLIENT_IDS } from '../lib/b2bClients';
+import { B2B_LEAD_CLIENT_IDS, isB2bClient } from '../lib/b2bClients';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
 import { runWithProject, currentProjectKey, DEFAULT_PROJECT } from '../lib/projects';
 import { chunk } from '../lib/chunk';
 import { isSteelDealerClient } from '../lib/steelDealer';
+import * as activityExtras from '../services/crm/activityExtras.service';
+import * as accountJourney from '../services/crm/accountJourney.service';
 
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
@@ -104,7 +106,8 @@ import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, sta
 async function enrichActivities<T extends Record<string, any>>(rows: T[]): Promise<any[]> {
   const withOwners = await stampOwnerNames(rows as any[]);
   const withLinked = await stampLinkedEntityNames(withOwners as any[]);
-  return stampDirectoryNames(withLinked as any[]);
+  // Connected-B2B only: add the assignee list (a no-op for every other client).
+  return activityExtras.stampAssignees(await stampDirectoryNames(withLinked as any[]));
 }
 import { discoverExportColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
@@ -357,12 +360,24 @@ async function activityScopeOpts(req: AuthRequest): Promise<{
   visibleOwnerIds?: string[] | null;
   ownerColumns?: string[];
   userScope?: { user_id: string; columns: string[] };
+  coAssignedIds?: string[];
 }> {
   const subtree = await hierarchy.maybeSubtreeOwnerIds(req);
+  const coAssignedIds = await coAssignedForCaller(req);
   if (subtree) {
-    return { visibleOwnerIds: subtree, ownerColumns: ['owner_id', 'assigned_to'] };
+    return { visibleOwnerIds: subtree, ownerColumns: ['owner_id', 'assigned_to'], coAssignedIds };
   }
-  return { userScope: activityVisibilityScope(req) };
+  return { userScope: activityVisibilityScope(req), coAssignedIds };
+}
+
+/**
+ * Activities the caller is a CO-assignee on (connected-B2B only; [] for every other client).
+ * They are added to the visibility filter so every assigned field executive can see the activity.
+ */
+async function coAssignedForCaller(req: AuthRequest): Promise<string[]> {
+  const uid = req.user?.id;
+  if (!uid) return [];
+  return activityExtras.coAssignedActivityIds(orgId(req), clientScope(req).id ?? req.user?.client_id ?? null, [uid]);
 }
 
 /**
@@ -674,16 +689,24 @@ async function activityAccessError(req: AuthRequest, row: Record<string, unknown
     const owner = row.owner_id as string | null;
     const assigned = row.assigned_to as string | null;
     const allowed = (owner && subtree.includes(owner)) || (assigned && subtree.includes(assigned));
-    if (!allowed) return new AppError(404, 'crm_activities not found', 'NOT_FOUND');
+    if (!allowed && !(await isCoAssigneeOfRow(req, row))) return new AppError(404, 'crm_activities not found', 'NOT_FOUND');
     return null;
   }
   const userScope = activityVisibilityScope(req);
   if (userScope) {
-    if (row.owner_id !== userScope.user_id && row.assigned_to !== userScope.user_id) {
+    if (row.owner_id !== userScope.user_id && row.assigned_to !== userScope.user_id
+        && !(await isCoAssigneeOfRow(req, row))) {
       return new AppError(404, 'crm_activities not found', 'NOT_FOUND');
     }
   }
   return null;
+}
+/** Is the caller on this activity's assignee list? (connected-B2B only — false elsewhere.) */
+async function isCoAssigneeOfRow(req: AuthRequest, row: Record<string, unknown>): Promise<boolean> {
+  const uid = req.user?.id;
+  if (!uid || typeof row.id !== 'string') return false;
+  const cid = (row.client_id as string | null | undefined) ?? clientScope(req).id ?? null;
+  return activityExtras.isCoAssignee(orgId(req), cid, row.id, [uid]);
 }
 function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> {
   try { return schema.parse(payload); }
@@ -2203,6 +2226,48 @@ accounts.get('/:id/bundle', wrap(async (req, res) => res.json(
 accounts.get('/:id/timeline', wrap(async (req, res) => res.json(
   await visitBridge.getAccountTimeline(bridgeCtx(req), req.params.id)
 )));
+// ---- Connected-B2B account journey: contact-attributed updates + the end-to-end journey ----
+// Only for a connected-B2B client's account (decided by the account's own client_id, so an admin
+// without an X-Client-Id header still works); anyone else gets a plain 404.
+async function b2bAccount(req: Request): Promise<Record<string, any>> {
+  const acc = await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, any>;
+  if (!isB2bClient(acc.client_id as string | null)) throw new AppError(404, 'Not found', 'NOT_FOUND');
+  return acc;
+}
+accounts.get('/:id/updates', wrap(async (req, res) => {
+  await b2bAccount(req);
+  res.json(await accountJourney.listAccountUpdates(orgId(req), req.params.id));
+}));
+accounts.post('/:id/updates', idempotency, wrap(async (req, res) => {
+  const acc = await b2bAccount(req);
+  const body = parse(v.accountUpdateSchema, req.body);
+  res.status(201).json(await accountJourney.createAccountUpdate({
+    orgId: orgId(req), clientId: (acc.client_id as string | null) ?? null, userId: userId(req) ?? null,
+    accountId: req.params.id, body: body.body, contactId: body.contact_id ?? null,
+  }));
+}));
+accounts.patch('/:id/updates/:updateId', wrap(async (req, res) => {
+  await b2bAccount(req);
+  const body = parse(v.accountUpdateSchema.partial(), req.body);
+  res.json(await accountJourney.updateAccountUpdate({
+    orgId: orgId(req), userId: userId(req) ?? null, isAdmin: isTenantAdmin((req as AuthRequest).user),
+    accountId: req.params.id, updateId: req.params.updateId, body: body.body, contactId: body.contact_id,
+  }));
+}));
+accounts.delete('/:id/updates/:updateId', wrap(async (req, res) => {
+  await b2bAccount(req);
+  await accountJourney.deleteAccountUpdate({
+    orgId: orgId(req), userId: userId(req) ?? null, isAdmin: isTenantAdmin((req as AuthRequest).user),
+    accountId: req.params.id, updateId: req.params.updateId,
+  });
+  res.status(204).end();
+}));
+// The whole story of one customer — lead → account → contacts → visits & forms → follow-ups → deals → expenses.
+accounts.get('/:id/journey', wrap(async (req, res) => {
+  await b2bAccount(req);
+  const timeline = await visitBridge.getAccountTimeline(bridgeCtx(req), req.params.id);
+  res.json(await accountJourney.buildAccountJourney({ orgId: orgId(req), accountId: req.params.id, timeline: timeline as never }));
+}));
 router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
 
 // ---------- SITES (plants) -------------------------------------------
@@ -2425,11 +2490,40 @@ deals.get('/export', wrap(async (req, res) => {
   res.send(csv);
 }));
 deals.post('/', idempotency, wrap(async (req, res) => {
-  const parsed = parse(v.dealSchema, req.body);
+  const { items: dealItems, quotation_no: quotationNo, ...parsed } = parse(v.dealSchema, req.body);
   // client_id derived server-side from scope, never from body (SECURITY_AUDIT H-2).
-  const payload = { ...parsed, client_id: clientId(req) };
+  const payload: Record<string, any> = { ...parsed, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
-  res.status(201).json(await stampOwnerName(await dealsSvc.createDeal(orgId(req), payload, userId(req))));
+  const b2bDeal = isB2bClient(clientId(req));
+  if (b2bDeal) {
+    // Connected-B2B: a deal belongs to the customer account. A deal raised from a converted lead
+    // inherits that lead's account, so several deals per lead/account all roll up to one customer.
+    if (!payload.account_id && payload.lead_id) {
+      const { data: ld } = await supabaseAdmin.from('crm_leads').select('converted_account_id')
+        .eq('org_id', orgId(req)).eq('id', payload.lead_id).maybeSingle();
+      if (ld?.converted_account_id) payload.account_id = ld.converted_account_id;
+    }
+    if (payload.account_id) {
+      const { data: ac } = await supabaseAdmin.from('crm_accounts').select('id')
+        .eq('org_id', orgId(req)).eq('id', payload.account_id).is('deleted_at', null).maybeSingle();
+      if (!ac) throw new AppError(400, 'That customer account was not found', 'VALIDATION');
+    }
+    if (typeof quotationNo === 'string' && quotationNo.trim()) payload.quotation_no = quotationNo.trim();
+    if (dealItems?.length) {
+      payload.amount = dealItems.reduce((sum, it) => sum + (it.quantity ?? 1) * it.unit_price, 0);
+    }
+  }
+  const createdDeal = await dealsSvc.createDeal(orgId(req), payload, userId(req));
+  if (b2bDeal && dealItems?.length) {
+    let position = 0;
+    for (const it of dealItems) {
+      await productsSvc.addLineItem(orgId(req), (createdDeal as { id: string }).id, {
+        product_id: it.product_id ?? null, name: it.name, quantity: it.quantity ?? 1,
+        unit_price: it.unit_price, position: position++,
+      }, userId(req));
+    }
+  }
+  res.status(201).json(await stampOwnerName(createdDeal));
 }));
 deals.get('/:id', wrap(async (req, res) => {
   // Same decorations as the list: linked-lead name/phone + dealer name,
@@ -2440,14 +2534,18 @@ deals.get('/:id', wrap(async (req, res) => {
   res.json(decorated);
 }));
 deals.patch('/:id', wrap(async (req, res) => {
-  const payload = parse(v.dealUpdateSchema, req.body);
+  const { items: _ignoredItems, quotation_no: quotationNo, ...payload } = parse(v.dealUpdateSchema, req.body);
   sanitizeOwnerId(req, payload);
   // Price lock — a deal's amount / product basket / volume are fixed once it is
   // CLOSED (won/lost) so captured close-out figures never drift. While the deal
   // is still OPEN the rep may edit the Products of Interest basket and the header
   // amount tracks the basket total. Enforced here (not inside updateDeal) so
   // winDeal's deliberate close-out amount still flows through the shared service.
-  const existing = await dealsSvc.getDeal(orgId(req), req.params.id) as { status?: string | null };
+  const existing = await dealsSvc.getDeal(orgId(req), req.params.id) as { status?: string | null; client_id?: string | null };
+  // The quotation number is a connected-B2B field ('' clears it); every other client ignores it.
+  if (quotationNo !== undefined && isB2bClient(existing?.client_id)) {
+    (payload as Record<string, unknown>).quotation_no = (quotationNo ?? '').trim() || null;
+  }
   if (dealsSvc.isDealClosed(existing?.status)) {
     dealsSvc.stripLockedDealFields(payload);
   } else {
@@ -2929,6 +3027,11 @@ activities.get('/', wrap(async (req, res) => {
   // doesn't apply .eq('status','unset') (no row would match) and apply
   // the OR filter below in extraFilters.
   const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, status: statusQ, ...listQuery } = req.query as Record<string, unknown>;
+  // Connected-B2B: an FE filter also matches activities they are a co-assignee on.
+  const ownerCoIds = ownerFilter
+    ? await activityExtras.coAssignedActivityIds(orgId(req), scope.id, [ownerFilter])
+    : [];
+  const coAssignedIds = await coAssignedForCaller(req as AuthRequest);
   const statusUnset = statusQ === 'unset';
   if (typeof statusQ === 'string' && statusQ && !statusUnset) {
     (listQuery as Record<string, unknown>).status = statusQ;
@@ -2948,7 +3051,9 @@ activities.get('/', wrap(async (req, res) => {
     if (statusUnset) {
       q = q.or('status.is.null,status.not.in.(open,in_progress,completed,done,cancelled)');
     }
-    if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
+    if (ownerFilter) {
+      q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}${ownerCoIds.length ? `,id.in.(${ownerCoIds.join(',')})` : ''}`);
+    }
     if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
     // View-aware date-range filter so planned activities don't vanish
     // whenever a date range is picked:
@@ -2995,6 +3100,7 @@ activities.get('/', wrap(async (req, res) => {
       ...(subtreeIds
         ? { visibleOwnerIds: subtreeIds, ownerColumns: ['owner_id', 'assigned_to'] }
         : { userScope: activityVisibilityScope(req) }),
+      coAssignedIds,
       extraFilters,
     },
   );
@@ -3593,6 +3699,16 @@ activities.post('/', idempotency, wrap(async (req, res) => {
   // a non-admin user could create an activity they're then not allowed
   // to see (because activityVisibilityScope filters on owner_id /
   // assigned_to). Admins explicitly setting owner_id keep that value.
+  // Connected-B2B extras (several assignees, product interested, form serial). For every other
+  // client these keys are dropped and nothing below changes.
+  const assigneeIds = await activityExtras.applyActivityExtras({
+    orgId: orgId(req), clientId: (payload.client_id as string | null) ?? null, payload,
+  });
+  // With a list of assignees the creator stays on as owner, so they can still see what they set up.
+  if (assigneeIds?.length && !payload.owner_id) {
+    const uid = userId(req);
+    if (uid) payload.owner_id = uid;
+  }
   if (!payload.owner_id && !payload.assigned_to) {
     const uid = userId(req);
     if (uid) payload.owner_id = uid;
@@ -3607,6 +3723,12 @@ activities.post('/', idempotency, wrap(async (req, res) => {
     );
   }
   const created = await crud.create('crm_activities', orgId(req), payload, userId(req)) as Record<string, unknown>;
+  if (assigneeIds !== undefined) {
+    await activityExtras.replaceActivityAssignees({
+      orgId: orgId(req), clientId: (created.client_id as string | null) ?? null, activityId: created.id as string,
+      ids: assigneeIds, actorId: userId(req) ?? null, subject: created.subject as string | null,
+    });
+  }
   // Run the tenant's `activity_created` (and, for a logged-complete activity, `activity_completed`)
   // automations. Fire-and-forget: never blocks or fails the write.
   void fireActivityLifecycle(orgId(req), userId(req), null, created);
@@ -3622,7 +3744,8 @@ activities.post('/', idempotency, wrap(async (req, res) => {
       }
     } catch (e) { console.warn('[googleCalendar] post-create hook failed', (e as Error).message); }
   })();
-  res.status(201).json(await stampOwnerName(created));
+  const [createdOut] = await activityExtras.stampAssignees([await stampOwnerName(created)] as Record<string, any>[]);
+  res.status(201).json(createdOut);
 }));
 activities.get('/:id', wrap(async (req, res) => {
   const row = await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, unknown>;
@@ -3646,7 +3769,16 @@ activities.patch('/:id', wrap(async (req, res) => {
       orgId(req), ((existing as { client_id?: string | null }).client_id) ?? null, 'activity', merged,
     );
   }
+  const assigneeIds = await activityExtras.applyActivityExtras({
+    orgId: orgId(req), clientId: ((existing as { client_id?: string | null }).client_id) ?? null, payload: patched,
+  });
   const updated = await crud.update('crm_activities', orgId(req), req.params.id, patched, userId(req), clientScope(req).id) as Record<string, unknown>;
+  if (assigneeIds !== undefined) {
+    await activityExtras.replaceActivityAssignees({
+      orgId: orgId(req), clientId: (updated.client_id as string | null) ?? null, activityId: req.params.id,
+      ids: assigneeIds, actorId: userId(req) ?? null, subject: updated.subject as string | null,
+    });
+  }
   // `activity_completed` fires once, on the empty -> set transition of completed_at (not on later edits).
   void fireActivityLifecycle(orgId(req), userId(req), existing, updated);
   void (async () => {
@@ -3658,7 +3790,8 @@ activities.patch('/:id', wrap(async (req, res) => {
       }
     } catch (e) { console.warn('[googleCalendar] post-update hook failed', (e as Error).message); }
   })();
-  res.json(await stampOwnerName(updated));
+  const [updatedOut] = await activityExtras.stampAssignees([await stampOwnerName(updated)] as Record<string, any>[]);
+  res.json(updatedOut);
 }));
 activities.delete('/:id', wrap(async (req, res) => {
   const existing = await crud.get('crm_activities', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, unknown>;
