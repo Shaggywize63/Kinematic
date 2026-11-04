@@ -135,19 +135,29 @@ export async function replaceActivityAssignees(args: {
   }
 }
 
-/** Adds `assignees: [{id, name}]` (primary first) to activities of connected-B2B clients. Never throws. */
+/**
+ * Read-side extras for activities of connected-B2B clients (everyone else's rows pass through untouched):
+ *  - assignees:   [{id, name}], primary first
+ *  - form_ref_no: the linked filled form's serial (e.g. "SRPR2627-12")
+ *  - products:    [{id, name}] for product_ids
+ * Each part is best-effort and independent — a failed lookup never fails the request. Never throws.
+ */
 export async function stampAssignees<T extends Record<string, any>>(rows: T[]): Promise<T[]> {
-  const ids = rows.filter((r) => r?.id && isB2bClient(r.client_id)).map((r) => r.id as string);
-  if (!ids.length) return rows;
+  const b2b = rows.filter((r) => r?.id && isB2bClient(r.client_id));
+  if (!b2b.length) return rows;
+  const extra = new Map<string, Record<string, unknown>>();
+  const put = (id: string, patch: Record<string, unknown>) => extra.set(id, { ...(extra.get(id) ?? {}), ...patch });
+
   try {
-    const { data } = await supabaseAdmin.from('crm_activity_assignees').select('activity_id, user_id').in('activity_id', ids);
+    const { data } = await supabaseAdmin.from('crm_activity_assignees').select('activity_id, user_id')
+      .in('activity_id', b2b.map((r) => r.id as string));
     const byActivity = new Map<string, string[]>();
     for (const r of (data ?? []) as Array<{ activity_id: string; user_id: string }>) {
       const list = byActivity.get(r.activity_id) ?? [];
       list.push(r.user_id);
       byActivity.set(r.activity_id, list);
     }
-    const primaries = rows.filter((r) => byActivity.has(r.id) && r.assigned_to).map((r) => r.assigned_to as string);
+    const primaries = b2b.filter((r) => byActivity.has(r.id) && r.assigned_to).map((r) => r.assigned_to as string);
     const userIds = Array.from(new Set([...Array.from(byActivity.values()).flat(), ...primaries]));
     const names = new Map<string, string>();
     if (userIds.length) {
@@ -156,17 +166,39 @@ export async function stampAssignees<T extends Record<string, any>>(rows: T[]): 
         names.set(u.id, u.name || u.email || '');
       }
     }
-    return rows.map((r) => {
+    for (const r of b2b) {
       const list = byActivity.get(r.id);
-      if (!list) return r;
+      if (!list) continue;
       const primary = r.assigned_to as string | null | undefined;
       // The primary always leads (an older app may have changed assigned_to without touching the list).
       const ordered = primary ? [primary, ...list.filter((u) => u !== primary)] : list;
-      return { ...r, assignees: ordered.map((id) => ({ id, name: names.get(id) ?? null })) };
-    });
-  } catch {
-    return rows;
-  }
+      put(r.id, { assignees: ordered.map((id) => ({ id, name: names.get(id) ?? null })) });
+    }
+  } catch { /* assignees are optional decoration */ }
+
+  try {
+    const formIds = Array.from(new Set(b2b.map((r) => r.form_submission_id as string | null).filter(Boolean) as string[]));
+    if (formIds.length) {
+      const { data } = await supabaseAdmin.from('form_submissions').select('id, ref_no').in('id', formIds);
+      const ref = new Map((data ?? []).map((f: { id: string; ref_no: string | null }) => [f.id, f.ref_no]));
+      for (const r of b2b) if (r.form_submission_id) put(r.id, { form_ref_no: ref.get(r.form_submission_id) ?? null });
+    }
+  } catch { /* form serial is optional decoration */ }
+
+  try {
+    const productIds = Array.from(new Set(b2b.flatMap((r) => (Array.isArray(r.product_ids) ? r.product_ids : [])) as string[]));
+    if (productIds.length) {
+      const { data } = await supabaseAdmin.from('crm_products').select('id, name').in('id', productIds);
+      const nm = new Map((data ?? []).map((p: { id: string; name: string }) => [p.id, p.name]));
+      for (const r of b2b) {
+        if (Array.isArray(r.product_ids) && r.product_ids.length) {
+          put(r.id, { products: r.product_ids.map((id: string) => ({ id, name: nm.get(id) ?? null })) });
+        }
+      }
+    }
+  } catch { /* product names are optional decoration */ }
+
+  return rows.map((r) => (extra.has(r?.id) ? { ...r, ...extra.get(r.id) } : r));
 }
 
 /**
