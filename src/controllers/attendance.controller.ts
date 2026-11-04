@@ -758,6 +758,18 @@ async function annotateOverrideTransport(row: any, admin: { org_id: string; clie
   await annotateTransportLabels([row], { orgId: row.org_id ?? admin.org_id, clientId: row.client_id ?? admin.client_id ?? null });
 }
 
+// Admin override selfie handling. The override form (dashboard) lets an admin
+// set OR remove a check-in / check-out selfie. A non-empty string is the new
+// URL; an empty string or null clears it. We only touch the column when the
+// client actually sends the key, so callers that omit it never clobber an
+// existing selfie. `emptySelfieToNull` maps the clear-intent values to null.
+export const emptySelfieToNull = (v: unknown): string | null =>
+  (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
+export const applyOverrideSelfies = (body: Record<string, unknown>, target: Record<string, unknown>): void => {
+  if ('checkin_selfie_url' in body)  target.checkin_selfie_url  = emptySelfieToNull(body.checkin_selfie_url);
+  if ('checkout_selfie_url' in body) target.checkout_selfie_url = emptySelfieToNull(body.checkout_selfie_url);
+};
+
 export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => {
   const admin = req.user!;
   const { user_id, date, status, override_reason, checkin_at, checkout_at, notes } = req.body;
@@ -783,6 +795,7 @@ export const overrideAttendance = asyncHandler<AuthRequest>(async (req, res) => 
     override_by: admin.id,
     is_regularised: true,
   };
+  applyOverrideSelfies(req.body, payload);
 
   const { data, error } = await supabaseAdmin.from('attendance').upsert({
     user_id, date, org_id: admin.org_id, ...payload
@@ -802,9 +815,12 @@ export const updateAttendanceOverride = asyncHandler<AuthRequest>(async (req, re
   if (!existing?.user_id) { badRequest(res, 'Attendance record not found'); return; }
   await assertUserReachable(admin, existing.user_id as string, 'updateAttendanceOverride');
 
+  const update: Record<string, unknown> = { status, checkin_at, checkout_at, notes, override_reason, override_by: admin.id, is_regularised: true };
+  applyOverrideSelfies(req.body, update);
+
   const { data: updated, error } = await supabaseAdmin
     .from('attendance')
-    .update({ status, checkin_at, checkout_at, notes, override_reason, override_by: admin.id, is_regularised: true })
+    .update(update)
     .eq('id', req.params.id)
     .select().single();
 
