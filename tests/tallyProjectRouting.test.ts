@@ -96,12 +96,12 @@ describe('middleware + route wiring', () => {
     }));
     for (const r of routes) {
       if (r.path === '/agent/download') continue;
-      const mw = r.path === '/pair' ? withTallyPairProject : withTallyIntegrationProject;
+      const mw = (r.path === '/pair' || r.path === '/pair-diag') ? withTallyPairProject : withTallyIntegrationProject;
       expect(r.handlers).toContain(mw);
       // routing must happen before the controller (the last handler)
       expect(r.handlers.indexOf(mw)).toBeLessThan(r.handlers.length - 1);
     }
     expect(routes.map((r: any) => r.path).sort()).toEqual(
-      ['/agent/download', '/jobs/:id', '/jobs/:id/command-result', '/jobs/:id/masters', '/jobs/:id/vouchers', '/jobs/:id/profile', '/jobs/:id/result', '/pair'].sort());
+      ['/agent/download', '/jobs/:id', '/jobs/:id/command-result', '/jobs/:id/masters', '/jobs/:id/vouchers', '/jobs/:id/profile', '/jobs/:id/result', '/pair', '/pair-diag'].sort());
   });
 });

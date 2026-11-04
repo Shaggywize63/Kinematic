@@ -25,7 +25,18 @@ async function pairAndInstall({ code, server, noInstall = false, log, deps = {} 
   } catch (e) {
     return { ok: false, error: `Could not reach ${base}. Check this PC's internet connection. (${e.message})` };
   }
-  if (!res.ok || !json.ok) return { ok: false, error: json.error || `Pairing failed (HTTP ${res.status})` };
+  if (!res.ok || !json.ok) {
+    const error = json.error || `Pairing failed (HTTP ${res.status})`;
+    // Best-effort: tell the dashboard why pairing failed (bad/expired code) so the client's
+    // error is visible to the team without touching this PC. Never let this throw.
+    try {
+      await doFetch(`${base}/api/v1/integrations/tally/pair-diag`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, stage: 'pair', error }),
+      });
+    } catch { /* ignore — diagnostics are best-effort */ }
+    return { ok: false, error };
+  }
 
   const cfg = { ...json.config, company_name: json.company_name || null };
   const p = cfgMod.saveConfig(cfg);

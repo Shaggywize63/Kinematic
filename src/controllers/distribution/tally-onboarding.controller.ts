@@ -34,12 +34,13 @@ interface Command { id: string; type: 'pull_masters' | 'pull_vouchers' | 'tally_
 async function loadTallyIntegration(org_id: string, id: string, user?: { client_id?: string | null; company_client_ids?: string[] }) {
   if (!isUuid(id)) return null;
   const { data } = await scopeIntegrations(supabaseAdmin.from('distribution_integrations')
-    .select('id, org_id, provider, config, last_seen_at, agent_version, tally_profile, tally_profile_at, pending_commands, last_command_result, master_sync_requested_at, last_master_sync_at')
+    .select('id, org_id, provider, config, last_seen_at, agent_version, tally_profile, tally_profile_at, pending_commands, last_command_result, master_sync_requested_at, last_master_sync_at, agent_last_error, agent_last_error_at')
     .eq('id', id).eq('org_id', org_id).eq('provider', 'tally'), user).maybeSingle();
   return data as null | {
     id: string; org_id: string; config: TallyIntegrationConfig; last_seen_at: string | null; agent_version: string | null;
     tally_profile: TallyProfile | null; tally_profile_at: string | null; pending_commands: Command[] | null;
     last_command_result: unknown; master_sync_requested_at: string | null; last_master_sync_at: string | null;
+    agent_last_error: string | null; agent_last_error_at: string | null;
   };
 }
 
@@ -87,6 +88,10 @@ export const getHealth = asyncHandler<AuthRequest>(async (req, res) => {
     master_sync_pending: !!integ.master_sync_requested_at,
     pending_commands: (integ.pending_commands ?? []).length,
     last_command_result: integ.last_command_result,
+    // What the connector itself last reported it couldn't do (shown on the dashboard so
+    // the client's exact error is visible without touching their PC).
+    agent_last_error: integ.agent_last_error,
+    agent_last_error_at: integ.agent_last_error_at,
   });
 });
 
@@ -276,6 +281,25 @@ export const agentPair = asyncHandler<Request>(async (req, res) => {
     },
     company_name: (integ.config as TallyIntegrationConfig | null)?.company_name ?? null,
   });
+});
+
+/**
+ * Connector self-report (public, routed by the pairing code like /pair). When the connector
+ * can't finish pairing (bad/expired code, Tally unreachable, startup fault) it posts the reason
+ * here, keyed by the code, so the dashboard shows the client's exact error — we can diagnose
+ * without touching the client's PC. Best-effort: always 200 so the connector never loops on it,
+ * and the code is matched even if expired (it is the shared secret) but is never consumed here.
+ */
+export const agentPairDiag = asyncHandler<Request>(async (req, res) => {
+  const norm = normalisePairingCode(req.body?.code);
+  if (norm.length === 6) {
+    const stage = (typeof req.body?.stage === 'string' ? req.body.stage : 'pair').slice(0, 40);
+    const error = (typeof req.body?.error === 'string' ? req.body.error : 'unknown').slice(0, 500);
+    await supabaseAdmin.from('distribution_integrations')
+      .update({ agent_last_error: `[${stage}] ${error}`, agent_last_error_at: new Date().toISOString() })
+      .eq('pairing_code_hash', hashPairingCode(norm)).eq('provider', 'tally');
+  }
+  res.status(200).json({ ok: true });
 });
 
 async function authAgent(req: Request, res: Response) {
