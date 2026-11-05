@@ -4935,6 +4935,7 @@ router.get('/lookup/search', wrap(async (req, res) => {
 router.post('/custom-fields/reorder', wrap(async (req, res) => {
   const body = parse(v.customFieldReorderSchema, req.body);
   const scope = clientScope(req);
+  let updated = 0;
   for (const item of body.items) {
     let q = supabaseAdmin.from('crm_custom_field_defs')
       .update({ position: item.position, updated_at: new Date().toISOString() })
@@ -4943,9 +4944,12 @@ router.post('/custom-fields/reorder', wrap(async (req, res) => {
     if (scope.id) {
       q = scope.strict ? q.eq('client_id', scope.id) : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
     }
-    await q;
+    // A failed or out-of-scope update used to be swallowed, so the page showed the new order while nothing was saved.
+    const { data, error } = await q.select('id');
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    updated += (data ?? []).length;
   }
-  res.json({ ok: true, count: body.items.length });
+  res.json({ ok: true, count: body.items.length, updated });
 }));
 
 // ── KINI AI lead-form builder ───────────────────────────────────────────────
