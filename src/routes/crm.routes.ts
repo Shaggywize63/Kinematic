@@ -2515,7 +2515,7 @@ deals.get('/export', wrap(async (req, res) => {
   res.send(csv);
 }));
 deals.post('/', idempotency, wrap(async (req, res) => {
-  const { items: dealItems, quotation_no: quotationNo, ...parsed } = parse(v.dealSchema, req.body);
+  const { items: dealItems, quotation_no: quotationNo, convert_lead: convertLead, ...parsed } = parse(v.dealSchema, req.body);
   // client_id derived server-side from scope, never from body (SECURITY_AUDIT H-2).
   const payload: Record<string, any> = { ...parsed, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
@@ -2523,6 +2523,20 @@ deals.post('/', idempotency, wrap(async (req, res) => {
   if (b2bDeal) {
     // Connected-B2B: a deal belongs to the customer account. A deal raised from a converted lead
     // inherits that lead's account, so several deals per lead/account all roll up to one customer.
+    // "Convert to deal": convert the lead first (account created / reused, no old-style deal), then attach the deal
+    // built from the full deal form to that account and contact.
+    if (convertLead && payload.lead_id) {
+      const { data: src } = await supabaseAdmin.from('crm_leads').select('status, converted_account_id, converted_contact_id')
+        .eq('org_id', orgId(req)).eq('id', payload.lead_id).is('deleted_at', null).maybeSingle();
+      if (!src) throw new AppError(404, 'Lead not found', 'NOT_FOUND');
+      if (src.status === 'converted') {
+        payload.account_id = payload.account_id || src.converted_account_id || undefined;
+      } else {
+        const conv = await leadsSvc.convertLead(orgId(req), payload.lead_id, { create_deal: false }, userId(req));
+        payload.account_id = payload.account_id || conv.account_id || undefined;
+        payload.primary_contact_id = payload.primary_contact_id || conv.contact_id || undefined;
+      }
+    }
     if (!payload.account_id && payload.lead_id) {
       const { data: ld } = await supabaseAdmin.from('crm_leads').select('converted_account_id')
         .eq('org_id', orgId(req)).eq('id', payload.lead_id).maybeSingle();
@@ -2548,6 +2562,11 @@ deals.post('/', idempotency, wrap(async (req, res) => {
         unit_price: it.unit_price, position: position++,
       }, userId(req));
     }
+  }
+  // Point the converted lead at the deal it produced (convertLead ran without one).
+  if (b2bDeal && convertLead && payload.lead_id) {
+    await supabaseAdmin.from('crm_leads').update({ converted_deal_id: (createdDeal as { id: string }).id })
+      .eq('org_id', orgId(req)).eq('id', payload.lead_id).is('converted_deal_id', null);
   }
   res.status(201).json((await dealSections.stampDealPeopleNames([await stampOwnerName(createdDeal)] as Record<string, any>[]))[0]);
 }));
