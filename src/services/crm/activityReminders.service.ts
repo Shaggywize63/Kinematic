@@ -17,6 +17,7 @@
  */
 import { supabaseAdmin } from '../../lib/supabase';
 import { logger } from '../../lib/logger';
+import { notifyUsers } from '../notify';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -122,4 +123,122 @@ export async function dispatchActivityReminders(opts: { limit?: number } = {}): 
   }
 
   return { checked: rows.length, created };
+}
+
+
+// ─── Upcoming-activity reminders: 1 week / 3 days / 1 day before the due date ────────────────────────────────────
+//
+// Opt-in per client by DATA: crm_settings.config.activity_reminders = { enabled?, offsets_days?: [7,3,1], user_ids?: [] }.
+// A client without it is never scanned, so every other tenant behaves exactly as before. Each offset fires once per
+// activity (crm_activity_reminder_log). Recipients = the people the activity is assigned to (assigned_to, owner,
+// everyone on the assignee list) plus the client's configured `user_ids` (e.g. the managers who follow every visit).
+
+export const DEFAULT_REMINDER_OFFSETS = [7, 3, 1];
+const DAY_MS = 86_400_000;
+
+/** Normalised, de-duplicated, descending offsets (days). Falls back to 7 / 3 / 1. */
+export function reminderOffsets(raw: unknown): number[] {
+  const list = Array.isArray(raw) ? raw : DEFAULT_REMINDER_OFFSETS;
+  const out = Array.from(new Set(list.map((n) => Math.floor(Number(n))).filter((n) => Number.isFinite(n) && n >= 1 && n <= 60)));
+  out.sort((a, b) => b - a);
+  return out.length ? out : [...DEFAULT_REMINDER_OFFSETS];
+}
+
+/**
+ * Which offsets to log and which (if any) to announce for one activity. An offset is "crossed" once the due date is
+ * within that many days. The closest crossed offset is the one announced (only if it has not gone out yet), and every
+ * crossed offset is logged — so an activity created two days ahead gets one "due in 2 days" reminder, not a burst of
+ * 7-day and 3-day ones, and the 1-day reminder still follows.
+ */
+export function planReminder(dueMs: number, nowMs: number, offsets: number[], alreadySent: Set<number>): { send: number | null; log: number[] } {
+  const remaining = dueMs - nowMs;
+  if (remaining <= 0) return { send: null, log: [] };
+  const crossed = offsets.filter((d) => d * DAY_MS >= remaining);
+  if (!crossed.length) return { send: null, log: [] };
+  const closest = Math.min(...crossed);
+  return { send: alreadySent.has(closest) ? null : closest, log: crossed.filter((d) => !alreadySent.has(d)) };
+}
+
+/** "in 3 days" / "tomorrow" / "today", by whole calendar days in IST. */
+export function dueInWords(dueIso: string, nowMs: number = Date.now()): string {
+  const ist = (ms: number) => new Date(ms + 5.5 * 3_600_000).toISOString().slice(0, 10);
+  const days = Math.round((Date.parse(ist(Date.parse(dueIso)) ) - Date.parse(ist(nowMs))) / DAY_MS);
+  const when = new Date(dueIso).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
+  if (days <= 0) return `today (${when})`;
+  if (days === 1) return `tomorrow (${when})`;
+  return `in ${days} days (${when})`;
+}
+
+export async function dispatchUpcomingActivityReminders(opts: { limit?: number } = {}): Promise<{ clients: number; checked: number; notified: number }> {
+  const limit = Math.min(Math.max(opts.limit ?? 500, 1), 1000);
+  const nowMs = Date.now();
+  const result = { clients: 0, checked: 0, notified: 0 };
+
+  const { data: settingRows, error: sErr } = await supabaseAdmin.from('crm_settings').select('org_id, client_id, config').not('client_id', 'is', null);
+  if (sErr) { logger.warn(`[activity-upcoming] settings query failed: ${sErr.message}`); return result; }
+
+  for (const row of (settingRows ?? []) as Array<{ org_id: string; client_id: string; config: Record<string, any> | null }>) {
+    const cfg = row.config?.activity_reminders as { enabled?: boolean; offsets_days?: unknown; user_ids?: unknown } | undefined;
+    if (!cfg || cfg.enabled === false) continue;
+    result.clients++;
+    const offsets = reminderOffsets(cfg.offsets_days);
+    const extra = (Array.isArray(cfg.user_ids) ? cfg.user_ids : []).filter((u): u is string => typeof u === 'string' && UUID_RE.test(u));
+    const horizon = new Date(nowMs + Math.max(...offsets) * DAY_MS).toISOString();
+
+    const { data: acts, error } = await supabaseAdmin.from('crm_activities')
+      .select('id, org_id, subject, type, due_at, assigned_to, owner_id, lead_id, deal_id, account_id')
+      .eq('org_id', row.org_id).eq('client_id', row.client_id).is('deleted_at', null)
+      .is('completed_at', null).not('due_at', 'is', null)
+      .not('status', 'in', '(done,cancelled,completed)')
+      .gt('due_at', new Date(nowMs).toISOString()).lte('due_at', horizon)
+      .order('due_at', { ascending: true }).limit(limit);
+    if (error) { logger.warn(`[activity-upcoming] activities query failed: ${error.message}`); continue; }
+    const list = (acts ?? []) as Array<ActivityRow & { account_id: string | null }>;
+    if (!list.length) continue;
+    result.checked += list.length;
+
+    const ids = list.map((a) => a.id);
+    const [{ data: logs }, { data: team }] = await Promise.all([
+      supabaseAdmin.from('crm_activity_reminder_log').select('activity_id, offset_days').in('activity_id', ids),
+      supabaseAdmin.from('crm_activity_assignees').select('activity_id, user_id').in('activity_id', ids),
+    ]);
+    const sent = new Map<string, Set<number>>();
+    for (const l of (logs ?? []) as Array<{ activity_id: string; offset_days: number }>) {
+      (sent.get(l.activity_id) ?? sent.set(l.activity_id, new Set()).get(l.activity_id)!).add(l.offset_days);
+    }
+    const crew = new Map<string, string[]>();
+    for (const t of (team ?? []) as Array<{ activity_id: string; user_id: string }>) {
+      (crew.get(t.activity_id) ?? crew.set(t.activity_id, []).get(t.activity_id)!).push(t.user_id);
+    }
+
+    for (const a of list) {
+      const plan = planReminder(Date.parse(a.due_at), nowMs, offsets, sent.get(a.id) ?? new Set());
+      if (!plan.log.length) continue;
+      if (plan.send !== null) {
+        const people = Array.from(new Set([a.assigned_to, a.owner_id, ...(crew.get(a.id) ?? []), ...extra]
+          .filter((u): u is string => typeof u === 'string' && UUID_RE.test(u))));
+        const label = (a.subject && a.subject.trim()) || (a.type ? a.type.charAt(0).toUpperCase() + a.type.slice(1) : 'Activity');
+        try {
+          await notifyUsers(people, {
+            orgId: row.org_id,
+            title: `Upcoming: ${label}`,
+            body: `“${label}” is due ${dueInWords(a.due_at, nowMs)}.`,
+            kind: 'activity_upcoming',
+            data: {
+              activity_id: a.id, offset_days: plan.send,
+              ...(a.lead_id ? { lead_id: a.lead_id } : {}), ...(a.deal_id ? { deal_id: a.deal_id } : {}),
+              ...(a.account_id ? { account_id: a.account_id } : {}),
+            },
+          });
+          result.notified += people.length;
+        } catch (e: any) {
+          logger.warn(`[activity-upcoming] notify failed for activity ${a.id}: ${e?.message || e}`);
+          continue; // not logged → retried on the next tick
+        }
+      }
+      await supabaseAdmin.from('crm_activity_reminder_log')
+        .upsert(plan.log.map((d) => ({ activity_id: a.id, offset_days: d })), { onConflict: 'activity_id,offset_days', ignoreDuplicates: true });
+    }
+  }
+  return result;
 }

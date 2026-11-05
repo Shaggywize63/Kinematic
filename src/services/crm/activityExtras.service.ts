@@ -126,7 +126,7 @@ export async function replaceActivityAssignees(args: {
         orgId,
         title: 'New activity assigned to you',
         body: (subject ?? '').trim() || 'You have been assigned an activity.',
-        kind: 'crm_activity_assigned',
+        kind: 'activity_assigned',
         data: { activity_id: activityId },
       }, { exclude: actorId ?? null });
     } catch (e) {

@@ -44,6 +44,7 @@ export const NOTIFICATION_CATALOG: CatalogEntry[] = [
   { kind: 'crm_deal_overdue', label: 'Deal overdue', group: 'CRM', description: 'A deal passed its expected close date.' },
   { kind: 'activity_assigned', label: 'Activity assigned', group: 'CRM', description: 'A call, meeting or task was assigned.' },
   { kind: 'crm_task_overdue', label: 'Activity due / overdue', group: 'CRM', description: 'A scheduled activity is due or overdue.' },
+  { kind: 'activity_upcoming', label: 'Upcoming activity (1 week / 3 days / 1 day)', group: 'CRM', description: 'A scheduled activity is coming up — sent a week, three days and a day before it is due, to the people it is assigned to and the client\'s reminder recipients.' },
   { kind: 'automation', label: 'Automation notifications', group: 'CRM', description: 'A "send notification" action configured in an automation.' },
   {
     kind: 'crm_home', label: 'Daily home summary', group: 'CRM',

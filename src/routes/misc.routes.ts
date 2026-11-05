@@ -23,7 +23,11 @@ router.get('/dashboard-summary', requireAuth, requireRole('admin', 'super_admin'
 router.get('/activity-feed', requireAuth, requireRole('admin', 'super_admin', 'supervisor', 'hr'), misc.getActivityFeed);
 
 // USERS & ZONES (Admin)
-router.get('/users', requireAuth, requireRole('admin', 'super_admin', 'supervisor', 'hr'), misc.getUsers);
+// The directory is admin / supervisor / hr only. The CRM people PICKER (?scope=assignable) is open to any signed-in
+// user of a connected-B2B client, which the controller answers with a minimal projection (see getUsers); everyone
+// else still needs a directory role.
+const directoryOnly = requireRole('admin', 'super_admin', 'supervisor', 'hr');
+router.get('/users', requireAuth, (req, res, next) => (String(req.query.scope) === 'assignable' ? next() : directoryOnly(req as any, res, next)), misc.getUsers);
 
 router.get('/users/:id', requireAuth, misc.getUserById);
 router.post('/users', requireAuth, requireRole('admin', 'super_admin', 'hr'), misc.createUser);

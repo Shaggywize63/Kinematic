@@ -18,7 +18,7 @@ import { runRescoreAllLeads, isRescoreAllRunning } from '../services/crm/leads.s
 import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
 import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { runDailyBriefings } from '../services/crm/ai/dailyBriefing.service';
-import { dispatchActivityReminders } from '../services/crm/activityReminders.service';
+import { dispatchActivityReminders, dispatchUpcomingActivityReminders } from '../services/crm/activityReminders.service';
 import { runScheduledTasks, runProactiveNudges } from '../services/crm/ai/kiniScheduler.service';
 import { reconcileCallRecordings } from '../services/crm/ai/callRecordingPull.service';
 import { runRetentionPurge } from '../services/crm/retention.service';
@@ -190,7 +190,11 @@ router.post('/dispatch-daily-briefings', requireEdgeSecret, async (req, res) => 
 router.post('/dispatch-activity-reminders', requireEdgeSecret, async (req, res) => {
   try {
     const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
-    const result = await runForRequestedProjects(body, () => dispatchActivityReminders({ limit: 200 }));
+    const result = await runForRequestedProjects(body, async () => {
+      const due = await dispatchActivityReminders({ limit: 200 });
+      const upcoming = await dispatchUpcomingActivityReminders();
+      return { ...due, upcoming };
+    });
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] dispatch-activity-reminders crashed: ${err?.message || err}`);
