@@ -80,25 +80,40 @@ function signingCandidates(host?: string): string[] {
     .filter((k, i, a) => a.indexOf(k) === i);
 }
 
-// GET /api/v1/media/sign?bucket=<b>&path=<p>   (or ?url=<stored object url>)
-export const signMedia = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const user = req.user!;
-  const ref = parseObjectRef(req.query.bucket as string, req.query.path as string, req.query.url as string);
-  if (!ref) return badRequest(res, 'Provide bucket+path or a url');
+/** Longest expiry a caller may ask for (a downloaded report's links). */
+export const MAX_SIGN_TTL_SECONDS = 7 * 24 * 60 * 60;
+/** Most objects one batch call signs. */
+export const MAX_SIGN_BATCH = 200;
 
+/** Requested expiry in seconds: the short default unless a valid larger value is asked for, capped at 7 days. */
+export function resolveSignTtl(raw: unknown): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= SIGN_TTL_SECONDS) return SIGN_TTL_SECONDS;
+  return Math.min(n, MAX_SIGN_TTL_SECONDS);
+}
+
+type SignResult = { url: string; expiresIn: number } | { error: string; forbidden?: boolean };
+
+/** Sign one object for the caller (tenant/role checks included). Never throws. */
+async function signObject(
+  user: NonNullable<AuthRequest['user']>,
+  ref: { bucket: string; path: string; host?: string } | null,
+  ttl: number,
+): Promise<SignResult> {
+  if (!ref) return { error: 'Provide bucket+path or a url' };
   const { bucket, path, host } = ref;
-  if (!SIGNABLE_BUCKETS.has(bucket)) return badRequest(res, 'Bucket is not signable');
+  if (!SIGNABLE_BUCKETS.has(bucket)) return { error: 'Bucket is not signable' };
 
   // Path-traversal / malformed-path guard.
   if (!path || path.includes('..') || path.startsWith('/') || path.includes('\\')) {
-    return badRequest(res, 'Invalid object path');
+    return { error: 'Invalid object path' };
   }
 
   // Tenant isolation via the object path prefix.
-  if (!path.startsWith(`${user.org_id}/`)) return forbidden(res, 'Not permitted for this object');
+  if (!path.startsWith(`${user.org_id}/`)) return { error: 'Not permitted for this object', forbidden: true };
   const isManager = MANAGER_ROLES.has(String(user.role || '').toLowerCase());
   if (!isManager && !path.startsWith(`${user.org_id}/${user.id}/`)) {
-    return forbidden(res, 'Not permitted for this object');
+    return { error: 'Not permitted for this object', forbidden: true };
   }
 
   // The object may live in a different project's storage than the current
@@ -106,9 +121,34 @@ export const signMedia = asyncHandler(async (req: AuthRequest, res: Response) =>
   // project until one signs. Authorization is already enforced above.
   for (const key of signingCandidates(host)) {
     try {
-      const { data, error } = await adminClientFor(key).storage.from(bucket).createSignedUrl(path, SIGN_TTL_SECONDS);
-      if (!error && data?.signedUrl) return ok(res, { url: data.signedUrl, expiresIn: SIGN_TTL_SECONDS });
+      const { data, error } = await adminClientFor(key).storage.from(bucket).createSignedUrl(path, ttl);
+      if (!error && data?.signedUrl) return { url: data.signedUrl, expiresIn: ttl };
     } catch { /* project unreachable / object not here — try the next */ }
   }
-  return badRequest(res, 'Could not sign object');
+  return { error: 'Could not sign object' };
+}
+
+// GET /api/v1/media/sign?bucket=<b>&path=<p>   (or ?url=<stored object url>)  [&ttl=<seconds, max 7 days>]
+export const signMedia = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const ref = parseObjectRef(req.query.bucket as string, req.query.path as string, req.query.url as string);
+  const r = await signObject(req.user!, ref, resolveSignTtl(req.query.ttl));
+  if ('error' in r) return r.forbidden ? forbidden(res, r.error) : badRequest(res, r.error);
+  return ok(res, r);
+});
+
+// POST /api/v1/media/sign-batch  { urls: string[], ttl?: seconds }  ->  { urls: { [stored]: signed | null } }
+// For report exports: one call signs every photo of a report with a long-lived link. A URL that is
+// not signable, not the caller's to see or missing maps to null — the rest still sign.
+export const signMediaBatch = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const raw = Array.isArray(req.body?.urls) ? req.body.urls : [];
+  const urls: string[] = Array.from(new Set<string>(raw.filter((u: unknown): u is string => typeof u === 'string' && u.length > 0 && u.length < 2048)));
+  if (urls.length === 0) return badRequest(res, 'Provide urls');
+  if (urls.length > MAX_SIGN_BATCH) return badRequest(res, `At most ${MAX_SIGN_BATCH} urls per call`);
+  const ttl = resolveSignTtl(req.body?.ttl);
+  const out: Record<string, string | null> = {};
+  await Promise.all(urls.map(async (u) => {
+    const r = await signObject(req.user!, parseObjectRef(undefined, undefined, u), ttl);
+    out[u] = 'url' in r ? r.url : null;
+  }));
+  return ok(res, { urls: out, expiresIn: ttl });
 });
