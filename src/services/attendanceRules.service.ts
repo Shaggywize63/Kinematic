@@ -33,6 +33,14 @@ export interface AttendanceRules {
   allow_offline_checkin: boolean;
   /** Executives must send a selfie on check-in / check-out. Default true (today's behaviour). */
   selfie_required: boolean;
+  /**
+   * Require the selfie from EVERY role, not just field executives. Opt-in
+   * (default false / unset = legacy behaviour where only `executive` punches are
+   * forced). When true AND `selfie_required !== false`, a check-in / check-out
+   * with no selfie is refused for any role, so attendance can't be marked
+   * without a photo.
+   */
+  selfie_required_all_roles?: boolean;
   /** Every form submission records a check-in / check-out (time + GPS). Default false. */
   form_checkin_required: boolean;
   /**
@@ -72,7 +80,7 @@ export interface ResolvedAttendanceRules {
 export const ATTENDANCE_RULES_SETTINGS_KEY = 'attendance_rules';
 export const ATTENDANCE_RULE_KEYS = [
   'shift_start', 'shift_end', 'grace_minutes', 'weekly_off', 'allow_offline_checkin',
-  'selfie_required', 'form_checkin_required', 'track_transport_mode',
+  'selfie_required', 'selfie_required_all_roles', 'form_checkin_required', 'track_transport_mode',
   'required_minutes', 'half_day_cutoff',
 ] as const;
 export type AttendanceRuleKey = (typeof ATTENDANCE_RULE_KEYS)[number];
@@ -99,6 +107,23 @@ export const ATTENDANCE_RULES_BOUNDS = Object.freeze({
 /** A fresh, mutable copy of the defaults. */
 export function defaultAttendanceRules(): AttendanceRules {
   return { ...ATTENDANCE_RULES_DEFAULTS, weekly_off: [...ATTENDANCE_RULES_DEFAULTS.weekly_off] };
+}
+
+/**
+ * Whether a selfie is mandatory for THIS user's punch (check-in / check-out).
+ *
+ * - `selfie_required === false`  → never required (GPS-only client).
+ * - `selfie_required_all_roles`  → required for EVERY role (opt-in).
+ * - otherwise (legacy default)   → required only for field executives.
+ *
+ * Pure (no I/O) so both the check-in and check-out paths — and the app, which
+ * mirrors this — stay in lock-step. Keep aligned with OfflinePunch.selfieRequiredFor
+ * in Kinematic-App.
+ */
+export function selfieRequiredForRole(role: string | null | undefined, rules: AttendanceRules): boolean {
+  if (rules.selfie_required === false) return false;
+  if (rules.selfie_required_all_roles === true) return true;
+  return String(role || '').trim().toLowerCase() === 'executive';
 }
 
 // ── time-zone helpers (IST) ───────────────────────────────────────────────
@@ -229,6 +254,10 @@ export function validateRulesPatch(body: unknown): RulesPatchResult {
   if ('selfie_required' in body) {
     if (typeof body.selfie_required !== 'boolean') return { ok: false, error: 'selfie_required must be true or false' };
     patch.selfie_required = body.selfie_required;
+  }
+  if ('selfie_required_all_roles' in body) {
+    if (typeof body.selfie_required_all_roles !== 'boolean') return { ok: false, error: 'selfie_required_all_roles must be true or false' };
+    patch.selfie_required_all_roles = body.selfie_required_all_roles;
   }
   if ('form_checkin_required' in body) {
     if (typeof body.form_checkin_required !== 'boolean') return { ok: false, error: 'form_checkin_required must be true or false' };

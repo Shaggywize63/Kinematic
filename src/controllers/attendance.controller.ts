@@ -12,6 +12,7 @@ import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { SUPERVISOR_OR_ABOVE_ROLES } from '../middleware/auth';
 import {
   decideCapturedAt, validateSummaryRange, buildAttendanceSummary, resolveAttendanceRules, istDateOf, isValidYmd,
+  selfieRequiredForRole,
   type CapturedAtDecision, type AttendanceRules,
 } from '../services/attendanceRules.service';
 import {
@@ -98,12 +99,13 @@ async function resolveCapture(
 }
 
 /**
- * Is a selfie mandatory for this client's executives? True unless the client's
- * `attendance_rules.selfie_required` is explicitly false. Unconfigured clients,
- * a missing client and any lookup failure all read as TRUE (today's behaviour).
+ * Is a selfie mandatory for this punch? Delegates to the pure
+ * `selfieRequiredForRole` (which honours `selfie_required` and the opt-in
+ * `selfie_required_all_roles`). Unconfigured clients, a missing client and any
+ * lookup failure read as the defaults (selfie required for executives).
  */
-async function selfieRequiredFor(clientId: string | null | undefined): Promise<boolean> {
-  return (await rulesForClient(clientId)).rules.selfie_required !== false;
+async function selfieRequiredForPunch(role: string | null | undefined, clientId: string | null | undefined): Promise<boolean> {
+  return selfieRequiredForRole(role, (await rulesForClient(clientId)).rules);
 }
 
 const isBackdated = (d: CapturedAtDecision): boolean =>
@@ -174,11 +176,12 @@ export const checkin = asyncHandler<AuthRequest>(async (req, res) => {
   // exactly as for a first check-in.
   const isReopen = !!existing;
 
-  // Enforce selfie for field executives — unless the client opted out with the
-  // attendance rule `selfie_required:false` (a GPS-only punch; the selfie columns
-  // are nullable). The rule is only looked up when a selfie is actually missing.
-  if (user.role === 'executive' && !selfie_url && await selfieRequiredFor(user.client_id)) {
-    badRequest(res, 'Selfie is mandatory for check-in');
+  // Enforce the selfie — for field executives always, and for every role when
+  // the client opts in with `selfie_required_all_roles`. Skipped only when the
+  // client set `selfie_required:false` (a GPS-only punch). The rule is looked up
+  // only when a selfie is actually missing.
+  if (!selfie_url && await selfieRequiredForPunch(user.role, user.client_id)) {
+    badRequest(res, 'Selfie is mandatory for check-in', { code: 'SELFIE_REQUIRED' });
     return;
   }
 
@@ -403,9 +406,10 @@ export const checkout = asyncHandler<AuthRequest>(async (req, res) => {
   // Fully closed for the day: the rollup says checked out AND no session is open.
   if (record.status === 'checked_out' && !openSession) { conflict(res, 'Already checked out for this shift'); return; }
 
-  // Enforce selfie for field executives (see selfieRequiredFor — opt-out per client).
-  if (user.role === 'executive' && !selfie_url && await selfieRequiredFor(user.client_id)) {
-    badRequest(res, 'Selfie is mandatory for check-out');
+  // Enforce the selfie (executives always; every role when the client opts in
+  // with `selfie_required_all_roles`; skipped when `selfie_required:false`).
+  if (!selfie_url && await selfieRequiredForPunch(user.role, user.client_id)) {
+    badRequest(res, 'Selfie is mandatory for check-out', { code: 'SELFIE_REQUIRED' });
     return;
   }
 

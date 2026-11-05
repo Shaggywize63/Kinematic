@@ -6,6 +6,7 @@
 import {
   ATTENDANCE_RULES_DEFAULTS, ATTENDANCE_RULES_BOUNDS, defaultAttendanceRules, parseHHMM,
   validateRulesPatch, resolveAttendanceRules, mergeRulesIntoSettings, rulesAdminView,
+  selfieRequiredForRole,
   istParts, istDateOf, isValidYmd, addDaysYmd, weekdayOf, inclusiveDayCount,
   computeLate, classifyPunctuality, applyLate, lateTrackingEnabled, lateTrackingOn,
   isHalfDayCheckin, isShortWorkday,
@@ -926,3 +927,32 @@ describe('validateRulesPatch (required_minutes / half_day_cutoff)', () => {
     expect(validateRulesPatch({ half_day_cutoff: '25:00' }).ok).toBe(false);
   });
 });
+
+describe('selfieRequiredForRole (compulsory-selfie gating)', () => {
+  const rules = (over: Partial<AttendanceRules> = {}): AttendanceRules => ({ ...defaultAttendanceRules(), ...over });
+
+  it('defaults: required for executive, not for other roles', () => {
+    expect(selfieRequiredForRole('executive', rules())).toBe(true);
+    expect(selfieRequiredForRole('sub_admin', rules())).toBe(false);
+    expect(selfieRequiredForRole('admin', rules())).toBe(false);
+    expect(selfieRequiredForRole(null, rules())).toBe(false);
+  });
+
+  it('selfie_required:false → never required, even for executives or all_roles', () => {
+    expect(selfieRequiredForRole('executive', rules({ selfie_required: false }))).toBe(false);
+    expect(selfieRequiredForRole('sub_admin', rules({ selfie_required: false, selfie_required_all_roles: true }))).toBe(false);
+  });
+
+  it('selfie_required_all_roles:true → required for EVERY role', () => {
+    const r = rules({ selfie_required_all_roles: true });
+    expect(selfieRequiredForRole('sub_admin', r)).toBe(true);
+    expect(selfieRequiredForRole('admin', r)).toBe(true);
+    expect(selfieRequiredForRole('executive', r)).toBe(true);
+    expect(selfieRequiredForRole('client', r)).toBe(true);
+    expect(selfieRequiredForRole(undefined, r)).toBe(true);
+  });
+
+  it('role match is case/space tolerant', () => {
+    expect(selfieRequiredForRole('  Executive ', rules())).toBe(true);
+  });
+})
