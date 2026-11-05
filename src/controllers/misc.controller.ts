@@ -18,6 +18,7 @@ import { assertMayManageUser, assertMayAssignRole } from '../lib/userGuard';
 import { allowedFlags, isProjectDisabled } from '../services/notificationPolicy';
 import { isPlatformOperator, usesStrictTenantScope } from '../lib/tenantScope';
 import { invalidateAuthCache } from '../middleware/auth';
+import { isB2bClient } from '../lib/b2bClients';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -212,6 +213,23 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     return sendSuccess(res, data, 'Success', 200);
   }
   
+  // Connected-B2B (Spark & Ray) picker: the client admin (role `client`) and the field executives need the
+  // people list for owner / assignee / deal-people dropdowns, but are not allowed the full directory. They get a
+  // minimal projection of their OWN client's active users — no phones, permissions or attendance. Every other
+  // caller (and every other tenant) is untouched.
+  const callerRole = String(user.role ?? '').toLowerCase();
+  const directoryRoles = ['admin', 'super_admin', 'supervisor', 'hr'];
+  if (String(req.query.scope) === 'assignable' && !directoryRoles.includes(callerRole)) {
+    if (!isB2bClient(user.client_id) || !user.org_id) throw new AppError(403, 'Requires one of: admin, super_admin, supervisor, hr', 'FORBIDDEN');
+    const { data: people, error: peopleErr } = await supabaseAdmin.from('users')
+      .select('id, name, email, role')
+      .eq('org_id', user.org_id).eq('client_id', user.client_id as string)
+      .eq('is_active', true).is('deleted_at', null)
+      .order('name').limit(500);
+    if (peopleErr) throw new AppError(500, peopleErr.message, 'DB_ERROR');
+    return sendSuccess(res, people ?? [], 'Success', 200);
+  }
+
   const { role: filterRole, zone_id, is_active, client_id } = req.query;
   // Dashboard's api.ts auto-attaches the active client picker as the
   // X-Client-Id header on every request. Honour it as a fallback so the
