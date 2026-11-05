@@ -9,7 +9,7 @@ import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
 import { processDueBroadcastsAllProjects } from './services/crm/broadcast.service';
 import { processDueEmailCampaignsAllProjects } from './services/crm/emailCampaign.service';
 import { runAutoReplenishmentAllProjects } from './services/distribution/replenishment.service';
-import { dispatchActivityReminders } from './services/crm/activityReminders.service';
+import { dispatchActivityReminders, dispatchUpcomingActivityReminders } from './services/crm/activityReminders.service';
 import { runTrackingWatchdog } from './services/trackingWatchdog.service';
 import { runAttendanceSweep } from './services/attendanceSweep.service';
 import { dispatchPendingPushes } from './services/notifications.service';
@@ -225,7 +225,12 @@ if (String(process.env.CRM_PUSH_DISPATCH_ENABLED ?? 'true').toLowerCase() !== 'f
 if (String(process.env.CRM_ACTIVITY_REMINDER_ENABLED ?? 'true').toLowerCase() !== 'false') {
   const everyMs = Math.max(60, Number(process.env.CRM_ACTIVITY_REMINDER_INTERVAL_SEC ?? 300)) * 1000;
   setInterval(() => {
-    forEachProject('activity-reminders', () => dispatchActivityReminders({ limit: 200 }))
+    forEachProject('activity-reminders', async () => {
+      const due = await dispatchActivityReminders({ limit: 200 });
+      // Opt-in per client (crm_settings.config.activity_reminders): 1 week / 3 days / 1 day before the due date.
+      await dispatchUpcomingActivityReminders();
+      return due;
+    })
       .catch((e) => logger.warn(`[activity-reminders] tick failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[activity-reminders] scheduler enabled (every ${everyMs / 1000}s)`);

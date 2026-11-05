@@ -26,6 +26,7 @@ import { chunk } from '../lib/chunk';
 import { isSteelDealerClient } from '../lib/steelDealer';
 import * as activityExtras from '../services/crm/activityExtras.service';
 import * as accountJourney from '../services/crm/accountJourney.service';
+import * as dealSections from '../services/crm/dealSections.service';
 
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
@@ -1491,7 +1492,7 @@ leads.get('/geo', wrap(async (req, res) => {
   // the Call / WhatsApp quick actions per row. Without it those buttons
   // gated to disabled because the geo payload had no phone field.
   let q = supabaseAdmin.from('crm_leads')
-    .select('id, first_name, last_name, phone, email, city, state, status, latitude, longitude, score, score_grade')
+    .select('id, first_name, last_name, phone, email, city, state, status, industry, company, latitude, longitude, score, score_grade')
     .eq('org_id', orgId(req)).is('deleted_at', null)
     .not('latitude', 'is', null).not('longitude', 'is', null);
   if (scope.id) {
@@ -1532,6 +1533,10 @@ leads.get('/geo', wrap(async (req, res) => {
   if (city) q = q.eq('city', city);
   const state = typeof req.query.state === 'string' ? req.query.state.trim() : '';
   if (state) q = q.eq('state', state);
+  // Industry filter for the dashboard map (case-insensitive exact match; '__none__' = leads with no industry).
+  const industryQ = typeof req.query.industry === 'string' ? req.query.industry.trim() : '';
+  if (industryQ === '__none__') q = q.or('industry.is.null,industry.eq.');
+  else if (industryQ) q = q.ilike('industry', industryQ.replace(/[%,()]/g, ' ').trim());
   // Drop converted leads from the map by default — once a lead is a
   // Deal it shouldn't drift back onto the leads map. Opt-in via
   // `?include_converted=true` (or explicit `?is_converted=...`) so
@@ -2164,9 +2169,24 @@ accounts.get('/', wrap(async (req, res) => {
     await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds }))
   );
 }));
+/**
+ * Spark & Ray: an account's Outcome is mandatory when it is created and can never be blanked afterwards. For every
+ * other client the key is dropped, so their account writes are unchanged.
+ */
+function applyAccountOutcome(clientIdForRow: string | null | undefined, payload: Record<string, unknown>, mode: 'create' | 'patch'): void {
+  if (!isB2bClient(clientIdForRow)) { delete payload.outcome; return; }
+  if ('outcome' in payload) {
+    const o = typeof payload.outcome === 'string' ? payload.outcome.trim() : '';
+    if (!o) throw new AppError(400, 'Outcome is required', 'VALIDATION');
+    payload.outcome = o;
+  } else if (mode === 'create') {
+    throw new AppError(400, 'Outcome is required', 'VALIDATION');
+  }
+}
 accounts.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
+  applyAccountOutcome(payload.client_id as string | null, payload, 'create');
   sanitizeOwnerId(req, payload);
   if (payload.custom_fields !== undefined) {
     payload.custom_fields = await validateAndStampCustomFields(
@@ -2179,6 +2199,11 @@ accounts.post('/', idempotency, wrap(async (req, res) => {
 accounts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id)))));
 accounts.patch('/:id', wrap(async (req, res) => {
   const payload = parse(v.accountSchema.partial(), req.body) as Record<string, unknown>;
+  if ('outcome' in payload) {
+    // Decided by the account's own client, so an admin without an X-Client-Id header is treated the same way.
+    const acct = await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, any>;
+    applyAccountOutcome((acct.client_id as string | null) ?? null, payload, 'patch');
+  }
   sanitizeOwnerId(req, payload);
   if (payload.custom_fields !== undefined) {
     payload.custom_fields = await validateAndStampCustomFields(
@@ -2513,6 +2538,7 @@ deals.post('/', idempotency, wrap(async (req, res) => {
       payload.amount = dealItems.reduce((sum, it) => sum + (it.quantity ?? 1) * it.unit_price, 0);
     }
   }
+  await dealSections.applyDealSections({ orgId: orgId(req), clientId: payload.client_id as string | null, payload });
   const createdDeal = await dealsSvc.createDeal(orgId(req), payload, userId(req));
   if (b2bDeal && dealItems?.length) {
     let position = 0;
@@ -2523,7 +2549,7 @@ deals.post('/', idempotency, wrap(async (req, res) => {
       }, userId(req));
     }
   }
-  res.status(201).json(await stampOwnerName(createdDeal));
+  res.status(201).json((await dealSections.stampDealPeopleNames([await stampOwnerName(createdDeal)] as Record<string, any>[]))[0]);
 }));
 deals.get('/:id', wrap(async (req, res) => {
   // Same decorations as the list: linked-lead name/phone + dealer name,
@@ -2531,7 +2557,8 @@ deals.get('/:id', wrap(async (req, res) => {
   // extra client-side fetches.
   const deal = await stampOwnerName(await dealsSvc.getDeal(orgId(req), req.params.id));
   const [decorated] = await stampDealerNames(await stampLinkedEntityNames([deal] as never[]) as never[]);
-  res.json(decorated);
+  const [withPeople] = await dealSections.stampDealPeopleNames([decorated] as Record<string, any>[]);
+  res.json(withPeople);
 }));
 deals.patch('/:id', wrap(async (req, res) => {
   const { items: _ignoredItems, quotation_no: quotationNo, ...payload } = parse(v.dealUpdateSchema, req.body);
@@ -2546,12 +2573,17 @@ deals.patch('/:id', wrap(async (req, res) => {
   if (quotationNo !== undefined && isB2bClient(existing?.client_id)) {
     (payload as Record<string, unknown>).quotation_no = (quotationNo ?? '').trim() || null;
   }
+  // Connected-B2B deal sections (pricing / product trial / people): dropped for every other client.
+  await dealSections.applyDealSections({
+    orgId: orgId(req), clientId: existing?.client_id ?? null, payload: payload as Record<string, unknown>,
+    existing: existing as unknown as Record<string, unknown>,
+  });
   if (dealsSvc.isDealClosed(existing?.status)) {
     dealsSvc.stripLockedDealFields(payload);
   } else {
     dealsSvc.applyOpenDealBasketAmount(payload);
   }
-  res.json(await stampOwnerName(await dealsSvc.updateDeal(orgId(req), req.params.id, payload, userId(req))));
+  res.json((await dealSections.stampDealPeopleNames([await stampOwnerName(await dealsSvc.updateDeal(orgId(req), req.params.id, payload, userId(req)))] as Record<string, any>[]))[0]);
 }));
 deals.delete('/:id', wrap(async (req, res) => { await dealsSvc.deleteDeal(orgId(req), req.params.id); res.status(204).end(); }));
 deals.post('/:id/move-stage', wrap(async (req, res) => {
@@ -3262,7 +3294,7 @@ activities.get('/export', wrap(async (req, res) => {
     { key: 'lead_phone',       label: 'Lead Phone' },
     { key: 'owner_name',       label: 'Owner' },
     { key: 'assigned_to_name', label: 'Assigned To' },
-    { key: 'image_url',        label: 'Image URL' },
+    { key: 'image_url',        label: 'Photo URL' },
     // Visit-kind first-class column. Stamped by the dashboard's
     // activity composer when the rep picks "Mark as visit" (→
     // 'completed') vs "Schedule a visit" (→ 'scheduled') for a
@@ -3275,10 +3307,19 @@ activities.get('/export', wrap(async (req, res) => {
   // Lift visit_kind out of custom_fields jsonb into a top-level
   // field on each enriched row so the generic row[key] lookup in
   // the CSV body composer below sees it without a special case.
-  for (const r of enriched as Array<{ custom_fields?: unknown; visit_kind?: unknown }>) {
+  for (const r of enriched as Array<{ custom_fields?: unknown; visit_kind?: unknown; image_url?: unknown }>) {
     const cf = r.custom_fields;
     if (cf && typeof cf === 'object') {
       r.visit_kind = (cf as Record<string, unknown>).visit_kind ?? '';
+    }
+    // Photo URL: the activity's own photo, else the first photo link captured in one of its custom fields
+    // (a photo-type field stores its URL there). Without this the column came out blank for those rows.
+    if (!r.image_url) {
+      const hit = cf && typeof cf === 'object'
+        ? Object.values(cf as Record<string, unknown>).flatMap((x) => (Array.isArray(x) ? x : [x]))
+            .find((x): x is string => typeof x === 'string' && /^https?:\/\//i.test(x))
+        : undefined;
+      if (hit) r.image_url = hit;
     }
   }
   const escape = (v: unknown): string => {

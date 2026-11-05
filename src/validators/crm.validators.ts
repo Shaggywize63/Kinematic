@@ -386,6 +386,9 @@ export const accountSchema = z.object({
   parent_account_id: optionalUuid,
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
+  // Connected-B2B (Spark & Ray): the account's outcome — required when an account is created there, and it
+  // cannot be blanked afterwards. Dropped for every other client.
+  outcome: z.string().trim().max(500).optional().nullable(),
 });
 
 // Plant / site under a customer account (multi-site customers).
@@ -509,6 +512,21 @@ export const dealSchema = z.object({
     quantity: z.number().positive().max(1_000_000_000).default(1),
     unit_price: z.number().nonnegative().max(1_000_000_000_000),
   })).max(50).optional(),
+  // Connected-B2B deal sections: pricing (after the quotation), product trial and the people on the deal.
+  // Dropped for every other client. See services/crm/dealSections.service.ts.
+  pricing_quoted: z.number().nonnegative().max(1_000_000_000_000).optional().nullable(),
+  pricing_discount_pct: z.number().min(0).max(100).optional().nullable(),
+  pricing_final: z.number().nonnegative().max(1_000_000_000_000).optional().nullable(),
+  pricing_valid_till: isoDate,
+  trial_required: z.boolean().optional().nullable(),
+  trial_start: isoDate,
+  trial_end: isoDate,
+  trial_result: z.enum(['pending', 'successful', 'failed']).optional().nullable(),
+  trial_notes: z.string().trim().max(2000).optional().nullable(),
+  technical_approval_by: optionalUuid,
+  prepared_by: optionalUuid,
+  checked_by: optionalUuid,
+  supervisor_id: optionalUuid,
 });
 
 export const dealUpdateSchema = dealSchema.partial();
@@ -998,11 +1016,28 @@ export const targetEntriesQuerySchema = z.object({
   all: z.enum(['1', 'true', '0', 'false']).optional(),
 });
 
+// crm_settings.config.deal_sections — which deal sections a connected-B2B client shows, how they are labelled and
+// in what order. Every key is optional; an absent section is shown with its default label.
+export const dealSectionsConfigSchema = z.object({
+  quotation: z.object({ enabled: z.boolean().optional(), label: z.string().max(60).optional(), position: z.number().int().optional() }).optional(),
+  pricing: z.object({ enabled: z.boolean().optional(), label: z.string().max(60).optional(), position: z.number().int().optional() }).optional(),
+  product_trial: z.object({ enabled: z.boolean().optional(), label: z.string().max(60).optional(), position: z.number().int().optional() }).optional(),
+  approvals: z.object({ enabled: z.boolean().optional(), label: z.string().max(60).optional(), position: z.number().int().optional() }).optional(),
+});
+
+// crm_settings.config.activity_reminders — the upcoming-activity reminders (days before the due date) and the
+// people who get every one of them, on top of whoever the activity is assigned to.
+export const activityRemindersConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  offsets_days: z.array(z.number().int().min(1).max(60)).min(1).max(6).optional(),
+  user_ids: z.array(z.string().uuid()).max(50).optional(),
+});
+
 export const settingsUpdateSchema = z.object({
   config: z.record(z.unknown()).optional().superRefine((c, ctx) => {
     if (!c) return;
     // Both blocks are optional, and null clears them.
-    for (const [key, schema] of [['lead_form', leadFormConfigSchema], ['targets', targetsConfigSchema]] as const) {
+    for (const [key, schema] of [['lead_form', leadFormConfigSchema], ['targets', targetsConfigSchema], ['deal_sections', dealSectionsConfigSchema], ['activity_reminders', activityRemindersConfigSchema]] as const) {
       if (c[key] === undefined || c[key] === null) continue;
       const r = schema.safeParse(c[key]);
       if (!r.success) {

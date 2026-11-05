@@ -1,6 +1,7 @@
 /**
  * Deal service: CRUD, stage moves, win/lose, history.
  */
+import { DEAL_SECTION_KEYS } from './dealSections.service';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError, sanitisePostgrestSearch } from '../../utils';
 import { validateAndStampCustomFields } from './customFields.service';
@@ -234,6 +235,12 @@ export async function createDeal(org_id: string, payload: Partial<Deal>, user_id
     // Connected-B2B quotation number: only written when one is supplied (the route drops it for every other client).
     ...(typeof (payload as { quotation_no?: unknown }).quotation_no === 'string' && (payload as { quotation_no: string }).quotation_no
       ? { quotation_no: (payload as { quotation_no: string }).quotation_no } : {}),
+    // Connected-B2B deal sections (pricing / product trial / people): applyDealSections already dropped these
+    // for every other client, and only the keys that were supplied are written.
+    ...Object.fromEntries(
+      DEAL_SECTION_KEYS.filter((k) => (payload as Record<string, unknown>)[k] !== undefined && (payload as Record<string, unknown>)[k] !== null)
+        .map((k) => [k, (payload as Record<string, unknown>)[k]]),
+    ),
   };
   const { data, error } = await supabaseAdmin.from('crm_deals').insert(insertRow).select('*').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
