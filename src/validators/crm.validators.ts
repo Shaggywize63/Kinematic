@@ -506,6 +506,9 @@ export const dealSchema = z.object({
   // Connected-B2B (Spark & Ray): a quotation number and the products quoted, each with a quantity and
   // price. The deal's amount becomes the total of the lines. Dropped for every other client.
   quotation_no: z.string().trim().max(60).optional().nullable(),
+  // Connected-B2B: "Convert to deal" — convert the source lead (creating / reusing its customer account) and create
+  // this deal in the same request. Needs lead_id; ignored for every other client.
+  convert_lead: z.boolean().optional(),
   items: z.array(z.object({
     product_id: optionalUuid,
     name: z.string().trim().min(1).max(200),
