@@ -51,6 +51,35 @@ export async function stampOwnerName<T extends Row>(row: T | null | undefined): 
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Account (company) name decoration for contacts. Contacts carry account_id
+// but no name column, so the contacts table / detail rendered "—" for the
+// Company even when a contact was linked. One batched IN() query per call.
+// A failed lookup leaves the rows untouched rather than failing the list.
+// ─────────────────────────────────────────────────────────────────────
+
+type AccountRow = { account_id?: string | null; account_name?: string | null };
+
+export async function stampAccountNames<T extends AccountRow>(rows: T[]): Promise<T[]> {
+  if (!rows || rows.length === 0) return rows;
+  const ids = Array.from(new Set(rows.map((r) => r.account_id).filter(Boolean) as string[]));
+  if (ids.length === 0) return rows;
+  const { data: accounts, error } = await supabaseAdmin.from('crm_accounts').select('id, name').in('id', ids);
+  if (error) return rows;
+  const nameById = new Map<string, string>();
+  for (const a of accounts ?? []) nameById.set((a as any).id, ((a as any).name as string) || '');
+  return rows.map((r) => ({
+    ...r,
+    account_name: r.account_id ? (nameById.get(r.account_id) || r.account_name || null) : (r.account_name ?? null),
+  }));
+}
+
+export async function stampAccountName<T extends AccountRow>(row: T | null | undefined): Promise<T | null> {
+  if (!row) return row ?? null;
+  const [decorated] = await stampAccountNames([row]);
+  return decorated;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Source-name decoration. Leads carry source_id (FK to crm_lead_sources);
 // the FE list table renders `row.source_name`. Without this stamping the
 // Source column always reads "—" even when the source_id is populated.

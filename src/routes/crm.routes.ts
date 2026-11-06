@@ -99,7 +99,7 @@ import { chatWithTools } from '../services/crm/ai/aiClient';
 import { AIService } from '../services/ai.service';
 import * as globalSearch from '../services/crm/globalSearch.service';
 import * as leadFormBuilder from '../services/crm/ai/leadFormBuilder.service';
-import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, stampDirectoryNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
+import { stampAccountNames, stampAccountName, stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, stampCreatedByNames, relabelImportedUploader, stampLinkedEntityNames, stampDealerNames, stampDirectoryNames, listCustomFieldColumns, stampCustomFieldValues, resolveLookupLabels } from '../services/crm/owners.helper';
 
 // Enrich crm_activities rows with the owner, linked-entity (lead / contact /
 // deal / account) and People-Directory ("dealer_name") display names + phones
@@ -2096,7 +2096,7 @@ contacts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
   const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   return res.json(
-    await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds }))
+    await stampAccountNames(await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds })))
   );
 }));
 contacts.post('/', idempotency, wrap(async (req, res) => {
@@ -2135,9 +2135,9 @@ contacts.post('/', idempotency, wrap(async (req, res) => {
       console.warn(`[consent] recordConsent on contact create failed: ${(e as Error).message}`);
     }
   }
-  res.status(201).json(await stampOwnerName(contact));
+  res.status(201).json(await stampAccountName(await stampOwnerName(contact)));
 }));
-contacts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id, true, clientScope(req).id)))));
+contacts.get('/:id', wrap(async (req, res) => res.json(await stampAccountName(await stampOwnerName(await crud.get('crm_contacts', orgId(req), req.params.id, true, clientScope(req).id))))));
 contacts.patch('/:id', wrap(async (req, res) => {
   const { _consent: _dropConsent, ...parsed } = parse(v.contactSchema.partial(), req.body);
   const payload = parsed as Record<string, unknown>;
@@ -2152,7 +2152,7 @@ contacts.patch('/:id', wrap(async (req, res) => {
       payload.custom_fields as Record<string, unknown>,
     );
   }
-  res.json(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, payload, userId(req), clientScope(req).id)));
+  res.json(await stampAccountName(await stampOwnerName(await crud.update('crm_contacts', orgId(req), req.params.id, payload, userId(req), clientScope(req).id))));
 }));
 contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 contacts.get('/:id/activities', wrap(async (req, res) => {
