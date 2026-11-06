@@ -641,6 +641,18 @@ function activityOwnerFilter(v: unknown): string | null {
   return typeof v === 'string' && UUID_RE.test(v) ? v : null;
 }
 
+/**
+ * Account filter for the activity list / summary / export (?account_id=). An activity belongs to a company when
+ * it is logged against the account itself OR against one of that account's leads (a converted / linked lead), so
+ * the filter returns both. Returns the PostgREST `.or()` expression, or null when no valid account was asked for.
+ */
+async function activityAccountOr(v: unknown, org: string): Promise<string | null> {
+  if (typeof v !== 'string' || !UUID_RE.test(v)) return null;
+  const { data } = await supabaseAdmin.from('crm_leads').select('id').eq('org_id', org).eq('account_id', v).is('deleted_at', null).limit(300);
+  const ids = (data ?? []).map((r: { id: string }) => r.id).filter((id) => UUID_RE.test(id));
+  return `account_id.eq.${v}${ids.length ? `,lead_id.in.(${ids.join(',')})` : ''}`;
+}
+
 // A uuid that can never match a real row — used to force an empty result when
 // a location filter resolves to zero leads.
 const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
@@ -2170,23 +2182,21 @@ accounts.get('/', wrap(async (req, res) => {
   );
 }));
 /**
- * Spark & Ray: an account's Outcome is mandatory when it is created and can never be blanked afterwards. For every
- * other client the key is dropped, so their account writes are unchanged.
+ * Spark & Ray: Outcome now lives on the ACTIVITY, not the account, so an account no longer needs one. The column and
+ * any value already stored stay (shown read-only on the account); a value that is sent is kept (trimmed, blank = none).
+ * For every other client the key is dropped, so their account writes are unchanged.
  */
-function applyAccountOutcome(clientIdForRow: string | null | undefined, payload: Record<string, unknown>, mode: 'create' | 'patch'): void {
+function applyAccountOutcome(clientIdForRow: string | null | undefined, payload: Record<string, unknown>): void {
   if (!isB2bClient(clientIdForRow)) { delete payload.outcome; return; }
   if ('outcome' in payload) {
     const o = typeof payload.outcome === 'string' ? payload.outcome.trim() : '';
-    if (!o) throw new AppError(400, 'Outcome is required', 'VALIDATION');
-    payload.outcome = o;
-  } else if (mode === 'create') {
-    throw new AppError(400, 'Outcome is required', 'VALIDATION');
+    payload.outcome = o || null;
   }
 }
 accounts.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
-  applyAccountOutcome(payload.client_id as string | null, payload, 'create');
+  applyAccountOutcome(payload.client_id as string | null, payload);
   sanitizeOwnerId(req, payload);
   if (payload.custom_fields !== undefined) {
     payload.custom_fields = await validateAndStampCustomFields(
@@ -2202,7 +2212,7 @@ accounts.patch('/:id', wrap(async (req, res) => {
   if ('outcome' in payload) {
     // Decided by the account's own client, so an admin without an X-Client-Id header is treated the same way.
     const acct = await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, any>;
-    applyAccountOutcome((acct.client_id as string | null) ?? null, payload, 'patch');
+    applyAccountOutcome((acct.client_id as string | null) ?? null, payload);
   }
   sanitizeOwnerId(req, payload);
   if (payload.custom_fields !== undefined) {
@@ -2843,6 +2853,7 @@ activities.get('/summary', wrap(async (req, res) => {
     subtreeIds = [meAct.id];
   }
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
+  const accountOr = await activityAccountOr(req.query.account_id, orgId(req));
   const locLeadIds = req.query.lead_id
     ? null
     : await activityLocationLeadIds(req.query as Record<string, unknown>, orgId(req), scope);
@@ -2868,6 +2879,7 @@ activities.get('/summary', wrap(async (req, res) => {
       q = q.or(`owner_id.in.(${ids}),assigned_to.in.(${ids})`);
     }
     if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
+    if (accountOr) q = q.or(accountOr);
     if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
     if (typeof req.query.type === 'string' && req.query.type) q = q.eq('type', req.query.type);
     if (typeof req.query.q === 'string' && req.query.q.trim()) {
@@ -3058,6 +3070,7 @@ activities.get('/', wrap(async (req, res) => {
   // helper would apply) hides them all. Strip it from the generic query and
   // apply an OR here instead.
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
+  const accountOr = await activityAccountOr(req.query.account_id, orgId(req));
   // Location filter (city/state/district/block) → resolve to lead ids, since
   // crm_activities has no geo columns. null = no location filter.
   // When an explicit lead_id is provided, location filter is redundant (we're already
@@ -3077,7 +3090,7 @@ activities.get('/', wrap(async (req, res) => {
   // standard set). Strip it from the generic listQuery so crud.list
   // doesn't apply .eq('status','unset') (no row would match) and apply
   // the OR filter below in extraFilters.
-  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, status: statusQ, ...listQuery } = req.query as Record<string, unknown>;
+  const { owner_id: _ownerOmit, account_id: _accountOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, status: statusQ, ...listQuery } = req.query as Record<string, unknown>;
   // Connected-B2B: an FE filter also matches activities they are a co-assignee on.
   const ownerCoIds = ownerFilter
     ? await activityExtras.coAssignedActivityIds(orgId(req), scope.id, [ownerFilter])
@@ -3105,6 +3118,7 @@ activities.get('/', wrap(async (req, res) => {
     if (ownerFilter) {
       q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}${ownerCoIds.length ? `,id.in.(${ownerCoIds.join(',')})` : ''}`);
     }
+    if (accountOr) q = q.or(accountOr);
     if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
     // View-aware date-range filter so planned activities don't vanish
     // whenever a date range is picked:
@@ -3195,6 +3209,7 @@ activities.get('/export', wrap(async (req, res) => {
   // Match the list endpoint: ?owner_id= filters on owner_id OR assigned_to,
   // and city/state/district/block filter via the linked lead.
   const ownerFilter = activityOwnerFilter(req.query.owner_id);
+  const accountOr = await activityAccountOr(req.query.account_id, orgId(req));
   // When an explicit lead_id is provided, location filter is redundant (we're already
   // scoping to a single lead) and would conflict if the lead is from a different city.
   const locLeadIds = req.query.lead_id
@@ -3205,7 +3220,7 @@ activities.get('/export', wrap(async (req, res) => {
   // the single-column dateRangeColumn filter on completed_at would
   // hide every planned activity from the export the moment a range
   // is set, leaving the two surfaces out of sync.
-  const { owner_id: _ownerOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, status: statusExpQ, ...exportQuery } = req.query as Record<string, unknown>;
+  const { owner_id: _ownerOmit, account_id: _accountOmit, city: _c, state: _s, district: _d, block: _b, from: fromQ, to: toQ, status: statusExpQ, ...exportQuery } = req.query as Record<string, unknown>;
   // Same status=unset handling as the list endpoint — strip it so
   // crud.list doesn't .eq('status','unset') against PostgREST, and
   // apply the OR predicate in ownerExtra below.
@@ -3217,7 +3232,7 @@ activities.get('/export', wrap(async (req, res) => {
   const toExp = typeof toQ === 'string' && toQ ? toQ : null;
   const nowExpIso = new Date().toISOString();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ownerExtra = (ownerFilter || locLeadIds !== null || fromExp || toExp || exportView !== 'all' || statusUnsetExp)
+  const ownerExtra = (ownerFilter || accountOr || locLeadIds !== null || fromExp || toExp || exportView !== 'all' || statusUnsetExp)
     ? (q: any) => {
         // Mirror the list endpoint's view-axis predicates so the CSV
         // honors the tile-active filter. The list endpoint handles
@@ -3230,6 +3245,7 @@ activities.get('/export', wrap(async (req, res) => {
           q = q.or('status.is.null,status.not.in.(open,in_progress,completed,done,cancelled)');
         }
         if (ownerFilter) q = q.or(`owner_id.eq.${ownerFilter},assigned_to.eq.${ownerFilter}`);
+        if (accountOr) q = q.or(accountOr);
         if (locLeadIds !== null) q = q.in('lead_id', locLeadIds.length ? locLeadIds : [NO_MATCH_UUID]);
         if (fromExp || toExp) {
           if (exportView === 'completed') {

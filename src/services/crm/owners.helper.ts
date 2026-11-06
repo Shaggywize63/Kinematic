@@ -166,6 +166,9 @@ type Linked = {
   contact_name?: string | null;
   account_name?: string | null;
   deal_name?: string | null;
+  /** The company this row belongs to: its account, else its lead's account, else the lead's company text. */
+  company_id?: string | null;
+  company_name?: string | null;
 };
 
 export async function stampLinkedEntityNames<T extends Linked>(rows: T[]): Promise<T[]> {
@@ -182,20 +185,39 @@ export async function stampLinkedEntityNames<T extends Linked>(rows: T[]): Promi
   }
   if (!leadIds.size && !contactIds.size && !accountIds.size && !dealIds.size) return rows;
 
-  const [leadsRes, contactsRes, accountsRes, dealsRes] = await Promise.all([
-    leadIds.size    ? supabaseAdmin.from('crm_leads').select('id, first_name, last_name, company, phone').in('id', Array.from(leadIds)) : Promise.resolve({ data: [] as any[] }),
+  // Leads first: a lead can point at an account (account_id), which supplies the activity's company.
+  let leadsRes: { data: any[] | null; error?: unknown } = { data: [] as any[] };
+  if (leadIds.size) {
+    leadsRes = await supabaseAdmin.from('crm_leads').select('id, first_name, last_name, company, phone, account_id').in('id', Array.from(leadIds));
+    // A tenant whose database predates crm_leads.account_id must keep its lead names: retry without it.
+    if (leadsRes.error) leadsRes = await supabaseAdmin.from('crm_leads').select('id, first_name, last_name, company, phone').in('id', Array.from(leadIds));
+  }
+  for (const l of leadsRes.data ?? []) if (l.account_id) accountIds.add(l.account_id as string);
+  const [contactsRes, accountsRes, dealsRes] = await Promise.all([
     contactIds.size ? supabaseAdmin.from('crm_contacts').select('id, first_name, last_name').in('id', Array.from(contactIds))    : Promise.resolve({ data: [] as any[] }),
     accountIds.size ? supabaseAdmin.from('crm_accounts').select('id, name').in('id', Array.from(accountIds))                     : Promise.resolve({ data: [] as any[] }),
     dealIds.size    ? supabaseAdmin.from('crm_deals').select('id, name').in('id', Array.from(dealIds))                            : Promise.resolve({ data: [] as any[] }),
   ]);
   const leadName    = new Map<string, string>((leadsRes.data    ?? []).map((l: any) => [l.id, [l.first_name, l.last_name].filter(Boolean).join(' ').trim() || l.company || '']));
   const leadPhone   = new Map<string, string>((leadsRes.data    ?? []).map((l: any) => [l.id, (l.phone as string) || '']));
+  const leadCompany = new Map<string, string>((leadsRes.data    ?? []).map((l: any) => [l.id, (l.company as string) || '']));
+  const leadAccount = new Map<string, string>((leadsRes.data    ?? []).filter((l: any) => l.account_id).map((l: any) => [l.id, l.account_id as string]));
   const contactName = new Map<string, string>((contactsRes.data ?? []).map((c: any) => [c.id, [c.first_name, c.last_name].filter(Boolean).join(' ').trim()]));
   const accountName = new Map<string, string>((accountsRes.data ?? []).map((a: any) => [a.id, (a.name as string) || '']));
   const dealName    = new Map<string, string>((dealsRes.data    ?? []).map((d: any) => [d.id, (d.name as string) || '']));
 
+  // Company of a row: its own account, else the account of its lead, else the lead's free-text company (no link).
+  const companyOf = (r: Linked): { id: string | null; name: string | null } => {
+    const acct = r.account_id || (r.lead_id ? leadAccount.get(r.lead_id) : undefined) || null;
+    if (acct && accountName.get(acct)) return { id: acct, name: accountName.get(acct) as string };
+    const text = r.lead_id ? leadCompany.get(r.lead_id) : '';
+    return { id: null, name: text || null };
+  };
+
   return rows.map((r) => ({
     ...r,
+    company_id:   companyOf(r).id,
+    company_name: companyOf(r).name,
     lead_name:    r.lead_id    ? (leadName.get(r.lead_id)       ?? r.lead_name    ?? null) : (r.lead_name    ?? null),
     lead_phone:   r.lead_id    ? (leadPhone.get(r.lead_id)      ?? r.lead_phone   ?? null) : (r.lead_phone   ?? null),
     contact_name: r.contact_id ? (contactName.get(r.contact_id) ?? r.contact_name ?? null) : (r.contact_name ?? null),
