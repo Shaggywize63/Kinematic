@@ -48,6 +48,7 @@ import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import { ensureLocationMaster } from '../services/crm/locationSeed';
 import { writeAccountResilient } from '../services/crm/accountWrite';
+import { writeActivityResilient, restoreCarrierType } from '../services/crm/activityTypeFallback';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
 import * as afterSales from '../services/crm/afterSales.service';
@@ -107,7 +108,8 @@ import { stampOwnerNames, stampOwnerName, stampSourceNames, stampSourceName, sta
 // safe on any rows (missing refs simply no-op). Callers that already stamp a
 // subset can still route through this; the helpers coalesce existing values.
 async function enrichActivities<T extends Record<string, any>>(rows: T[]): Promise<any[]> {
-  const withOwners = await stampOwnerNames(rows as any[]);
+  // Rows saved under a carrier type (see activityTypeFallback) show their real type again.
+  const withOwners = await stampOwnerNames((rows ?? []).map((r) => restoreCarrierType(r)) as any[]);
   const withLinked = await stampLinkedEntityNames(withOwners as any[]);
   // Connected-B2B only: add the assignee list (a no-op for every other client).
   return activityExtras.stampAssignees(await stampDirectoryNames(withLinked as any[]));
@@ -3800,7 +3802,7 @@ activities.post('/', idempotency, wrap(async (req, res) => {
       payload.custom_fields as Record<string, unknown>,
     );
   }
-  const created = await crud.create('crm_activities', orgId(req), payload, userId(req)) as Record<string, unknown>;
+  const created = restoreCarrierType(await writeActivityResilient(payload, (p) => crud.create('crm_activities', orgId(req), p, userId(req))) as Record<string, unknown>);
   if (assigneeIds !== undefined) {
     await activityExtras.replaceActivityAssignees({
       orgId: orgId(req), clientId: (created.client_id as string | null) ?? null, activityId: created.id as string,
@@ -3850,7 +3852,7 @@ activities.patch('/:id', wrap(async (req, res) => {
   const assigneeIds = await activityExtras.applyActivityExtras({
     orgId: orgId(req), clientId: ((existing as { client_id?: string | null }).client_id) ?? null, payload: patched,
   });
-  const updated = await crud.update('crm_activities', orgId(req), req.params.id, patched, userId(req), clientScope(req).id) as Record<string, unknown>;
+  const updated = restoreCarrierType(await writeActivityResilient(patched, (p) => crud.update('crm_activities', orgId(req), req.params.id, p, userId(req), clientScope(req).id)) as Record<string, unknown>);
   if (assigneeIds !== undefined) {
     await activityExtras.replaceActivityAssignees({
       orgId: orgId(req), clientId: (updated.client_id as string | null) ?? null, activityId: req.params.id,

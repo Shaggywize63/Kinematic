@@ -369,6 +369,9 @@ export const contactSchema = z.object({
   // DPDP §5/§6 — consent captured at collection (popped before insert, recorded
   // in crm_consents against the new contact).
   _consent: consentInlineSchema.optional(),
+  // Existing contacts can have no city (it is optional and often hidden), and the edit form echoes the stored value
+  // back, so null must be accepted on update; an actual city still may not be blank.
+  city: z.string().min(1, { message: 'City is required' }).max(120).optional().nullable(),
 });
 
 export const accountSchema = z.object({
