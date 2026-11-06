@@ -47,6 +47,7 @@ import { fireActivityLifecycle } from '../services/crm/activityTriggers';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import { ensureLocationMaster } from '../services/crm/locationSeed';
+import { writeAccountResilient } from '../services/crm/accountWrite';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
 import * as afterSales from '../services/crm/afterSales.service';
@@ -2205,7 +2206,7 @@ accounts.post('/', idempotency, wrap(async (req, res) => {
       payload.custom_fields as Record<string, unknown>,
     );
   }
-  res.status(201).json(await stampOwnerName(await crud.create('crm_accounts', orgId(req), payload, userId(req))));
+  res.status(201).json(await stampOwnerName(await writeAccountResilient(payload, 'create', (p) => crud.create('crm_accounts', orgId(req), p, userId(req)))));
 }));
 accounts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id)))));
 accounts.patch('/:id', wrap(async (req, res) => {
@@ -2222,7 +2223,7 @@ accounts.patch('/:id', wrap(async (req, res) => {
       payload.custom_fields as Record<string, unknown>,
     );
   }
-  res.json(await stampOwnerName(await crud.update('crm_accounts', orgId(req), req.params.id, payload, userId(req), clientScope(req).id)));
+  res.json(await stampOwnerName(await writeAccountResilient(payload, 'patch', (p) => crud.update('crm_accounts', orgId(req), req.params.id, p, userId(req), clientScope(req).id))));
 }));
 accounts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_accounts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
