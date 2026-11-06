@@ -11,6 +11,7 @@
 import { AppError } from '../../utils';
 import { AIService } from '../ai.service';
 import { logger } from '../../lib/logger';
+import { usableScanDate } from './expenseInput';
 
 export type ReceiptCategory = 'travel' | 'food' | 'lodging' | 'fuel' | 'toll' | 'misc';
 const CATEGORIES: ReceiptCategory[] = ['travel', 'food', 'lodging', 'fuel', 'toll', 'misc'];
@@ -64,6 +65,11 @@ function cat(v: unknown): ReceiptCategory | null {
   return (CATEGORIES as string[]).includes(t) ? (t as ReceiptCategory) : null;
 }
 
+/** A total that can be saved on a line (positive, within the column). */
+export function usableAmount(n: number | null): number | null {
+  return n != null && n > 0 && n <= 10_000_000 ? Math.round(n * 100) / 100 : null;
+}
+
 export async function scanReceipt(imageBase64: string, mediaType: ReceiptMediaType = 'image/jpeg'): Promise<ReceiptFields> {
   const apiKey = await AIService.getFunctionalKey();
   const model = process.env.RECEIPT_SCAN_MODEL || process.env.CARD_SCAN_MODEL || 'claude-haiku-4-5';
@@ -103,8 +109,9 @@ export async function scanReceipt(imageBase64: string, mediaType: ReceiptMediaTy
     const p = JSON.parse(text.substring(start, end + 1));
     return {
       merchant: str(p.merchant),
-      txn_date: str(p.txn_date),
-      amount: num(p.amount),
+      // Only a real day: a date the model wrote in another shape would fail the line's save later.
+      txn_date: usableScanDate(p.txn_date),
+      amount: usableAmount(num(p.amount)),
       currency: str(p.currency)?.toUpperCase() ?? null,
       tax_amount: num(p.tax_amount),
       category: cat(p.category),

@@ -40,6 +40,7 @@ import { uploadReceipt } from '../services/expenses/receipts.service';
 import { odometerHistory } from '../services/expenses/odometerHistory.service';
 import * as odometerTrip from '../services/expenses/odometerTrip.service';
 import { scanReceipt, ReceiptMediaType } from '../services/expenses/receiptScan.service';
+import { createSchema, checkSchema, firstProblem, photoField } from '../services/expenses/expenseInput';
 
 const router = Router();
 
@@ -57,7 +58,7 @@ function actor(req: AuthRequest): expenses.Actor {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function parse(schema: z.ZodTypeAny, body: unknown): any {
   const r = schema.safeParse(body);
-  if (!r.success) throw new AppError(400, r.error.issues[0]?.message || 'Invalid input', 'VALIDATION');
+  if (!r.success) throw new AppError(400, firstProblem(r.error), 'VALIDATION');
   return r.data;
 }
 
@@ -82,61 +83,10 @@ function policyBlocked(res: Response, e: unknown): boolean {
 
 const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
 const uuid = z.string().uuid();
-const category = z.enum(['mileage', 'travel', 'food', 'lodging', 'fuel', 'toll', 'misc']);
 const num = (max: number) => z.number().min(0).max(max);
 
-// Only web links or our own storage objects — never javascript: or data: URIs. An empty string
-// means "remove it" for clients (the Android app) that cannot send an explicit null.
-const photoRef = z.union([
-  z.literal(''),
-  z.string().url().max(2048).refine((u) => /^https?:\/\//i.test(u), 'Photo must be a web link'),
-]);
+const photoRef = photoField('The odometer photo');
 
-const itemSchema = z.object({
-  id: uuid.optional(),
-  category,
-  item_date: dateStr.optional().nullable(),
-  description: z.string().max(500).optional().nullable(),
-  amount: num(10_000_000).optional().nullable(),
-  distance_km: num(100_000).optional().nullable(),
-  from_location: z.string().max(200).optional().nullable(),
-  to_location: z.string().max(200).optional().nullable(),
-  merchant: z.string().max(200).optional().nullable(),
-  // Travel allowance by vehicle (policies with vehicle_rates): the vehicle and the odometer
-  // readings before / after, each with a photo. Distance and amount are computed server-side.
-  vehicle_type: z.string().max(40).optional().nullable(),
-  odometer_start: num(100_000_000).optional().nullable(),
-  odometer_end: num(100_000_000).optional().nullable(),
-  odometer_start_photo_url: photoRef.optional().nullable(),
-  odometer_end_photo_url: photoRef.optional().nullable(),
-  // Only web links or our own storage objects — never javascript: or data: URIs.
-  // An empty string means "remove the receipt" — for clients (the Android app) that cannot send an explicit null.
-  receipt_url: z.union([
-    z.literal(''),
-    z.string().url().max(2048).refine((u) => /^https?:\/\//i.test(u), 'Receipt must be a web link'),
-  ]).optional().nullable(),
-  ai_extracted: z.any().optional(),
-  // GST on the bill — feeds Finance's GST-on-expenses / input-tax-credit report.
-  supplier_gstin: z.preprocess((v) => (typeof v === 'string' ? (v.trim() === '' ? null : v.trim().toUpperCase()) : v),
-    z.string().regex(/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/, 'Invalid supplier GSTIN').nullable().optional()),
-  supplier_invoice_no: z.string().max(60).optional().nullable(),
-  gst_rate: num(40).optional().nullable(),
-  gst_amount: num(10_000_000).optional().nullable(),
-  itc_eligible: z.boolean().optional().nullable(),
-});
-const createSchema = z.object({
-  title: z.string().max(200).optional().nullable(),
-  // Connected-B2B flow (Spark & Ray): the mandatory purpose/justification, and
-  // the CRM account + builder form this expense is linked to. Accepted for any
-  // client but only stored/enforced for B2B clients (see expenses.service).
-  clarification: z.string().max(2000).optional().nullable(),
-  account_id: uuid.optional().nullable(),
-  form_id: uuid.optional().nullable(),
-  // null or '' clears the link (a client that cannot send an explicit null sends '').
-  form_submission_id: z.union([uuid, z.literal('')]).optional().nullable(),
-  items: z.array(itemSchema).max(100).optional(),
-});
-const checkSchema = z.object({ items: z.array(itemSchema).max(100).optional(), claim_id: uuid.optional() });
 const lineDecision = z.object({ id: uuid, decision: z.enum(['approved', 'rejected']), note: z.string().max(1000).optional().nullable() });
 const decisionSchema = z.object({
   decision: z.enum(['approved', 'rejected']),

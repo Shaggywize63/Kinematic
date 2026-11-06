@@ -37,6 +37,7 @@ import {
   listPolicies, policyUserOf, priorMonthSpend, resolvePolicy, resolvePolicyForUserId, toClientShape, updatePolicy,
 } from './policy.service';
 import { assertReceiptsOwned, signReceipt } from './receipts.service';
+import { blamesOptional, carriesAny, dbFailure, withoutKeys } from './dbErrors';
 import {
   ODOMETER_KEYS, ODOMETER_PHOTO_KEYS, assertOdometerOrder, assertOdometerStorable, hasOdometerData, hasOdometerInput,
   isGpsDistanceLine, priceGpsLine, priceVehicleLine, vehicleFlowOn, withSoleVehicle,
@@ -421,6 +422,51 @@ async function applyGpsDistance<T extends ClaimItemInput>(
 }
 
 const GST_KEYS = ['supplier_gstin', 'supplier_invoice_no', 'gst_rate', 'gst_amount', 'itc_eligible'] as const;
+/**
+ * Claim columns that exist only after an optional migration (migration_expense_links_clarification.sql adds
+ * clarification / account_id / form_id; migration_form_ref_no.sql adds form_submission_id). They are written
+ * only for connected-B2B clients, but a tenant database that never ran the migration answers every such
+ * write with "column does not exist" — so a write that fails for that reason is retried once without them.
+ */
+export const CLAIM_LINK_KEYS = ['clarification', 'account_id', 'form_id', 'form_submission_id'] as const;
+
+/** Insert one claim row; if the optional link columns are missing from this database, retry once without them. */
+async function insertClaimRow(base: Record<string, unknown>, links: Record<string, unknown>) {
+  const first = await supabaseAdmin.from('expense_claims').insert({ ...base, ...links }).select('*').single();
+  if (first.error && carriesAny(links, CLAIM_LINK_KEYS) && blamesOptional(first.error, CLAIM_LINK_KEYS)) {
+    logger.warn(`[expenses] expense_claims lacks the link columns (${first.error.message}); saving the claim without them — apply migration_expense_links_clarification.sql and migration_form_ref_no.sql`);
+    return supabaseAdmin.from('expense_claims').insert(base).select('*').single();
+  }
+  return first;
+}
+
+/** Insert claim lines; if the optional GST columns are missing from this database, retry once without them. */
+async function insertItemRows(rows: Record<string, unknown> | Array<Record<string, unknown>>) {
+  const first = await supabaseAdmin.from('expense_claim_items').insert(rows);
+  if (first.error && carriesAny(rows, GST_KEYS) && blamesOptional(first.error, GST_KEYS)) {
+    logger.warn(`[expenses] expense_claim_items lacks the GST columns (${first.error.message}); saving the lines without GST — apply migrations/finance_expenses_gst.sql`);
+    return supabaseAdmin.from('expense_claim_items').insert(withoutKeys(rows, GST_KEYS));
+  }
+  return first;
+}
+
+async function updateItemRow(id: string, row: Record<string, unknown>) {
+  const first = await supabaseAdmin.from('expense_claim_items').update(row).eq('id', id);
+  if (first.error && carriesAny(row, GST_KEYS) && blamesOptional(first.error, GST_KEYS)) {
+    logger.warn(`[expenses] expense_claim_items lacks the GST columns (${first.error.message}); updating the line without GST`);
+    return supabaseAdmin.from('expense_claim_items').update(withoutKeys(row, GST_KEYS)).eq('id', id);
+  }
+  return first;
+}
+
+async function updateClaimRow(id: string, update: Record<string, unknown>) {
+  const first = await supabaseAdmin.from('expense_claims').update(update).eq('id', id);
+  if (first.error && carriesAny(update, CLAIM_LINK_KEYS) && blamesOptional(first.error, CLAIM_LINK_KEYS)) {
+    logger.warn(`[expenses] expense_claims lacks the link columns (${first.error.message}); updating the claim without them`);
+    return supabaseAdmin.from('expense_claims').update(withoutKeys(update, CLAIM_LINK_KEYS)).eq('id', id);
+  }
+  return first;
+}
 
 const itemRow = (claim_id: string, org_id: string, i: ClaimItemInput) => {
   const row: Record<string, unknown> = {
@@ -540,18 +586,21 @@ export async function createClaim(actor: Actor, body: ClaimBody) {
   const distance = round2(items.filter((i) => i.category === 'mileage').reduce((s, i) => s + Number(i.distance_km || 0), 0));
   const links = await resolveLinks(actor, body);
 
-  const { data: claim, error } = await supabaseAdmin.from('expense_claims').insert({
+  const { data: claim, error } = await insertClaimRow({
     org_id: actor.org_id, client_id: actor.client_id ?? null, user_id: actor.id, claim_no: genClaimNo(),
     title: body.title ?? null, status: 'draft', currency: policy.currency, total_amount: total,
     distance_km: distance || null, current_level: 1, created_by: actor.id,
-    ...links,
-  }).select('*').single();
-  if (error) throw new AppError(500, error.message, 'DB');
+  }, links);
+  if (error) throw dbFailure(error, 'save the claim');
 
   const c = claim as any;
   if (items.length) {
-    const { error: itErr } = await supabaseAdmin.from('expense_claim_items').insert(items.map((i) => itemRow(c.id, actor.org_id, i)));
-    if (itErr) throw new AppError(500, itErr.message, 'DB');
+    const { error: itErr } = await insertItemRows(items.map((i) => itemRow(c.id, actor.org_id, i)));
+    if (itErr) {
+      // Do not leave an empty draft behind: the person will retry, and would end up with two claims.
+      await supabaseAdmin.from('expense_claims').delete().eq('id', c.id);
+      throw dbFailure(itErr, 'save an expense line');
+    }
   }
   return getClaim(actor, c.id);
 }
@@ -678,11 +727,11 @@ export async function updateClaim(actor: Actor, id: string, body: ClaimBody) {
       if (i.receipt_url === undefined) row.receipt_url = prev.receipt_url;
       if (i.ai_extracted === undefined) row.ai_extracted = prev.ai_extracted;
       // (An odometer field the client did not send is simply left out of the update, so it keeps its value.)
-      const { error } = await supabaseAdmin.from('expense_claim_items').update(row).eq('id', prev.id);
-      if (error) throw new AppError(500, error.message, 'DB');
+      const { error } = await updateItemRow(prev.id, row);
+      if (error) throw dbFailure(error, 'save an expense line');
     } else {
-      const { error } = await supabaseAdmin.from('expense_claim_items').insert(itemRow(id, actor.org_id, i));
-      if (error) throw new AppError(500, error.message, 'DB');
+      const { error } = await insertItemRows(itemRow(id, actor.org_id, i));
+      if (error) throw dbFailure(error, 'save an expense line');
     }
   }
   // Whatever was on file and isn't kept is removed. A client that sends no ids is
@@ -710,8 +759,8 @@ export async function updateClaim(actor: Actor, id: string, body: ClaimBody) {
     update.ai_summary = await buildSummary({ ...c, total_amount: total, distance_km: claimedKm || null, gps_derived_km: gpsKm }, fresh, a.violations);
   }
 
-  const { error } = await supabaseAdmin.from('expense_claims').update(update).eq('id', id);
-  if (error) throw new AppError(500, error.message, 'DB');
+  const { error } = await updateClaimRow(id, update);
+  if (error) throw dbFailure(error, 'save the claim');
   return getClaim(actor, id);
 }
 
@@ -737,7 +786,9 @@ export async function submitClaim(actor: Actor, id: string) {
   // Connected-B2B flow (Spark & Ray): a clarification (the purpose of the spend)
   // is mandatory before an expense can be submitted. Mirrors the mandatory-remark
   // machinery on reject. No effect for any other tenant.
-  if (isB2bClient(actor.client_id) && !String(c.clarification ?? '').trim()) {
+  // (A database that never ran the link migration has no clarification column, so nothing could have been
+  // stored — requiring it there would make every submit fail for good.)
+  if (isB2bClient(actor.client_id) && 'clarification' in c && !String(c.clarification ?? '').trim()) {
     throw new AppError(400, 'Add a clarification (the purpose of this expense) before submitting', 'CLARIFICATION_REQUIRED');
   }
 
@@ -827,7 +878,7 @@ export async function submitClaim(actor: Actor, id: string) {
     approved_amount: auto ? total : null, submit_count: round, auto_approved: auto,
   });
   const { error } = await supabaseAdmin.from('expense_claims').update(base).eq('id', id);
-  if (error) throw new AppError(500, error.message, 'DB');
+  if (error) throw dbFailure(error, 'submit the claim');
 
   const roundCol = v2 ? { round } : {};
   const { data: me } = await supabaseAdmin.from('users').select('name').eq('id', actor.id).maybeSingle();
