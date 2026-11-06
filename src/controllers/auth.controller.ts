@@ -1,6 +1,5 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
-import { randomUUID } from 'crypto';
 import { supabase, supabaseAdmin, getUserClient } from '../lib/supabase';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest, unauthorized, forbidden, serverError, isDemo } from '../utils';
@@ -10,7 +9,9 @@ import { DEMO_ORG_ID, DEMO_USER_ID } from '../utils/demoData';
 import { resolveEntitlements } from '../lib/entitlements';
 import { deriveAppUi } from '../lib/appItems';
 import { invalidateAuthCache } from '../middleware/auth';
-import { resolveProjectForEmailAsync } from '../lib/projects';
+import { resolveProjectForEmailAsync, currentProjectKey, listProjectKeys, anonClientFor } from '../lib/projects';
+import { performRefresh, forgetRefreshReplay } from '../lib/authRefresh';
+import { rotateDeviceSession, buildDeviceLabel } from '../lib/deviceSession';
 import { checkClientAccess } from '../lib/clientAccess';
 import * as passwordReset from '../services/auth/passwordReset.service';
 
@@ -42,8 +43,14 @@ const loginSchema = z.object({
 });
 
 const refreshSchema = z.object({
-  refresh_token: z.string(),
+  refresh_token: z.string().min(1),
 });
+
+function headerStr(req: Request, name: string): string | undefined {
+  const v = req.headers[name];
+  const s = Array.isArray(v) ? v[0] : v;
+  return typeof s === 'string' && s.trim() ? s.trim() : undefined;
+}
 
 // Default FE location-ping cadence in seconds. Used when org_settings has
 // no override row for the requesting user's org. 600s = 10 min, which
@@ -110,20 +117,6 @@ async function getClientAppUiConfig(clientId: string | null | undefined): Promis
     const cfg = settings && typeof settings === 'object' ? (settings as any).app_ui : null;
     return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : {};
   } catch { return {}; }
-}
-
-/**
- * Build a human-readable device label for the kicked-device toast.
- * Examples:
- *   "Realme 12 Pro · Android 14"
- *   "iPhone15,3 · iOS 17.4"
- *   "Nokia 6.1"  (when os/brand missing)
- */
-function buildDeviceLabel(opts: { model?: string; brand?: string; os?: string; platform?: string }): string {
-  const left = [opts.brand, opts.model].filter(Boolean).join(' ').trim();
-  const right = opts.os ? (opts.platform === 'ios' ? `iOS ${opts.os}` : `Android ${opts.os}`) : '';
-  if (left && right) return `${left} · ${right}`;
-  return left || right || 'mobile device';
 }
 
 // POST /api/v1/auth/login
@@ -367,31 +360,21 @@ export const login = asyncHandler<Request>(async (req, res) => {
   // or platform=ios in the login body (or via X-Kinematic-Platform).
   let issuedSessionId: string | null = null;
   if (isMobileLogin) {
-    issuedSessionId = randomUUID();
     const deviceLabel = buildDeviceLabel({
-      model:    device_model,
-      brand:    device_brand,
-      os:       os_version,
+      // The apps send the device metadata as X-Device-* headers (body fields are accepted too).
+      model:    device_model || headerStr(req, 'x-device-model'),
+      brand:    device_brand || headerStr(req, 'x-device-brand'),
+      os:       os_version   || headerStr(req, 'x-os-version'),
       platform: effectivePlatform,
     });
-    try {
-      await supabaseAdmin.rpc('rotate_user_session', {
-        p_user_id:        userProfile.id,
-        p_new_session_id: issuedSessionId,
-        p_device_label:   deviceLabel,
-      });
-      // Burn the cache so the OTHER (now-stale) device's cached profile
-      // entry can't ride the previous session_id through middleware.
-      invalidateAuthCache((u) => u?.id === userProfile.id);
-      logger.info(`[Auth] Rotated session for ${userProfile.id} → ${issuedSessionId} (${deviceLabel})`);
-    } catch (e: any) {
-      // Don't fail login if session rotation crashes — log and continue.
-      // The user is still authenticated; they just won't have single-device
-      // enforcement this session. Safer than locking everyone out on a DB
-      // hiccup.
-      logger.error(`[Auth] Session rotation failed for ${userProfile.id}: ${e?.message || e}`);
-      issuedSessionId = null;
-    }
+    // rotateDeviceSession only returns an id the database really stored (supabase-js RPCs resolve
+    // `{ error }` instead of throwing — see lib/deviceSession.ts). On failure it returns null and login
+    // still succeeds without single-device enforcement, instead of handing out an id that can never match.
+    issuedSessionId = await rotateDeviceSession(supabaseAdmin as any, userProfile.id, deviceLabel);
+    // Burn the cache so the OTHER (now-stale) device's cached profile entry can't ride the previous
+    // session_id through middleware.
+    invalidateAuthCache((u) => u?.id === userProfile.id);
+    if (issuedSessionId) logger.info(`[Auth] Rotated session for ${userProfile.id} → ${issuedSessionId} (${deviceLabel})`);
   }
 
   const locationPingIntervalSeconds = await getLocationPingIntervalSeconds(userProfile.org_id);
@@ -484,10 +467,31 @@ export const resetPassword = asyncHandler<Request>(async (req, res) => {
   // the user should not be forced to change it again on the next login.
   await supabaseAdmin.from('users').update({ must_change_password: false }).eq('id', result.session.user_id);
 
+  // A reset on a phone is a fresh sign-in on that device, so it must claim the single-device session exactly
+  // like /auth/login does. Without this the response carried no session_id while users.active_session_id
+  // kept whatever an earlier login stored; the device then sent no X-Session-Id and the very next request
+  // came back 401 DEVICE_REPLACED — "reset my password, got signed straight out".
+  const platformHeader = String(req.headers['x-kinematic-platform'] || '').toLowerCase();
+  let issuedSessionId: string | null = null;
+  if (platformHeader === 'android' || platformHeader === 'ios') {
+    issuedSessionId = await rotateDeviceSession(
+      supabaseAdmin as any,
+      result.session.user_id,
+      buildDeviceLabel({
+        model: headerStr(req, 'x-device-model'),
+        brand: headerStr(req, 'x-device-brand'),
+        os: headerStr(req, 'x-os-version'),
+        platform: platformHeader,
+      }),
+    );
+    invalidateAuthCache((u) => u?.id === result.session!.user_id);
+  }
+
   return ok(res, {
     access_token: result.session.access_token,
     refresh_token: result.session.refresh_token,
     expires_at: result.session.expires_at,
+    session_id: issuedSessionId,
     user: userProfile || { id: result.session.user_id, email: result.session.email },
   }, 'Password updated');
 });
@@ -575,22 +579,38 @@ export const changePassword = asyncHandler<AuthRequest>(async (req, res) => {
 });
 
 // POST /api/v1/auth/refresh
-// POST /api/v1/auth/refresh
+//
+// Contract the mobile apps depend on (they sign the user OUT on a 4xx here and keep the session on anything else):
+//   200  fresh session
+//   401  the refresh token is DEFINITIVELY dead (unknown / expired / already used / revoked) — sign out
+//   503  we could not find out (GoTrue down, timeout, 5xx, rate-limited) — keep the session, retry later
+// The 503 body is deliberately NOT a JSON object: already-installed Android builds parse the body as
+// `{success, data}` and treat `success:false` as a dead session even on a 5xx, so a JSON error object
+// would sign them out. A plain-text body fails their parse and is (correctly) treated as transient.
 export const refresh = asyncHandler<Request>(async (req, res) => {
   const body = refreshSchema.safeParse(req.body);
   if (!body.success) return badRequest(res, 'refresh_token is required');
 
-  const { data: session, error } = await supabase.auth.refreshSession({
-    refresh_token: body.data.refresh_token,
+  const outcome = await performRefresh(body.data.refresh_token, currentProjectKey(), {
+    refreshOnProject: (project, refresh_token) => anonClientFor(project).auth.refreshSession({ refresh_token }) as any,
+    allProjects: () => listProjectKeys(),
   });
 
-  if (error || !session.session) return unauthorized(res, 'Invalid or expired refresh token');
-
-  return ok(res, {
-    access_token: session.session.access_token,
-    refresh_token: session.session.refresh_token,
-    expires_at: session.session.expires_at,
-  });
+  if (outcome.kind === 'ok') {
+    return ok(res, {
+      access_token: outcome.session.access_token,
+      refresh_token: outcome.session.refresh_token,
+      expires_at: outcome.session.expires_at,
+      // Which project minted the session (differs from the request's routing when the client had no/old header).
+      project: outcome.project,
+    });
+  }
+  if (outcome.kind === 'rejected') {
+    logger.info(`[Auth] refresh rejected: ${outcome.message}`);
+    return res.status(401).json({ success: false, error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
+  }
+  logger.warn(`[Auth] refresh unavailable (client keeps its session): ${outcome.reason}`);
+  res.status(503).set('Retry-After', '5').type('text/plain').send('AUTH_UNAVAILABLE: the sign-in service is busy, try again shortly');
 });
 
 // POST /api/v1/auth/logout
@@ -612,6 +632,7 @@ export const logout = asyncHandler<AuthRequest>(async (req, res) => {
   // pushes (e.g. new-lead alerts) kept landing on a device now signed in
   // as someone in a different org — a cross-tenant push leak.
   if (req.user) {
+    forgetRefreshReplay(req.user.id);
     await supabaseAdmin.from('users').update({ fcm_token: null, apns_token: null }).eq('id', req.user.id);
     try {
       await supabaseAdmin.rpc('clear_user_session', { p_user_id: req.user.id });

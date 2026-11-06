@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { rateLimit } from 'express-rate-limit';
+import { createHash } from 'crypto';
 import { SignJWT } from 'jose';
 import * as ctrl from '../controllers/auth.controller';
 import { requireAuth, MASTER_ADMIN_EMAIL } from '../middleware/auth';
@@ -175,7 +177,34 @@ router.post('/reset-password',  ctrl.resetPassword);
 // used to guess the current password. The limiter sits AFTER requireAuth so its
 // key carries the user id.
 router.post('/change-password', requireAuth, perRouteLimit({ windowMs: 15 * 60 * 1000, max: 10 }), ctrl.changePassword);
-router.post('/refresh', ctrl.refresh);
+// /auth/refresh is exempt from the namespace-wide 30/min per-IP cap in app.ts (see `skip` there): that cap is shared
+// by every phone behind one NAT / office / carrier-grade-NAT address, and a 429 here was read by BOTH mobile apps as
+// "refresh token rejected" -> forced logout. Refresh gets its own limits instead, keyed per refresh token (a client
+// legitimately refreshes ~once an hour) plus a generous per-IP ceiling. When a limit is hit we answer 503 +
+// Retry-After (plain-text body, see controllers/auth.controller.ts refresh) — never a 4xx the apps treat as fatal.
+const refreshThrottled = (_req: unknown, res: import('express').Response) => {
+  res.status(503).set('Retry-After', '10').type('text/plain').send('AUTH_UNAVAILABLE: too many refresh attempts, retry shortly');
+};
+const refreshPerToken = rateLimit({
+  windowMs: 60_000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const t = (req.body as { refresh_token?: unknown } | undefined)?.refresh_token;
+    return typeof t === 'string' && t ? `rt:${createHash('sha256').update(t).digest('hex').slice(0, 32)}` : `ip:${req.ip}`;
+  },
+  handler: refreshThrottled,
+});
+const refreshPerIp = rateLimit({
+  windowMs: 60_000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `ip:${req.ip}`,
+  handler: refreshThrottled,
+});
+router.post('/refresh', refreshPerIp, refreshPerToken, ctrl.refresh);
 router.post('/logout',  requireAuth, ctrl.logout);
 router.get('/me',       requireAuth, ctrl.me);
 router.patch('/me',     requireAuth, ctrl.updateMe);

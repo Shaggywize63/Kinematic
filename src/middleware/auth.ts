@@ -8,6 +8,7 @@ import { logger } from '../lib/logger';
 import { resolveEntitlements } from '../lib/entitlements';
 import { isPlatformOperator, enforcedUnlessOff } from '../lib/tenantScope';
 import { checkClientAccess } from '../lib/clientAccess';
+import { classifyAuthError } from '../lib/authRefresh';
 
 // In-memory profile cache. Keyed by token (so a refreshed token re-validates).
 // TTL is min(5 min, JWT exp). Eliminates 3 sequential round-trips per request:
@@ -317,7 +318,11 @@ export function invalidateAuthCache(predicate?: (u: AuthRequest['user']) => bool
 //      and supabaseAdmin already points at the current project's gotrue.
 // A token minted by one project will NOT verify against another project's
 // keys, so cross-project token confusion fails closed.
-async function verifyToken(token: string): Promise<{ sub: string; exp?: number; email?: string; act_org_id?: string; ro?: boolean } | null> {
+// Sentinel: we could not tell whether the token is valid (GoTrue unreachable / 5xx / rate-limited). Callers answer
+// 503 — NOT 401 — so the mobile apps keep the session instead of treating a server blip as a dead token.
+const AUTH_UNAVAILABLE = Symbol('AUTH_UNAVAILABLE');
+
+async function verifyToken(token: string): Promise<{ sub: string; exp?: number; email?: string; act_org_id?: string; ro?: boolean } | null | typeof AUTH_UNAVAILABLE> {
   const projectKey = currentProjectKey();
 
   // 1 + 2. Local verification against this project's keys.
@@ -340,12 +345,22 @@ async function verifyToken(token: string): Promise<{ sub: string; exp?: number; 
   // 3. Network fallback (slow but always correct), against this project's gotrue.
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
-    if (error || !data?.user) return null;
+    if (error) return classifyAuthError(error) === 'unavailable' ? AUTH_UNAVAILABLE : null;
+    if (!data?.user) return null;
     return { sub: data.user.id, email: data.user.email ?? undefined };
   } catch (e: any) {
     logger.error(`[Auth] supabase.auth.getUser exception: ${e.message}`);
-    return null;
+    return AUTH_UNAVAILABLE;
   }
+}
+
+function authUnavailable(res: Response, why: string) {
+  logger.warn(`[Auth] ${why} — answering 503 so clients keep their session`);
+  return res.status(503).set('Retry-After', '5').json({
+    success: false,
+    error: 'Sign-in service is temporarily unavailable. Please retry.',
+    code: 'AUTH_UNAVAILABLE',
+  });
 }
 
 /**
@@ -392,7 +407,10 @@ function rejectIfStaleSession(req: AuthRequest, res: Response, user: AuthRequest
   const headerSessionId = String(req.headers['x-session-id'] || '').trim();
   if (headerSessionId && headerSessionId === activeSessionId) return false;
 
-  // Mismatch — kick the device. Also nuke this user from the auth cache
+  // Mismatch — kick the device. Log WHY so "logged out on its own" reports can be told apart:
+  // `missing_header` = the app sent no X-Session-Id (lost/never stored), `mismatch` = a newer login took over.
+  logger.warn(`[Auth] DEVICE_REPLACED user=${(user as any)?.id} platform=${platform} reason=${headerSessionId ? 'mismatch' : 'missing_header'}`);
+  // Also nuke this user from the auth cache
   // so the next request (from any device using the same cached entry)
   // re-fetches a fresh profile instead of hitting the same stale row.
   invalidateAuthCache((u) => u?.id === user?.id);
@@ -408,7 +426,18 @@ function rejectIfStaleSession(req: AuthRequest, res: Response, user: AuthRequest
   return true;
 }
 
+// Express 4 does not catch a rejected async middleware: an unexpected throw (a DB/network error in the profile,
+// entitlement or client lookups below) left the request hanging until the client timed out. Answer 503 instead.
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
+  try {
+    await authenticate(req, res, next);
+  } catch (e) {
+    logger.error(`[Auth] requireAuth failed unexpectedly: ${(e as Error)?.message || e}`);
+    if (!res.headersSent) authUnavailable(res, 'unexpected auth error');
+  }
+}
+
+async function authenticate(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
     return unauthorized(res, 'Missing or invalid Authorization header');
@@ -451,6 +480,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   }
 
   const verified = await verifyToken(token);
+  if (verified === AUTH_UNAVAILABLE) return authUnavailable(res, 'token verification unavailable');
   if (!verified) return unauthorized(res, 'Invalid or expired token');
 
   // Cold path — fetch profile + permissions + cities in parallel (was sequential).
@@ -469,6 +499,10 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
   if (profileRes.error || !profileRes.data) {
     logger.error(`[Auth] Profile lookup failed for ${verified.sub}: ${profileRes.error?.message || 'not found'}`);
+    // PGRST116 = "0 rows" from .single(): the user really has no profile -> 401. ANY other error (network,
+    // pool exhaustion, PostgREST 5xx) says nothing about the user and used to be reported as 401 too, which the
+    // apps handle as an expired session.
+    if (profileRes.error && profileRes.error.code !== 'PGRST116') return authUnavailable(res, 'profile lookup failed');
     return unauthorized(res, 'User profile not found');
   }
 
