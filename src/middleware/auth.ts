@@ -407,9 +407,20 @@ function rejectIfStaleSession(req: AuthRequest, res: Response, user: AuthRequest
   const headerSessionId = String(req.headers['x-session-id'] || '').trim();
   if (headerSessionId && headerSessionId === activeSessionId) return false;
 
-  // Mismatch — kick the device. Log WHY so "logged out on its own" reports can be told apart:
-  // `missing_header` = the app sent no X-Session-Id (lost/never stored), `mismatch` = a newer login took over.
-  logger.warn(`[Auth] DEVICE_REPLACED user=${(user as any)?.id} platform=${platform} reason=${headerSessionId ? 'mismatch' : 'missing_header'}`);
+  // A request that carries NO session id is not evidence that another device took over — it is a client that holds no
+  // id: a build whose reset-password / login response never delivered one (the iOS reset flow never sent the
+  // platform header, so the server could not issue it one, while users.active_session_id still held the id of an
+  // earlier login because iOS sign-out never calls /auth/logout), or one that lost it. Treating that as
+  // DEVICE_REPLACED force-logged the user out the moment they opened the app after a password reset.
+  // The check protects against a DIFFERENT id (a newer login elsewhere); omitting the platform header already bypasses
+  // enforcement entirely, so rejecting the missing-id case bought no security, only false sign-outs.
+  if (!headerSessionId) {
+    logger.info(`[Auth] mobile request without X-Session-Id allowed user=${(user as any)?.id} platform=${platform}`);
+    return false;
+  }
+
+  // Mismatch — a newer login took over: kick the device.
+  logger.warn(`[Auth] DEVICE_REPLACED user=${(user as any)?.id} platform=${platform} reason=mismatch`);
   // Also nuke this user from the auth cache
   // so the next request (from any device using the same cached entry)
   // re-fetches a fresh profile instead of hitting the same stale row.

@@ -126,6 +126,13 @@ describe('single-device gate (DEVICE_REPLACED)', () => {
     expect(r.body.code).toBe('DEVICE_REPLACED');
   });
 
+  it('does NOT kick a mobile request that carries no session id (e.g. right after a password reset)', async () => {
+    wire({ users: { data: { ...PROFILE, active_session_id: 'S2' } } });
+    const r = await run({ 'x-kinematic-platform': 'ios' });
+    expect(r.nextCalled).toBe(true);
+    expect(r.status).toBe(200);
+  });
+
   it('does not enforce for web (no platform header)', async () => {
     wire({ users: { data: { ...PROFILE, active_session_id: 'S2' } } });
     expect((await run()).nextCalled).toBe(true);
