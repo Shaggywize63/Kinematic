@@ -381,6 +381,15 @@ export const accountSchema = z.object({
   website: z.string().url().optional().nullable(),
   billing_address: z.record(z.unknown()).optional().nullable(),
   shipping_address: z.record(z.unknown()).optional().nullable(),
+  // The account's own location. These are real crm_accounts columns; without them here the apps' Address / City /
+  // Country (and now State) were silently dropped on save.
+  email: z.string().max(200).optional().nullable(),
+  address_line1: z.string().max(300).optional().nullable(),
+  address_line2: z.string().max(300).optional().nullable(),
+  city: z.string().max(120).optional().nullable(),
+  state: z.string().max(120).optional().nullable(),
+  postal_code: z.string().max(20).optional().nullable(),
+  country: z.string().max(80).optional().nullable(),
   owner_id: optionalUuid,
   territory_id: optionalUuid,
   parent_account_id: optionalUuid,

@@ -46,6 +46,7 @@ import * as ownerAssign from '../services/crm/ownerAssignment';
 import { fireActivityLifecycle } from '../services/crm/activityTriggers';
 import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
+import { ensureLocationMaster } from '../services/crm/locationSeed';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
 import * as afterSales from '../services/crm/afterSales.service';
@@ -3927,9 +3928,11 @@ router.use('/tasks', rbac.requireModuleAccess('crm_tasks'), tasks);
 
 // ---------- STATES + CITIES (location management) -------------------
 const states = express.Router();
-states.get('/', wrap(async (req, res) => res.json(
-  await crud.list('crm_states', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name','code'] })
-)));
+states.get('/', wrap(async (req, res) => {
+  // An organisation whose location master was never seeded gets all states (and the major cities) on first use.
+  await ensureLocationMaster(orgId(req));
+  res.json(await crud.list('crm_states', orgId(req), req.query, { softDelete: false, defaultSort: { column: 'name', ascending: true }, searchColumns: ['name','code'] }));
+}));
 states.post('/', wrap(async (req, res) =>
   res.status(201).json(await crud.create('crm_states', orgId(req), parse(v.stateSchema, req.body), userId(req)))));
 states.patch('/:id', wrap(async (req, res) =>
