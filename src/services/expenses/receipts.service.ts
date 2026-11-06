@@ -20,6 +20,8 @@ import { Actor } from './access';
 export const RECEIPT_BUCKET = process.env.BUCKET_RECEIPTS || 'kinematic-receipts';
 const MAX_BYTES = 10 * 1024 * 1024;
 const SIGN_TTL_SECONDS = 600;
+/** The photo reading (OCR) is a convenience: it gets this long, then the upload is answered without it. */
+const SCAN_TIMEOUT_MS = Number(process.env.RECEIPT_SCAN_TIMEOUT_MS) > 0 ? Number(process.env.RECEIPT_SCAN_TIMEOUT_MS) : 12_000;
 // Buckets a claim's receipt may legitimately point at (older app builds uploaded
 // receipts through the generic photo endpoint).
 const SIGNABLE = new Set([RECEIPT_BUCKET, 'kinematic-form-photos', 'form-responses']);
@@ -40,7 +42,7 @@ export function sniff(b: Buffer): string | null {
   if (b.subarray(0, 4).toString('ascii') === '%PDF') return 'application/pdf';
   if (b.subarray(4, 8).toString('ascii') === 'ftyp') {
     const brand = b.subarray(8, 12).toString('ascii');
-    if (/^(heic|heix|hevc|hevx|mif1|msf1)/.test(brand)) return 'image/heic';
+    if (/^(heic|heix|heim|heis|hevc|hevx|hevm|hevs|mif1|msf1)/.test(brand)) return 'image/heic';
   }
   return null;
 }
@@ -56,6 +58,13 @@ async function ensureBucket(): Promise<void> {
     if (error && !/exist/i.test(error.message)) throw new AppError(500, `Receipt storage is unavailable: ${error.message}`, 'STORAGE');
   }
   bucketReady.add(key);
+}
+
+/** Rejects after `ms`, so a model call that never answers cannot hold the rep's upload open until their app gives up. */
+export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms); });
+  return Promise.race([p, limit]).finally(() => { if (timer) clearTimeout(timer); });
 }
 
 export interface UploadedFile { buffer: Buffer; mimetype?: string; originalname?: string; size?: number }
@@ -84,11 +93,11 @@ export async function uploadReceipt(actor: Actor, file: UploadedFile, opts: { sc
   let odometer: OdometerReading = { ...EMPTY_ODOMETER };
   if (odometerMode) {
     if (SCANNABLE.has(type)) {
-      try { odometer = await scanOdometer(file.buffer.toString('base64'), type as ReceiptMediaType); }
+      try { odometer = await withTimeout(scanOdometer(file.buffer.toString('base64'), type as ReceiptMediaType), SCAN_TIMEOUT_MS, 'odometer OCR'); }
       catch (e: any) { logger.warn(`[expenses] odometer OCR failed: ${e?.message || e}`); }
     }
   } else if (opts.scan !== false && SCANNABLE.has(type)) {
-    try { scan = await scanReceipt(file.buffer.toString('base64'), type as ReceiptMediaType); }
+    try { scan = await withTimeout(scanReceipt(file.buffer.toString('base64'), type as ReceiptMediaType), SCAN_TIMEOUT_MS, 'receipt OCR'); }
     catch (e: any) { logger.warn(`[expenses] receipt OCR failed: ${e?.message || e}`); }
   }
 

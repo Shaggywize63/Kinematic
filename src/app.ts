@@ -575,7 +575,7 @@ app.use(V1, readOnlyGuard);
 app.use(V1, moduleGate);
 
 // Public/Auth routes (loginLimiter already applied at /auth/login above)
-app.use(`${V1}/auth`,          perRouteLimit({ windowMs: 60_000, max: 30 }), authRoutes);
+app.use(`${V1}/auth`,          perRouteLimit({ windowMs: 60_000, max: 30, skip: (req) => req.path === '/refresh' }), authRoutes); // /refresh has its own limits in auth.routes.ts
 
 // Protected routes with RBAC
 app.use(`${V1}/attendance`,    requireAuth, enforceCityScope, attendanceRoutes);
