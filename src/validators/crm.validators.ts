@@ -1036,11 +1036,35 @@ export const activityRemindersConfigSchema = z.object({
   user_ids: z.array(z.string().uuid()).max(50).optional(),
 });
 
+/**
+ * Spark & Ray industry management (Settings -> Industries): the list of industries, each with a colour and its
+ * sub-industries. Stored whole in crm_settings.config.industries (config keys are shallow-merged, so the client sends
+ * the full list). A missing / empty list means "use the built-in seven industries and their default colours".
+ */
+export const industriesConfigSchema = z.array(z.object({
+  name: z.string().trim().min(1).max(60),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'color must be a #RRGGBB hex value'),
+  sub_industries: z.array(z.string().trim().min(1).max(60)).max(60).optional().default([]),
+})).max(60).superRefine((list, ctx) => {
+  const seen = new Set<string>();
+  list.forEach((it, i) => {
+    const k = it.name.toLowerCase();
+    if (seen.has(k)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'name'], message: `Duplicate industry "${it.name}"` });
+    seen.add(k);
+    const subs = new Set<string>();
+    it.sub_industries.forEach((sub, j) => {
+      const sk = sub.toLowerCase();
+      if (subs.has(sk)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'sub_industries', j], message: `Duplicate sub-industry "${sub}"` });
+      subs.add(sk);
+    });
+  });
+});
+
 export const settingsUpdateSchema = z.object({
   config: z.record(z.unknown()).optional().superRefine((c, ctx) => {
     if (!c) return;
     // Both blocks are optional, and null clears them.
-    for (const [key, schema] of [['lead_form', leadFormConfigSchema], ['targets', targetsConfigSchema], ['deal_sections', dealSectionsConfigSchema], ['activity_reminders', activityRemindersConfigSchema]] as const) {
+    for (const [key, schema] of [['lead_form', leadFormConfigSchema], ['targets', targetsConfigSchema], ['deal_sections', dealSectionsConfigSchema], ['activity_reminders', activityRemindersConfigSchema], ['industries', industriesConfigSchema]] as const) {
       if (c[key] === undefined || c[key] === null) continue;
       const r = schema.safeParse(c[key]);
       if (!r.success) {
