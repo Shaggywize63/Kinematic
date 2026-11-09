@@ -16,6 +16,7 @@ import { FinanceScope, scoped } from './scope';
 import { round2, num } from './money';
 import { getSettings, pageParams, safeSearch } from './masters.service';
 import { fetchAll, itemLines, Report } from './reports.service';
+import { signReceipt } from '../expenses/receipts.service';
 
 const db = () => supabaseAdmin;
 const fail = (e: { message: string }) => new AppError(500, e.message, 'DB_ERROR');
@@ -261,6 +262,12 @@ export async function getExpense(s: FinanceScope, id: string) {
   if (error) throw fail(error);
   if (!data) throw new AppError(404, 'Expense not found', 'NOT_FOUND');
   return { ...data, amount: data.total };
+}
+
+/** A bill for the edit form: the stored row plus a short-lived link to its receipt (the bucket is private). */
+export async function getExpenseView(s: FinanceScope, id: string) {
+  const e = await getExpense(s, id);
+  return { ...e, receipt_signed_url: await signReceipt(s.org_id, e.receipt_url) };
 }
 
 export async function createExpense(s: FinanceScope, input: BillInput) {
