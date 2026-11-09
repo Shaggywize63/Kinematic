@@ -10,7 +10,7 @@
  *   import/invoices/preview|commit   bring in previously issued invoices from a CSV/XLSX export
  *   reports/dashboard         overview (receivables ageing, sales vs receipts)
  *   reports/projection        12-month billing projection from recurring invoices (+ scenarios)
- *   expenses                  business bills + GST-bearing approved field-expense claim lines (ITC)
+ *   expenses                  business bills + GST-bearing approved field-expense claim lines (ITC); expenses/receipt uploads a bill's receipt
  *   reports/:name             tabular reports; ?format=csv exports the same filters
  *
  * Public, no-login invoice links live in finance-public.routes.ts.
@@ -31,6 +31,7 @@ import * as reports from '../services/finance/reports.service';
 import * as expensesSvc from '../services/finance/expenses.service';
 import * as projectionSvc from '../services/finance/projection.service';
 import * as importer from '../services/finance/import.service';
+import { uploadReceipt } from '../services/expenses/receipts.service';
 
 const router = Router();
 router.use(requireFinanceAccess);
@@ -275,8 +276,28 @@ router.get('/expenses', asyncHandler(async (req: Request, res: Response) => {
   const r = await expensesSvc.listExpenses(scopeOf(req), req.query);
   res.json({ success: true, data: r.rows, pagination: { total: r.total, page: r.page, limit: r.limit }, totals: r.totals, meta: r.meta });
 }));
+// A bill's receipt (photo or PDF, up to 10 MB). Stored in the same private bucket as field-expense receipts, under this
+// org and user; the bill keeps the returned `url`, and the edit form gets a short-lived signed link (getExpenseView).
+// Finance has its own route because /expenses/receipts sits behind the Field Expenses module, which a finance-only client may not have.
+const uploadReceiptFile = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } }).single('file');
+const withReceipt = (req: Request, res: Response, next: NextFunction) => {
+  const project = currentProjectKey();
+  uploadReceiptFile(req, res, (err: unknown) => runWithProject(project, () => {
+    if (!err) return next();
+    const e = err as { code?: string; message?: string };
+    return next(new AppError(e.code === 'LIMIT_FILE_SIZE' ? 413 : 400, e.code === 'LIMIT_FILE_SIZE' ? 'The file is larger than 10 MB' : (e.message || 'Upload failed'), 'UPLOAD'));
+  }));
+};
+router.post('/expenses/receipt', withReceipt, asyncHandler(async (req: Request, res: Response) => {
+  if (!req.file) throw new AppError(400, 'Attach the receipt as a file', 'NO_FILE');
+  const s = scopeOf(req);
+  const role = String((req as AuthRequest).user?.role ?? '');
+  // ?scan=0 stores the file only; by default the amount, merchant, date and GST are read off it to pre-fill the form.
+  const scan = String(req.query.scan ?? '1') !== '0';
+  res.status(201).json(await uploadReceipt({ id: s.user_id, org_id: s.org_id, role, client_id: s.client_id }, req.file, { scan }));
+}));
 router.post('/expenses', asyncHandler(async (req: Request, res: Response) => res.status(201).json(await expensesSvc.createExpense(scopeOf(req), parse(expenseSchema, req.body)))));
-router.get('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.getExpense(scopeOf(req), idParam(req)))));
+router.get('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.getExpenseView(scopeOf(req), idParam(req)))));
 router.put('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.updateExpense(scopeOf(req), idParam(req), parse(expenseSchema, req.body)))));
 router.delete('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.deleteExpense(scopeOf(req), idParam(req)))));
 
