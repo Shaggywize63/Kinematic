@@ -19,7 +19,8 @@ import { ok, isoDate, toIST } from '../../utils';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { isDemo } from '../../utils/demoData';
 import { rulesForClients } from '../../services/attendanceRules.store';
-import { classifyPunctuality, lateTrackingOn } from '../../services/attendanceRules.service';
+import { addDaysYmd, classifyPunctuality, istDateOf, lateTrackingOn } from '../../services/attendanceRules.service';
+import { loadSecurityAlerts } from './ffm-plus.data';
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
@@ -255,7 +256,7 @@ export const aov = asyncHandler<AuthRequest>(async (req, res) => {
   }
   const rows = Array.from(agg.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([week, a]) => ({ week, aov_inr: a.count ? Math.round(a.sum / a.count) : 0, orders: a.count }));
+    .map(([week, a]) => ({ week, aov_inr: a.count ? Math.round(a.sum / a.count) : 0, orders: a.count, revenue_inr: Math.round(a.sum) }));
   return ok(res, rows);
 });
 
@@ -355,19 +356,21 @@ export const distanceTravelled = asyncHandler<AuthRequest>(async (req, res) => {
   if (isDemo(user)) return ok(res, []);
   const { data: plans } = await supabaseAdmin
     .from('route_plans')
-    .select('plan_date, total_distance_km, actual_distance_km')
+    .select('plan_date, user_id, total_distance_km, actual_distance_km')
     .eq('org_id', user.org_id)
     .gte('plan_date', dayAgo(14));
 
-  const agg = new Map<string, { km: number }>();
+  const agg = new Map<string, { km: number; reps: Set<string> }>();
   for (const p of (plans || []) as any[]) {
-    const cur = agg.get(p.plan_date) || { km: 0 };
-    cur.km += Number(p.actual_distance_km ?? p.total_distance_km) || 0;
+    const cur = agg.get(p.plan_date) || { km: 0, reps: new Set<string>() };
+    const km = Number(p.actual_distance_km ?? p.total_distance_km) || 0;
+    cur.km += km;
+    if (km > 0 && p.user_id) cur.reps.add(p.user_id);
     agg.set(p.plan_date, cur);
   }
   const rows = Array.from(agg.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([day, a]) => ({ day, km_total: Math.round(a.km * 10) / 10 }));
+    .map(([day, a]) => ({ day, km_total: Math.round(a.km * 10) / 10, reps: a.reps.size }));
   return ok(res, rows);
 });
 
@@ -532,15 +535,22 @@ export const stuckFes = asyncHandler<AuthRequest>(async (req, res) => {
   return ok(res, rows);
 });
 
-/** GET /security-violations — MOCK_LOCATION / VPN counts per FE (device trust). */
+/** GET /security-violations — MOCK_LOCATION / VPN counts per FE (device trust), last 30 days.
+ *  Read from security_alerts, where the mobile apps report each violation (POST /misc/security/alert). A tenant
+ *  without that table, or with no alerts, reads as all clean — same as before this was wired up. */
 export const securityViolations = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, []);
   const fes = await getFEs(user.org_id);
-  // No device-integrity signals are recorded for this org → all clean.
-  const rows = fes.map((fe) => ({
-    fe_id: fe.id, fe_name: fe.name, mock_location: 0, vpn_detected: 0, violation_count: 0,
-  }));
+  const today = istDateOf(Date.now()) as string;
+  const alerts = await loadSecurityAlerts(
+    { orgId: user.org_id, clientId: null, scopeIds: null },
+    new Set(fes.map((f) => f.id)), addDaysYmd(today, -29), today,
+  );
+  const rows = fes.map((fe) => {
+    const a = alerts.get(fe.id) || { mock_location: 0, vpn_detected: 0 };
+    return { fe_id: fe.id, fe_name: fe.name, mock_location: a.mock_location, vpn_detected: a.vpn_detected, violation_count: a.mock_location + a.vpn_detected };
+  });
   return ok(res, rows);
 });
 

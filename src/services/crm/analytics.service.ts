@@ -115,7 +115,7 @@ const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
 // FK ourselves — the same pattern the leads list uses (stampSourceNames) —
 // is immune to that failure mode.
 /* eslint-disable @typescript-eslint/no-explicit-any */
-async function resolveSourceNames(
+export async function resolveSourceNames(
   ids: Array<string | null | undefined>,
 ): Promise<Map<string, { name: string; cost_per_lead: number }>> {
   const uniq = Array.from(new Set(ids.filter(Boolean) as string[]));
@@ -191,7 +191,7 @@ export function applyOwnerScope(q: any, scope?: AnalyticsScope): any {
 }
 
 // Owner-subtree scope on a crm_activities query (owner_id OR assigned_to).
-function applyActivityScope(q: any, scope?: AnalyticsScope): any {
+export function applyActivityScope(q: any, scope?: AnalyticsScope): any {
   if (!scope) return q;
   if (scope.visibleOwnerIds !== undefined && scope.visibleOwnerIds !== null) {
     const ids = (scope.visibleOwnerIds.length ? scope.visibleOwnerIds : [NO_MATCH_UUID]).join(',');
@@ -520,6 +520,8 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
     return Array.from(map.entries()).map(([bucket, v]) => ({
       bucket, won: v.won, lost: Math.max(0, v.total - v.won),
       rate: v.total > 0 ? v.won / v.total : 0,
+      // additive: lead volume behind the rate (here "lost" means "not converted").
+      total: v.total,
     }));
   }
   // .range(0, 99999) lifts the row cap so win-rate covers every deal,
@@ -553,14 +555,16 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
       }
     }
   }
-  const map = new Map<string, { won: number; lost: number }>();
+  const map = new Map<string, { won: number; lost: number; open: number; wonValue: number; lostValue: number }>();
   for (const d of (deals ?? []) as unknown as Array<{ amount: number; owner_id?: string; stage_id: string; crm_deal_stages: { name: string; stage_type: string } }>) {
     const key = by === 'rep'
       ? (d.owner_id ? (ownerNameById.get(d.owner_id) ?? 'Unknown') : 'Unassigned')
       : d.crm_deal_stages.name;
-    const e = map.get(key) ?? { won: 0, lost: 0 };
-    if (d.crm_deal_stages.stage_type === 'won') e.won += 1;
-    if (d.crm_deal_stages.stage_type === 'lost') e.lost += 1;
+    const e = map.get(key) ?? { won: 0, lost: 0, open: 0, wonValue: 0, lostValue: 0 };
+    const amount = Number(d.amount ?? 0);
+    if (d.crm_deal_stages.stage_type === 'won') { e.won += 1; e.wonValue += amount; }
+    else if (d.crm_deal_stages.stage_type === 'lost') { e.lost += 1; e.lostValue += amount; }
+    else e.open += 1;
     map.set(key, e);
   }
   return Array.from(map.entries()).map(([bucket, v]) => ({
@@ -568,6 +572,12 @@ export async function winRate(org_id: string, by: 'rep' | 'source' | 'stage', ra
     won: v.won,
     lost: v.lost,
     rate: v.won + v.lost > 0 ? v.won / (v.won + v.lost) : 0,
+    // additive: value view of the same deals (INR) and the open deals not yet counted in the rate
+    open: v.open,
+    won_value: Math.round(v.wonValue),
+    lost_value: Math.round(v.lostValue),
+    avg_won_deal: v.won > 0 ? Math.round(v.wonValue / v.won) : 0,
+    value_win_rate: v.wonValue + v.lostValue > 0 ? v.wonValue / (v.wonValue + v.lostValue) : 0,
   }));
 }
 
@@ -616,6 +626,17 @@ export interface TeamPerformanceRow {
   last_activity_at: string | null;   // ISO; most recent owned/assigned activity
   // ── Quality
   avg_lead_score: number;
+  // ── Follow-through & trend (additive; all optional for older clients)
+  lost_value?: number;                 // sum of lost-deal amounts (same basis as lost_count)
+  weighted_pipeline_value?: number;    // open deals: amount x probability (deal's own, else its stage's)
+  overdue_followups?: number;          // open scheduled activities past their due time (all time)
+  untouched_open_leads?: number;       // open leads with no activity logged
+  idle_leads_14d?: number;             // open leads whose last touch (or creation) is 14+ days old
+  calls_period?: number;               // calls logged in the range
+  meetings_period?: number;            // meetings logged in the range
+  new_leads_prev_period?: number | null;   // new leads in the equal-length window just before the range
+  won_count_prev_period?: number | null;
+  won_value_prev_period?: number | null;
 }
 
 export async function teamPerformance(
@@ -656,7 +677,7 @@ export async function teamPerformance(
   // .range(0, 99999) lifts the row cap so team-performance counts every
   // lead/deal/activity, not just the first 1000.
   let leadQ = supabaseAdmin.from('crm_leads')
-    .select('owner_id, status, created_at, score, converted_at')
+    .select('owner_id, status, created_at, score, converted_at, last_activity_at')
     .eq('org_id', org_id).is('deleted_at', null)
     .range(0, 99999);
   leadQ = withClient(leadQ, client_id);
@@ -666,7 +687,7 @@ export async function teamPerformance(
   // ── 2) All deals for the subtree (open + closed). Period-bound for
   //    won/lost; lifetime for open pipeline.
   let dealQ = supabaseAdmin.from('crm_deals')
-    .select('owner_id, amount, status, created_at, actual_close_date, crm_deal_stages!inner(stage_type)')
+    .select('owner_id, amount, status, probability, created_at, actual_close_date, crm_deal_stages!inner(stage_type, probability)')
     .eq('org_id', org_id).is('deleted_at', null)
     .range(0, 99999);
   dealQ = withClient(dealQ, client_id);
@@ -675,7 +696,7 @@ export async function teamPerformance(
 
   // ── 3) Activities in window (period scoped if range, else lifetime).
   let actQ = supabaseAdmin.from('crm_activities')
-    .select('owner_id, assigned_to, completed_at, activity_date, created_at')
+    .select('owner_id, assigned_to, completed_at, activity_date, created_at, type')
     .eq('org_id', org_id).is('deleted_at', null)
     .range(0, 99999);
   actQ = withClient(actQ, client_id);
@@ -694,6 +715,27 @@ export async function teamPerformance(
   lastActQ = lastActQ.order('created_at', { ascending: false }).limit(2000);
   const { data: latestActs } = await lastActQ;
 
+  // Open scheduled activities already past their due time (all time) — the
+  // "overdue follow-ups" column. A failed read leaves the column at zero
+  // rather than failing the whole report.
+  let overdueQ = supabaseAdmin.from('crm_activities')
+    .select('owner_id, assigned_to')
+    .eq('org_id', org_id).is('deleted_at', null)
+    .in('status', ['open', 'planned', 'in_progress']).is('completed_at', null)
+    .not('due_at', 'is', null).lt('due_at', now.toISOString())
+    .range(0, 99999);
+  overdueQ = withClient(overdueQ, client_id);
+  overdueQ = applyActivityScope(overdueQ, scope);
+  const { data: overdueActs } = await overdueQ;
+
+  // Equal-length window immediately before the chosen range, for comparisons.
+  const prevWindow = (rangeFrom && rangeTo)
+    ? (() => {
+        const f = new Date(rangeFrom).getTime(); const t = new Date(rangeTo).getTime();
+        return t > f ? { from: new Date(f - (t - f)), to: new Date(f) } : null;
+      })()
+    : null;
+
   // ── Aggregate per-owner. Initialise from the users list so an idle
   //    rep still gets a row of zeros.
   type Acc = ReturnType<typeof blankAcc>;
@@ -703,7 +745,7 @@ export async function teamPerformance(
   // Leads.
   for (const l of (leads ?? []) as Array<{
     owner_id: string | null; status: string | null; created_at: string;
-    score: number | null; converted_at: string | null;
+    score: number | null; converted_at: string | null; last_activity_at?: string | null;
   }>) {
     if (!l.owner_id || !byOwner.has(l.owner_id)) continue;
     const a = byOwner.get(l.owner_id)!;
@@ -722,6 +764,9 @@ export async function teamPerformance(
       const ageDays = Math.max(0, (now.getTime() - created.getTime()) / 86_400_000);
       a.open_lead_age_sum += ageDays; a.open_lead_age_n += 1;
       if (ageDays > a.oldest_open_lead_days) a.oldest_open_lead_days = ageDays;
+      if (!l.last_activity_at) a.untouched_open_leads += 1;
+      const idleDays = (now.getTime() - new Date(l.last_activity_at ?? l.created_at).getTime()) / 86_400_000;
+      if (idleDays >= 14) a.idle_leads_14d += 1;
     }
     if (created >= todayStart)  a.new_leads_today += 1;
     if (created >= weekStart)   a.new_leads_week  += 1;
@@ -730,18 +775,23 @@ export async function teamPerformance(
         (!rangeTo   || created <= new Date(rangeTo))) {
       a.new_leads_period += 1;
     }
+    if (prevWindow && created >= prevWindow.from && created < prevWindow.to) a.new_leads_prev_period += 1;
   }
 
   // Deals.
   for (const d of (deals ?? []) as unknown as Array<{
-    owner_id: string | null; amount: number | null; status: string | null;
+    owner_id: string | null; amount: number | null; status: string | null; probability?: number | null;
     created_at: string; actual_close_date: string | null;
-    crm_deal_stages: { stage_type: string };
+    crm_deal_stages: { stage_type: string; probability?: number | null };
   }>) {
     if (!d.owner_id || !byOwner.has(d.owner_id)) continue;
     const a = byOwner.get(d.owner_id)!;
     const stageType = d.crm_deal_stages?.stage_type ?? '';
     const amount = Number(d.amount ?? 0);
+    if (stageType === 'won' && prevWindow && d.actual_close_date) {
+      const closed = new Date(d.actual_close_date);
+      if (closed >= prevWindow.from && closed < prevWindow.to) { a.won_count_prev_period += 1; a.won_value_prev_period += amount; }
+    }
     if (stageType === 'won') {
       // Period-bound when range is supplied; else lifetime.
       const matchesRange =
@@ -764,24 +814,35 @@ export async function teamPerformance(
       }
     } else if (stageType === 'lost') {
       a.lost_count += 1;
+      a.lost_value += amount;
     } else {
       // Open / pipeline.
       a.open_count += 1;
       a.open_pipeline_value += amount;
+      const prob = d.probability != null && Number(d.probability) > 0 ? Number(d.probability) : Number(d.crm_deal_stages?.probability ?? 0);
+      a.weighted_pipeline_value += (amount * prob) / 100;
     }
   }
 
   // Activities — completed + total counts in the period.
   for (const act of (acts ?? []) as Array<{
-    owner_id: string | null; assigned_to: string | null; completed_at: string | null;
+    owner_id: string | null; assigned_to: string | null; completed_at: string | null; type?: string | null;
   }>) {
     const owner = act.assigned_to || act.owner_id;
     if (!owner || !byOwner.has(owner)) continue;
     const a = byOwner.get(owner)!;
     a.activities_total_period += 1;
+    const actType = String(act.type ?? '').toLowerCase();
+    if (actType === 'call') a.calls_period += 1;
+    else if (actType === 'meeting') a.meetings_period += 1;
     // Use completed_at (the authoritative completion signal) rather than
     // the status field, which may lag or be absent on older rows.
     if (act.completed_at) a.activities_completed_period += 1;
+  }
+
+  for (const o of (overdueActs ?? []) as Array<{ owner_id: string | null; assigned_to: string | null }>) {
+    const owner = o.assigned_to || o.owner_id;
+    if (owner && byOwner.has(owner)) byOwner.get(owner)!.overdue_followups += 1;
   }
 
   // Latest activity per owner (lifetime).
@@ -830,6 +891,16 @@ export async function teamPerformance(
     activities_total_period:     a.activities_total_period,
     last_activity_at:    id ? (lastTouchByOwner.get(id) ?? null) : null,
     avg_lead_score:      a.score_n > 0 ? a.score_sum / a.score_n : 0,
+    lost_value:              Math.round(a.lost_value),
+    weighted_pipeline_value: Math.round(a.weighted_pipeline_value),
+    overdue_followups:       a.overdue_followups,
+    untouched_open_leads:    a.untouched_open_leads,
+    idle_leads_14d:          a.idle_leads_14d,
+    calls_period:            a.calls_period,
+    meetings_period:         a.meetings_period,
+    new_leads_prev_period:   prevWindow ? a.new_leads_prev_period : null,
+    won_count_prev_period:   prevWindow ? a.won_count_prev_period : null,
+    won_value_prev_period:   prevWindow ? a.won_value_prev_period : null,
   });
 
   const rows: TeamPerformanceRow[] = [];
@@ -861,6 +932,11 @@ export async function teamPerformance(
     tot.open_lead_age_sum += a.open_lead_age_sum; tot.open_lead_age_n += a.open_lead_age_n;
     tot.score_sum        += a.score_sum;        tot.score_n        += a.score_n;
     if (a.oldest_open_lead_days > tot.oldest_open_lead_days) tot.oldest_open_lead_days = a.oldest_open_lead_days;
+    tot.lost_value += a.lost_value; tot.weighted_pipeline_value += a.weighted_pipeline_value;
+    tot.overdue_followups += a.overdue_followups; tot.untouched_open_leads += a.untouched_open_leads;
+    tot.idle_leads_14d += a.idle_leads_14d; tot.calls_period += a.calls_period; tot.meetings_period += a.meetings_period;
+    tot.new_leads_prev_period += a.new_leads_prev_period;
+    tot.won_count_prev_period += a.won_count_prev_period; tot.won_value_prev_period += a.won_value_prev_period;
   }
   const total = rowFromAgg(null, 'Total', tot);
   return { total, rows };
@@ -877,6 +953,9 @@ function blankAcc() {
     open_lead_age_sum: 0, open_lead_age_n: 0, oldest_open_lead_days: 0,
     activities_completed_period: 0, activities_total_period: 0,
     score_sum: 0, score_n: 0,
+    lost_value: 0, weighted_pipeline_value: 0, overdue_followups: 0, untouched_open_leads: 0, idle_leads_14d: 0,
+    calls_period: 0, meetings_period: 0,
+    new_leads_prev_period: 0, won_count_prev_period: 0, won_value_prev_period: 0,
   };
 }
 function blankRow(name: string): TeamPerformanceRow {
@@ -891,6 +970,9 @@ function blankRow(name: string): TeamPerformanceRow {
     avg_ageing_days: 0, oldest_open_lead_days: 0,
     activities_completed_period: 0, activities_total_period: 0,
     last_activity_at: null, avg_lead_score: 0,
+    lost_value: 0, weighted_pipeline_value: 0, overdue_followups: 0, untouched_open_leads: 0, idle_leads_14d: 0,
+    calls_period: 0, meetings_period: 0,
+    new_leads_prev_period: null, won_count_prev_period: null, won_value_prev_period: null,
   };
 }
 
@@ -929,6 +1011,15 @@ export interface LeadTrackerPayload {
   city_breakdown: LeadTrackerBreakdown[];
   // Distribution of open-lead ageing — for the heatmap card.
   ageing_distribution: { bucket: string; count: number }[];
+  // ── Additive comparison / detail blocks (older clients ignore them)
+  /** Per month: leads created that month, how many of those are Converted now, and the rate. */
+  monthly_detail?: Array<{ key: string; new_leads: number; converted: number; conversion_rate: number }>;
+  /** The same window one period earlier, cut at the same point in time, for a like-for-like comparison. */
+  previous_today?: LeadTrackerPeriodSummary;
+  previous_week?: LeadTrackerPeriodSummary;
+  previous_month?: LeadTrackerPeriodSummary;
+  /** Top sources with how many of their leads converted. */
+  source_detail?: Array<{ name: string; count: number; converted: number; conversion_rate: number }>;
 }
 
 export async function leadTracker(
@@ -1024,6 +1115,35 @@ export async function leadTracker(
     }
   }
 
+  // ── Additive detail: monthly conversion, per-source conversion, like-for-like previous periods.
+  const monthlyConv: Record<string, number> = {};
+  const sourceConv = new Map<string, { count: number; converted: number }>();
+  const prev = { today: { new: 0, conv: 0 }, week: { new: 0, conv: 0 }, month: { new: 0, conv: 0 } };
+  const yesterdayStart = new Date(todayStart.getTime() - 86_400_000);
+  const yesterdayCut = new Date(now.getTime() - 86_400_000);
+  const lastWeekStart = new Date(weekStart.getTime() - 7 * 86_400_000);
+  const lastWeekCut = new Date(now.getTime() - 7 * 86_400_000);
+  const lastMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const daysInLastMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0)).getUTCDate();
+  const lastMonthCut = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth() - 1, Math.min(now.getUTCDate(), daysInLastMonth),
+    now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(),
+  ));
+  for (const l of (leads ?? []) as Array<{ created_at: string; status: string | null; source_id?: string | null }>) {
+    const t = new Date(l.created_at);
+    if (!Number.isFinite(t.getTime())) continue;
+    const conv = (l.status ?? '').toLowerCase() === 'converted';
+    const mkey = `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (mkey in monthlyBuckets && conv) monthlyConv[mkey] = (monthlyConv[mkey] ?? 0) + 1;
+    const srcName = (l.source_id ? srcNames.get(l.source_id)?.name : '')?.trim() || 'Unspecified';
+    const sc = sourceConv.get(srcName) ?? { count: 0, converted: 0 };
+    sc.count += 1; if (conv) sc.converted += 1;
+    sourceConv.set(srcName, sc);
+    if (t >= yesterdayStart && t <= yesterdayCut) { prev.today.new += 1; if (conv) prev.today.conv += 1; }
+    if (t >= lastWeekStart && t <= lastWeekCut)   { prev.week.new  += 1; if (conv) prev.week.conv  += 1; }
+    if (t >= lastMonthStart && t <= lastMonthCut) { prev.month.new += 1; if (conv) prev.month.conv += 1; }
+  }
+
   const monthly: LeadTrackerBucket[] = Object.entries(monthlyBuckets)
     .map(([key, count]) => ({ key, count }))
     .sort((a, b) => a.key.localeCompare(b.key));
@@ -1056,6 +1176,16 @@ export async function leadTracker(
     source_breakdown: topN(sourceCounts),
     city_breakdown:   topN(cityCounts),
     ageing_distribution: Object.entries(ageingBuckets).map(([bucket, count]) => ({ bucket, count })),
+    monthly_detail: monthly.map(({ key, count }) => ({
+      key, new_leads: count, converted: monthlyConv[key] ?? 0,
+      conversion_rate: count > 0 ? (monthlyConv[key] ?? 0) / count : 0,
+    })),
+    previous_today: period('Yesterday (same time)', yesterdayStart, yesterdayCut, prev.today),
+    previous_week:  period('Last week (same days)', lastWeekStart, lastWeekCut, prev.week),
+    previous_month: period('Last month (same days)', lastMonthStart, lastMonthCut, prev.month),
+    source_detail: Array.from(sourceConv.entries())
+      .map(([name, v]) => ({ name, count: v.count, converted: v.converted, conversion_rate: v.count > 0 ? v.converted / v.count : 0 }))
+      .sort((a, b) => b.count - a.count).slice(0, 5),
   };
 }
 
@@ -1104,6 +1234,10 @@ export interface TeamDailyCard {
   deals_won_today_value: number;
   pipeline_value: number;
   status: 'active' | 'idle' | 'inactive';
+  /** Additive: scheduled activities still not completed that were due ON the chosen day. */
+  open_followups_due_that_day?: number;
+  /** Additive: scheduled activities still not completed that were due BEFORE the chosen day. */
+  open_followups_overdue?: number;
 }
 
 export async function teamDaily(
@@ -1133,7 +1267,7 @@ export async function teamDaily(
   if (userIds.length === 0) return [];
 
   // Fan-out parallel queries.
-  const [actRes, leadsTodayRes, latestLeadRes, dealsRes, lastActRes] = await Promise.all([
+  const [actRes, leadsTodayRes, latestLeadRes, dealsRes, lastActRes, openDueRes] = await Promise.all([
     // Activities owned/assigned on the chosen day, with type for the
     // breakdown.
     supabaseAdmin.from('crm_activities')
@@ -1169,7 +1303,24 @@ export async function teamDaily(
       .or(`owner_id.in.(${userIds.join(',')}),assigned_to.in.(${userIds.join(',')})`)
       .order('created_at', { ascending: false })
       .limit(2000),
+    // Scheduled activities still open that were due on or before the chosen day.
+    supabaseAdmin.from('crm_activities')
+      .select('owner_id, assigned_to, due_at')
+      .eq('org_id', org_id).is('deleted_at', null)
+      .or(`owner_id.in.(${userIds.join(',')}),assigned_to.in.(${userIds.join(',')})`)
+      .in('status', ['open', 'planned', 'in_progress']).is('completed_at', null)
+      .not('due_at', 'is', null).lte('due_at', dayEnd)
+      .limit(20000),
   ]);
+
+  const openDueByUser = new Map<string, { onDay: number; before: number }>();
+  for (const a of (openDueRes?.data ?? []) as Array<{ owner_id: string | null; assigned_to: string | null; due_at: string }>) {
+    const user = a.assigned_to || a.owner_id;
+    if (!user) continue;
+    const r = openDueByUser.get(user) ?? { onDay: 0, before: 0 };
+    if (a.due_at >= dayStart) r.onDay += 1; else r.before += 1;
+    openDueByUser.set(user, r);
+  }
 
   type ActBreak = { total: number; completed: number; calls: number; emails: number; meetings: number; site_visits: number; tasks: number; other: number };
   const blankAct = (): ActBreak => ({ total: 0, completed: 0, calls: 0, emails: 0, meetings: 0, site_visits: 0, tasks: 0, other: 0 });
@@ -1277,6 +1428,8 @@ export async function teamDaily(
       deals_won_today_value: deals.won_today_value,
       pipeline_value: deals.pipeline,
       status,
+      open_followups_due_that_day: openDueByUser.get(u.id)?.onDay ?? 0,
+      open_followups_overdue: openDueByUser.get(u.id)?.before ?? 0,
     };
   });
 
@@ -1500,9 +1653,20 @@ export async function salesCycle(org_id: string, range?: DateRange, client_id: s
     arr.push(days);
     buckets.set(month, arr);
   }
+  const median = (xs: number[]) => {
+    const s = xs.slice().sort((a, b) => a - b); const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
   return Array.from(buckets.entries())
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([month, days]) => ({ month, avg_days: Math.round(days.reduce((a, b) => a + b, 0) / days.length) }));
+    .map(([month, days]) => ({
+      month, avg_days: Math.round(days.reduce((a, b) => a + b, 0) / days.length),
+      // additive: how many deals sit behind the average and how spread they are
+      deals: days.length,
+      median_days: Math.round(median(days)),
+      fastest_days: Math.round(Math.min(...days)),
+      slowest_days: Math.round(Math.max(...days)),
+    }));
 }
 
 export async function forecast(org_id: string, period: 'month' | 'quarter' = 'quarter', range?: DateRange, client_id: string | null = null, unit: AnalyticsUnit = 'inr', scope?: AnalyticsScope) {
@@ -1544,20 +1708,24 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
 
   const [{ data: openData }, { data: wonData }] = await Promise.all([openQ, wonQ]);
 
-  const buckets = new Map<string, { committed: number; pipeline: number; closed: number }>();
+  const buckets = new Map<string, { committed: number; pipeline: number; closed: number; open_deals: number; won_deals: number; prob_sum: number }>();
+  const blankBucket = () => ({ committed: 0, pipeline: 0, closed: 0, open_deals: 0, won_deals: 0, prob_sum: 0 });
   for (const d of (openData ?? []) as unknown as Array<DealWithWeight & { probability?: number; expected_close_date: string; crm_deal_stages: { probability: number } }>) {
     const month = d.expected_close_date.slice(0, 7);
     const p = d.probability ?? d.crm_deal_stages.probability ?? 50;
     const v = dealValue(d, unit);
-    const e = buckets.get(month) ?? { committed: 0, pipeline: 0, closed: 0 };
+    const e = buckets.get(month) ?? blankBucket();
     e.committed += v * p / 100;
     e.pipeline += v;
+    e.open_deals += 1;
+    e.prob_sum += p;
     buckets.set(month, e);
   }
   for (const d of (wonData ?? []) as unknown as Array<DealWithWeight & { actual_close_date: string }>) {
     const month = d.actual_close_date.slice(0, 7);
-    const e = buckets.get(month) ?? { committed: 0, pipeline: 0, closed: 0 };
+    const e = buckets.get(month) ?? blankBucket();
     e.closed += dealValue(d, unit);
+    e.won_deals += 1;
     buckets.set(month, e);
   }
 
@@ -1569,6 +1737,11 @@ export async function forecast(org_id: string, period: 'month' | 'quarter' = 'qu
       best_case: Math.round(v.pipeline),
       pipeline: Math.round(v.pipeline),
       closed: Math.round(v.closed),
+      // additive: deal counts and the expected total for the period
+      open_deals: v.open_deals,
+      won_deals: v.won_deals,
+      avg_probability: v.open_deals > 0 ? Math.round((v.prob_sum / v.open_deals) * 10) / 10 : 0,
+      expected_total: Math.round(v.closed + v.committed),
     }));
 }
 
@@ -1646,13 +1819,14 @@ export async function leadSourceRoi(org_id: string, client_id: string | null = n
       dealsById.set(d.id, Number(d.amount ?? 0));
     }
   }
-  const map = new Map<string, { source: string; leads: number; deals: number; revenue: number; cost: number }>();
+  const map = new Map<string, { source: string; leads: number; deals: number; revenue: number; cost: number; qualified: number; cpl: number }>();
   for (const l of (leads ?? []) as unknown as Array<{ status: string; converted_deal_id: string | null; source_id?: string | null }>) {
     const src = l.source_id ? roiSrcNames.get(l.source_id) : undefined;
     const name = src?.name || 'Unspecified';
     const cpl = Number(src?.cost_per_lead ?? 0);
-    const e = map.get(name) ?? { source: name, leads: 0, deals: 0, revenue: 0, cost: 0 };
+    const e = map.get(name) ?? { source: name, leads: 0, deals: 0, revenue: 0, cost: 0, qualified: 0, cpl };
     e.leads += 1;
+    if (l.status === 'qualified' || l.status === 'converted') e.qualified += 1;
     e.cost += cpl;
     if (l.converted_deal_id && dealsById.has(l.converted_deal_id)) {
       e.deals += 1;
@@ -1660,9 +1834,18 @@ export async function leadSourceRoi(org_id: string, client_id: string | null = n
     }
     map.set(name, e);
   }
+  const totalRevenue = Array.from(map.values()).reduce((a, e) => a + e.revenue, 0);
   return Array.from(map.values()).map((e) => ({
-    ...e,
+    source: e.source, leads: e.leads, deals: e.deals, revenue: e.revenue, cost: e.cost,
     roi: e.cost > 0 ? (e.revenue - e.cost) / e.cost : (e.revenue > 0 ? 1 : 0),
+    // additive: funnel + unit-economics columns (null when there is nothing to divide by)
+    qualified: e.qualified,
+    lead_to_deal_pct: e.leads > 0 ? Math.round((e.deals / e.leads) * 1000) / 10 : null,
+    avg_deal_value: e.deals > 0 ? Math.round(e.revenue / e.deals) : null,
+    revenue_per_lead: e.leads > 0 ? Math.round(e.revenue / e.leads) : null,
+    cost_per_lead: e.cpl,
+    cost_per_deal: e.deals > 0 && e.cost > 0 ? Math.round(e.cost / e.deals) : null,
+    revenue_share_pct: totalRevenue > 0 ? Math.round((e.revenue / totalRevenue) * 1000) / 10 : null,
   }));
 }
 

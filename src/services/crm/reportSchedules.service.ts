@@ -16,6 +16,7 @@ import { AppError } from '../../utils';
 import { sendEmail } from './emails.service';
 import * as analytics from './analytics.service';
 import * as analyticsExt from './analytics-extended.service';
+import * as analyticsPlus from './analytics-leads-plus.service';
 import { logger } from '../../lib/logger';
 
 export type Frequency = 'daily' | 'weekly' | 'monthly';
@@ -82,6 +83,14 @@ const REPORTS: Record<string, ReportDef> = {
   at_risk:    { label: 'Leads at risk',           run: (o, c)    => analyticsExt.leadsAtRisk(o, c, 60, 14) },
   stuck:      { label: 'Stuck leads',             run: (o, c)    => analyticsExt.stuckLeads(o, c) },
   lead_aging: { label: 'Lead aging',              run: (o, c)    => analyticsExt.leadAging(o, c) },
+  // Lead Management "plus" reports: the digest prints a flat table, so each returns its rows.
+  source_performance:  { label: 'Lead source performance',     run: async (o, c, r) => (await analyticsPlus.sourcePerformance(o, c, r)).rows },
+  followup_compliance: { label: 'Follow-up compliance',        run: async (o, c, r) => (await analyticsPlus.followupCompliance(o, c, r)).rows },
+  owner_workload:      { label: 'Owner workload and response', run: async (o, c, r) => (await analyticsPlus.ownerWorkload(o, c, r, undefined)).rows },
+  stage_velocity:      { label: 'Days in each deal stage',     run: async (o, c)    => (await analyticsPlus.stageVelocity(o, c, undefined)).rows },
+  activity_mix:        { label: 'Activity mix by person',      run: async (o, c, r) => (await analyticsPlus.activityMix(o, c, r)).rows },
+  conversion_time:     { label: 'Lead conversion time',        run: async (o, c, r) => (await analyticsPlus.conversionTime(o, c, r)).buckets },
+  weighted_pipeline:   { label: 'Weighted pipeline by stage',  run: async (o, c)    => (await analyticsPlus.weightedPipeline(o, c, undefined)).rows },
 };
 
 /** Report keys + labels for the dashboard builder dropdown. */
