@@ -119,6 +119,7 @@ import organisationsRoutes     from './routes/organisations.routes';
 import crmRoutes               from './routes/crm.routes';
 import financeRoutes           from './routes/finance.routes';
 import financePublicRoutes     from './routes/finance-public.routes';
+import hrmsRoutes              from './routes/hrms.routes';
 import whatsappWebhookPublicRoutes from './routes/crm/whatsapp-webhook-public.routes';
 import oauthRoutes             from './routes/oauth.routes';
 import { authorizationServerMetadata } from './controllers/oauth.controller';
@@ -722,6 +723,8 @@ app.use(`${V1}/crm/webhooks/whatsapp`, whatsappWebhookPublicRoutes);
 app.use(`${V1}/crm`, requireAuth, crmRoutes);
 // Finance: master admin only; shareable per client via the non-universal `finance` module.
 app.use(`${V1}/finance`, requireAuth, financeRoutes);
+// HRMS (organisation + people): master admin only, never while impersonating. Gate lives in the router (requireHrmsAccess).
+app.use(`${V1}/hrms`, requireAuth, hrmsRoutes);
 
 // ── KINI agentic v2 (flag-gated; legacy /crm/ai/chat untouched) ─────────────
 // Per-tenant rollout is controlled by org_settings(key='kini_agentic_v2'),
