@@ -14,6 +14,8 @@
  *   POST   employees/:id/reveal           { field: pan|bank|aadhaar, reason } -> full value, written to the access log
  *   GET    access-log?employee_id=        newest first, at most 200
  *   PUT    settings/employee_code_prefix  { value }
+ *   PUT    settings/payroll               { overtime_rule }   (also at payroll/settings/payroll)
+ *   *      payroll/...                    phase 2: payroll on the server (hrmsPayroll.routes.ts)
  *
  * PAN and bank details are encrypted at rest (lib/hrmsCrypto) and masked in every response; they are write-only.
  * If the HRMS tables are not there yet (migration_hrms_core.sql not applied) every call answers 503 HRMS_NOT_READY.
@@ -37,6 +39,9 @@ import * as documents from '../services/hrms/documents.service';
 import * as privacy from '../services/hrms/privacy.service';
 import * as settings from '../services/hrms/settings.service';
 import { importEmployees } from '../services/hrms/import.service';
+import payrollRoutes from './hrmsPayroll.routes';
+import * as payrollSettings from '../services/hrms/payroll/settings.service';
+import { payrollSettingsBody } from '../services/hrms/payroll/schemas';
 
 const router = Router();
 
@@ -67,6 +72,10 @@ const body = (req: Request) => req.body ?? {};
 
 // ── bootstrap ───────────────────────────────────────────────────────────────
 router.get('/bootstrap', asyncHandler(async (req: Request, res: Response) => res.json(await bootstrap(scopeOf(req)))));
+
+// ── payroll (phase 2) ───────────────────────────────────────────────────────
+// Same gate, scope, headers, limits, response wrapper and error handler as everything above and below.
+router.use('/payroll', payrollRoutes);
 
 // ── organisation structure ──────────────────────────────────────────────────
 const MASTER_ROUTES: Array<{ path: string; kind: MasterKind; create: Parameters<typeof parse>[0]; update: Parameters<typeof parse>[0] }> = [
@@ -131,6 +140,10 @@ router.get('/access-log', asyncHandler(async (req: Request, res: Response) => {
 
 // ── settings ────────────────────────────────────────────────────────────────
 router.put('/settings/:key', asyncHandler(async (req: Request, res: Response) => {
+  if (req.params.key === payrollSettings.PAYROLL_KEY) {
+    res.json(await payrollSettings.setPayrollSettings(scopeOf(req), parse(payrollSettingsBody, body(req)).overtime_rule));
+    return;
+  }
   if (req.params.key !== CODE_PREFIX_KEY) throw new AppError(404, 'Unknown setting', 'NOT_FOUND');
   res.json(await settings.setCodePrefix(scopeOf(req), parse(codePrefixBody, body(req)).value));
 }));
