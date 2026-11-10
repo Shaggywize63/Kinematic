@@ -14,6 +14,7 @@ import { readOrgSettings, writeOrgSettings } from '../services/notificationPolic
 import { cleanAppUiForStore } from '../lib/appItems';
 import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, countActiveUsersByOrg, nextUnpaidInvoicesByCustomer, type NextPayment } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
+import { currentMonth as kiniMonth } from '../services/crm/ai/kiniQuota.service';
 import { invalidateAuthCache } from '../middleware/auth';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
@@ -142,6 +143,91 @@ async function readUserCaps(clients: Array<{ id: string; org_id?: string; data_p
   return out;
 }
 
+// ── KINI AI monthly limits, settable from Client Management ─────────────────
+// Stored as org-level rows (client_id NULL) in org_settings on the org that holds the client's users, exactly where
+// kiniQuota.service reads them: the per-user cap and the cap for the whole client. A blank value removes the row, so the
+// server default (KINI_MONTHLY_QUERY_CAP, 20 if unset) applies. A client-scoped row for the same key, if one was ever
+// written by hand, still takes precedence for that client's users (that is how the quota service resolves it).
+const KINI_USER_KEY = 'kini_user_monthly_query_limit';
+const KINI_ORG_KEY = 'kini_monthly_query_limit';
+const KINI_LIMIT_MAX = 1_000_000;
+
+/** `undefined` = field not sent (leave as is); `null` = clear; a number = set; `'invalid'` = reject with a 400. */
+export function parseKiniLimit(raw: unknown): number | null | undefined | 'invalid' {
+  if (raw === undefined) return undefined;
+  if (raw === null || raw === '') return null;
+  const n = typeof raw === 'number' ? raw : Number(String(raw).trim());
+  if (!Number.isFinite(n) || n < 1) return 'invalid';
+  return Math.min(KINI_LIMIT_MAX, Math.floor(n));
+}
+const KINI_LIMIT_MSG = 'KINI limits must be a whole number of at least 1, or left blank to use the default.';
+
+type CapClient = { id?: string; org_id?: string; data_project_key?: string; data_client_id?: string };
+
+export async function writeKiniLimits(client: CapClient, limits: { user?: number | null; org?: number | null }): Promise<void> {
+  const { admin, orgId } = await resolveCapTarget(client);
+  if (!orgId) return;
+  const put = async (key: string, value: number | null | undefined) => {
+    if (value === undefined) return;
+    await admin.from('org_settings').delete().eq('org_id', orgId).eq('key', key).is('client_id', null);
+    if (value !== null) {
+      const { error } = await admin.from('org_settings').insert({ org_id: orgId, key, value });
+      if (error) throw new Error(error.message);
+    }
+  };
+  await put(KINI_USER_KEY, limits.user);
+  await put(KINI_ORG_KEY, limits.org);
+}
+
+interface KiniLimits { user: number | null; org: number | null; org_used: number }
+const kiniNum = (v: unknown): number | null => { const n = typeof v === 'number' ? v : Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : null; };
+
+/** Each client's KINI limits and this month's org-wide usage (batched for same-project, per-link for cross-project). */
+export async function readKiniLimits(clients: CapClient[]): Promise<Record<string, KiniLimits>> {
+  const out: Record<string, KiniLimits> = {};
+  const month = kiniMonth();
+  const isCross = (c: CapClient) =>
+    !!(orgPerClient() && c.data_project_key && isKnownProject(c.data_project_key)
+      && c.data_project_key !== currentProjectKey() && c.data_client_id && isUUID(c.data_client_id));
+
+  // One database's worth of orgs: their org-level limit rows and the month's usage, summed per org.
+  const forOrgs = async (admin: SupabaseClient, orgIds: string[]): Promise<Record<string, KiniLimits>> => {
+    const res: Record<string, KiniLimits> = {};
+    orgIds.forEach((o) => { res[o] = { user: null, org: null, org_used: 0 }; });
+    if (!orgIds.length) return res;
+    const { data: rows } = await admin.from('org_settings').select('org_id, key, value').in('org_id', orgIds).is('client_id', null).in('key', [KINI_USER_KEY, KINI_ORG_KEY]);
+    for (const r of (rows || []) as Array<{ org_id: string; key: string; value: unknown }>) {
+      if (!res[r.org_id]) continue;
+      if (r.key === KINI_USER_KEY) res[r.org_id].user = kiniNum(r.value);
+      else res[r.org_id].org = kiniNum(r.value);
+    }
+    // PostgREST returns at most 1000 rows per request, so page through the month's usage rows.
+    for (let from = 0; from < 20000; from += 1000) {
+      const { data, error } = await admin.from('kini_usage').select('org_id, query_count').in('org_id', orgIds).eq('month', month).range(from, from + 999);
+      if (error) break;
+      for (const r of (data || []) as Array<{ org_id: string; query_count: number | null }>) {
+        if (res[r.org_id]) res[r.org_id].org_used += r.query_count ?? 0;
+      }
+      if (!data || data.length < 1000) break;
+    }
+    return res;
+  };
+
+  const same = clients.filter((c) => !isCross(c));
+  const orgIds = Array.from(new Set(same.map((c) => c.org_id).filter(Boolean))) as string[];
+  try {
+    const byOrg = await forOrgs(supabaseAdmin, orgIds);
+    same.forEach((c) => { if (c.id && c.org_id && byOrg[c.org_id]) out[c.id] = byOrg[c.org_id]; });
+  } catch (e: any) { logger.warn(`[Clients] KINI limits read failed: ${e?.message || e}`); }
+  for (const c of clients.filter(isCross)) {
+    try {
+      const { admin, orgId } = await resolveCapTarget(c);
+      if (orgId && c.id) out[c.id] = (await forOrgs(admin, [orgId]))[orgId];
+    } catch { /* leave blank: the form shows the default */ }
+  }
+  return out;
+}
+
 /** Active, non-staff user counts per client (batched for same-project, per-link for cross-project). */
 async function readActiveCounts(clients: Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
@@ -234,9 +320,13 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
   const caps = await readUserCaps(liveClients as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
   const activeCounts = await readActiveCounts(liveClients as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
   const nextPayments = await readNextPayments(liveClients as Array<Record<string, any>>, user);
+  const kini = await readKiniLimits(liveClients as CapClient[]);
   const results = liveClients.map(client => ({
     ...client,
     max_active_users: caps[client.id] ?? null,
+    kini_user_monthly_limit: kini[client.id]?.user ?? null,
+    kini_org_monthly_limit: kini[client.id]?.org ?? null,
+    kini_org_used_this_month: kini[client.id]?.org_used ?? 0,
     active_users: activeCounts[client.id] ?? 0,
     next_payment: nextPayments[client.id] ?? null,
     modules: (accessData || [])
@@ -292,12 +382,15 @@ async function syncClientUserModulePermissions(clientId: string, moduleIds: stri
  */
 export const createClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
-  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id, max_active_users, trial, finance_customer_id } = req.body;
+  const { name, contact_person, email, phone, modules, password, login_org_id, data_project_key, data_client_id, max_active_users, trial, finance_customer_id, kini_user_monthly_limit, kini_org_monthly_limit } = req.body;
 
   if (!name) {
     badRequest(res, 'Client name is required');
     return;
   }
+  const kiniUser = parseKiniLimit(kini_user_monthly_limit);
+  const kiniOrg = parseKiniLimit(kini_org_monthly_limit);
+  if (kiniUser === 'invalid' || kiniOrg === 'invalid') { badRequest(res, KINI_LIMIT_MSG); return; }
 
   // Optional trial-period record set at creation time ({ start_date, days });
   // end_date is computed server-side. Stored under clients.settings.trial.
@@ -448,7 +541,14 @@ export const createClient = asyncHandler(async (req: AuthRequest, res: Response)
     catch (e: any) { logger.warn(`[Clients] user-cap write failed for ${client.id}: ${e?.message || e}`); }
   }
 
-  created(res, { ...client, modules: modules || [], max_active_users: parseUserCap(max_active_users) });
+  // KINI AI monthly limits (optional; only the ones that were sent).
+  const warnings: string[] = [];
+  if (kiniUser !== undefined || kiniOrg !== undefined) {
+    try { await writeKiniLimits(client, { user: kiniUser, org: kiniOrg }); }
+    catch (e: any) { logger.warn(`[Clients] KINI limit write failed for ${client.id}: ${e?.message || e}`); warnings.push('The client was created, but its KINI limits could not be saved. Open the client and set them again.'); }
+  }
+
+  created(res, { ...client, modules: modules || [], max_active_users: parseUserCap(max_active_users), kini_user_monthly_limit: kiniUser ?? null, kini_org_monthly_limit: kiniOrg ?? null, ...(warnings.length ? { warnings } : {}) });
 });
 
 /**
@@ -660,9 +760,12 @@ async function syncCeilingToLinkedProject(opts: {
 export const updateClient = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
-  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users, app_ui, trial, finance_customer_id } = req.body;
+  const { name, contact_person, email, phone, is_active, password, modules, user_id, login_org_id, data_project_key, data_client_id, max_active_users, app_ui, trial, finance_customer_id, kini_user_monthly_limit, kini_org_monthly_limit } = req.body;
 
   if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+  const kiniUser = parseKiniLimit(kini_user_monthly_limit);
+  const kiniOrg = parseKiniLimit(kini_org_monthly_limit);
+  if (kiniUser === 'invalid' || kiniOrg === 'invalid') { badRequest(res, KINI_LIMIT_MSG); return; }
   // 1. Update Core Client Details
   let updateQ = supabaseAdmin
     .from('clients')
@@ -856,7 +959,20 @@ export const updateClient = asyncHandler(async (req: AuthRequest, res: Response)
     catch (e: any) { logger.warn(`[Clients] user-cap write failed for ${id}: ${e?.message || e}`); }
   }
 
-  ok(res, { ...client, modules: modules || [], max_active_users: capOut, app_ui: appUiOut, trial: trialOut });
+  // KINI AI monthly limits (only the ones that were sent).
+  const kiniOut: Record<string, number | null | string[]> = {};
+  if (kiniUser !== undefined || kiniOrg !== undefined) {
+    try {
+      await writeKiniLimits(client, { user: kiniUser, org: kiniOrg });
+      if (kiniUser !== undefined) kiniOut.kini_user_monthly_limit = kiniUser;
+      if (kiniOrg !== undefined) kiniOut.kini_org_monthly_limit = kiniOrg;
+    } catch (e: any) {
+      logger.warn(`[Clients] KINI limit write failed for ${id}: ${e?.message || e}`);
+      kiniOut.warnings = ['The client was saved, but its KINI limits could not be saved. Try again.'];
+    }
+  }
+
+  ok(res, { ...client, modules: modules || [], max_active_users: capOut, app_ui: appUiOut, trial: trialOut, ...kiniOut });
 });
 
 /**
