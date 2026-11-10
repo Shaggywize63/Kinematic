@@ -42,6 +42,11 @@ const PII_KEYS = new Set([
   'aadhaar', 'aadhar', 'pan', 'passport', 'ssn', 'national_id',
   'latitude', 'longitude', 'lat', 'lng', 'lon', 'coordinates',
   'address', 'address_line1', 'address_line2', 'street', 'pincode', 'postal_code', 'zip',
+  // HRMS: bank details, tax declaration (carries the landlord's PAN), emergency contact, Aadhaar last four, parent's name.
+  // Keys are compared lower-cased, so the camelCase spellings the dashboard sends are listed squashed.
+  'bank', 'bank_enc', 'pan_enc', 'account_number', 'accountnumber', 'account_holder', 'accountholder', 'ifsc',
+  'declaration', 'landlord_pan', 'landlordpan', 'emergency_contact', 'emergencycontact',
+  'aadhaar_last4', 'aadhaarlast4', 'father_name', 'fathername',
 ]);
 
 /**
@@ -49,7 +54,7 @@ const PII_KEYS = new Set([
  * a structural clone so we don't mutate the live req.body. Arrays and
  * nested objects walk through; primitives are returned unchanged.
  */
-function scrubBody(value: unknown, depth = 0): unknown {
+export function scrubBody(value: unknown, depth = 0): unknown {
   if (value === null || value === undefined) return value;
   if (depth > 8) return '[depth-limit]'; // defence against pathological nesting
   if (Array.isArray(value)) return value.map((v) => scrubBody(v, depth + 1));

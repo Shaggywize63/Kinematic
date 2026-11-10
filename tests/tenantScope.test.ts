@@ -345,7 +345,9 @@ describe('X-Org-Id act-as', () => {
 
   it('only a platform operator may act as another org; any other super_admin keeps their own', () => {
     expect(asOrg(OPERATOR).org_id).toBe(BYTEBACK_ORG);
+    expect(asOrg(OPERATOR).acting_as_org).toBe(true); // modules that must not run on another org's behalf (HRMS) key off this
     expect(asOrg({ ...OPERATOR, email: 'srs@kinematicapp.com' }).org_id).toBe(KIN_ORG);
+    expect(asOrg({ ...OPERATOR, email: 'srs@kinematicapp.com' }).acting_as_org).toBeUndefined();
     expect(asOrg({ ...OPERATOR, client_id: BYTEBACK_CLIENT }).org_id).toBe(KIN_ORG);
   });
 
