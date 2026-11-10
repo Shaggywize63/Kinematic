@@ -58,6 +58,7 @@ import * as importSvc from '../services/crm/import.service';
 import * as activityImportSvc from '../services/crm/activityImport.service';
 import * as analyticsSvc from '../services/crm/analytics.service';
 import * as analyticsExt from '../services/crm/analytics-extended.service';
+import * as analyticsPlus from '../services/crm/analytics-leads-plus.service';
 import * as dashboardLayoutSvc from '../services/crm/dashboardLayout.service';
 import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
@@ -6142,6 +6143,49 @@ analytics.get('/intel/trend', wrap(async (req, res) => res.json(
 analytics.get('/intel/feed', wrap(async (req, res) => res.json(
   await cachedAnalytics(cacheKey(req, `intel-feed:${req.query.city ?? ''}:${req.query.limit ?? ''}`), ANALYTICS_TTL,
     () => analyticsExt.intelFeed(orgId(req), clientId(req), dateRange(req), (req.query.city as string) || null, Number(req.query.limit ?? 50))))));
+
+// ── Lead Management "plus" analytics — extra Lead Analytics widgets + report pages ──
+// Same pattern as the handlers above: the per-user analyticsScope computed once
+// per request, org + client scoping, and a 60 s cache whose key carries the
+// scope signature plus every query parameter the handler reads (the shared
+// cacheKey() already covers from / to / pipeline_id; `extra` adds the rest).
+const plusKey = (req: Request, name: string, extra: Array<string | number | undefined> = []) =>
+  cacheKey(req, `plus:${name}${extra.length ? ':' + extra.map((x) => x ?? '').join(':') : ''}`);
+const plusScope = (req: Request) => (req as AuthRequest).analyticsScope;
+analytics.get('/source-performance', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'source-performance'), ANALYTICS_TTL,
+    () => analyticsPlus.sourcePerformance(orgId(req), clientId(req), dateRange(req), plusScope(req))))));
+analytics.get('/followup-compliance', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'followup-compliance'), ANALYTICS_TTL,
+    () => analyticsPlus.followupCompliance(orgId(req), clientId(req), dateRange(req), plusScope(req))))));
+analytics.get('/owner-workload', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'owner-workload', [String(req.query.sla_minutes ?? '')]), ANALYTICS_TTL,
+    () => analyticsPlus.ownerWorkload(orgId(req), clientId(req), dateRange(req), req.query.sla_minutes, plusScope(req))))));
+analytics.get('/stage-velocity', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'stage-velocity'), ANALYTICS_TTL,
+    () => analyticsPlus.stageVelocity(orgId(req), clientId(req), req.query.pipeline_id, plusScope(req))))));
+analytics.get('/activity-mix', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'activity-mix'), ANALYTICS_TTL,
+    () => analyticsPlus.activityMix(orgId(req), clientId(req), dateRange(req), plusScope(req))))));
+analytics.get('/conversion-time', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'conversion-time'), ANALYTICS_TTL,
+    () => analyticsPlus.conversionTime(orgId(req), clientId(req), dateRange(req), plusScope(req))))));
+analytics.get('/weighted-pipeline', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'weighted-pipeline'), ANALYTICS_TTL,
+    () => analyticsPlus.weightedPipeline(orgId(req), clientId(req), req.query.pipeline_id, plusScope(req))))));
+analytics.get('/deal-size-distribution', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'deal-size-distribution'), ANALYTICS_TTL,
+    () => analyticsPlus.dealSizeDistribution(orgId(req), clientId(req), dateRange(req), plusScope(req))))));
+analytics.get('/win-rate-trend', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'win-rate-trend', [String(req.query.months ?? '')]), ANALYTICS_TTL,
+    () => analyticsPlus.winRateTrend(orgId(req), clientId(req), req.query.months, plusScope(req))))));
+analytics.get('/call-connect-trend', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'call-connect-trend', [String(req.query.weeks ?? '')]), ANALYTICS_TTL,
+    () => analyticsPlus.callConnectTrend(orgId(req), clientId(req), req.query.weeks, plusScope(req))))));
+analytics.get('/lead-recycling', wrap(async (req, res) => res.json(
+  await cachedAnalytics(plusKey(req, 'lead-recycling', [String(req.query.months ?? '')]), ANALYTICS_TTL,
+    () => analyticsPlus.leadRecycling(orgId(req), clientId(req), req.query.months, plusScope(req))))));
+
 router.use('/analytics', rbac.requireModuleAccess('crm_lead_analytics'), analytics);
 
 // ── Home-screen widgets (mobile) ──────────────────────────────────────────
