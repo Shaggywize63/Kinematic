@@ -157,7 +157,7 @@ router.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
     status = 413; code = 'PAYLOAD_TOO_LARGE'; message = 'The request is larger than 1 MB';
   }
   const line = `[hrms] ${req.method} ${req.baseUrl}${req.path} -> ${status} ${code}`;
-  if (status >= 500) logger.error(`${line}: ${(err as { message?: string })?.message ?? 'unknown'}`);
+  if (status >= 500 && code !== 'HRMS_NOT_READY') logger.error(`${line}: ${(err as { message?: string })?.message ?? 'unknown'}`);
   else logger.warn(line);
   res.status(status).json({ success: false, error: message, code, ...((req as { id?: string }).id ? { request_id: (req as { id?: string }).id } : {}) });
 });

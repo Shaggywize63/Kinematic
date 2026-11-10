@@ -42,6 +42,17 @@ export const PLAIN_COLUMNS = [
   'pt_applicable', 'lwf_applicable', 'tax_regime', 'declaration', 'pay_mode', 'structure_id', 'annual_ctc', 'structure_overrides',
 ] as const;
 
+/**
+ * The database defaults for the NOT NULL columns that have one. Insert rows carry EVERY column explicitly (these, or null),
+ * so all rows of a bulk insert have the same keys: supabase-js fills a key that is missing from some rows of a bulk insert
+ * with NULL rather than the column default, which would break NOT NULL columns such as status.
+ */
+export const INSERT_DEFAULTS: Record<string, unknown> = {
+  last_name: '', status: 'onboarding', probation_months: 0, notice_days: 0, aadhaar_verified: false, uan_status: 'none', pf_member: false,
+  pf_on_actual_wage: false, pt_applicable: false, lwf_applicable: false, tax_regime: 'new', pay_mode: 'bank', address: {},
+  declaration: { sec80C: 0, sec80D: 0, nps80CCD1B: 0, homeLoanInterest: 0, rentPaidAnnual: 0, other: 0, status: 'not_submitted' },
+};
+
 /** Foreign-key fields: the change log names the thing (a department, a person) instead of printing its id. */
 export const REF_FIELDS = {
   entity_id: 'hrms_entities', location_id: 'hrms_locations', department_id: 'hrms_departments',

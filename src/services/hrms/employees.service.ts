@@ -5,7 +5,7 @@ import {
   db, fail, fetchAll, HrmsScope, isUniqueViolation, must, scopeCols, scoped,
 } from './scope';
 import {
-  ApiEmployee, changeText, diffEmployee, historyRow, interpretBank, interpretPan, PLAIN_COLUMNS, readBank, readPan, REF_FIELDS, Row, sameValue,
+  ApiEmployee, changeText, diffEmployee, historyRow, INSERT_DEFAULTS, interpretBank, interpretPan, PLAIN_COLUMNS, readBank, readPan, REF_FIELDS, Row, sameValue,
   sealBank, sealPan, toApiEmployee, wouldCreateCycle,
 } from './model';
 import { reserveCodes } from './settings.service';
@@ -115,11 +115,11 @@ export interface CreatedEmployee { employee: ApiEmployee; created: boolean }
 /** The insert row for a new employee (everything the input carries; the database fills the defaults for the rest). */
 export function buildInsertRow(s: HrmsScope, id: string, code: string, input: Row): Row {
   const row: Row = { id, ...scopeCols(s), code };
-  for (const col of PLAIN_COLUMNS) if (input[col] !== undefined) row[col] = input[col];
+  for (const col of PLAIN_COLUMNS) row[col] = input[col] !== undefined ? input[col] : (INSERT_DEFAULTS[col] ?? null);
   const pan = interpretPan(input.pan);
-  if ('value' in pan) row.pan_enc = sealPan(id, pan.value);
+  row.pan_enc = 'value' in pan ? sealPan(id, pan.value) : null;
   const bank = interpretBank(input.bank, null);
-  if ('value' in bank) row.bank_enc = sealBank(id, bank.value);
+  row.bank_enc = 'value' in bank ? sealBank(id, bank.value) : null;
   return row;
 }
 

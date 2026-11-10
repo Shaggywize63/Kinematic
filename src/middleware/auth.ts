@@ -104,7 +104,9 @@ export function maybeImpersonate(user: AuthRequest['user'], req: AuthRequest): A
     if (deny) return user;
   }
   logger.info(`[Auth] super_admin acting as org ${target}`);
-  return { ...(user as object), org_id: target } as AuthRequest['user'];
+  // `acting_as_org` marks the clone as a request made on another org's behalf, so a module that must never run in that
+  // state (HRMS holds personal data) can refuse it; the token-keyed cache entry never carries it.
+  return { ...(user as object), org_id: target, acting_as_org: true } as unknown as AuthRequest['user'];
 }
 
 // Per-request memo of client_id → org_id for the scoped-viewer org-derive

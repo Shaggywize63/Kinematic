@@ -66,7 +66,8 @@ export function must<T>(res: { data: T | null; error: DbError }): T {
 
 export const isUniqueViolation = (e: DbError, constraintHint?: string): boolean =>
   !!e && e.code === '23505' && (!constraintHint || (e.message ?? '').includes(constraintHint));
-export const isForeignKeyViolation = (e: DbError): boolean => !!e && e.code === '23503';
+// ON DELETE RESTRICT raises 23001 (restrict_violation); a missing referenced row on insert/update raises 23503. Both mean "still in use" / "unknown reference".
+export const isForeignKeyViolation = (e: DbError): boolean => !!e && (e.code === '23503' || e.code === '23001');
 
 /** Read every row of a query, a page at a time (PostgREST caps one response, 1000 rows by default). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
 import { db, fail, fetchAll, HrmsScope, isUniqueViolation, scoped } from './scope';
 import { ApiEmployee, historyRow, Row, toApiEmployee } from './model';
@@ -84,7 +85,7 @@ export async function importEmployees(s: HrmsScope, rows: unknown[], dryRun: boo
   const takenIds = new Set(live.map((r) => String(r.id)));
 
   // 1. validate every row in memory
-  interface Ready { row: number; id: string; input: Row }
+  interface Ready { row: number; id: string; input: Row; built: Row }
   const ready: Ready[] = [];
   const seenCodes = new Set<string>();
   const seenIds = new Set<string>();
@@ -107,10 +108,16 @@ export async function importEmployees(s: HrmsScope, rows: unknown[], dryRun: boo
       const key = String(input.code).toLowerCase();
       if (takenCodes.has(key)) { errors.push({ row: n, error: `code: ${String(input.code)} is already in use` }); return; }
       if (seenCodes.has(key)) { errors.push({ row: n, error: `code: ${String(input.code)} is repeated in this file` }); return; }
-      seenCodes.add(key);
     }
+    // PAN / bank shape problems are this row's problem too. The row is built (sensitive fields sealed) now and gets its code later.
+    let built: Row;
+    try { built = buildInsertRow(s, id, '', input); } catch (e) {
+      if (e instanceof AppError && e.statusCode < 500) { errors.push({ row: n, error: e.message }); return; }
+      throw e; // a missing / invalid encryption key is not a row problem
+    }
+    if (input.code) seenCodes.add(String(input.code).toLowerCase());
     seenIds.add(id);
-    ready.push({ row: n, id, input });
+    ready.push({ row: n, id, input, built });
   });
 
   const base = { dry_run: dryRun, total: rows.length, valid: ready.length, existing };
@@ -129,7 +136,7 @@ export async function importEmployees(s: HrmsScope, rows: unknown[], dryRun: boo
   const created: Array<{ row: Row; at: string; n: number }> = [];
   const now = new Date().toISOString();
   const fallback = async (r: (typeof withCode)[number]) => {
-    const res = await db().from('hrms_employees').insert(buildInsertRow(s, r.id, r.code, r.input)).select('*').single();
+    const res = await db().from('hrms_employees').insert({ ...r.built, code: r.code }).select('*').single();
     if (res.error) {
       if (isUniqueViolation(res.error, 'org_code')) { errors.push({ row: r.row, error: `code: ${r.code} is already in use` }); return; }
       logger.warn(`[hrms] import row ${r.row} failed: ${res.error.message}`);
@@ -140,7 +147,7 @@ export async function importEmployees(s: HrmsScope, rows: unknown[], dryRun: boo
   };
   for (let i = 0; i < withCode.length; i += CHUNK) {
     const chunk = withCode.slice(i, i + CHUNK);
-    const res = await db().from('hrms_employees').insert(chunk.map((r) => buildInsertRow(s, r.id, r.code, r.input))).select('*');
+    const res = await db().from('hrms_employees').insert(chunk.map((r) => ({ ...r.built, code: r.code }))).select('*');
     if (!res.error) {
       const back = new Map(((res.data as Row[] | null) ?? []).map((r) => [String(r.id), r]));
       chunk.forEach((r) => { const row = back.get(r.id); if (row) created.push({ row, at: now, n: r.row }); });
@@ -160,7 +167,8 @@ export async function importEmployees(s: HrmsScope, rows: unknown[], dryRun: boo
     if (hist.error) {
       // The people exist but their "Created" line could not be written: take them out again rather than leave them unlogged.
       logger.error(`[hrms] import: change-log write failed (${hist.error.message}); rolling the batch back`);
-      await scoped(db().from('hrms_employees').delete(), s).in('id', created.map((c) => String(c.row.id)));
+      const all = created.map((c) => String(c.row.id));
+      for (let i = 0; i < all.length; i += 50) await scoped(db().from('hrms_employees').delete(), s).in('id', all.slice(i, i + 50)); // short URLs
       throw fail(hist.error);
     }
   }
