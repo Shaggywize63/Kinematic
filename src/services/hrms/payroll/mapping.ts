@@ -1,5 +1,5 @@
 import type {
-  Adjustment, AttendanceSummary, Employee, FnfCase, HrmsDb, Loan, Location, OvertimeRule, PayRun, Payslip, SalaryStructure, TaxDeclaration,
+  Adjustment, AttendanceSummary, Employee, FnfCase, HrmsDb, Loan, Location, OvertimeRule, PayRun, Payslip, SalaryStructure, Shift, TaxDeclaration,
 } from './engine';
 import type { Row } from './common';
 
@@ -60,6 +60,13 @@ export function toEngineEmployee(r: Row): Employee {
 
 export const toEngineLocation = (r: Row): Location => ({
   id: String(r.id), name: String(r.name ?? ''), entityId: String(r.entity_id), state: String(r.state ?? ''), city: String(r.city ?? ''), metro: !!r.metro,
+});
+
+/** A stored shift as the engine sees it. Payroll reads only fullDayHours (the overtime hourly rate divides by it), but the whole shape is mapped. */
+export const toEngineShift = (r: Row): Shift => ({
+  id: String(r.id), name: String(r.name ?? ''), start: String(r.start ?? ''), end: String(r.end ?? ''),
+  breakMinutes: num(r.break_minutes), graceMinutes: num(r.grace_minutes), fullDayHours: num(r.full_day_hours), halfDayHours: num(r.half_day_hours),
+  isNight: !!r.is_night, color: String(r.color ?? ''),
 });
 
 export const toEngineStructure = (r: Row): SalaryStructure => ({

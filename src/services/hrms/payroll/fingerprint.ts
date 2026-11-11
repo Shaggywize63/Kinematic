@@ -12,11 +12,16 @@ import type { HrmsDb, Month } from './engine';
 //   - the structures and locations those employees point at;
 //   - the month's attendance (loss of pay, overtime hours) and adjustments for those people;
 //   - their loans, with how much is recovered so far (a freeze of another run moves it);
-//   - the overtime rule, the shift hours the server assumes, and the law version (a change of statutory rules makes old payslips stale).
+//   - the stored shifts those people point at (their full-day hours drive the overtime hourly rate) and the default used when a person
+//     has no / an unknown shift; the overtime rule; and the law version (a change of statutory rules makes old payslips stale).
 // Fields the compute does NOT read (attendance "locked", the present / holiday counts, a person's address) are left out on purpose, so
 // freezing a run, which locks attendance, does not make anything look stale.
+//
+// VERSION 2 adds the referenced shifts (phase 3 put shifts on the server, so each employee's full-day hours are now a real input and an
+// edit to a shift makes a computed run stale). Runs computed under version 1 (default shift hours of 8) read stale after this change,
+// which is correct: a recompute with real shift hours may differ, so they ask to be computed again before a freeze.
 
-export const FINGERPRINT_VERSION = 1;
+export const FINGERPRINT_VERSION = 2;
 export const SERVER_SHIFT_HOURS = 8;
 
 /** JSON with object keys sorted at every level: the same data always gives the same text. */
@@ -36,8 +41,11 @@ export function payrollInputs(db: HrmsDb, month: Month, entityId: string) {
   const ids = new Set(emps.map((e) => e.id));
   const structureIds = new Set(emps.map((e) => e.structureId).filter(Boolean));
   const locationIds = new Set(emps.map((e) => e.locationId));
+  const shiftIds = new Set(emps.map((e) => e.shiftId).filter(Boolean));
   return {
-    version: FINGERPRINT_VERSION, law: LAW_VERSION, month, entityId, shiftHours: SERVER_SHIFT_HOURS, overtimeRule: db.overtimeRules[0] ?? null,
+    version: FINGERPRINT_VERSION, law: LAW_VERSION, month, entityId, defaultShiftHours: SERVER_SHIFT_HOURS, overtimeRule: db.overtimeRules[0] ?? null,
+    // the full-day hours of the shifts the people on this run point at: an edit to one (same id, new hours) changes the hash -> stale
+    shifts: db.shifts.filter((sh) => shiftIds.has(sh.id)).map((sh) => ({ id: sh.id, fullDayHours: sh.fullDayHours })).sort(byId),
     employees: emps.map((e) => ({
       id: e.id, entityId: e.entityId, status: e.status, joinDate: e.joinDate, lastWorkingDate: e.lastWorkingDate, structureId: e.structureId, annualCtc: e.annualCtc,
       locationId: e.locationId, shiftId: e.shiftId, employmentType: e.employmentType, gender: e.gender, taxRegime: e.taxRegime, declaration: e.declaration,

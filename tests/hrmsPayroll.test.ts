@@ -780,9 +780,10 @@ describe('compute', () => {
     expect(slip2.warnings).toContain('18 overtime hours were logged but no overtime rule applies to this employee.');
   });
 
-  it('assumes 8 hour shifts (shifts are not on the server) whatever shift_id says', async () => {
+  it('falls back to 8 hour days when the employee\'s shift_id is not a stored shift', async () => {
     seedAttendance(people.chitra!.id, M, { overtime_hours: 10 });
     const base = await compute((await mkRun()).id);
+    // shift_id points at nothing in hrms_shifts (no shifts stored here), so the engine still uses 8 (shift?.fullDayHours ?? 8)
     stored('hrms_employees', people.chitra!.id).shift_id = 'some-night-shift';
     const again = await compute(base.id);
     const ot = (r: Row) => r.payslips.find((p: Row) => p.employeeId === people.chitra!.id).earnings.find((l: Row) => l.code === 'OT').amount;
