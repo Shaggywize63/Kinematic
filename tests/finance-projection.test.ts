@@ -155,3 +155,57 @@ describe('growth / hiring plan', () => {
     expect(growthOptionsFrom({ founder: '-5' }).founder).toBe(0);
   });
 });
+
+import { expenseStats, type ProjExpense } from '../src/services/finance/projection.service';
+
+describe('expenses in the projection and P&L', () => {
+  // Three complete months of bills (Aug, Sep, Oct) plus a part-month (Nov) that must not drag the run-rate.
+  const EXP: ProjExpense[] = [
+    { expense_date: '2026-08-31', cost: 20000, category: 'marketing' },
+    { expense_date: '2026-09-30', cost: 30000, category: 'marketing' },
+    { expense_date: '2026-10-31', cost: 40000, category: 'software' },
+    { expense_date: '2026-11-01', cost: 5000, category: 'software' },
+  ];
+
+  it('run-rate is the average of the last 3 complete months, ignoring the current part-month', () => {
+    const e = expenseStats(EXP, AS_OF);
+    expect(e.run_rate).toBe(30000);            // (20000+30000+40000)/3
+    expect(e.months_counted).toBe(3);
+    expect(e.trailing_total).toBe(95000);
+    expect(e.by_category.find((c) => c.category === 'marketing')?.cost).toBe(50000);
+    expect(e.history.at(-1)).toMatchObject({ month: '2026-11', cost: 5000 });
+  });
+
+  it('adds expenses and net to the actuals history', () => {
+    const p = buildProjection(INVOICES, QUOTES, PAYMENTS, AS_OF, DEFAULT_OPTIONS, EXP);
+    expect(p.summary.monthly_expense).toBe(30000);
+    const oct = p.history.find((h) => h.month === '2026-10');
+    expect(oct?.expenses).toBe(40000);
+    expect(oct?.net).toBe(Math.round((oct!.billed - 40000) * 100) / 100);
+  });
+
+  it('carries operating expenses into the growth-plan P&L and lowers net', () => {
+    const p = buildProjection(INVOICES, QUOTES, PAYMENTS, AS_OF, DEFAULT_OPTIONS, EXP);
+    const withOpex = buildGrowthPlan(p, { ...DEFAULT_GROWTH, opex: 30000 });
+    const noOpex = buildGrowthPlan(p, { ...DEFAULT_GROWTH, opex: 0 });
+    type Base = { timeline: Array<{ opex: number; payroll: number; one_time: number; billings: number; existing: number; founder: number; net: number; cum_net: number }>; pnl: { expenses: number; net: number; months: Array<unknown> } };
+    const base = (g: typeof withOpex) => g.plans.base as Base;
+    const b = base(withOpex);
+    expect(b.timeline[0].opex).toBe(30000);
+    expect(b.pnl.expenses).toBe(360000);       // 30000 × 12
+    expect(b.pnl.months).toHaveLength(12);
+    // Each month's net is revenue minus every cost (payroll, one-off, founder, other, opex).
+    b.timeline.forEach((t) => expect(t.net).toBe(Math.round((t.billings - t.payroll - t.one_time - t.founder - t.existing - t.opex) * 100) / 100));
+    // The 12-month P&L net equals the final cumulative figure.
+    expect(b.pnl.net).toBe(b.timeline.at(-1)!.cum_net);
+    // With no hires in either case (founder pay already blocks hiring here), opex lowers the yearly P&L by 12×.
+    expect(base(noOpex).pnl.net - b.pnl.net).toBe(360000);
+    void noOpex;
+  });
+
+  it('reads opex from the query and clamps it', () => {
+    expect(growthOptionsFrom({ opex: '45000' }).opex).toBe(45000);
+    expect(growthOptionsFrom({}).opex).toBe(0);
+    expect(growthOptionsFrom({ opex: '-5' }).opex).toBe(0);
+  });
+});

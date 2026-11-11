@@ -16,6 +16,7 @@ import { FinanceScope, scoped } from './scope';
 import { round2 } from './money';
 import { fetchAll } from './reports.service';
 import { addDays, addInterval, addMonths, type RecurrenceSpec } from './recurrence';
+import { loadLedger } from './expenses.service';
 
 const db = () => supabaseAdmin;
 const REVENUE_STATUSES = ['sent', 'partially_paid', 'paid'];
@@ -28,6 +29,35 @@ export interface ProjInvoice {
 }
 export interface ProjQuote { number: string; customer_id: string; customer: string; taxable: number }
 export interface ProjPayment { payment_date: string; amount: number }
+/** A real business expense, as a profit-and-loss cost: what was paid, minus any GST you can reclaim. */
+export interface ProjExpense { expense_date: string; cost: number; category: string }
+
+const monthLabel = (k: string) => new Date(`${k}-01T00:00:00Z`).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
+
+/**
+ * Monthly operating-expense run-rate and history from real bills. The run-rate (what we carry forward in
+ * the P&L) is the average of the last up-to-3 COMPLETE months, so the current, part-billed month does not
+ * drag it down. Payroll is not in here — the plan models salaries separately.
+ */
+export function expenseStats(expenses: ProjExpense[], asOf: string) {
+  const byMonth = new Map<string, number>();
+  const byCat = new Map<string, number>();
+  for (const e of expenses) {
+    const mk = String(e.expense_date).slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(mk)) continue;
+    byMonth.set(mk, (byMonth.get(mk) ?? 0) + e.cost);
+    byCat.set(e.category || 'other', (byCat.get(e.category || 'other') ?? 0) + e.cost);
+  }
+  const thisMonth = asOf.slice(0, 7);
+  const months = Array.from(byMonth.keys()).filter((k) => k <= thisMonth).sort();
+  const history = months.map((k) => ({ month: k, label: monthLabel(k), cost: round2(byMonth.get(k) ?? 0) }));
+  const complete = months.filter((k) => k < thisMonth);
+  const recent = complete.slice(-3);
+  const run_rate = recent.length ? round2(recent.reduce((x, k) => x + (byMonth.get(k) ?? 0), 0) / recent.length) : 0;
+  const by_category = Array.from(byCat.entries()).map(([category, cost]) => ({ category, cost: round2(cost) })).sort((a, b) => b.cost - a.cost);
+  const trailing_total = round2(months.slice(-12).reduce((x, k) => x + (byMonth.get(k) ?? 0), 0));
+  return { run_rate, months_counted: recent.length, history, by_category, trailing_total };
+}
 export interface ProjOptions { churn_pct: number; growth: number; growth_up: number }
 export const DEFAULT_OPTIONS: ProjOptions = { churn_pct: 15, growth: 2500, growth_up: 5000 };
 
@@ -110,7 +140,7 @@ export interface ProjCustomer {
 }
 
 export function buildProjection(
-  invoices: ProjInvoice[], quotes: ProjQuote[], payments: ProjPayment[], asOf: string, opts: ProjOptions = DEFAULT_OPTIONS,
+  invoices: ProjInvoice[], quotes: ProjQuote[], payments: ProjPayment[], asOf: string, opts: ProjOptions = DEFAULT_OPTIONS, expenses: ProjExpense[] = [],
 ) {
   const rev = invoices.filter((i) => REVENUE_STATUSES.includes(i.status));
   const byCustomer = new Map<string, ProjInvoice[]>();
@@ -170,11 +200,17 @@ export function buildProjection(
   const billedBy = new Map<string, number>(); const collectedBy = new Map<string, number>();
   for (const i of rev) billedBy.set(i.issue_date.slice(0, 7), (billedBy.get(i.issue_date.slice(0, 7)) ?? 0) + i.taxable);
   for (const p of payments) collectedBy.set(p.payment_date.slice(0, 7), (collectedBy.get(p.payment_date.slice(0, 7)) ?? 0) + p.amount);
-  const first = Array.from(billedBy.keys()).sort()[0];
-  const history: Array<{ month: string; label: string; billed: number; collected: number }> = [];
+  const exp = expenseStats(expenses, asOf);
+  const expenseBy = new Map(exp.history.map((h) => [h.month, h.cost]));
+  // History starts at the earliest month that has revenue OR an expense, so costs show even before the first invoice.
+  const firstBilled = Array.from(billedBy.keys()).sort()[0];
+  const firstExp = exp.history[0]?.month;
+  const first = [firstBilled, firstExp].filter(Boolean).sort()[0];
+  const history: Array<{ month: string; label: string; billed: number; collected: number; expenses: number; net: number }> = [];
   if (first) {
     for (let k = 0, key = first; key <= asOf.slice(0, 7) && k < 60; k++, key = addMonths(`${key}-01`, 1).slice(0, 7)) {
-      history.push({ month: key, label: new Date(`${key}-01T00:00:00Z`).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }), billed: round2(billedBy.get(key) ?? 0), collected: round2(collectedBy.get(key) ?? 0) });
+      const billed = round2(billedBy.get(key) ?? 0), spent = round2(expenseBy.get(key) ?? 0);
+      history.push({ month: key, label: monthLabel(key), billed, collected: round2(collectedBy.get(key) ?? 0), expenses: spent, net: round2(billed - spent) });
     }
   }
 
@@ -191,9 +227,11 @@ export function buildProjection(
       outstanding: round2(rev.filter((i) => i.status === 'sent' || i.status === 'partially_paid').reduce((x, i) => x + i.balance, 0)),
       recurring_customers: customers.length, mrr: round2(arr / 12), arr, top2_share: Math.round(top2 * 1000) / 10,
       one_off_total: round2(oneOff.reduce((x, o) => x + o.amount, 0)), gst_factor: gstFactor,
+      monthly_expense: exp.run_rate, expense_trailing_total: exp.trailing_total,
     },
     scenarios: { contracted: sumOf('contracted'), conservative: sumOf('conservative'), base: sumOf('base'), upside: sumOf('upside') },
     months, history, customers, one_off: oneOff.sort((a, b) => b.amount - a.amount), pipeline: { quotes: pipeline, total: pipelineTotal },
+    expenses: exp,
   };
 }
 
@@ -248,10 +286,10 @@ export const ROLE_CATALOG: RoleDef[] = [
     trigger_text: '40 or more recurring customers' },
 ];
 
-export interface GrowthOptions { cap_pct: number; oncost_pct: number; existing: number; founder: number; costs: Record<string, number> }
+export interface GrowthOptions { cap_pct: number; oncost_pct: number; existing: number; founder: number; opex: number; costs: Record<string, number> }
 /** Founder pay is a fixed cost the plan always carries: ₹2,00,000 a month, before any hire is affordable. */
 export const FOUNDER_MONTHLY = 200_000;
-export const DEFAULT_GROWTH: GrowthOptions = { cap_pct: 50, oncost_pct: 12, existing: 0, founder: FOUNDER_MONTHLY, costs: {} };
+export const DEFAULT_GROWTH: GrowthOptions = { cap_pct: 50, oncost_pct: 12, existing: 0, founder: FOUNDER_MONTHLY, opex: 0, costs: {} };
 
 type ScenarioKey = 'conservative' | 'base' | 'upside';
 
@@ -263,14 +301,15 @@ export function growthOptionsFrom(q: Record<string, unknown>): GrowthOptions {
     oncost_pct: num(q.oncost, DEFAULT_GROWTH.oncost_pct, 0, 60),
     existing: num(q.existing, DEFAULT_GROWTH.existing, 0, 100_000_000),
     founder: num(q.founder, DEFAULT_GROWTH.founder, 0, 100_000_000),
+    opex: num(q.opex, DEFAULT_GROWTH.opex, 0, 100_000_000),
     costs,
   };
 }
 
 export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: GrowthOptions) {
   const cap = g.cap_pct / 100;
-  // Costs that exist whether or not anyone is hired: founder pay + any other monthly costs entered.
-  const fixed = g.existing + g.founder;
+  // Costs that exist whether or not anyone is hired: founder pay + your real monthly expenses + any other costs entered.
+  const fixed = g.existing + g.founder + g.opex;
   const customersNow = proj.summary.recurring_customers;
   const mrr0 = proj.summary.mrr;
   const avgMrr = customersNow > 0 ? mrr0 / customersNow : 0;
@@ -333,7 +372,7 @@ export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: Gro
       cumNet += net; peak = Math.max(peak, payrollK); oneTimeTotal += oneTime; payrollTotal += payrollK;
       return {
         month: m.month, label: m.label, mrr: round2(mrrAt(k)), customers: custAt(k), billings, payroll: round2(payrollK), one_time: round2(oneTime),
-        existing: g.existing, founder: g.founder, net, cum_net: round2(cumNet), hires: starting.map((r) => r.title),
+        existing: g.existing, founder: g.founder, opex: g.opex, net, cum_net: round2(cumNet), hires: starting.map((r) => r.title),
         payroll_pct: mrrAt(k) > 0 ? Math.round(((payrollK + fixed) / mrrAt(k)) * 1000) / 10 : 0,
       };
     });
@@ -342,6 +381,14 @@ export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: Gro
     plans[sc] = {
       roles: out, timeline,
       budget: { year1_total: round2(payrollTotal + oneTimeTotal), payroll: round2(payrollTotal), one_time: round2(oneTimeTotal), peak_monthly: round2(peak), founder_year1: round2(g.founder * 12), end_net: round2(cumNet) },
+      // 12-month profit & loss for this scenario. revenue is projected billings; costs are real + modelled.
+      pnl: {
+        revenue: round2(timeline.reduce((x, t) => x + t.billings, 0)),
+        expenses: round2(g.opex * 12), founder: round2(g.founder * 12), other: round2(g.existing * 12),
+        payroll: round2(payrollTotal + oneTimeTotal),
+        net: round2(cumNet),
+        months: timeline.map((t) => ({ month: t.month, label: t.label, revenue: t.billings, expenses: round2(t.opex + t.existing), payroll: round2(t.payroll + t.one_time), founder: t.founder, net: t.net, cum_net: t.cum_net })),
+      },
       headline: {
         hires: hires.length,
         first_hire: hires[0] ? { title: hires[0].title, month: hires[0].hire_month, label: hires[0].hire_label, status: hires[0].status } : null,
@@ -356,7 +403,9 @@ export function buildGrowthPlan(proj: ReturnType<typeof buildProjection>, g: Gro
       `Employer cost on top of salary: ${g.oncost_pct}% (PF, insurance, equipment). One-time cost per hire: one month's salary (recruiting + setup).`,
       `Founder pay is held at ₹${Math.round(g.founder).toLocaleString('en-IN')} a month throughout and counted before any hire. Fixed costs (founder + other) plus the team are kept under ${g.cap_pct}% of monthly recurring revenue; the rest covers infrastructure, tools and profit.`,
       ...(mrr0 * cap < g.founder ? [`Today's recurring revenue (₹${Math.round(mrr0).toLocaleString('en-IN')}/month) does not yet cover the founder pay inside the ${g.cap_pct}% limit, so no hire is affordable until it reaches about ₹${Math.round(g.founder / cap).toLocaleString('en-IN')}/month even before the first salary.`] : []),
-      'Sales commission and AWS / software costs are not included unless you enter them under "other monthly costs".',
+      g.opex > 0
+        ? `Operating expenses of ₹${Math.round(g.opex).toLocaleString('en-IN')}/month are carried in the P&L, from the average of your recent months' bills (Finance → Expenses). Sales commission is not included.`
+        : 'No recorded expenses yet, so the P&L shows only revenue, founder pay and any hires. Add bills in Finance → Expenses & GST to see operating costs here.',
     ],
     plans,
   };
@@ -393,6 +442,18 @@ export async function projection(s: FinanceScope, query: Record<string, unknown>
   }));
   const quotes: ProjQuote[] = qs.map((q) => ({ number: String(q.number), customer_id: String(q.customer_id), customer: name(q.customer_snapshot), taxable: Number(q.taxable_value) }));
   const payments: ProjPayment[] = pays.map((p) => ({ payment_date: String(p.payment_date).slice(0, 10), amount: Number(p.amount) }));
-  const proj = buildProjection(invoices, quotes, payments, asOf, optionsFrom(query));
-  return { ...proj, growth: buildGrowthPlan(proj, growthOptionsFrom(query)) };
+
+  // Real expenses as P&L costs (what was paid minus the GST that can be reclaimed), over the trailing year.
+  const windowStart = new Date(`${asOf.slice(0, 7)}-01T00:00:00Z`);
+  windowStart.setUTCMonth(windowStart.getUTCMonth() - 12);
+  const ledger = await loadLedger(s, windowStart.toISOString().slice(0, 10), asOf, 'all');
+  const expenses: ProjExpense[] = ledger
+    .filter((r) => r.date)
+    .map((r) => ({ expense_date: String(r.date).slice(0, 10), cost: round2(Number(r.total) - Number(r.itc_total)), category: r.category }));
+
+  const proj = buildProjection(invoices, quotes, payments, asOf, optionsFrom(query), expenses);
+  const g = growthOptionsFrom(query);
+  // Default the plan's operating expense to the derived run-rate, unless the user typed their own on the page.
+  if (query.opex === undefined || String(query.opex).trim() === '') g.opex = proj.summary.monthly_expense;
+  return { ...proj, growth: buildGrowthPlan(proj, g) };
 }
