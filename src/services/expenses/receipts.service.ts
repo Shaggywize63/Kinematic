@@ -13,7 +13,7 @@ import { supabaseAdmin } from '../../lib/supabase';
 import { currentProjectKey } from '../../lib/projects';
 import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
-import { scanReceipt, ReceiptMediaType } from './receiptScan.service';
+import { scanReceipt, ReceiptMediaType, ScanKind } from './receiptScan.service';
 import { scanOdometer, EMPTY_ODOMETER, OdometerReading } from './odometerScan.service';
 import { Actor } from './access';
 
@@ -21,7 +21,7 @@ export const RECEIPT_BUCKET = process.env.BUCKET_RECEIPTS || 'kinematic-receipts
 const MAX_BYTES = 10 * 1024 * 1024;
 const SIGN_TTL_SECONDS = 600;
 /** The photo reading (OCR) is a convenience: it gets this long, then the upload is answered without it. */
-const SCAN_TIMEOUT_MS = Number(process.env.RECEIPT_SCAN_TIMEOUT_MS) > 0 ? Number(process.env.RECEIPT_SCAN_TIMEOUT_MS) : 12_000;
+const SCAN_TIMEOUT_MS = Number(process.env.RECEIPT_SCAN_TIMEOUT_MS) > 0 ? Number(process.env.RECEIPT_SCAN_TIMEOUT_MS) : 25_000;
 // Buckets a claim's receipt may legitimately point at (older app builds uploaded
 // receipts through the generic photo endpoint).
 const SIGNABLE = new Set([RECEIPT_BUCKET, 'kinematic-form-photos', 'form-responses']);
@@ -31,7 +31,9 @@ const EXT: Record<string, string> = {
   'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
   'image/heic': 'heic', 'image/heif': 'heif', 'application/pdf': 'pdf',
 };
-const SCANNABLE = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const SCANNABLE = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
+/** The odometer reader takes photos only. */
+const PHOTO_ONLY = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 /** What the bytes actually are — never trust the declared content type alone. */
 export function sniff(b: Buffer): string | null {
@@ -73,7 +75,7 @@ export interface UploadedFile { buffer: Buffer; mimetype?: string; originalname?
  * `scan`: omitted / true = read the photo as a receipt (today's behaviour); false = just store it;
  * 'odometer' = read the vehicle odometer instead (response gains `odometer`, `scan` stays null).
  */
-export async function uploadReceipt(actor: Actor, file: UploadedFile, opts: { scan?: boolean | 'odometer' } = {}) {
+export async function uploadReceipt(actor: Actor, file: UploadedFile, opts: { scan?: boolean | 'odometer'; kind?: ScanKind } = {}) {
   if (!file?.buffer?.length) throw new AppError(400, 'No file received', 'NO_FILE');
   if (file.buffer.length > MAX_BYTES) throw new AppError(413, 'The file is larger than 10 MB', 'TOO_LARGE');
   const type = sniff(file.buffer);
@@ -92,12 +94,12 @@ export async function uploadReceipt(actor: Actor, file: UploadedFile, opts: { sc
   let scan: unknown = null;
   let odometer: OdometerReading = { ...EMPTY_ODOMETER };
   if (odometerMode) {
-    if (SCANNABLE.has(type)) {
-      try { odometer = await withTimeout(scanOdometer(file.buffer.toString('base64'), type as ReceiptMediaType), SCAN_TIMEOUT_MS, 'odometer OCR'); }
+    if (PHOTO_ONLY.has(type)) {
+      try { odometer = await withTimeout(scanOdometer(file.buffer.toString('base64'), type as 'image/jpeg' | 'image/png' | 'image/webp'), SCAN_TIMEOUT_MS, 'odometer OCR'); }
       catch (e: any) { logger.warn(`[expenses] odometer OCR failed: ${e?.message || e}`); }
     }
   } else if (opts.scan !== false && SCANNABLE.has(type)) {
-    try { scan = await withTimeout(scanReceipt(file.buffer.toString('base64'), type as ReceiptMediaType), SCAN_TIMEOUT_MS, 'receipt OCR'); }
+    try { scan = await withTimeout(scanReceipt(file.buffer.toString('base64'), type as ReceiptMediaType, opts.kind ?? 'claim'), SCAN_TIMEOUT_MS, 'receipt OCR'); }
     catch (e: any) { logger.warn(`[expenses] receipt OCR failed: ${e?.message || e}`); }
   }
 

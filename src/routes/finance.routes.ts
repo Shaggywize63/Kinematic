@@ -294,7 +294,7 @@ router.post('/expenses/receipt', withReceipt, asyncHandler(async (req: Request, 
   const role = String((req as AuthRequest).user?.role ?? '');
   // ?scan=0 stores the file only; by default the amount, merchant, date and GST are read off it to pre-fill the form.
   const scan = String(req.query.scan ?? '1') !== '0';
-  res.status(201).json(await uploadReceipt({ id: s.user_id, org_id: s.org_id, role, client_id: s.client_id }, req.file, { scan }));
+  res.status(201).json(await uploadReceipt({ id: s.user_id, org_id: s.org_id, role, client_id: s.client_id }, req.file, { scan, kind: 'finance' }));
 }));
 router.post('/expenses', asyncHandler(async (req: Request, res: Response) => res.status(201).json(await expensesSvc.createExpense(scopeOf(req), parse(expenseSchema, req.body)))));
 router.get('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.getExpenseView(scopeOf(req), idParam(req)))));
