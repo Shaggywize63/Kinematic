@@ -28,6 +28,10 @@ const UNIQUES: Unique[] = [
   { table: 'hrms_pay_runs', cols: ['org_id', 'entity_id', 'month'], name: 'hrms_pay_runs_regular_uq', where: (r) => r.type === 'regular' },
   { table: 'hrms_payslips', cols: ['run_id', 'employee_id'], name: 'hrms_payslips_run_employee_uq' },
   { table: 'hrms_fnf_cases', cols: ['org_id', 'employee_id'], name: 'hrms_fnf_cases_open_uq', where: (r) => r.status !== 'paid' },
+  { table: 'hrms_shifts', cols: ['org_id', 'name'], name: 'hrms_shifts_org_name_uq' },
+  { table: 'hrms_roster', cols: ['org_id', 'employee_id', 'week_start'], name: 'hrms_roster_org_emp_week_uq' },
+  { table: 'hrms_leave_types', cols: ['org_id', 'code'], name: 'hrms_leave_types_org_code_uq' },
+  { table: 'hrms_leave_balances', cols: ['org_id', 'employee_id', 'leave_type_id'], name: 'hrms_leave_balances_org_emp_lt_uq' },
 ];
 
 /** The database defaults of the columns the services leave out of an insert. */
@@ -55,6 +59,14 @@ const DEFAULTS: Record<string, () => Row> = {
     loan_recoveries: {}, attendance_locked_for: [], input_fingerprint: null, created_by: null,
   }),
   hrms_fnf_cases: () => ({ resignation_date: null, notice_days_served: 0, leave_encash_days: 0, other_recoveries: 0, other_payments: 0, status: 'draft' }),
+  hrms_shifts: () => ({ break_minutes: 0, grace_minutes: 0, full_day_hours: 8, half_day_hours: 4, is_night: false, color: '#3E9EFF' }),
+  hrms_roster: () => ({ days: [] }),
+  hrms_leave_types: () => ({
+    paid: true, audience: 'all', accrual: {}, carry_forward: {}, encashment: {}, max_consecutive_days: null, document_after_days: null,
+    probation_eligible: true, include_weekly_offs: false, description: null,
+  }),
+  hrms_holiday_lists: () => ({ holidays: [] }),
+  hrms_leave_balances: () => ({ opening: 0, accrued: 0, taken: 0, encashed: 0, lapsed: 0 }),
 };
 
 /** jsonb stores an object's keys sorted by length, then bytewise; arrays keep their order. */
@@ -110,7 +122,7 @@ export function createHrmsFakeDb() {
     if (!gone.length) return;
     const ids = new Set(gone.map((g) => g.id));
     if (table === 'hrms_employees') {
-      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
+      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
       for (const r of tables.hrms_employees ?? []) if (ids.has(r.reporting_to_id)) r.reporting_to_id = null;
       for (const r of tables.hrms_departments ?? []) if (ids.has(r.head_id)) r.head_id = null;
     }
