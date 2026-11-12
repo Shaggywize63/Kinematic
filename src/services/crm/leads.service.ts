@@ -25,6 +25,63 @@ import type { Lead, LeadStatus } from '../../types/crm.types';
 // dance is what TS demands for casts between non-overlapping shapes.
 const asRow = (x: unknown): Record<string, unknown> => x as Record<string, unknown>;
 
+// ── Sample invoices (Spark & Ray) ───────────────────────────────────────────
+// A lead can carry a free-form list of sample-invoice NUMBERS (just strings —
+// no invoice generation, delivery, airway bill or line items). It is stored in
+// the lead's existing `custom_fields` jsonb under `sample_invoices` as an array
+// of strings — exactly how deals-per-lead stashed make/brand there — so it needs
+// NO new column, table or migration. The list already round-trips generically
+// through the custom_fields blob (leadCreateSchema accepts z.record(z.unknown())
+// and validateAndStampCustomFields passes unknown keys through untouched); this
+// helper only NORMALIZES its shape on write.
+//
+// The normalization is deliberately tenant-agnostic and a no-op unless the key
+// is present, so it is harmless for every tenant — only Spark & Ray (an
+// isB2bClient) surfaces the UI that populates it. There is no built-in column
+// here, so the field-override `isHidden` contract does not apply.
+export const SAMPLE_INVOICES_KEY = 'sample_invoices';
+export const MAX_SAMPLE_INVOICES = 100;
+export const MAX_SAMPLE_INVOICE_LEN = 60;
+
+/**
+ * Normalize `custom_fields.sample_invoices`. Returns a NEW object (never mutates
+ * the input) and is a no-op unless the key is present. When present, the value
+ * is coerced to an array of clean strings:
+ *   • each entry trimmed; blank/empty entries dropped;
+ *   • each entry capped at 60 chars (overflow truncated);
+ *   • duplicates removed on exact string match, keeping the first occurrence;
+ *   • the list capped at 100 entries (overflow dropped).
+ * Every other custom_fields key is preserved untouched. Truncation runs before
+ * dedupe so two over-length numbers that collapse to the same 60-char value
+ * don't leave a duplicate in the output.
+ */
+export function normalizeSampleInvoicesField(
+  customFields: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const cf: Record<string, unknown> = { ...(customFields ?? {}) };
+  if (!(SAMPLE_INVOICES_KEY in cf)) return cf;
+  const raw = cf[SAMPLE_INVOICES_KEY];
+  const arr: unknown[] = Array.isArray(raw)
+    ? raw
+    : raw === null || raw === undefined || raw === ''
+      ? []
+      : [raw];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of arr) {
+    if (item === null || item === undefined) continue;
+    let s = (typeof item === 'string' ? item : String(item)).trim();
+    if (!s) continue;
+    if (s.length > MAX_SAMPLE_INVOICE_LEN) s = s.slice(0, MAX_SAMPLE_INVOICE_LEN);
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+    if (out.length >= MAX_SAMPLE_INVOICES) break;
+  }
+  cf[SAMPLE_INVOICES_KEY] = out;
+  return cf;
+}
+
 export interface CreateLeadInput {
   org_id: string;
   user_id?: string;
@@ -106,6 +163,9 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
     org_id, payload.client_id ?? null, 'lead', payload.custom_fields,
     { enforceRequired, isB2c: payload.is_b2c },
   );
+  // Shape the free-form sample-invoice number list (Spark & Ray) — tenant-
+  // agnostic, no-op unless the key is present. See normalizeSampleInvoicesField.
+  payload.custom_fields = normalizeSampleInvoicesField(payload.custom_fields);
 
   const owner_id = payload.owner_id ?? (await assignment.assignOwner(org_id, payload, user_id));
 
@@ -835,6 +895,9 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     payload.custom_fields = await validateAndStampCustomFields(
       org_id, (before as { client_id?: string | null }).client_id ?? null, 'lead', merged,
     );
+    // Shape the free-form sample-invoice number list (Spark & Ray) — tenant-
+    // agnostic, no-op unless the key is present. See normalizeSampleInvoicesField.
+    payload.custom_fields = normalizeSampleInvoicesField(payload.custom_fields);
   }
 
   // Terminal/"disqualified" states — the client's own is_lost statuses when a
