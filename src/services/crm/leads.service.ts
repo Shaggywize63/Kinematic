@@ -14,6 +14,9 @@ import { validateAndStampCustomFields } from './customFields.service';
 import { assertValidLeadStatus, disqualifiedStatesFor } from './leadStatuses';
 import { isMinor } from '../../lib/age';
 import { logger } from '../../lib/logger';
+import { allocateLeadRef, normalizeLeadRef, LEAD_TYPES } from '../../lib/leadRef';
+import { isB2bClient } from '../../lib/b2bClients';
+import { blamesOptional, isUndefinedColumn, withoutKeys } from '../expenses/dbErrors';
 import type { Lead, LeadStatus } from '../../types/crm.types';
 
 // Helper: erase the structural-type-narrowing TS does on Lead so we can
@@ -51,7 +54,16 @@ async function resolveSoleClientId(org_id: string, provided: string | null): Pro
   return rows.length === 1 ? rows[0].id : null;
 }
 
+/**
+ * Optional lead columns that only exist once migration_lead_ref_and_type.sql has run. An insert that fails because
+ * one of them is absent is retried once without them, so lead creation never breaks on an unmigrated tenant.
+ */
+export const LEAD_REF_TYPE_COLUMNS = ['ref_no', 'lead_type'] as const;
+
 export async function createLead({ org_id, user_id, payload, skipDedup, enforceRequired }: CreateLeadInput) {
+  // The lead number is server-assigned and read-only: whatever a caller (route, import, webhook, KINI) put in the
+  // payload is discarded; the number is only ever allocated below.
+  delete (payload as Record<string, unknown>).ref_no;
   if (!skipDedup) {
     if (payload.email) {
       const dup = await dedup.findLeadByEmail(org_id, payload.email);
@@ -231,7 +243,30 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
     approval_requested_by: approvalStatus === 'pending' ? (user_id ?? null) : null,
   };
 
-  const { data, error } = await supabaseAdmin.from('crm_leads').insert(insertRow).select('*').single();
+  // Lead number (connected-B2B clients only; allocateLeadRef never throws and returns null for everyone else). The
+  // keys are only added when there is something to write, so a tenant without lead numbers / a lead type inserts the
+  // exact row it always did.
+  const leadRef = await allocateLeadRef(payload.client_id ?? null);
+  const leadType = (LEAD_TYPES as readonly string[]).includes(p.lead_type as string) ? (p.lead_type as string) : undefined;
+  const insertWithRef: Record<string, unknown> = {
+    ...insertRow,
+    ...(leadRef ? { ref_no: leadRef } : {}),
+    ...(leadType ? { lead_type: leadType } : {}),
+  };
+
+  let { data, error } = await supabaseAdmin.from('crm_leads').insert(insertWithRef).select('*').single();
+  // A tenant database that has not run migration_lead_ref_and_type.sql has neither column: retry once without them
+  // (the lead is saved un-numbered / untyped; the backfill numbers it once the migration is applied).
+  if (error && isUndefinedColumn(error) && blamesOptional(error, LEAD_REF_TYPE_COLUMNS)
+      && LEAD_REF_TYPE_COLUMNS.some((k) => k in insertWithRef)) {
+    logger.warn({ clientId: payload.client_id ?? null, err: error.message }, 'leads: ref_no/lead_type columns missing in this database, saving the lead without them');
+    ({ data, error } = await supabaseAdmin.from('crm_leads').insert(withoutKeys(insertWithRef, LEAD_REF_TYPE_COLUMNS)).select('*').single());
+  } else if (error && (error as { code?: string }).code === '23505' && 'ref_no' in insertWithRef && /ref_no/i.test(String(error.message ?? ''))) {
+    // The lead-number unique index refused the number (cannot happen with the atomic counter unless the series was
+    // reset by hand): save the lead un-numbered rather than failing the create; the backfill numbers it later.
+    logger.warn({ clientId: payload.client_id ?? null, ref: leadRef }, 'leads: lead number already taken, saving the lead without one');
+    ({ data, error } = await supabaseAdmin.from('crm_leads').insert(withoutKeys(insertWithRef, ['ref_no'])).select('*').single());
+  }
   if (error) {
     // Race-safe net for the dedup unique indexes (ux_crm_leads_org_email_open
     // and ux_crm_leads_org_phone_hash_open). If two parallel POSTs both
@@ -383,7 +418,7 @@ export async function listLeads(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean; ownOnly?: boolean } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean; ownOnly?: boolean; noLeadRef?: boolean } = {},
 ) {
   const { rows } = await listLeadsWithCount(org_id, filters, client_id, options);
   return rows;
@@ -431,7 +466,7 @@ export async function listLeadsWithCount(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean; ownOnly?: boolean } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean; ownOnly?: boolean; noLeadRef?: boolean } = {},
 ): Promise<{ rows: Lead[]; total: number; page: number; limit: number }> {
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
@@ -616,9 +651,32 @@ export async function listLeadsWithCount(
     const n = Number(filters.no_activity_days);
     if (n > 0) q = q.or(`last_activity_at.is.null,last_activity_at.lt.${new Date(Date.now() - n * 86_400_000).toISOString()}`);
   }
+  // Lead number / lead type (migration_lead_ref_and_type.sql). Both are validated, never interpolated raw.
+  let usesLeadRefColumn = false;
+  let usesSearchRef = false;
+  if (filters.lead_type !== undefined && filters.lead_type !== '') {
+    const lt = String(filters.lead_type).trim().toLowerCase();
+    if (!(LEAD_TYPES as readonly string[]).includes(lt)) {
+      throw new AppError(400, `lead_type must be one of: ${LEAD_TYPES.join(', ')}`, 'VALIDATION');
+    }
+    q = q.eq('lead_type', lt);
+    usesLeadRefColumn = true;
+  }
+  if (filters.ref_no !== undefined && filters.ref_no !== '') {
+    const ref = normalizeLeadRef(filters.ref_no);
+    if (!ref) throw new AppError(400, 'ref_no must look like SR/LD/2627-12', 'VALIDATION');
+    q = q.eq('ref_no', ref);
+    usesLeadRefColumn = true;
+  }
   if (filters.q) {
     const s = sanitisePostgrestSearch(filters.q);
-    if (s) q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`);
+    if (s) {
+      // The search box also finds a lead by its number (case-insensitive contains). Only offered where lead numbers
+      // exist or the text looks like one (a "/" or "2627-1"), and dropped again below on a database without the column.
+      const searchRef = !options.noLeadRef && (isB2bClient(client_id) || /\/|\d{4}-\d/.test(s));
+      q = q.or(`first_name.ilike.%${s}%,last_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%${searchRef ? `,ref_no.ilike.%${s}%` : ''}`);
+      if (searchRef) usesSearchRef = true;
+    }
   }
   if (filters.from) q = q.gte('created_at', String(filters.from));
   if (filters.to) q = q.lte('created_at', String(filters.to));
@@ -673,6 +731,12 @@ export async function listLeadsWithCount(
        .range((page - 1) * limit, page * limit - 1);
   }
   const { data, error, count } = await q;
+  if (error && (usesLeadRefColumn || usesSearchRef) && isUndefinedColumn(error)) {
+    // A database that has not run migration_lead_ref_and_type.sql: no lead has a number or a type, so a filter on
+    // either matches nothing; a plain search just loses the number term and runs as it always did.
+    if (usesLeadRefColumn) return { rows: [], total: 0, page, limit };
+    return listLeadsWithCount(org_id, filters, client_id, { ...options, noLeadRef: true });
+  }
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   // Tag each row so the list can badge inbound leads without a second lookup.
   const rows = (data ?? []).map((r) => {
@@ -787,6 +851,8 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     updated_by: user_id ?? null,
     updated_at: nowIso,
   };
+  // The lead number is read-only: no caller (route, merge, import, KINI) can change or clear it through an update.
+  delete update.ref_no;
   if (enteringDisqualified && asRow(before).disqualified_at == null) {
     update.disqualified_at = nowIso;
   }
@@ -799,8 +865,14 @@ export async function updateLead(org_id: string, id: string, payload: Partial<Le
     update.stage_changed_at = nowIso;
   }
 
-  const { data, error } = await supabaseAdmin.from('crm_leads')
+  let { data, error } = await supabaseAdmin.from('crm_leads')
     .update(update).eq('org_id', org_id).eq('id', id).select('*').single();
+  // lead_type only exists after migration_lead_ref_and_type.sql: on an unmigrated tenant save the rest of the edit.
+  if (error && 'lead_type' in update && isUndefinedColumn(error) && blamesOptional(error, ['lead_type'])) {
+    logger.warn({ leadId: id, err: error.message }, 'leads: lead_type column missing in this database, saving the edit without it');
+    ({ data, error } = await supabaseAdmin.from('crm_leads')
+      .update(withoutKeys(update, ['lead_type'])).eq('org_id', org_id).eq('id', id).select('*').single());
+  }
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
   if (before.status !== data.status) {
