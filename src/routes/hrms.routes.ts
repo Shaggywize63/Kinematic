@@ -17,6 +17,7 @@
  *   PUT    settings/payroll               { overtime_rule }   (also at payroll/settings/payroll)
  *   *      payroll/...                    phase 2: payroll on the server (hrmsPayroll.routes.ts)
  *   *      time/...                       phase 3: Time & Leave on the server (hrmsTime.routes.ts)
+ *   *      lifecycle/...                  phase 4: Lifecycle + Letters on the server (hrmsLifecycle.routes.ts)
  *
  * PAN and bank details are encrypted at rest (lib/hrmsCrypto) and masked in every response; they are write-only.
  * If the HRMS tables are not there yet (migration_hrms_core.sql not applied) every call answers 503 HRMS_NOT_READY.
@@ -42,6 +43,7 @@ import * as settings from '../services/hrms/settings.service';
 import { importEmployees } from '../services/hrms/import.service';
 import payrollRoutes from './hrmsPayroll.routes';
 import timeRoutes from './hrmsTime.routes';
+import lifecycleRoutes from './hrmsLifecycle.routes';
 import * as payrollSettings from '../services/hrms/payroll/settings.service';
 import { payrollSettingsBody } from '../services/hrms/payroll/schemas';
 
@@ -81,6 +83,9 @@ router.use('/payroll', payrollRoutes);
 
 // ── time & leave (phase 3) ──────────────────────────────────────────────────
 router.use('/time', timeRoutes);
+
+// ── lifecycle + letters (phase 4) ───────────────────────────────────────────
+router.use('/lifecycle', lifecycleRoutes);
 
 // ── organisation structure ──────────────────────────────────────────────────
 const MASTER_ROUTES: Array<{ path: string; kind: MasterKind; create: Parameters<typeof parse>[0]; update: Parameters<typeof parse>[0] }> = [
