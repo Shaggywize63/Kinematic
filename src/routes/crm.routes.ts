@@ -28,6 +28,7 @@ import { isSteelDealerClient } from '../lib/steelDealer';
 import * as activityExtras from '../services/crm/activityExtras.service';
 import * as accountJourney from '../services/crm/accountJourney.service';
 import * as dealSections from '../services/crm/dealSections.service';
+import * as engineerScorecard from '../services/crm/engineerScorecard.service';
 
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
@@ -5540,6 +5541,33 @@ targets.put('/calls', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
 }));
 
 router.use('/targets', targets);
+
+// ---------- REPORTS: Engineer Scorecard (connected-B2B / Spark & Ray only) ----------
+// Read-only aggregation of each sales engineer's performance over a period:
+// attendance, leads, brands worked, quoted value, order value and orders won,
+// optionally bucketed by day / week / month. Pure aggregation of existing tables
+// (no migration). Gated the same way as the other CRM admin/report surfaces
+// (MANAGER_ROLES = supervisor / city_manager / sub_admin / admin / super_admin /
+// main_admin / client), and additionally restricted to connected-B2B clients via
+// isB2bClient(): a non-B2B tenant gets a 404 NOT_AVAILABLE, matching the other
+// Spark-only endpoints. Range defaults to the current IST calendar month.
+router.get('/reports/engineer-scorecard', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  const s = (k: string) => (req.query[k] != null ? String(req.query[k]) : undefined);
+  const data = await engineerScorecard.buildEngineerScorecard({
+    orgId: orgId(req),
+    clientId: clientId(req),
+    from: s('from'),
+    to: s('to'),
+    granularity: s('granularity'),
+  });
+  if (!data) {
+    return res.status(404).json({
+      success: false,
+      error: { code: 'NOT_AVAILABLE', message: 'Engineer Scorecard is not available for this workspace.' },
+    });
+  }
+  res.json({ success: true, data });
+}));
 
 // ---------- HIERARCHY (Phase 3 — client-admin org hierarchy) ----------
 // Every endpoint here (except /enabled) 404s when the active client
