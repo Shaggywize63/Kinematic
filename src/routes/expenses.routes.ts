@@ -8,12 +8,12 @@
  *              POST scan-receipt              OCR only (older clients)
  *              GET  mileage                   GPS-derived distance suggestion
  *              POST claims/check              what would the policy say about these lines?
- *              GET  claims[?status]           my claims
+ *              GET  claims[?status&lead_id&deal_id]  my claims (optionally only those spent on one lead / deal)
  *              GET  claims/:id                a claim with lines, receipts and trail
  *              GET  linkable-submissions[?account_id]  my filled forms (reference + date) to link a claim to
  *              POST claims · PATCH claims/:id · POST claims/:id/submit · PATCH claims/:id/cancel
  *   Approver:  GET  claims/pending            waiting on me
- *              GET  claims/all                everything I may see, filtered + paged
+ *              GET  claims/all                everything I may see, filtered (incl. lead_id / deal_id) + paged
  *              GET  claims/summary            totals for the dashboard
  *              GET  claims/export             the same filters as a CSV
  *              PATCH claims/:id/decision      approve / reject (line by line if needed)
@@ -286,7 +286,7 @@ const filtersOf = (req: Request): reports.ClaimFilters => {
   const q = req.query;
   const s = (k: string) => (q[k] ? String(q[k]) : undefined);
   return { status: s('status'), user_id: s('user_id'), from: s('from'), to: s('to'), category: s('category'), policy_id: s('policy_id'),
-    q: s('q'), city: s('city'), page: Number(q.page) || undefined, limit: Number(q.limit) || undefined };
+    lead_id: s('lead_id'), deal_id: s('deal_id'), q: s('q'), city: s('city'), page: Number(q.page) || undefined, limit: Number(q.limit) || undefined };
 };
 router.get('/claims/all', requireApprover, asyncHandler<AuthRequest>(async (req, res) => {
   const r = await reports.listAllClaims(actor(req), filtersOf(req));
@@ -318,7 +318,8 @@ router.get('/linkable-submissions', asyncHandler<AuthRequest>(async (req, res) =
 }));
 router.get('/claims', asyncHandler<AuthRequest>(async (req, res) => {
   const status = req.query.status ? String(req.query.status) : undefined;
-  res.json({ success: true, data: await expenses.listMyClaims(actor(req), status) });
+  const one = (k: string) => (typeof req.query[k] === 'string' ? String(req.query[k]) : undefined);
+  res.json({ success: true, data: await expenses.listMyClaims(actor(req), status, { lead_id: one('lead_id'), deal_id: one('deal_id') }) });
 }));
 router.get('/claims/:id', asyncHandler<AuthRequest>(async (req, res) => {
   res.json({ success: true, data: await expenses.getClaim(actor(req), idParam(req)) });

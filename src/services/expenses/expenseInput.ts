@@ -161,6 +161,9 @@ export const createSchema = z.object({
   clarification: textField(2000),
   account_id: optionalId,
   form_id: optionalId,
+  // The CRM lead / deal this expense was spent on (connected-B2B). null or '' clears the link.
+  lead_id: optionalId,
+  deal_id: optionalId,
   // null or '' clears the link (a client that cannot send an explicit null sends '').
   form_submission_id: optionalId,
   items: z.array(itemSchema).max(100, 'A claim can have at most 100 expense lines').optional(),
@@ -174,7 +177,7 @@ const FIELD_NAME: Record<string, string> = {
   receipt_url: 'receipt', vehicle_type: 'vehicle', odometer_start: 'odometer reading before', odometer_end: 'odometer reading after',
   odometer_start_photo_url: 'odometer photo', odometer_end_photo_url: 'odometer photo', supplier_gstin: 'supplier GSTIN',
   supplier_invoice_no: 'invoice number', gst_rate: 'GST rate', gst_amount: 'GST amount', form_submission_id: 'linked form entry',
-  account_id: 'linked account', form_id: 'linked form', claim_id: 'claim id', ai_extracted: 'scan data',
+  account_id: 'linked account', form_id: 'linked form', lead_id: 'linked lead', deal_id: 'linked deal', claim_id: 'claim id', ai_extracted: 'scan data',
 };
 const nameOf = (k: string | number | undefined) => (k === undefined ? 'request' : (FIELD_NAME[String(k)] ?? String(k).replace(/_/g, ' ')));
 
