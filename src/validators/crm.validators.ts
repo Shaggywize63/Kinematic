@@ -6,6 +6,15 @@ import { z } from 'zod';
 
 const uuid = z.string().uuid();
 const optionalUuid = uuid.nullish();
+// Connected-B2B deal-line extras (dropped for every other client): the line's make and brand (null clears), the
+// typed-in MAC funnel reference (required when the brand is MAC; checked in the service) and the order value.
+const lineExtrasShape = {
+  make_id: optionalUuid,
+  brand_id: optionalUuid,
+  funnel_ref: z.string().trim().max(60).nullish(),
+  order_value: z.number().nonnegative().max(1_000_000_000_000).nullish(),
+};
+
 const isoDate = z.string().datetime({ offset: true }).or(z.string().date()).optional().nullable();
 
 const contactMethod = z.enum(['email','phone','whatsapp','sms']).optional().nullable();
@@ -556,6 +565,8 @@ export const dealSchema = z.object({
     name: z.string().trim().min(1).max(200),
     quantity: z.number().positive().max(1_000_000_000).default(1),
     unit_price: z.number().nonnegative().max(1_000_000_000_000),
+    // Make / brand / MAC funnel reference / order value per line (connected-B2B only).
+    ...lineExtrasShape,
   })).max(50).optional(),
   // Connected-B2B deal sections: pricing (after the quotation), product trial and the people on the deal.
   // Dropped for every other client. See services/crm/dealSections.service.ts.
@@ -1178,6 +1189,7 @@ export const productSchema = z.object({
 });
 
 export const lineItemSchema = z.object({
+  ...lineExtrasShape,
   product_id: optionalUuid,
   name: z.string().min(1).max(200).optional(),
   description: z.string().optional().nullable(),

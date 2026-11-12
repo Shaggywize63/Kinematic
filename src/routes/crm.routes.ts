@@ -19,6 +19,7 @@ import { idempotency } from '../middleware/idempotency';
 import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { B2B_LEAD_CLIENT_IDS, isB2bClient } from '../lib/b2bClients';
+import * as dealLineMakeBrand from '../services/crm/dealLineMakeBrand.service';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
 import { runWithProject, currentProjectKey, DEFAULT_PROJECT } from '../lib/projects';
@@ -1771,7 +1772,7 @@ leads.get('/:id/activities', wrap(async (req, res) => {
   );
 }));
 leads.get('/:id/deals', wrap(async (req, res) => res.json(
-  await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query })
+  await dealLineMakeBrand.stampDealRollups(orgId(req), await crud.list('crm_deals', orgId(req), { lead_id: req.params.id, ...req.query }) as Record<string, any>[])
 )));
 // Contacts captured on this lead — the B2B contact-persons and each one's
 // `requirement`. Org-scoped only (mirrors accounts/:id/contacts), NOT owner-
@@ -2293,7 +2294,7 @@ accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
   await crud.list('crm_contacts', orgId(req), { account_id: req.params.id, ...req.query })
 )));
 accounts.get('/:id/deals', wrap(async (req, res) => res.json(
-  await crud.list('crm_deals', orgId(req), { account_id: req.params.id, ...req.query })
+  await dealLineMakeBrand.stampDealRollups(orgId(req), await crud.list('crm_deals', orgId(req), { account_id: req.params.id, ...req.query }) as Record<string, any>[])
 )));
 accounts.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
@@ -2433,7 +2434,7 @@ deals.get('/', wrap(async (req, res) => {
   // Decorate with owner + linked-lead name/phone + dealer name so the
   // deals list (web + mobile) can render "Dealer: Ravi Kumar · Lead:
   // 98765 43210" without resolving UUIDs client-side.
-  const stamped = await stampDealerNames(await stampLinkedEntityNames(await stampOwnerNames(rows) as never[]) as never[]);
+  const stamped = await dealLineMakeBrand.stampDealRollups(orgId(req), await stampDealerNames(await stampLinkedEntityNames(await stampOwnerNames(rows) as never[]) as never[]) as Record<string, any>[]);
   res.json({
     success: true,
     data: stamped,
@@ -2595,6 +2596,7 @@ deals.post('/', idempotency, wrap(async (req, res) => {
   const payload: Record<string, any> = { ...parsed, client_id: clientId(req) };
   sanitizeOwnerId(req, payload);
   const b2bDeal = isB2bClient(clientId(req));
+  let preparedLines: Array<Record<string, unknown>> | null = null;
   if (b2bDeal) {
     // Connected-B2B: a deal belongs to the customer account. A deal raised from a converted lead
     // inherits that lead's account, so several deals per lead/account all roll up to one customer.
@@ -2612,19 +2614,36 @@ deals.post('/', idempotency, wrap(async (req, res) => {
         payload.primary_contact_id = payload.primary_contact_id || conv.contact_id || undefined;
       }
     }
+    // A deal raised against a lead (and no explicit account) belongs to that lead's account: the account it was converted
+    // into, else the company account the lead was resolved to. Any number of deals may hang off one lead.
+    let accountFromLead = false;
     if (!payload.account_id && payload.lead_id) {
-      const { data: ld } = await supabaseAdmin.from('crm_leads').select('converted_account_id')
+      let { data: ld, error: ldErr } = await supabaseAdmin.from('crm_leads').select('converted_account_id, account_id')
         .eq('org_id', orgId(req)).eq('id', payload.lead_id).maybeSingle();
-      if (ld?.converted_account_id) payload.account_id = ld.converted_account_id;
+      if (ldErr) {
+        // crm_leads.account_id is not in this database yet: fall back to the conversion link alone.
+        ({ data: ld } = await supabaseAdmin.from('crm_leads').select('converted_account_id')
+          .eq('org_id', orgId(req)).eq('id', payload.lead_id).maybeSingle());
+      }
+      const fromLead = (ld as { converted_account_id?: string | null; account_id?: string | null } | null);
+      const derived = fromLead?.converted_account_id || fromLead?.account_id;
+      if (derived) { payload.account_id = derived; accountFromLead = true; }
     }
     if (payload.account_id) {
       const { data: ac } = await supabaseAdmin.from('crm_accounts').select('id')
         .eq('org_id', orgId(req)).eq('id', payload.account_id).is('deleted_at', null).maybeSingle();
-      if (!ac) throw new AppError(400, 'That customer account was not found', 'VALIDATION');
+      if (!ac) {
+        // An account the caller named must exist; one inferred from the lead that has since gone is just dropped.
+        if (!accountFromLead) throw new AppError(400, 'That customer account was not found', 'VALIDATION');
+        payload.account_id = undefined;
+      }
     }
     if (typeof quotationNo === 'string' && quotationNo.trim()) payload.quotation_no = quotationNo.trim();
     if (dealItems?.length) {
       payload.amount = dealItems.reduce((sum, it) => sum + (it.quantity ?? 1) * it.unit_price, 0);
+      // Make / brand / MAC funnel reference / order value per line: validated for ALL lines before the deal is written,
+      // so a bad line never leaves a half-created deal.
+      preparedLines = await dealLineMakeBrand.prepareDealItems(orgId(req), dealItems);
     }
   }
   await dealSections.applyDealSections({ orgId: orgId(req), clientId: payload.client_id as string | null, payload });
@@ -2634,8 +2653,9 @@ deals.post('/', idempotency, wrap(async (req, res) => {
     for (const it of dealItems) {
       await productsSvc.addLineItem(orgId(req), (createdDeal as { id: string }).id, {
         product_id: it.product_id ?? null, name: it.name, quantity: it.quantity ?? 1,
-        unit_price: it.unit_price, position: position++,
-      }, userId(req));
+        unit_price: it.unit_price, position: position,
+      }, userId(req), { clientId: clientId(req), resolvedCustomFields: preparedLines?.[position] ?? undefined });
+      position++;
     }
   }
   // Point the converted lead at the deal it produced (convertLead ran without one).
@@ -2652,7 +2672,7 @@ deals.get('/:id', wrap(async (req, res) => {
   const deal = await stampOwnerName(await dealsSvc.getDeal(orgId(req), req.params.id));
   const [decorated] = await stampDealerNames(await stampLinkedEntityNames([deal] as never[]) as never[]);
   const [withPeople] = await dealSections.stampDealPeopleNames([decorated] as Record<string, any>[]);
-  res.json(withPeople);
+  res.json((await dealLineMakeBrand.stampDealRollups(orgId(req), [withPeople]))[0]);
 }));
 deals.patch('/:id', wrap(async (req, res) => {
   const { items: _ignoredItems, quotation_no: quotationNo, ...payload } = parse(v.dealUpdateSchema, req.body);
@@ -2719,9 +2739,9 @@ deals.get('/:id/contacts', wrap(async (req, res) => {
 deals.get('/:id/notes', wrap(async (req, res) => res.json(
   await crud.list('crm_notes', orgId(req), { entity_type: 'deal', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
-deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc.listLineItems(orgId(req), req.params.id))));
+deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc.listLineItems(orgId(req), req.params.id, { clientId: clientId(req) }))));
 deals.post('/:id/line-items', wrap(async (req, res) =>
-  res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req)))));
+  res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req), { clientId: clientId(req) }))));
 router.use('/deals', rbac.requireModuleAccess('crm_deals'), deals);
 
 // ── Upsells ─────────────────────────────────────────────────────────────────
@@ -2751,7 +2771,7 @@ router.use('/upsells', upsells);
 
 const lineItems = express.Router();
 lineItems.patch('/:id', wrap(async (req, res) =>
-  res.json(await productsSvc.updateLineItem(orgId(req), req.params.id, parse(v.lineItemSchema.partial(), req.body), userId(req)))));
+  res.json(await productsSvc.updateLineItem(orgId(req), req.params.id, parse(v.lineItemSchema.partial(), req.body), userId(req), { clientId: clientId(req) }))));
 lineItems.delete('/:id', wrap(async (req, res) => {
   await productsSvc.deleteLineItem(orgId(req), req.params.id);
   res.status(204).end();
