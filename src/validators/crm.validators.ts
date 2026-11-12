@@ -1129,9 +1129,22 @@ export const productCategorySchema = z.object({
   sort_order: z.number().int().optional(),
 });
 
+// A manufacturer ("Make") or a product brand. They are separate lists: a brand is NOT a make.
+export const makeBrandSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(2000).optional().nullable(),
+  is_active: z.boolean().optional(),
+  sort_order: z.number().int().optional(),
+});
+
 export const productSchema = z.object({
   category_id: optionalUuid,
-  sku: z.string().min(1).max(120),
+  // The product reference (its key identifier, e.g. 13280). Unique per org + client, case-insensitive,
+  // among non-deleted products; the route hook (services/crm/makesBrands.service) enforces that.
+  sku: z.string().trim().min(1).max(120),
+  // Link to one make and one brand. Null clears. Existence is checked by the route hook.
+  make_id: optionalUuid,
+  brand_id: optionalUuid,
   name: z.string().min(1).max(200),
   description: z.string().optional().nullable(),
   unit: z.string().max(40).optional(),
