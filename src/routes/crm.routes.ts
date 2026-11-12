@@ -29,6 +29,7 @@ import * as activityExtras from '../services/crm/activityExtras.service';
 import * as accountJourney from '../services/crm/accountJourney.service';
 import * as dealSections from '../services/crm/dealSections.service';
 import * as engineerScorecard from '../services/crm/engineerScorecard.service';
+import * as businessReport from '../services/crm/businessReport.service';
 
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
@@ -5564,6 +5565,40 @@ router.get('/reports/engineer-scorecard', requireRole(...MANAGER_ROLES), wrap(as
     return res.status(404).json({
       success: false,
       error: { code: 'NOT_AVAILABLE', message: 'Engineer Scorecard is not available for this workspace.' },
+    });
+  }
+  res.json({ success: true, data });
+}));
+
+// ---------- REPORTS: Business Report (connected-B2B / Spark & Ray only) ----------
+// A flexible directors' report over deals in a date range, grouped by ONE dimension
+// (engineer | industry | brand | product | account) and optionally narrowed by the
+// others (engineer_id / industry / brand / product_id / account_id). Pure aggregation
+// over existing tables (no migration); the "won"/value/brand/owner definitions are
+// identical to the Engineer Scorecard so the two reports reconcile. Gated the same way
+// (MANAGER_ROLES + isB2bClient): a non-B2B tenant gets a 404 NOT_AVAILABLE. Range
+// defaults to the current IST calendar month. `scope=own|supervised|all` (default all)
+// lets a supervisor split their own business from their reports' (users.supervisor_id).
+router.get('/reports/business', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  const s = (k: string) => (req.query[k] != null ? String(req.query[k]) : undefined);
+  const data = await businessReport.buildBusinessReport({
+    orgId: orgId(req),
+    clientId: clientId(req),
+    requesterId: userId(req) ?? null,
+    from: s('from'),
+    to: s('to'),
+    group_by: s('group_by'),
+    scope: s('scope'),
+    engineer_id: s('engineer_id'),
+    industry: s('industry'),
+    brand: s('brand'),
+    product_id: s('product_id'),
+    account_id: s('account_id'),
+  });
+  if (!data) {
+    return res.status(404).json({
+      success: false,
+      error: { code: 'NOT_AVAILABLE', message: 'Business Report is not available for this workspace.' },
     });
   }
   res.json({ success: true, data });
