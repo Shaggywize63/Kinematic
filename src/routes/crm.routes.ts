@@ -48,6 +48,8 @@ import * as marketingVisitsSvc from '../services/crm/marketingVisits.service';
 import * as placesSvc from '../services/crm/places.service';
 import { ensureLocationMaster } from '../services/crm/locationSeed';
 import { writeAccountResilient } from '../services/crm/accountWrite';
+import * as accountMerge from '../services/crm/accountMerge.service';
+import { audit } from '../utils/audit';
 import { writeActivityResilient, restoreCarrierType } from '../services/crm/activityTypeFallback';
 import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
@@ -2210,6 +2212,30 @@ accounts.post('/', idempotency, wrap(async (req, res) => {
     );
   }
   res.status(201).json(await stampOwnerName(await writeAccountResilient(payload, 'create', (p) => crud.create('crm_accounts', orgId(req), p, userId(req)))));
+}));
+// Duplicate accounts: find likely duplicates, then merge them into one. Registered BEFORE `/:id` so "similar" and
+// "merge" are never captured as an account id.
+accounts.get('/similar', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
+  const data = await accountMerge.findSimilarAccountGroups({
+    orgId: orgId(req), clientId: scope.id, visibleOwnerIds,
+    minScore: accountMerge.parseMinScore(req.query.min_score),
+  });
+  res.json({ success: true, data });
+}));
+// Admin-only (isTenantAdmin, enforced in the service). `dry_run: true` only counts and writes nothing.
+accounts.post('/merge', wrap(async (req, res) => {
+  const body = parse(v.accountMergeSchema, req.body);
+  const data = await accountMerge.mergeAccounts(
+    { orgId: orgId(req), clientId: clientScope(req).id, user: (req as AuthRequest).user },
+    body as accountMerge.MergeInput,
+  );
+  if (!data.dry_run) {
+    await audit(req as AuthRequest, 'account.merge', 'crm_accounts', data.kept?.id ?? body.keep_id, null, null,
+      { keep_id: body.keep_id, merged_ids: data.merged_ids, moved: data.moved, skipped: data.skipped });
+  }
+  res.json({ success: true, data });
 }));
 accounts.get('/:id', wrap(async (req, res) => res.json(await stampOwnerName(await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id)))));
 accounts.patch('/:id', wrap(async (req, res) => {

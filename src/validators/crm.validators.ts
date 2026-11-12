@@ -403,6 +403,21 @@ export const accountSchema = z.object({
   outcome: z.string().trim().max(500).optional().nullable(),
 });
 
+// Merge duplicate accounts into one: every reference moves to `keep_id`, the others are soft-deleted.
+// `dry_run` only counts what would move and writes nothing.
+export const accountMergeSchema = z.object({
+  keep_id: uuid,
+  merge_ids: z.array(uuid).min(1, 'Pick at least one account to merge').max(20, 'You can merge at most 20 accounts at once'),
+  dry_run: z.boolean().optional(),
+}).superRefine((val, ctx) => {
+  if (val.merge_ids.some((i) => i.toLowerCase() === val.keep_id.toLowerCase())) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['merge_ids'], message: 'keep_id cannot also be in merge_ids' });
+  }
+  if (new Set(val.merge_ids.map((i) => i.toLowerCase())).size !== val.merge_ids.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['merge_ids'], message: 'merge_ids must not contain duplicates' });
+  }
+});
+
 // Plant / site under a customer account (multi-site customers).
 export const siteSchema = z.object({
   account_id: uuid,
