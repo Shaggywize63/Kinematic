@@ -20,6 +20,7 @@ import { runScheduledTasks, runProactiveNudges } from './services/crm/ai/kiniSch
 import { reconcileCallRecordings } from './services/crm/ai/callRecordingPull.service';
 import { deactivateExpiredTrials } from './lib/clientAccess';
 import { knownProjectKeys, runWithProject } from './lib/projects';
+import { runPendingMigrations } from './lib/autoMigrate';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -38,6 +39,13 @@ probeFirebaseCredential()
     else logger.error(`[firebase] Android push is DISABLED: ${r.reason}. Put a current service-account key for the Firebase project the Android app uses into FIREBASE_SERVICE_ACCOUNT.`);
   })
   .catch((e) => logger.warn(`[firebase] credential probe failed: ${e?.message ?? e}`));
+
+// Apply any pending Kinematic DB migrations from inside the deployed backend
+// (used when the AWS-side migration path is unavailable). Idempotent, Kinematic
+// only, and a silent no-op in dev/CI. Never blocks or crashes boot.
+runPendingMigrations().catch((e) =>
+  logger.error(`[auto-migrate] unexpected error: ${e?.message ?? e}`),
+);
 
 // Hydrate the dynamic project registry with any client projects created by the
 // onboarding provisioner. Non-fatal: a failure just means those tenants aren't
