@@ -73,6 +73,8 @@ import * as emailCampaignSvc from '../services/crm/emailCampaign.service';
 import { isEmailCampaignEnabled, EMAIL_CAMPAIGN_DISABLED_MESSAGE } from '../lib/emailCampaignEntitlement';
 import * as googleContactsSvc from '../services/crm/googleContacts.service';
 import * as productsSvc from '../services/crm/products.service';
+import * as makesBrandsSvc from '../services/crm/makesBrands.service';
+import * as productImportSvc from '../services/crm/productImport.service';
 import * as nbaSvc from '../services/crm/ai/nextBestAction.service';
 import * as winSvc from '../services/crm/ai/winProbability.service';
 import * as autoRespSvc from '../services/crm/ai/autoResponse.service';
@@ -5106,7 +5108,115 @@ router.post('/ai/lead-form/generate', rbac.requireModuleAccess('crm_settings'), 
 
 attach('/email-templates', 'crm_email_templates', v.emailTemplateSchema, { softDelete: false, clientScoped: true });
 attach('/product-categories', 'crm_product_categories', v.productCategorySchema, { defaultSort: { column: 'sort_order', ascending: true }, clientScoped: true });
+
+// ---------- Makes & Brands ---------------------------------------------
+// A "make" is the manufacturer, a "brand" the product brand sold (a brand is NOT a make). Both are plain lookup
+// lists, unique by name per org + client (case-insensitive), soft-deleted, and refuse deletion while products use
+// them. Same gating as /products (the CRM module). Needs migration_makes_brands.sql: until it is applied these
+// answer 503 NOT_MIGRATED rather than a raw 500.
+function taxonomyRouter(kind: makesBrandsSvc.TaxonomyKind): Router {
+  const r = express.Router();
+  const scopeOf = (req: Request): makesBrandsSvc.Scope => {
+    const cs = clientScope(req);
+    return { orgId: orgId(req), clientId: cs.id, strict: cs.strict };
+  };
+  r.get('/', wrap(async (req, res) => res.json(await makesBrandsSvc.listTaxonomy(kind, scopeOf(req), req.query))));
+  r.post('/', wrap(async (req, res) => {
+    const parsed = parse(v.makeBrandSchema, req.body);
+    res.status(201).json(await makesBrandsSvc.createTaxonomy(kind, scopeOf(req), userId(req), parsed));
+  }));
+  r.patch('/:id', wrap(async (req, res) => {
+    const parsed = parse(v.makeBrandSchema.partial(), req.body);
+    res.json(await makesBrandsSvc.updateTaxonomy(kind, scopeOf(req), req.params.id, parsed));
+  }));
+  r.delete('/:id', wrap(async (req, res) => {
+    await makesBrandsSvc.deleteTaxonomy(kind, scopeOf(req), req.params.id);
+    res.status(204).end();
+  }));
+  return r;
+}
+router.use('/makes', taxonomyRouter('make'));
+router.use('/brands', taxonomyRouter('brand'));
+
+// ---------- Products: bulk import + make/brand/reference hooks ---------
+// Registered BEFORE the generic /products routes below, which keep doing the actual CRUD.
+router.post('/products/bulk', wrap(async (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(body.rows)) throw new AppError(400, 'rows must be an array', 'VALIDATION');
+  const flag = (x: unknown): boolean => !(x === false || x === 'false' || x === 0);
+  const cs = clientScope(req);
+  const data = await productImportSvc.importProducts(
+    { orgId: orgId(req), clientId: cs.id, strict: cs.strict, userId: userId(req) },
+    { rows: body.rows, create_missing: flag(body.create_missing), update_existing: flag(body.update_existing) },
+  );
+  res.json({ success: true, data });
+}));
+
+// Product JSON (list, detail, and the row a create/patch returns) gains make_name / brand_name. The lookups never
+// throw: a database without the columns simply yields nulls.
+function stampProductNames(res: Response): void {
+  const original = res.json.bind(res);
+  res.json = ((body: unknown) => {
+    const isList = Array.isArray(body);
+    const isRow = !!body && typeof body === 'object' && !isList && 'id' in (body as object) && !('success' in (body as object));
+    if (!isList && !isRow) return original(body);
+    makesBrandsSvc.stampMakeBrandNames(isList ? (body as Record<string, unknown>[]) : [body as Record<string, unknown>])
+      .then((rows) => original(isList ? rows : rows[0]))
+      .catch(() => { if (!res.headersSent) original(body); });
+    return res;
+  }) as typeof res.json;
+}
+
+const productHooks = express.Router();
+productHooks.get('/', wrap(async (req, res, next) => {
+  for (const key of ['make_id', 'brand_id']) {
+    const val = req.query[key];
+    if (val === undefined || val === '') continue;
+    if (typeof val !== 'string' || !UUID_RE.test(val)) throw new AppError(400, `${key} must be a UUID`, 'VALIDATION');
+  }
+  stampProductNames(res);
+  next();
+}));
+productHooks.get('/:id', (_req, res, next) => { stampProductNames(res); next(); });
+productHooks.post('/', wrap(async (req, res, next) => {
+  const body = req.body as Record<string, unknown> | undefined;
+  if (body && typeof body === 'object') {
+    // An unset link is simply absent on create (so a database without the columns still saves the product).
+    for (const k of ['make_id', 'brand_id']) if (body[k] === null || body[k] === undefined) delete body[k];
+    const cs = clientScope(req);
+    await makesBrandsSvc.assertProductLinks({ orgId: orgId(req), clientId: cs.id, strict: cs.strict }, body);
+    if (typeof body.sku === 'string' && body.sku.trim()) {
+      await makesBrandsSvc.assertReferenceUnique(orgId(req), cs.id, body.sku);
+    }
+  }
+  stampProductNames(res);
+  next();
+}));
+productHooks.patch('/:id', wrap(async (req, res, next) => {
+  const body = req.body as Record<string, unknown> | undefined;
+  if (body && typeof body === 'object') {
+    const cs = clientScope(req);
+    await makesBrandsSvc.assertProductLinks({ orgId: orgId(req), clientId: cs.id, strict: cs.strict }, body);
+    if (typeof body.sku === 'string' && body.sku.trim()) {
+      const owner = await makesBrandsSvc.productClientId(orgId(req), req.params.id);
+      // An unknown id is left for the generic route to 404.
+      if (owner !== undefined) await makesBrandsSvc.assertReferenceUnique(orgId(req), owner, body.sku, req.params.id);
+    }
+  }
+  stampProductNames(res);
+  next();
+}));
+router.use('/products', productHooks);
+
 attach('/products', 'crm_products', v.productSchema, { searchColumns: ['name','sku','description'], clientScoped: true });
+// A product write that fails only because the make_id / brand_id columns are missing is "not migrated", never a raw 500.
+router.use('/products', (err: Error, req: Request, _res: Response, next: NextFunction) => {
+  const touches = ['make_id', 'brand_id'].some((k) => (req.body && typeof req.body === 'object' && k in req.body) || k in req.query);
+  if (err instanceof AppError && err.code === 'DB_ERROR' && touches && makesBrandsSvc.isMissingSchemaError({ message: err.message })) {
+    return next(makesBrandsSvc.notMigrated());
+  }
+  next(err);
+});
 attach('/whatsapp-templates', 'crm_whatsapp_templates', v.whatsappTemplateSchema, { softDelete: false, clientScoped: true });
 router.post('/whatsapp-templates/:id/translate', wrap(async (req, res) => {
   const langs = Array.isArray(req.body?.languages) ? req.body.languages.filter((l: unknown) => typeof l === 'string') : [];
