@@ -67,6 +67,8 @@ const DEFAULTS: Record<string, () => Row> = {
   }),
   hrms_holiday_lists: () => ({ holidays: [] }),
   hrms_leave_balances: () => ({ opening: 0, accrued: 0, taken: 0, encashed: 0, lapsed: 0 }),
+  hrms_assets: () => ({ warranty_end: null, status: 'in_stock', holder_id: null }),
+  hrms_asset_events: () => ({ from_id: null, to_id: null, condition: null, ack: null, note: null }),
 };
 
 /** jsonb stores an object's keys sorted by length, then bytewise; arrays keep their order. */
@@ -88,6 +90,10 @@ export function createHrmsFakeDb() {
   const fails: Array<{ table: string; op: string; error: any; times: number; fire?: () => void }> = [];
   const rpcFails: Array<{ name: string; error: any; times: number }> = [];
   let auditSeq = 0;
+  // A strictly-increasing clock for asset rows and events, so bootstrap's (created_at, id) order is insertion order even
+  // when many operations land in the same millisecond (the real DB uses clock_timestamp(), which is microsecond-distinct).
+  let assetClock = Date.now();
+  const assetTick = () => new Date(assetClock++).toISOString();
   /** Runs before an rpc body, to simulate another request getting in between a service's read and its call. */
   const hooks: { beforeRpc?: (name: string, args: any) => void } = {};
 
@@ -125,8 +131,11 @@ export function createHrmsFakeDb() {
       for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
       for (const r of tables.hrms_employees ?? []) if (ids.has(r.reporting_to_id)) r.reporting_to_id = null;
       for (const r of tables.hrms_departments ?? []) if (ids.has(r.head_id)) r.head_id = null;
+      for (const r of tables.hrms_assets ?? []) if (ids.has(r.holder_id)) r.holder_id = null;                 // holder_id ON DELETE SET NULL
+      for (const r of tables.hrms_asset_events ?? []) { if (ids.has(r.from_id)) r.from_id = null; if (ids.has(r.to_id)) r.to_id = null; } // from_id/to_id ON DELETE SET NULL
     }
     if (table === 'hrms_pay_runs') for (const t of ['hrms_payslips', 'hrms_pay_run_audit']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.run_id));
+    if (table === 'hrms_assets') tables.hrms_asset_events = (tables.hrms_asset_events ?? []).filter((r) => !ids.has(r.asset_id)); // asset_id ON DELETE CASCADE
   };
 
   const exec = (q: Query): { data: any; error: any; count?: number | null } => {
@@ -284,6 +293,72 @@ export function createHrmsFakeDb() {
       audit(a.p_org, run.id, a.p_by_user, a.p_by_name, 'Marked paid');
       return { data: { status: 'paid' }, error: null };
     },
+    // ── asset register (migration_hrms_assets.sql) ───────────────────────────
+    // The asset + its 'purchased' event, atomically. Enforces the two unique indexes (tag per org; serial per org,
+    // case-insensitive) and the primary key, exactly as the SQL does; returns the new 'purchased' event's id.
+    hrms_asset_create: (a) => {
+      const assets = T('hrms_assets');
+      const uniq = (name: string) => ({ data: null, error: { code: '23505', message: `duplicate key value violates unique constraint "${name}"` } });
+      if (assets.some((x) => x.id === a.p_asset)) return uniq('hrms_assets_pkey');
+      if (assets.some((x) => x.org_id === a.p_org && x.client_id === null && x.tag === a.p_tag)) return uniq('hrms_assets_org_tag_uq');
+      const ser = String(a.p_serial).toLowerCase();
+      if (assets.some((x) => x.org_id === a.p_org && x.client_id === null && String(x.serial).toLowerCase() === ser)) return uniq('hrms_assets_org_serial_uq');
+      const ts = assetTick();
+      assets.push(normalise({
+        id: a.p_asset, org_id: a.p_org, client_id: null, tag: a.p_tag, type: a.p_type, make: a.p_make, model: a.p_model, serial: a.p_serial,
+        purchase_date: a.p_purchase_date, cost: a.p_cost, warranty_end: a.p_warranty_end ?? null, condition: a.p_condition, status: 'in_stock', holder_id: null, created_at: ts, updated_at: ts,
+      }));
+      const evId = crypto.randomUUID();
+      T('hrms_asset_events').push(normalise({
+        id: evId, org_id: a.p_org, client_id: null, asset_id: a.p_asset, on_date: a.p_on, kind: 'purchased', from_id: null, to_id: null,
+        condition: a.p_condition, status: 'in_stock', ack: null, note: 'Added to the register.', by_name: a.p_by || 'Unknown', created_at: ts, updated_at: ts,
+      }));
+      return { data: evId, error: null };
+    },
+    // One state transition, atomically: check against the CURRENT status, append the event, move status/holder/condition.
+    // The transition rules mirror store.ts; a wrong status is ASSET_STATE, a transfer to the current holder is ASSET_SAME_HOLDER.
+    hrms_asset_apply_event: (a) => {
+      const asset = T('hrms_assets').find((x) => x.id === a.p_asset && x.org_id === a.p_org && x.client_id === null);
+      if (!asset) return token('ASSET_NOT_FOUND');
+      const from = asset.holder_id ?? null;
+      let newStatus = asset.status; let newHolder: string | null = asset.holder_id ?? null; let newCond = asset.condition;
+      let evFrom: string | null = null; let evTo: string | null = null; let evCond: string | null = null; let evAck: boolean | null = null;
+      const bad = () => token('ASSET_STATE');
+      switch (a.p_kind) {
+        case 'issued':
+          if (asset.status !== 'in_stock') return bad();
+          newStatus = 'issued'; newHolder = a.p_to_id; newCond = a.p_condition ?? asset.condition; evTo = a.p_to_id; evCond = a.p_condition ?? null; evAck = true; break;
+        case 'returned':
+          if (asset.status !== 'issued') return bad();
+          if (!['in_stock', 'in_repair', 'retired'].includes(a.p_next_status)) return bad();
+          newStatus = a.p_next_status; newHolder = null; newCond = a.p_condition ?? asset.condition; evFrom = from; evCond = a.p_condition ?? null; break;
+        case 'transferred':
+          if (asset.status !== 'issued') return bad();
+          if (from === (a.p_to_id ?? null)) return token('ASSET_SAME_HOLDER');
+          newStatus = 'issued'; newHolder = a.p_to_id; newCond = a.p_condition ?? asset.condition; evFrom = from; evTo = a.p_to_id; evCond = a.p_condition ?? null; evAck = true; break;
+        case 'repair_out':
+          if (!['in_stock', 'issued'].includes(asset.status)) return bad();
+          newStatus = 'in_repair'; newHolder = null; evFrom = from; break;
+        case 'repair_back':
+          if (asset.status !== 'in_repair') return bad();
+          newStatus = 'in_stock'; newHolder = null; newCond = a.p_condition ?? asset.condition; evCond = a.p_condition ?? null; break;
+        case 'lost':
+          if (!['in_stock', 'issued'].includes(asset.status)) return bad();
+          newStatus = 'lost'; newHolder = null; evFrom = from; break;
+        case 'retired':
+          if (!['in_stock', 'in_repair'].includes(asset.status)) return bad();
+          newStatus = 'retired'; newHolder = null; break;
+        default: return token('ASSET_BAD_KIND');
+      }
+      const ts = assetTick();
+      const evId = crypto.randomUUID();
+      T('hrms_asset_events').push(normalise({
+        id: evId, org_id: a.p_org, client_id: null, asset_id: a.p_asset, on_date: a.p_on, kind: a.p_kind, from_id: evFrom, to_id: evTo,
+        condition: evCond, status: newStatus, ack: evAck, note: a.p_note ?? null, by_name: a.p_by || 'Unknown', created_at: ts, updated_at: ts,
+      }));
+      Object.assign(asset, { status: newStatus, holder_id: newHolder, condition: newCond, updated_at: ts });
+      return { data: evId, error: null };
+    },
   };
 
   const rpc = (name: string, args: any) => {
@@ -302,7 +377,7 @@ export function createHrmsFakeDb() {
     tables, log, rpcLog, counters, missing, fails, rpcFails, hooks,
     reset() {
       for (const k of Object.keys(tables)) delete tables[k];
-      log.length = 0; rpcLog.length = 0; counters.clear(); missing.clear(); fails.length = 0; rpcFails.length = 0; auditSeq = 0; hooks.beforeRpc = undefined;
+      log.length = 0; rpcLog.length = 0; counters.clear(); missing.clear(); fails.length = 0; rpcFails.length = 0; auditSeq = 0; assetClock = Date.now(); hooks.beforeRpc = undefined;
     },
   };
 }
