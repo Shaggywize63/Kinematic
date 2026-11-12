@@ -49,6 +49,7 @@ import * as placesSvc from '../services/crm/places.service';
 import { ensureLocationMaster } from '../services/crm/locationSeed';
 import { writeAccountResilient } from '../services/crm/accountWrite';
 import * as accountMerge from '../services/crm/accountMerge.service';
+import * as expenseRollup from '../services/crm/expenseRollup.service';
 import { audit } from '../utils/audit';
 import { writeActivityResilient, restoreCarrierType } from '../services/crm/activityTypeFallback';
 import * as hierarchy from '../services/crm/hierarchy.service';
@@ -279,6 +280,13 @@ function clientScope(req: Request): { id: string | null; strict: boolean } {
 }
 
 function clientId(req: Request): string | null { return clientScope(req).id; }
+
+/** The caller as the expense roll-ups need them; `client_id` is the request's client scope (JWT client, else the X-Client-Id picker). */
+function expenseActor(req: Request): { id: string; org_id: string; role: string | null; client_id: string | null; data_scope: string | null } {
+  const u = ((req as AuthRequest).user ?? {}) as { id?: string; role?: string | null; client_id?: string | null; org_role_data_scope?: string | null };
+  return { id: String(u.id ?? userId(req) ?? ''), org_id: orgId(req), role: u.role ?? null, client_id: clientScope(req).id ?? u.client_id ?? null, data_scope: u.org_role_data_scope ?? null };
+}
+
 const bridgeCtx = (req: Request): visitBridge.BridgeCtx =>
   ({ org_id: orgId(req), client_id: clientScope(req).id, user_id: userId(req) });
 
@@ -1715,6 +1723,9 @@ leads.post('/:id/fulfill-balance', wrap(async (req, res) => {
 // Reopen / unconvert — flips back to 'working' and clears terminal fields.
 leads.post('/:id/reopen', wrap(async (req, res) =>
   res.json(await stampSourceName(await stampOwnerName(await leadsSvc.reopenLead(orgId(req), req.params.id, parse(v.leadReopenSchema, req.body), userId(req)))))));
+// What was spent on this lead (expense claims linked to it): totals, visits, spend as a % of the deals' value.
+// Visible to anyone who can open the lead; the per-claim list is approvers' / the claimant's own (see the service).
+leads.get('/:id/expenses', wrap(async (req, res) => res.json(await expenseRollup.leadExpenseRollup(expenseActor(req), req.params.id))));
 leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc.listScoreHistory(orgId(req), req.params.id))));
 leads.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
@@ -2654,6 +2665,8 @@ deals.post('/:id/win', wrap(async (req, res) => res.json(await dealsSvc.winDeal(
 deals.post('/:id/lose', wrap(async (req, res) => res.json(await dealsSvc.loseDeal(orgId(req), req.params.id, parse(v.loseSchema, req.body), userId(req)))));
 deals.post('/:id/win-probability', wrap(async (req, res) => res.json(await winSvc.compute(orgId(req), clientId(req), req.params.id))));
 deals.post('/:id/next-action', wrap(async (req, res) => res.json(await nbaSvc.compute(orgId(req), clientId(req), req.params.id, true))));
+// What was spent on this deal, as a total and as a % of its amount (same privacy rule as the lead roll-up).
+deals.get('/:id/expenses', wrap(async (req, res) => res.json(await expenseRollup.dealExpenseRollup(expenseActor(req), req.params.id))));
 deals.get('/:id/history', wrap(async (req, res) => res.json(await dealsSvc.dealHistory(orgId(req), req.params.id))));
 deals.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);

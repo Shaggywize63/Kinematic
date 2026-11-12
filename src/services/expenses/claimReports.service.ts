@@ -12,6 +12,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { Actor, isApprover } from './access';
+import { blamesOptional } from './dbErrors';
 import { stampNames, stampLinks } from './expenses.service';
 
 export interface ClaimFilters {
@@ -21,6 +22,8 @@ export interface ClaimFilters {
   to?: string;
   category?: string;
   policy_id?: string;
+  lead_id?: string;       // expenses spent on this CRM lead
+  deal_id?: string;       // expenses spent on this CRM deal
   q?: string;
   city?: string;
   page?: number;
@@ -66,6 +69,9 @@ async function buildQuery(actor: Actor, f: ClaimFilters, columns: string, count:
 
   if (f.user_id) { if (!UUID_RE.test(f.user_id)) throw new AppError(400, 'Invalid user', 'VALIDATION'); q = q.eq('user_id', f.user_id); }
   if (f.policy_id) { if (!UUID_RE.test(f.policy_id)) throw new AppError(400, 'Invalid policy', 'VALIDATION'); q = q.eq('policy_id', f.policy_id); }
+  // The lead / deal filters apply only when they are real ids (anything else is ignored, not an error).
+  if (f.lead_id && UUID_RE.test(f.lead_id)) q = q.eq('lead_id', f.lead_id);
+  if (f.deal_id && UUID_RE.test(f.deal_id)) q = q.eq('deal_id', f.deal_id);
   if (f.from) { if (!DATE_RE.test(f.from)) throw new AppError(400, 'Invalid from date', 'VALIDATION'); q = q.gte('submitted_at', `${f.from}T00:00:00.000Z`); }
   if (f.to) { if (!DATE_RE.test(f.to)) throw new AppError(400, 'Invalid to date', 'VALIDATION'); q = q.lte('submitted_at', `${f.to}T23:59:59.999Z`); }
 
@@ -85,6 +91,12 @@ async function buildQuery(actor: Actor, f: ClaimFilters, columns: string, count:
   return { q };
 }
 
+/** True when a lead/deal filter was applied and the database says it has no such column. */
+function lacksLinkColumn(f: ClaimFilters, error: { code?: string; message?: string }): boolean {
+  const filtered = (f.lead_id && UUID_RE.test(f.lead_id)) || (f.deal_id && UUID_RE.test(f.deal_id));
+  return !!filtered && blamesOptional(error, ['lead_id', 'deal_id']);
+}
+
 async function applyCity(rows: any[], city?: string) {
   if (!city || !rows.length) return rows;
   const ids = Array.from(new Set(rows.map((r) => r.user_id).filter(Boolean)));
@@ -100,7 +112,11 @@ export async function listAllClaims(actor: Actor, f: ClaimFilters) {
   if (!built) return { rows: [], total: 0, page, limit };
   const { data, error, count } = await built.q.order('submitted_at', { ascending: false, nullsFirst: false })
     .order('created_at', { ascending: false }).range((page - 1) * limit, page * limit - 1);
-  if (error) throw new AppError(500, error.message, 'DB');
+  if (error) {
+    // Filtering on a lead/deal column the tenant database does not have: nothing can match.
+    if (lacksLinkColumn(f, error)) return { rows: [], total: 0, page, limit };
+    throw new AppError(500, error.message, 'DB');
+  }
   const rows = await applyCity((data as any[]) ?? [], f.city);
   return { rows: await stampLinks(await stampNames(rows)), total: f.city ? rows.length : (count ?? rows.length), page, limit };
 }
@@ -109,7 +125,10 @@ async function fetchForReport(actor: Actor, f: ClaimFilters) {
   const built = await buildQuery(actor, f, '*', false);
   if (!built) return [];
   const { data, error } = await built.q.order('submitted_at', { ascending: false, nullsFirst: false }).limit(EXPORT_CAP);
-  if (error) throw new AppError(500, error.message, 'DB');
+  if (error) {
+    if (lacksLinkColumn(f, error)) return [];
+    throw new AppError(500, error.message, 'DB');
+  }
   return stampLinks(await stampNames(await applyCity((data as any[]) ?? [], f.city)));
 }
 
@@ -200,8 +219,8 @@ export function buildClaimsCsv(claims: any[], items: any[]): string {
   if (withTrip) head.push('Distance (km)', 'Vehicle', 'Odometer before', 'Odometer after');
   // Connected-B2B links: appended only when a claim in this report carries one,
   // so every other tenant's export keeps exactly the columns it always had.
-  const withLinks = claims.some((c) => c.clarification || c.account_name || c.form_title || c.form_ref_no);
-  if (withLinks) head.push('Clarification', 'Account', 'Form', 'Form ref', 'Form date');
+  const withLinks = claims.some((c) => c.clarification || c.account_name || c.form_title || c.form_ref_no || c.lead_name || c.deal_name);
+  if (withLinks) head.push('Clarification', 'Account', 'Form', 'Form ref', 'Form date', 'Lead', 'Deal');
   const out: string[] = [head.map(cell).join(',')];
   const day = (d: unknown) => (d ? String(d).slice(0, 10) : '');
   for (const c of claims) {
@@ -212,7 +231,7 @@ export function buildClaimsCsv(claims: any[], items: any[]): string {
         it.category, day(it.item_date), it.merchant, it.description, it.amount, it.decision ?? '', it.decision_note, it.receipt_url ? 'Yes' : 'No',
         c.total_amount, c.approved_amount ?? '', day(c.reimbursed_at), c.reimbursed_ref,
         ...(withTrip ? [it.distance_km ?? '', it.vehicle_type ?? '', it.odometer_start ?? '', it.odometer_end ?? ''] : []),
-        ...(withLinks ? [c.clarification ?? '', c.account_name ?? '', c.form_title ?? '', c.form_ref_no ?? '', day(c.form_submitted_at)] : []),
+        ...(withLinks ? [c.clarification ?? '', c.account_name ?? '', c.form_title ?? '', c.form_ref_no ?? '', day(c.form_submitted_at), c.lead_name ?? '', c.deal_name ?? ''] : []),
       ].map(cell).join(','));
     }
   }

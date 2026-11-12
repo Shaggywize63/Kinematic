@@ -37,7 +37,7 @@ import {
   listPolicies, policyUserOf, priorMonthSpend, resolvePolicy, resolvePolicyForUserId, toClientShape, updatePolicy,
 } from './policy.service';
 import { assertReceiptsOwned, signReceipt } from './receipts.service';
-import { blamesOptional, carriesAny, dbFailure, withoutKeys } from './dbErrors';
+import { DbError, blamesOptional, carriesAny, dbFailure, isUndefinedColumn, missingColumn, withoutKeys } from './dbErrors';
 import {
   ODOMETER_KEYS, ODOMETER_PHOTO_KEYS, assertOdometerOrder, assertOdometerStorable, hasOdometerData, hasOdometerInput,
   isGpsDistanceLine, priceGpsLine, priceVehicleLine, vehicleFlowOn, withSoleVehicle,
@@ -172,6 +172,44 @@ export async function stampNames(rows: any[]): Promise<any[]> {
   return rows;
 }
 
+/** "First Last" for a lead, else its company, else its email — what a person would call it. */
+function leadLabel(l: { first_name?: string | null; last_name?: string | null; company?: string | null; email?: string | null }): string | null {
+  const person = [l.first_name, l.last_name].filter((x) => x && String(x).trim()).join(' ').trim();
+  return person || (l.company && String(l.company).trim()) || (l.email && String(l.email).trim()) || null;
+}
+
+/**
+ * Give every claim `lead_id`, `deal_id`, `lead_name` and `deal_name` (null when not linked, or when the lookup
+ * fails — a name is decoration and must never turn a list into a 500). Two batched queries at most. Rows from a
+ * tenant whose database lacks the columns simply have no ids, so the names are null.
+ */
+export async function stampLeadDeal(rows: any[]): Promise<any[]> {
+  if (!rows.length) return rows;
+  const leadIds = Array.from(new Set(rows.map((r) => r.lead_id).filter(Boolean)));
+  const dealIds = Array.from(new Set(rows.map((r) => r.deal_id).filter(Boolean)));
+  const leadNames = new Map<string, string | null>();
+  const dealNames = new Map<string, string | null>();
+  try {
+    if (leadIds.length) {
+      const { data } = await supabaseAdmin.from('crm_leads').select('id, first_name, last_name, company, email').in('id', leadIds);
+      for (const l of (data as any[]) ?? []) leadNames.set(l.id, leadLabel(l));
+    }
+  } catch (e: any) { logger.warn(`[expenses] lead names not stamped: ${e?.message || e}`); }
+  try {
+    if (dealIds.length) {
+      const { data } = await supabaseAdmin.from('crm_deals').select('id, name').in('id', dealIds);
+      for (const d of (data as any[]) ?? []) dealNames.set(d.id, d.name ?? null);
+    }
+  } catch (e: any) { logger.warn(`[expenses] deal names not stamped: ${e?.message || e}`); }
+  for (const r of rows) {
+    r.lead_id = r.lead_id ?? null;
+    r.deal_id = r.deal_id ?? null;
+    r.lead_name = r.lead_id ? (leadNames.get(r.lead_id) ?? null) : null;
+    r.deal_name = r.deal_id ? (dealNames.get(r.deal_id) ?? null) : null;
+  }
+  return rows;
+}
+
 /**
  * Attach the linked CRM account name (`account_name`) and builder-form title
  * (`form_title`) to claims that carry those links (the connected-B2B expense ↔
@@ -181,6 +219,7 @@ export async function stampNames(rows: any[]): Promise<any[]> {
  */
 export async function stampLinks(rows: any[]): Promise<any[]> {
   if (!rows.length) return rows;
+  await stampLeadDeal(rows);
   const accIds = Array.from(new Set(rows.map((r) => r.account_id).filter(Boolean)));
   const subIds = Array.from(new Set(rows.map((r) => r.form_submission_id).filter(Boolean)));
   const accNames = new Map<string, string>();
@@ -428,16 +467,35 @@ const GST_KEYS = ['supplier_gstin', 'supplier_invoice_no', 'gst_rate', 'gst_amou
  * only for connected-B2B clients, but a tenant database that never ran the migration answers every such
  * write with "column does not exist" — so a write that fails for that reason is retried once without them.
  */
-export const CLAIM_LINK_KEYS = ['clarification', 'account_id', 'form_id', 'form_submission_id'] as const;
+export const CLAIM_LINK_KEYS = ['clarification', 'account_id', 'form_id', 'form_submission_id', 'lead_id', 'deal_id'] as const;
+/** The newest link columns (migration_expense_lead_deal_links.sql): a tenant can have the older ones but not these. */
+export const LEAD_DEAL_KEYS = ['lead_id', 'deal_id'] as const;
 
-/** Insert one claim row; if the optional link columns are missing from this database, retry once without them. */
+/**
+ * Which link keys a failed write drops, in order. When the error names lead_id / deal_id (or does not say which
+ * column is missing) and the write carries them, the first retry drops ONLY those two — a tenant that has the
+ * older link columns keeps its clarification / account / form. Otherwise (or if that still fails) every link
+ * key goes, exactly as before.
+ */
+function degradeStages(links: Record<string, unknown>, err: DbError | null | undefined): Array<readonly string[]> {
+  const col = missingColumn(err);
+  const newest = LEAD_DEAL_KEYS as readonly string[];
+  if (carriesAny(links, LEAD_DEAL_KEYS) && (col === null || newest.includes(col))) return [LEAD_DEAL_KEYS, CLAIM_LINK_KEYS];
+  return [CLAIM_LINK_KEYS];
+}
+
+/** Insert one claim row; if the optional link columns are missing from this database, retry without them. */
 async function insertClaimRow(base: Record<string, unknown>, links: Record<string, unknown>) {
-  const first = await supabaseAdmin.from('expense_claims').insert({ ...base, ...links }).select('*').single();
-  if (first.error && carriesAny(links, CLAIM_LINK_KEYS) && blamesOptional(first.error, CLAIM_LINK_KEYS)) {
-    logger.warn(`[expenses] expense_claims lacks the link columns (${first.error.message}); saving the claim without them — apply migration_expense_links_clarification.sql and migration_form_ref_no.sql`);
-    return supabaseAdmin.from('expense_claims').insert(base).select('*').single();
+  const full = { ...base, ...links };
+  let res = await supabaseAdmin.from('expense_claims').insert(full).select('*').single();
+  if (res.error && carriesAny(links, CLAIM_LINK_KEYS)) {
+    for (const drop of degradeStages(links, res.error)) {
+      if (!res.error || !blamesOptional(res.error, CLAIM_LINK_KEYS)) break;
+      logger.warn(`[expenses] expense_claims lacks the link columns (${res.error.message}); saving the claim without ${drop.join('/')} — apply migration_expense_links_clarification.sql, migration_form_ref_no.sql and migration_expense_lead_deal_links.sql`);
+      res = await supabaseAdmin.from('expense_claims').insert(withoutKeys(full, drop)).select('*').single();
+    }
   }
-  return first;
+  return res;
 }
 
 /** Insert claim lines; if the optional GST columns are missing from this database, retry once without them. */
@@ -460,12 +518,15 @@ async function updateItemRow(id: string, row: Record<string, unknown>) {
 }
 
 async function updateClaimRow(id: string, update: Record<string, unknown>) {
-  const first = await supabaseAdmin.from('expense_claims').update(update).eq('id', id);
-  if (first.error && carriesAny(update, CLAIM_LINK_KEYS) && blamesOptional(first.error, CLAIM_LINK_KEYS)) {
-    logger.warn(`[expenses] expense_claims lacks the link columns (${first.error.message}); updating the claim without them`);
-    return supabaseAdmin.from('expense_claims').update(withoutKeys(update, CLAIM_LINK_KEYS)).eq('id', id);
+  let res = await supabaseAdmin.from('expense_claims').update(update).eq('id', id);
+  if (res.error && carriesAny(update, CLAIM_LINK_KEYS)) {
+    for (const drop of degradeStages(update, res.error)) {
+      if (!res.error || !blamesOptional(res.error, CLAIM_LINK_KEYS)) break;
+      logger.warn(`[expenses] expense_claims lacks the link columns (${res.error.message}); updating the claim without ${drop.join('/')}`);
+      res = await supabaseAdmin.from('expense_claims').update(withoutKeys(update, drop)).eq('id', id);
+    }
   }
-  return first;
+  return res;
 }
 
 const itemRow = (claim_id: string, org_id: string, i: ClaimItemInput) => {
@@ -489,13 +550,24 @@ const itemRow = (claim_id: string, org_id: string, i: ClaimItemInput) => {
   return row;
 };
 
-export async function listMyClaims(actor: Actor, status?: string) {
+export interface MyClaimFilters { lead_id?: string | null; deal_id?: string | null }
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export async function listMyClaims(actor: Actor, status?: string, filters: MyClaimFilters = {}) {
   let q = supabaseAdmin.from('expense_claims').select('*')
     .eq('org_id', actor.org_id).eq('user_id', actor.id).order('created_at', { ascending: false }).limit(200);
   const statuses = (status ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   if (statuses.length) q = q.in('status', statuses);
+  // A filter is applied only when it is a real id; on a database without the column nothing can match.
+  const byLead = filters.lead_id && UUID_RE.test(filters.lead_id) ? filters.lead_id : null;
+  const byDeal = filters.deal_id && UUID_RE.test(filters.deal_id) ? filters.deal_id : null;
+  if (byLead) q = q.eq('lead_id', byLead);
+  if (byDeal) q = q.eq('deal_id', byDeal);
   const { data, error } = await q;
-  if (error) throw new AppError(500, error.message, 'DB');
+  if (error) {
+    if ((byLead || byDeal) && blamesOptional(error, LEAD_DEAL_KEYS)) return [];
+    throw new AppError(500, error.message, 'DB');
+  }
   return stampLinks(await stampNames(data ?? []));
 }
 
@@ -535,6 +607,9 @@ export interface ClaimBody {
   clarification?: string | null;
   account_id?: string | null;
   form_id?: string | null;
+  /** The CRM lead / deal this expense was spent on (connected-B2B). null clears; a deal's lead is derived when omitted. */
+  lead_id?: string | null;
+  deal_id?: string | null;
   /** A filled form (shown by its unique reference + date) this expense is linked to. */
   form_submission_id?: string | null;
   items?: ClaimItemInput[];
@@ -549,7 +624,38 @@ async function resolveLinks(actor: Actor, body: ClaimBody): Promise<Record<strin
   if (!isB2bClient(actor.client_id)) return {};
   const out: Record<string, unknown> = {};
   if (body.clarification !== undefined) out.clarification = (body.clarification ?? '').trim() || null;
-  if (body.account_id !== undefined) {
+
+  // The lead / deal this was spent on. Both must exist in the actor's org (and not be deleted); a deal
+  // brings its lead and account along unless the caller said otherwise.
+  let deal: { id: string; lead_id: string | null; account_id: string | null } | null = null;
+  let lead: { id: string; account_id: string | null } | null = null;
+  if (body.deal_id) {
+    const { data } = await supabaseAdmin.from('crm_deals').select('id, lead_id, account_id')
+      .eq('org_id', actor.org_id).eq('id', body.deal_id).is('deleted_at', null).maybeSingle();
+    if (!data) throw new AppError(400, 'Linked deal not found', 'VALIDATION');
+    deal = data as any;
+  }
+  if (body.lead_id) {
+    let res: any = await supabaseAdmin.from('crm_leads').select('id, account_id')
+      .eq('org_id', actor.org_id).eq('id', body.lead_id).is('deleted_at', null).maybeSingle();
+    // A database that predates crm_leads.account_id still validates the lead (it just derives no account from it).
+    if (res.error && isUndefinedColumn(res.error)) {
+      res = await supabaseAdmin.from('crm_leads').select('id')
+        .eq('org_id', actor.org_id).eq('id', body.lead_id).is('deleted_at', null).maybeSingle();
+    }
+    if (!res.data) throw new AppError(400, 'Linked lead not found', 'VALIDATION');
+    lead = { id: res.data.id, account_id: res.data.account_id ?? null };
+  }
+  if (deal && body.lead_id && deal.lead_id && deal.lead_id !== body.lead_id) {
+    throw new AppError(400, 'That deal belongs to another lead', 'VALIDATION');
+  }
+  if (body.deal_id !== undefined) out.deal_id = deal ? deal.id : null;     // null / '' clears the deal; the lead stays
+  if (body.lead_id !== undefined) out.lead_id = lead ? lead.id : null;
+  if (deal && !body.lead_id && deal.lead_id) out.lead_id = deal.lead_id;   // derived from the deal
+  // The account follows the deal, else the lead, unless the caller named (or cleared) one explicitly.
+  const derivedAccount = body.account_id === undefined ? (deal?.account_id ?? lead?.account_id ?? null) : null;
+  if (derivedAccount) out.account_id = derivedAccount;                     // already a stored reference: no re-check
+  else if (body.account_id !== undefined) {
     if (body.account_id) {
       const { data } = await supabaseAdmin.from('crm_accounts').select('id').eq('org_id', actor.org_id).eq('id', body.account_id).maybeSingle();
       if (!data) throw new AppError(400, 'Linked account not found', 'VALIDATION');
@@ -939,7 +1045,7 @@ export async function pendingForApprover(actor: Actor, city?: string, limit = 20
   if (!isApprover(actor)) q = q.eq('approver_id', actor.id);
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB');
-  return stampNames(await filterByCity((data as any[]) || [], city));
+  return stampLinks(await stampNames(await filterByCity((data as any[]) || [], city)));
 }
 
 /** Approved claims across the org still awaiting reimbursement (admin/finance). */
@@ -948,7 +1054,7 @@ export async function awaitingReimbursement(actor: Actor, city?: string, limit =
   const { data, error } = await supabaseAdmin.from('expense_claims').select('*')
     .eq('org_id', actor.org_id).eq('status', 'approved').order('reviewed_at', { ascending: true }).limit(limit);
   if (error) throw new AppError(500, error.message, 'DB');
-  return stampNames(await filterByCity((data as any[]) || [], city));
+  return stampLinks(await stampNames(await filterByCity((data as any[]) || [], city)));
 }
 
 export interface LineDecisionInput { id: string; decision: 'approved' | 'rejected'; note?: string | null }
