@@ -103,3 +103,32 @@ export function discoverExportColumns(sampleRow: Record<string, unknown> | undef
   for (const k of keys) if (!inPreferred.has(k)) ordered.push(k);
   return ordered.map((k) => ({ key: k, label: toTitle(k) }));
 }
+
+/**
+ * The lead export's "Lead No" and "Lead Type" columns, placed on purpose: Lead No right after the leading "Lead ID"
+ * column, Lead Type right after Status. Whatever auto-discovery produced for `ref_no` / `lead_type` is replaced.
+ *
+ *  - Lead Type: only when the rows carry the column (the database has been migrated).
+ *  - Lead No: the same, and only for a connected-B2B client or when some exported lead actually has a number — so a
+ *    tenant that does not use lead numbers gets the export it always had.
+ */
+export function withLeadNumberColumns(
+  cols: ExportCol[],
+  rows: Array<Record<string, unknown>>,
+  isNumberedClient: boolean,
+): ExportCol[] {
+  const sample = rows[0] ?? {};
+  const hasRefColumn = 'ref_no' in sample;
+  const hasTypeColumn = 'lead_type' in sample;
+  const showRef = hasRefColumn && (isNumberedClient || rows.some((r) => r.ref_no !== null && r.ref_no !== undefined && r.ref_no !== ''));
+  const out = cols.filter((c) => c.key !== 'ref_no' && c.key !== 'lead_type');
+  if (showRef) {
+    const at = out.findIndex((c) => c.key === 'id');
+    out.splice(at >= 0 ? at + 1 : 0, 0, { key: 'ref_no', label: 'Lead No' });
+  }
+  if (hasTypeColumn) {
+    const at = out.findIndex((c) => c.key === 'status');
+    out.splice(at >= 0 ? at + 1 : out.length, 0, { key: 'lead_type', label: 'Lead Type' });
+  }
+  return out;
+}

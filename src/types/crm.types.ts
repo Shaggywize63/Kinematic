@@ -123,6 +123,10 @@ export interface Lead {
   city?: string | null;
   state?: string | null;
   industry?: string | null;
+  /** 'requirement' (a specific need) | 'discussion' (talked, no work yet) | null. */
+  lead_type?: 'requirement' | 'discussion' | null;
+  /** Server-assigned lead number (e.g. SR/LD/2627-12), connected-B2B clients only. Read-only for clients. */
+  ref_no?: string | null;
   is_b2c?: boolean | null;
   notes?: string | null;
   tags: string[];

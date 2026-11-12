@@ -150,6 +150,14 @@ export const leadContactSchema = z.object({
   form_id: optionalUuid,
 });
 
+// Lead type: a specific need (requirement) or a talk with no work yet (discussion). Optional + nullable; an empty
+// string (a form that posts "" for "not chosen") reads as null. `ref_no` is deliberately NOT here: the lead number
+// is server-assigned and read-only, and zod drops the unknown key from any body that sends it.
+const leadTypeValue = z.preprocess(
+  (v) => (typeof v === 'string' && v.trim() === '' ? null : v),
+  z.enum(['requirement', 'discussion']).nullable().optional(),
+);
+
 const leadCreateBase = z.object({
   client_id: optionalUuid,
   // B2B: an explicit account to link to (when the rep picked an existing company).
@@ -188,6 +196,7 @@ const leadCreateBase = z.object({
   lifecycle_stage: lifecycleStage.optional(),
   owner_id: optionalUuid,
   industry: z.string().max(120).optional().nullable(),
+  lead_type: leadTypeValue,
   notes: z.string().optional().nullable(),
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
@@ -256,6 +265,12 @@ export const leadUpdateSchema = leadCreateBase.partial().extend({
   // uneditable. Accept null here so those rows can be saved; forms that require
   // city still send a real string, and the create path is unchanged.
   city: z.string().min(1, { message: 'City is required' }).max(120).optional().nullable(),
+});
+
+// POST /leads/ref-numbers/backfill — number the leads that have no lead number yet (admin, connected-B2B clients).
+export const leadRefBackfillSchema = z.object({
+  dry_run: z.boolean().optional(),
+  limit: z.coerce.number().int().min(1).max(2000).optional(),
 });
 
 export const leadConvertSchema = z.object({

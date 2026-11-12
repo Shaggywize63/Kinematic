@@ -38,6 +38,7 @@ import { validateAndStampCustomFields } from '../services/crm/customFields.servi
 import * as customObjectsSvc from '../services/crm/customObjects.service';
 import * as upsellsSvc from '../services/crm/upsells.service';
 import * as leadsSvc from '../services/crm/leads.service';
+import * as leadRefBackfill from '../services/crm/leadRefBackfill.service';
 import { isWalkInCapture } from '../services/crm/walkIn';
 import * as scheduledVisitSvc from '../services/crm/scheduledVisit.service';
 import * as leadFollowUpSvc from '../services/crm/leadFollowUp.service';
@@ -120,7 +121,7 @@ async function enrichActivities<T extends Record<string, any>>(rows: T[]): Promi
   // Connected-B2B only: add the assignee list (a no-op for every other client).
   return activityExtras.stampAssignees(await stampDirectoryNames(withLinked as any[]));
 }
-import { discoverExportColumns } from '../services/crm/exportColumns.helper';
+import { discoverExportColumns, withLeadNumberColumns } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
 import * as consentSvc from '../services/crm/consent.service';
 import * as nomineeSvc from '../services/crm/nominee.service';
@@ -433,7 +434,7 @@ async function enforceLeadRequiredFields(
   const builtinKeys = [
     'first_name', 'last_name', 'email', 'phone', 'company', 'title',
     'industry', 'city', 'state', 'address_line1', 'postal_code', 'country',
-    'date_of_birth', 'gender',
+    'date_of_birth', 'gender', 'lead_type',
   ] as const;
 
   const friendlyLabel: Record<string, string> = {
@@ -451,6 +452,7 @@ async function enforceLeadRequiredFields(
     country: 'Country',
     date_of_birth: 'Date of birth',
     gender: 'Gender',
+    lead_type: 'Lead type',
   };
 
   const merged = (key: string): { required?: boolean; hidden?: boolean } => {
@@ -514,7 +516,7 @@ async function stripHiddenLeadFields(
     'first_name', 'last_name', 'email', 'phone', 'company', 'title',
     'industry', 'city', 'state', 'address_line1', 'address_line2',
     'postal_code', 'country', 'date_of_birth', 'gender',
-    'preferred_contact_method', 'district', 'block', 'latitude', 'longitude',
+    'preferred_contact_method', 'district', 'block', 'latitude', 'longitude', 'lead_type',
   ];
 
   const stripped: string[] = [];
@@ -820,6 +822,20 @@ leads.get('/', wrap(async (req, res) => {
       hasPrev: page > 1,
     },
   });
+}));
+// Number the leads that have no lead number yet (connected-B2B clients only). Admin-only. `dry_run` (default true)
+// only counts. Registered before every `/leads/:id…` route.
+leads.post('/ref-numbers/backfill', wrap(async (req, res) => {
+  const body = parse(v.leadRefBackfillSchema, req.body ?? {});
+  const data = await leadRefBackfill.backfillLeadRefs({
+    orgId: orgId(req), clientId: clientScope(req).id, user: (req as AuthRequest).user,
+    dryRun: body.dry_run ?? true, limit: body.limit ?? leadRefBackfill.DEFAULT_LIMIT,
+  });
+  if (!data.dry_run && data.processed > 0) {
+    await audit(req as AuthRequest, 'lead.ref_backfill', 'crm_leads', null, null, null,
+      { processed: data.processed, remaining: data.remaining, total_missing: data.total_missing });
+  }
+  res.json({ success: true, data });
 }));
 leads.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.leadCreateSchema, req.body);
@@ -1176,8 +1192,13 @@ leads.get('/export', wrap(async (req, res) => {
   // lat/long → re-upload). discoverExportColumns excludes UUIDs by design,
   // so we add it explicitly here rather than un-excluding it globally
   // (which would leak/mislabel ids in deal/contact/account exports).
+  // "Lead No" (right after Lead ID) and "Lead Type" (after Status) are placed explicitly, not auto-discovered.
   const cols: Array<{ key: string; label: string }> = enriched.length > 0
-    ? [{ key: 'id', label: 'Lead ID' }, ...discoverExportColumns(enriched[0] as Record<string, unknown>)]
+    ? withLeadNumberColumns(
+        [{ key: 'id', label: 'Lead ID' }, ...discoverExportColumns(enriched[0] as Record<string, unknown>)],
+        enriched as Array<Record<string, unknown>>,
+        isB2bClient(scope.id),
+      )
     : [];
   const escape = (v: unknown): string => {
     if (v === null || v === undefined) return '';
