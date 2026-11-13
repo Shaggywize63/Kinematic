@@ -898,8 +898,17 @@ export const flowStepSchema = z.object({
   branch_false_step_id: optionalUuid,
 });
 
+// entity_type is a built-in CRM entity OR a custom object's key (crm_custom_objects.key).
+// A custom object's fields live in crm_custom_field_defs with entity_type = <object.key>
+// (see customObjects.service.ts), so the field-def validator must accept those keys too.
+// The /custom-fields route verifies that a non-built-in key names a real custom object for
+// the tenant, so this stays a permissive identifier check (same shape as a custom object key).
+export const CUSTOM_FIELD_BUILTIN_ENTITIES = ['lead', 'contact', 'account', 'deal', 'activity'] as const;
+export const customFieldEntityType = z.string().trim().min(1).max(50)
+  .regex(/^[a-z][a-z0-9_]*$/, 'entity_type must be a built-in entity (lead, contact, account, deal, activity) or a custom object key');
+
 export const customFieldSchema = z.object({
-  entity_type: z.enum(['lead','contact','account','deal','activity']),
+  entity_type: customFieldEntityType,
   field_key: z.string().min(1).max(80).regex(/^[a-z][a-z0-9_]*$/),
   label: z.string().min(1).max(120),
   // Full set of supported field types. Beyond the originals we now also

@@ -4360,18 +4360,40 @@ router.post('/flow-runs/resume', wrap(async (req, res) => {
 //     tombstones it (is_active=false), but the generic list never filtered
 //     is_active, so "deleted" fields kept rendering on the mobile forms.
 //     Admin/tooling can pass include_inactive=1 to see tombstones.
-router.use('/custom-fields', (req, _res, next) => {
-  const q = req.query as Record<string, unknown>;
-  if (q.entity !== undefined) {
-    if (q.entity_type === undefined) q.entity_type = q.entity;
-    delete q.entity;
+const CUSTOM_FIELD_BUILTIN_ENTITIES = new Set<string>(v.CUSTOM_FIELD_BUILTIN_ENTITIES);
+router.use('/custom-fields', async (req, _res, next) => {
+  try {
+    const q = req.query as Record<string, unknown>;
+    if (q.entity !== undefined) {
+      if (q.entity_type === undefined) q.entity_type = q.entity;
+      delete q.entity;
+    }
+    if (req.method === 'GET') {
+      const wantsInactive = q.include_inactive !== undefined && String(q.include_inactive) !== '0' && String(q.include_inactive) !== 'false';
+      delete q.include_inactive; // never let it reach the generic .eq() loop
+      if (!wantsInactive && q.is_active === undefined) q.is_active = 'true';
+    }
+    // A custom object's fields use entity_type = <object.key> (crm_custom_objects.key). On
+    // create / update, verify a non-built-in entity_type names a real custom object for this
+    // tenant, so a typo can't create an orphan field def. (The field-def validator accepts any
+    // key-shaped entity_type; this is where a key that is not a built-in is checked for real.)
+    if (req.method === 'POST' || req.method === 'PATCH') {
+      const et = (req.body as Record<string, unknown> | undefined)?.entity_type;
+      if (typeof et === 'string' && et.length > 0 && !CUSTOM_FIELD_BUILTIN_ENTITIES.has(et)) {
+        try {
+          await customObjectsSvc.getObject(orgId(req), clientId(req), et);
+        } catch (err) {
+          if (err instanceof AppError && err.statusCode === 404) {
+            throw new AppError(400, `entity_type "${et}" is not a built-in entity (lead, contact, account, deal, activity) or an existing custom object`, 'BAD_INPUT');
+          }
+          throw err;
+        }
+      }
+    }
+    next();
+  } catch (e) {
+    next(e);
   }
-  if (req.method === 'GET') {
-    const wantsInactive = q.include_inactive !== undefined && String(q.include_inactive) !== '0' && String(q.include_inactive) !== 'false';
-    delete q.include_inactive; // never let it reach the generic .eq() loop
-    if (!wantsInactive && q.is_active === undefined) q.is_active = 'true';
-  }
-  next();
 });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
 
