@@ -128,6 +128,38 @@ async function signObject(
   return { error: 'Could not sign object' };
 }
 
+/**
+ * Sign a batch of STORED object URLs for a caller, reusing the exact same
+ * tenant/role authorization `signObject` enforces. Returns, for each input url,
+ * `{ url, signed }` where `signed` is a short-/long-lived signed URL or `null`
+ * when the object is not the caller's to see, not in a signable bucket, or the
+ * storage backend can't be reached. Never throws — a signing failure degrades to
+ * `signed: null` so a caller (e.g. the per-submission export) never 500s because
+ * one photo couldn't be signed. `ttl` is clamped by `resolveSignTtl`.
+ *
+ * Exported so other controllers (forms export / submission reads) can turn the
+ * raw private-bucket photo URLs they store into renderable links without
+ * duplicating the IDOR-safe signing logic.
+ */
+export async function signStoredUrlsForUser(
+  user: NonNullable<AuthRequest['user']>,
+  urls: Array<string | null | undefined>,
+  ttlRaw?: unknown,
+): Promise<Array<{ url: string; signed: string | null }>> {
+  const ttl = resolveSignTtl(ttlRaw);
+  const clean = urls.filter((u): u is string => typeof u === 'string' && u.length > 0 && u.length < 2048);
+  return Promise.all(
+    clean.map(async (u) => {
+      try {
+        const r = await signObject(user, parseObjectRef(undefined, undefined, u), ttl);
+        return { url: u, signed: 'url' in r ? r.url : null };
+      } catch {
+        return { url: u, signed: null };
+      }
+    }),
+  );
+}
+
 // GET /api/v1/media/sign?bucket=<b>&path=<p>   (or ?url=<stored object url>)  [&ttl=<seconds, max 7 days>]
 export const signMedia = asyncHandler(async (req: AuthRequest, res: Response) => {
   const ref = parseObjectRef(req.query.bucket as string, req.query.path as string, req.query.url as string);

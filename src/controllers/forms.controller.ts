@@ -17,6 +17,50 @@ import { scanCard, CardMediaType } from '../services/crm/ai/cardScan.service';
 import { resolveTenantScope, callerMayReadOrg, enforcedUnlessOff } from '../lib/tenantScope';
 import { orgRowReachable } from '../lib/userGuard';
 import { isTenantAdmin } from '../middleware/auth';
+import { signStoredUrlsForUser } from './media.controller';
+
+/** Long-lived signed-URL TTL for per-submission exports (7 days). */
+const EXPORT_SIGN_TTL_SECONDS = 7 * 24 * 60 * 60;
+/** Shorter TTL for in-app submission detail photo rendering (1 hour). */
+const READ_SIGN_TTL_SECONDS = 60 * 60;
+
+/**
+ * Attach renderable signed URLs to each form_response row and expose a flat
+ * `photos` list for the whole submission. Form photos are stored as raw
+ * private-bucket object URLs in `photo_url` (comma-joined for multi-photo
+ * fields); since the storage buckets went PRIVATE (SECURITY_AUDIT_2026-07) those
+ * raw URLs no longer render, which is why captured photos appeared blank. We
+ * sign them server-side so the apps/web get links they can show directly without
+ * a second /media/sign round-trip. Best-effort: signing is additive (the
+ * original `photo_url` is untouched) and a signing miss leaves `signed: null`.
+ */
+async function withSignedPhotos(
+  user: NonNullable<AuthRequest['user']>,
+  responses: any[],
+  ttl: number,
+): Promise<{ responses: any[]; photos: Array<{ url: string; signed: string | null }> }> {
+  const rows = Array.isArray(responses) ? responses : [];
+  const all: string[] = [];
+  const perRow = rows.map((r) => {
+    const urls = splitPhotoUrls(r?.photo_url);
+    all.push(...urls);
+    return urls;
+  });
+  if (all.length === 0) return { responses: rows, photos: [] };
+  let signed: Array<{ url: string; signed: string | null }> = [];
+  try {
+    signed = await signStoredUrlsForUser(user, Array.from(new Set(all)), ttl);
+  } catch {
+    signed = all.map((u) => ({ url: u, signed: null }));
+  }
+  const byUrl = new Map(signed.map((s) => [s.url, s.signed] as const));
+  const enriched = rows.map((r, i) => ({
+    ...r,
+    photo_urls: perRow[i],
+    photos: perRow[i].map((u) => ({ url: u, signed: byUrl.get(u) ?? null })),
+  }));
+  return { responses: enriched, photos: signed };
+}
 
 /** Parse a "lat,lng" GPS string (the mobile check_in_gps field) to a coord pair. */
 function parseGps(s: unknown): { lat: number; lng: number } | null {
@@ -55,6 +99,62 @@ function normalizeOptions(raw: unknown): Array<{ label: string; value: string }>
     }
   }
   return out;
+}
+
+/**
+ * Extract the stored photo value for one form answer, tolerant of EVERY shape
+ * the apps have sent an image answer in. Historically the controller only read a
+ * single comma-joined `r.photo` STRING and dropped anything else, so a build that
+ * sent the uploaded URL(s) as an array (`r.photo: ["u1","u2"]`), under a
+ * different key (`r.photos`), or as `[{url}]` objects persisted NOTHING to
+ * `photo_url` — the captured photos silently vanished from the submission. This
+ * normalises all of those to the canonical comma-joined string the DB column and
+ * the dashboard already expect (or null when there is genuinely no photo), so no
+ * app release or data migration is needed and old single-string payloads are
+ * byte-identical.
+ *
+ * `isImageField` lets the submit/edit path also rescue a URL that an older build
+ * stuffed into the generic `value`/`response` of an image-type question instead
+ * of `photo`.
+ */
+function pickUrlString(v: unknown): string | null {
+  if (typeof v === 'string') return v.trim() || null;
+  if (v && typeof v === 'object') {
+    const rec = v as Record<string, unknown>;
+    const s = rec.url ?? rec.signed ?? rec.signedUrl ?? rec.path ?? rec.uri ?? rec.src;
+    return typeof s === 'string' ? (s.trim() || null) : null;
+  }
+  return null;
+}
+export function normalizePhotoAnswer(
+  r: { photo?: unknown; photos?: unknown; value?: unknown; response?: unknown },
+  isImageField = false,
+): string | null {
+  const parts: string[] = [];
+  const consume = (raw: unknown) => {
+    if (raw == null) return;
+    if (Array.isArray(raw)) { for (const el of raw) { const s = pickUrlString(el); if (s) parts.push(s); } return; }
+    const s = pickUrlString(raw);
+    if (s == null) return;
+    // A single value may itself be comma-joined (the legacy wire format).
+    for (const piece of s.split(',')) { const t = piece.trim(); if (t) parts.push(t); }
+  };
+  consume(r.photo);
+  consume(r.photos);
+  // Only fall back to value/response for image-typed questions, so a text answer
+  // that happens to contain a URL is never mistaken for a photo.
+  if (isImageField && parts.length === 0) { consume(r.value); consume(r.response); }
+  if (parts.length === 0) return null;
+  // De-dupe, preserve order.
+  const seen = new Set<string>();
+  const out = parts.filter((p) => (seen.has(p) ? false : (seen.add(p), true)));
+  return out.length ? out.join(',') : null;
+}
+
+/** Split a stored `photo_url` (possibly comma-joined) into individual object URLs. */
+export function splitPhotoUrls(stored: unknown): string[] {
+  if (typeof stored !== 'string' || !stored.trim()) return [];
+  return stored.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
 /** Rajkamal Jewellers client id — mirrors the apps/dashboard isRajkamal gate. */
@@ -385,6 +485,20 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
   // else, so their writes are byte-identical to before.
   const refNo = await allocateFormRef(submitterClientId);
 
+  // Image-type question ids for THIS form, so a photo answer that arrives as an
+  // array, under `photos`, or inside an image field's `value` still lands in
+  // `photo_url` (see normalizePhotoAnswer). Cheap single lookup, mirrors the
+  // phone/company pre-scans above; empty for text-only forms.
+  let imageFieldIds = new Set<string>();
+  if (template_id && Array.isArray(responses) && responses.length) {
+    const { data: imgQs } = await supabaseAdmin
+      .from('builder_questions')
+      .select('id')
+      .eq('form_id', template_id)
+      .in('qtype', ['photo', 'image', 'camera', 'signature', 'file', 'card_scan', 'planogram']);
+    imageFieldIds = new Set<string>((imgQs || []).map((q: any) => String(q.id)));
+  }
+
   const { data: sub, error: subErr } = await supabaseAdmin.from('form_submissions').insert({
     user_id: user.id, org_id: user.org_id, client_id: submitterClientId,
     ...(refNo ? { ref_no: refNo } : {}),
@@ -410,8 +524,13 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
     // for image fields and didn't show the captured images. Split them
     // out so image fields land in `photo_url` where the FE looks.
     const fieldId = r.field_id || r.question_id;
-    const photoVal: string | null = (typeof r.photo === 'string' && r.photo.length > 0) ? r.photo : null;
-    const rawVal: unknown = r.value ?? r.response ?? null;
+    const isImg = imageFieldIds.has(String(fieldId));
+    // Resilient to array / `photos` / `[{url}]` / image-field `value` shapes.
+    const photoVal: string | null = normalizePhotoAnswer(r, isImg);
+    // If the photo was rescued from an image field's own `value`, don't ALSO
+    // store that same URL as the text answer.
+    const rescuedFromValue = isImg && photoVal != null && normalizePhotoAnswer(r, false) == null;
+    const rawVal: unknown = rescuedFromValue ? null : (r.value ?? r.response ?? null);
     const textVal = typeof rawVal === 'string' ? rawVal
       : (rawVal == null ? "" : JSON.stringify(rawVal));
 
@@ -520,17 +639,114 @@ export const getSubmission = asyncHandler<AuthRequest>(async (req, res) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getMockSubmissionDetails(req.params.id));
   const { id } = req.params;
+  if (!isUUID(id)) return badRequest(res, 'Invalid submission id');
   const { data: sub } = await supabaseAdmin.from('form_submissions').select('*, builder_forms(title), activities(name), crm_accounts(name)').eq('id', id).single();
   // One org's rows only, on every project: a submission id from another org is a 404, not a read.
   if (sub && (sub as { user_id?: string }).user_id !== user.id && !callerMayReadOrg(user, (sub as { org_id?: string | null }).org_id)) return notFound(res);
   if (sub) {
     const { data: resp } = await supabaseAdmin.from('form_responses').select('*, builder_questions(*)').eq('submission_id', id);
-    return ok(res, { ...sub, form_responses: resp || [] });
+    // Turn stored private-bucket photo URLs into renderable signed links (additive).
+    const { responses, photos } = await withSignedPhotos(user, resp || [], READ_SIGN_TTL_SECONDS);
+    return ok(res, { ...sub, form_responses: responses, photos });
   }
   const { data: bSub } = await supabaseAdmin.from('builder_submissions').select('*, builder_forms(title), users(name)').eq('id', id).single();
   if (bSub && (bSub as { user_id?: string }).user_id !== user.id && !callerMayReadOrg(user, (bSub as { org_id?: string | null }).org_id)) return notFound(res);
   if (bSub) return ok(res, { ...bSub, activities: { name: bSub.builder_forms?.title }, form_responses: bSub.responses || [] });
   return notFound(res);
+});
+
+/**
+ * GET /api/v1/forms/submissions/:id/export
+ *
+ * One submission as a self-contained, downloadable payload the apps/web can
+ * save or format (we deliberately do NOT render a PDF here — a clean structured
+ * export is enough and the web can lay it out). Includes the reference number,
+ * form title, submitter, submitted-at and every answer, with LONG-LIVED signed
+ * URLs (7 days) for any photo answers so the export keeps rendering offline.
+ *
+ * Gated to the submitting rep (own) or a tenant admin (any in their org) —
+ * identical to the edit/history gate. Resilient: a missing optional join/column
+ * degrades to null and signing is best-effort; never 500s.
+ */
+export const exportSubmission = asyncHandler<AuthRequest>(async (req, res) => {
+  const user = req.user!;
+  const { id } = req.params;
+  if (!isUUID(id)) return badRequest(res, 'Invalid submission id');
+  if (isDemo(user)) {
+    return ok(res, { submission_id: id, ref_no: null, form_title: 'Demo Form', answers: [], photos: [] });
+  }
+
+  const { data: sub } = await supabaseAdmin
+    .from('form_submissions')
+    .select('*, builder_forms(title), activities(name), crm_accounts(name), users:user_id(id, name, employee_id)')
+    .eq('id', id)
+    .single();
+  if (!sub) return notFound(res, 'Submission not found');
+
+  const isOwner = (sub as { user_id?: string }).user_id === user.id;
+  const sameOrg = callerMayReadOrg(user, (sub as { org_id?: string | null }).org_id);
+  // Cross-org / cross-user without admin rights: 404 (don't reveal the row).
+  if (!sameOrg && !isOwner) return notFound(res);
+  // In-org but neither admin nor the submitter → forbidden.
+  if (!isTenantAdmin(user) && !isOwner) {
+    return res.status(403).json({ success: false, error: 'Only an admin or the submitting rep can export this report.', code: 'FORBIDDEN' });
+  }
+
+  const { data: resp } = await supabaseAdmin
+    .from('form_responses')
+    .select('*, builder_questions(*)')
+    .eq('submission_id', id);
+  const rows = (resp || []) as any[];
+
+  // Long-lived signed URLs for every captured photo.
+  const { photos } = await withSignedPhotos(user, rows, EXPORT_SIGN_TTL_SECONDS);
+  const signedByUrl = new Map(photos.map((p) => [p.url, p.signed] as const));
+
+  const s = sub as any;
+  const answers = rows
+    .map((r) => {
+      const q = r.builder_questions || {};
+      const urls = splitPhotoUrls(r.photo_url);
+      const value = r.value_text != null ? r.value_text
+        : r.value_number != null ? r.value_number
+        : r.value_bool != null ? r.value_bool
+        : null;
+      return {
+        field_id: r.field_id ?? null,
+        label: (q.label as string) ?? null,
+        type: (q.qtype as string) ?? null,
+        sort_order: (q.q_order as number) ?? null,
+        value,
+        gps: r.gps ?? null,
+        photos: urls.map((u) => ({ url: u, signed: signedByUrl.get(u) ?? null })),
+      };
+    })
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+
+  return ok(res, {
+    submission_id: s.id,
+    ref_no: s.ref_no ?? null,
+    form_title: s.builder_forms?.title ?? null,
+    template_id: s.template_id ?? null,
+    activity_name: s.activities?.name ?? null,
+    account_name: s.crm_accounts?.name ?? null,
+    submitter: {
+      id: s.users?.id ?? s.user_id ?? null,
+      name: s.users?.name ?? null,
+      employee_id: s.users?.employee_id ?? null,
+    },
+    submitted_at: s.submitted_at ?? null,
+    outlet_name: s.outlet_name ?? null,
+    address: s.address ?? null,
+    latitude: s.latitude ?? null,
+    longitude: s.longitude ?? null,
+    check_in_at: s.check_in_at ?? null,
+    check_out_at: s.check_out_at ?? null,
+    answers,
+    photos,
+    exported_at: new Date().toISOString(),
+    signed_url_ttl_seconds: EXPORT_SIGN_TTL_SECONDS,
+  });
 });
 
 // Admin edit of a submitted report. A TENANT ADMIN (isTenantAdmin) may edit any
@@ -581,17 +797,25 @@ export const updateSubmission = asyncHandler<AuthRequest>(async (req, res) => {
     const byField = new Map<string, any>((existing || []).map((r: any) => [String(r.field_id), r]));
     const fieldIds = body.responses.map((r) => String(r.field_id ?? r.question_id ?? '')).filter(Boolean);
     const labels = new Map<string, string>();
+    const imageFieldIds = new Set<string>();
+    const IMAGE_QTYPES = new Set(['photo', 'image', 'camera', 'signature', 'file', 'card_scan', 'planogram']);
     if (fieldIds.length) {
-      const { data: qs } = await supabaseAdmin.from('builder_questions').select('id,label').in('id', fieldIds);
-      for (const q of (qs || []) as Array<{ id: string; label: string | null }>) labels.set(String(q.id), q.label ?? '');
+      const { data: qs } = await supabaseAdmin.from('builder_questions').select('id,label,qtype').in('id', fieldIds);
+      for (const q of (qs || []) as Array<{ id: string; label: string | null; qtype?: string | null }>) {
+        labels.set(String(q.id), q.label ?? '');
+        if (q.qtype && IMAGE_QTYPES.has(String(q.qtype))) imageFieldIds.add(String(q.id));
+      }
     }
     const display = (r: any): string | null => r == null ? null
       : (r.photo_url ?? r.value_text ?? (r.value_number != null ? String(r.value_number) : (r.value_bool != null ? String(r.value_bool) : null)));
     for (const r of body.responses) {
       const fieldId = String(r.field_id ?? r.question_id ?? '');
       if (!fieldId) continue;
-      const photoVal: string | null = (typeof r.photo === 'string' && r.photo.length > 0) ? r.photo : null;
-      const rawVal: unknown = r.value ?? null;
+      const isImg = imageFieldIds.has(fieldId);
+      // Resilient to array / `photos` / `[{url}]` / image-field `value` shapes.
+      const photoVal: string | null = normalizePhotoAnswer(r, isImg);
+      const rescuedFromValue = isImg && photoVal != null && normalizePhotoAnswer(r, false) == null;
+      const rawVal: unknown = rescuedFromValue ? null : (r.value ?? null);
       const textVal = typeof rawVal === 'string' ? rawVal : (rawVal == null ? null : JSON.stringify(rawVal));
       const row = {
         value_text: textVal,
