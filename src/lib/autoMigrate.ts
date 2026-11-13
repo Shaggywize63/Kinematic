@@ -38,8 +38,28 @@ const TRACK_TABLE = `CREATE TABLE IF NOT EXISTS public.schema_migrations (
   applied_at timestamptz NOT NULL DEFAULT now()
 );`;
 
+/**
+ * Remove standalone top-level transaction-control statements from a migration.
+ *
+ * The runner applies SQL through the `exec_migration` RPC, which runs it via
+ * PL/pgSQL `EXECUTE`. Postgres cannot `EXECUTE` transaction commands, so a
+ * migration that wraps itself in `BEGIN; … COMMIT;` fails with
+ * "EXECUTE of transaction commands is not implemented" — and the exec_migration
+ * function call is already atomic, so the wrapper is redundant anyway. Strip
+ * only lines that are EXACTLY a transaction-control statement (e.g. `BEGIN;`,
+ * `COMMIT;`): the `BEGIN`/`END` keywords inside a `DO $$ BEGIN … END $$;` block
+ * carry no trailing `;` on their own line and are left untouched.
+ */
+export function stripTopLevelTxnControl(sql: string): string {
+  const txn = /^\s*(BEGIN|COMMIT|ROLLBACK|START\s+TRANSACTION|END\s+TRANSACTION)\s*;\s*$/i;
+  return sql
+    .split('\n')
+    .filter((line) => !txn.test(line))
+    .join('\n');
+}
+
 async function exec(admin: SupabaseClient, sql: string): Promise<void> {
-  const { error } = await admin.rpc('exec_migration', { sql_query: sql });
+  const { error } = await admin.rpc('exec_migration', { sql_query: stripTopLevelTxnControl(sql) });
   if (error) throw new Error(error.message || String(error));
 }
 
