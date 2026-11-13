@@ -23,6 +23,7 @@ import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { notify, notifyUsers, resolveManagers } from './notify';
 import { buildReplenishment } from './distribution/replenishment.service';
+import { istTodayISO } from '../lib/clientAccess';
 
 const DAY_MS = 86_400_000;
 
@@ -314,4 +315,191 @@ export async function runLowStockScan(
 
   logger.info(`[low-stock] scan: ${orgIds.length} org(s), ${alerted} alerted`);
   return { orgs: orgIds.length, alerted };
+}
+
+// ══════════════════════ Pharma desk + customer-order alerts ═════════════════
+// These four scans back the pharma requirement's alert rules. They read the
+// crm_daily_call_tasks + crm_customer_orders tables and are self-gating: a
+// tenant that doesn't use the calling desk / order ledger produces zero rows.
+// Grouped by (org_id, client_id); notifications are client-scoped.
+
+function groupBy<T>(rows: T[], key: (r: T) => string): Map<string, T[]> {
+  const m = new Map<string, T[]>();
+  for (const r of rows) { const k = key(r); const a = m.get(k) || []; a.push(r); m.set(k, a); }
+  return m;
+}
+
+/**
+ * Uncontacted-customer scan. For TODAY's (IST) calling list, finds customers
+ * still 'pending' (never called) and nudges the client's managers (+ each
+ * assigned operator). Run late in the IST working day. De-duped per
+ * (client, date) so it alerts once per day.
+ */
+export async function runUncontactedScan(): Promise<{ clients: number; alerted: number }> {
+  const today = istTodayISO();
+  const { data, error } = await supabaseAdmin
+    .from('crm_daily_call_tasks')
+    .select('org_id, client_id, assigned_operator, status')
+    .eq('call_date', today).is('deleted_at', null).limit(100000);
+  if (error) { logger.warn(`[uncontacted] query failed: ${error.message}`); return { clients: 0, alerted: 0 }; }
+  const rows = (data as any[]) || [];
+  if (!rows.length) return { clients: 0, alerted: 0 };
+
+  const already = await recentlyNotifiedIds('uncontacted_customers', 'scope', 20);
+  const byClient = groupBy(rows, (r) => `${r.org_id}|${r.client_id || ''}`);
+  let alerted = 0;
+  for (const [key, group] of byClient) {
+    const pending = group.filter((r) => r.status === 'pending');
+    if (!pending.length) continue;
+    if (already.has(key)) continue;
+    const [org_id, client_id] = key.split('|');
+    const managers = await resolveManagers(org_id, { clientId: client_id || null });
+    if (managers.length) {
+      await notifyUsers(managers, {
+        orgId: org_id, kind: 'uncontacted_customers',
+        title: 'Customers not yet called',
+        body: `${pending.length} customer${pending.length === 1 ? '' : 's'} on today's calling list ${pending.length === 1 ? 'has' : 'have'} not been contacted yet.`,
+        data: { scope: key, date: today, pending: String(pending.length), audience: 'manager' },
+      });
+    }
+    // Per-operator nudge.
+    const byOp = groupBy(pending.filter((r) => r.assigned_operator), (r) => r.assigned_operator);
+    for (const [op, list] of byOp) {
+      await notify({
+        orgId: org_id, userId: op, kind: 'uncontacted_customers',
+        title: 'Pending calls on your list',
+        body: `You have ${list.length} customer${list.length === 1 ? '' : 's'} still to call today.`,
+        data: { scope: `${key}|${op}`, date: today, pending: String(list.length), audience: 'operator' },
+      });
+    }
+    alerted++;
+  }
+  logger.info(`[uncontacted] scan: ${byClient.size} client(s), ${alerted} alerted`);
+  return { clients: byClient.size, alerted };
+}
+
+/**
+ * Order-pending-not-converted scan. Finds call tasks marked 'order_pending'
+ * on a prior day that never converted (pending_resolved = false), and tells
+ * the operator + managers. De-duped per task.
+ */
+export async function runPendingOrderScan(opts: { graceDays?: number } = {}): Promise<{ tasks: number; alerted: number }> {
+  const graceDays = Math.max(1, opts.graceDays ?? 1);
+  const cutoff = new Date(Date.now() - graceDays * DAY_MS).toISOString().slice(0, 10);
+  const { data, error } = await supabaseAdmin
+    .from('crm_daily_call_tasks')
+    .select('id, org_id, client_id, assigned_operator, customer_name, call_date')
+    .eq('status', 'order_pending').eq('pending_resolved', false)
+    .lte('call_date', cutoff).is('deleted_at', null).limit(50000);
+  if (error) { logger.warn(`[pending-order] query failed: ${error.message}`); return { tasks: 0, alerted: 0 }; }
+  const rows = (data as any[]) || [];
+  if (!rows.length) return { tasks: 0, alerted: 0 };
+
+  const already = await recentlyNotifiedIds('pending_order_unconverted', 'task_id', 48);
+  const managerCache = new Map<string, string[]>();
+  let alerted = 0;
+  for (const t of rows) {
+    if (already.has(String(t.id))) continue;
+    const mk = `${t.org_id}|${t.client_id || ''}`;
+    if (!managerCache.has(mk)) managerCache.set(mk, await resolveManagers(t.org_id, { clientId: t.client_id || null }));
+    const recipients = [...new Set([t.assigned_operator, ...(managerCache.get(mk) || [])].filter(Boolean))];
+    if (!recipients.length) continue;
+    await notifyUsers(recipients, {
+      orgId: t.org_id, kind: 'pending_order_unconverted',
+      title: 'Pending order not converted',
+      body: `${t.customer_name || 'A customer'} promised an order on ${t.call_date} but it hasn't been booked yet.`,
+      data: { task_id: String(t.id), customer_name: t.customer_name || '', call_date: String(t.call_date) },
+    });
+    alerted++;
+  }
+  logger.info(`[pending-order] scan: ${rows.length} task(s), ${alerted} alerted`);
+  return { tasks: rows.length, alerted };
+}
+
+/** Per-customer last-order + value aggregation from the order ledger. */
+async function aggregateCustomerOrders(): Promise<Map<string, { org_id: string; client_id: string | null; customer_type: string; customer_id: string; customer_name: string | null; last_order: string; value_last_30: number; value_prev_30: number }>> {
+  const today = istTodayISO();
+  const last30 = new Date(Date.now() - 30 * DAY_MS).toISOString().slice(0, 10);
+  const prev30 = new Date(Date.now() - 60 * DAY_MS).toISOString().slice(0, 10);
+  const { data } = await supabaseAdmin
+    .from('crm_customer_orders')
+    .select('org_id, client_id, customer_type, customer_id, customer_name, order_date, order_value')
+    .is('deleted_at', null).limit(200000);
+  const agg = new Map<string, any>();
+  for (const o of (data as any[]) || []) {
+    const k = `${o.org_id}|${o.client_id || ''}|${o.customer_type}|${o.customer_id}`;
+    const cur = agg.get(k) || { org_id: o.org_id, client_id: o.client_id || null, customer_type: o.customer_type, customer_id: o.customer_id, customer_name: o.customer_name, last_order: o.order_date, value_last_30: 0, value_prev_30: 0 };
+    if (o.order_date > cur.last_order) { cur.last_order = o.order_date; cur.customer_name = o.customer_name || cur.customer_name; }
+    if (o.order_date > last30) cur.value_last_30 += Number(o.order_value || 0);
+    else if (o.order_date > prev30) cur.value_prev_30 += Number(o.order_value || 0);
+    agg.set(k, cur);
+  }
+  void today;
+  return agg;
+}
+
+/**
+ * Dormant-customer scan. Customers whose most recent order is older than
+ * `dormantDays` (default 30) get surfaced to the client's managers as a digest.
+ * De-duped per (client) daily.
+ */
+export async function runDormantCustomerScan(opts: { dormantDays?: number } = {}): Promise<{ clients: number; alerted: number }> {
+  const dormantDays = Math.max(7, opts.dormantDays ?? 30);
+  const today = istTodayISO();
+  const cutoff = new Date(Date.now() - dormantDays * DAY_MS).toISOString().slice(0, 10);
+  const agg = await aggregateCustomerOrders();
+  const dormant = [...agg.values()].filter((c) => c.last_order <= cutoff);
+  if (!dormant.length) return { clients: 0, alerted: 0 };
+
+  const already = await recentlyNotifiedIds('customer_dormant', 'scope', 20);
+  const byClient = groupBy(dormant, (c) => `${c.org_id}|${c.client_id || ''}`);
+  let alerted = 0;
+  for (const [key, list] of byClient) {
+    if (already.has(key)) continue;
+    const [org_id, client_id] = key.split('|');
+    const managers = await resolveManagers(org_id, { clientId: client_id || null });
+    if (!managers.length) continue;
+    const lead = list.slice(0, 3).map((c) => c.customer_name || 'a customer').join(', ');
+    await notifyUsers(managers, {
+      orgId: org_id, kind: 'customer_dormant',
+      title: 'Customers stopped ordering',
+      body: `${list.length} customer${list.length === 1 ? '' : 's'} haven't ordered in ${dormantDays}+ days — e.g. ${lead}.`,
+      data: { scope: key, date: today, count: String(list.length), dormant_days: String(dormantDays) },
+    });
+    alerted++;
+  }
+  logger.info(`[dormant] scan: ${byClient.size} client(s), ${alerted} alerted`);
+  return { clients: byClient.size, alerted };
+}
+
+/**
+ * Declining-sales scan. Customers whose last-30-day order value fell below 70%
+ * of the prior 30 days (and who actually ordered before) get flagged to the
+ * client's managers. De-duped per (client) daily.
+ */
+export async function runDecliningCustomerScan(): Promise<{ clients: number; alerted: number }> {
+  const today = istTodayISO();
+  const agg = await aggregateCustomerOrders();
+  const declining = [...agg.values()].filter((c) => c.value_prev_30 > 0 && c.value_last_30 < c.value_prev_30 * 0.7);
+  if (!declining.length) return { clients: 0, alerted: 0 };
+
+  const already = await recentlyNotifiedIds('customer_declining', 'scope', 20);
+  const byClient = groupBy(declining, (c) => `${c.org_id}|${c.client_id || ''}`);
+  let alerted = 0;
+  for (const [key, list] of byClient) {
+    if (already.has(key)) continue;
+    const [org_id, client_id] = key.split('|');
+    const managers = await resolveManagers(org_id, { clientId: client_id || null });
+    if (!managers.length) continue;
+    const lead = list.slice(0, 3).map((c) => c.customer_name || 'a customer').join(', ');
+    await notifyUsers(managers, {
+      orgId: org_id, kind: 'customer_declining',
+      title: 'Customer orders declining',
+      body: `${list.length} customer${list.length === 1 ? '' : 's'} ordering well below their usual — e.g. ${lead}. Worth a call.`,
+      data: { scope: key, date: today, count: String(list.length) },
+    });
+    alerted++;
+  }
+  logger.info(`[declining] scan: ${byClient.size} client(s), ${alerted} alerted`);
+  return { clients: byClient.size, alerted };
 }
