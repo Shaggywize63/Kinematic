@@ -32,6 +32,9 @@ const UNIQUES: Unique[] = [
   { table: 'hrms_roster', cols: ['org_id', 'employee_id', 'week_start'], name: 'hrms_roster_org_emp_week_uq' },
   { table: 'hrms_leave_types', cols: ['org_id', 'code'], name: 'hrms_leave_types_org_code_uq' },
   { table: 'hrms_leave_balances', cols: ['org_id', 'employee_id', 'leave_type_id'], name: 'hrms_leave_balances_org_emp_lt_uq' },
+  { table: 'hrms_benefit_enrolments', cols: ['org_id', 'employee_id'], name: 'hrms_benefit_enrolments_org_emp_uq' },
+  { table: 'hrms_benefit_claims', cols: ['org_id', 'ref'], name: 'hrms_benefit_claims_org_ref_uq' },
+  { table: 'hrms_benefit_config', cols: ['org_id'], name: 'hrms_benefit_config_org_uq' },
 ];
 
 /** The database defaults of the columns the services leave out of an insert. */
@@ -69,6 +72,10 @@ const DEFAULTS: Record<string, () => Row> = {
   hrms_leave_balances: () => ({ opening: 0, accrued: 0, taken: 0, encashed: 0, lapsed: 0 }),
   hrms_assets: () => ({ warranty_end: null, status: 'in_stock', holder_id: null }),
   hrms_asset_events: () => ({ from_id: null, to_id: null, condition: null, ack: null, note: null }),
+  hrms_benefit_plans: () => ({ summary: '', provider: '', auto: false, tiers: [], employer_share_pct: {}, dependants: null, flex_monthly: null, baskets: null, tax_note: '' }),
+  hrms_benefit_enrolments: () => ({ health_tier: null, dependants: [], meal_tier: null, nps_tier: null, flex: {} }),
+  hrms_benefit_claims: () => ({ approved: null, closed_on: null, rejection_reason: null, trail: [] }),
+  hrms_benefit_config: () => ({ extensions: [], reminders: {}, sent: {} }),
 };
 
 /** jsonb stores an object's keys sorted by length, then bytewise; arrays keep their order. */
@@ -128,7 +135,7 @@ export function createHrmsFakeDb() {
     if (!gone.length) return;
     const ids = new Set(gone.map((g) => g.id));
     if (table === 'hrms_employees') {
-      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
+      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances', 'hrms_benefit_enrolments', 'hrms_benefit_claims']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
       for (const r of tables.hrms_employees ?? []) if (ids.has(r.reporting_to_id)) r.reporting_to_id = null;
       for (const r of tables.hrms_departments ?? []) if (ids.has(r.head_id)) r.head_id = null;
       for (const r of tables.hrms_assets ?? []) if (ids.has(r.holder_id)) r.holder_id = null;                 // holder_id ON DELETE SET NULL
@@ -358,6 +365,67 @@ export function createHrmsFakeDb() {
       }));
       Object.assign(asset, { status: newStatus, holder_id: newHolder, condition: newCond, updated_at: ts });
       return { data: evId, error: null };
+    },
+    // ── benefits (migration_hrms_benefits.sql) ───────────────────────────────
+    // Register a claim: assign the ref from the current count (4100 + count*37 + 41), insert in 'submitted' with the
+    // initial trail entry. The unique(org, ref) / pkey indexes are the race-safe backstops.
+    hrms_benefit_register_claim: (a) => {
+      const claims = T('hrms_benefit_claims');
+      const uniq = (name: string) => ({ data: null, error: { code: '23505', message: `duplicate key value violates unique constraint "${name}"` } });
+      if (claims.some((x) => x.id === a.p_claim)) return uniq('hrms_benefit_claims_pkey');
+      const cnt = claims.filter((x) => x.org_id === a.p_org && x.client_id === null).length;
+      const ref = `TPA-26-${String(4100 + cnt * 37 + 41).padStart(5, '0')}`;
+      if (claims.some((x) => x.org_id === a.p_org && x.client_id === null && x.ref === ref)) return uniq('hrms_benefit_claims_org_ref_uq');
+      const ts = assetTick();
+      const by = (String(a.p_by ?? '').trim()) || 'Unknown';
+      claims.push(normalise({
+        id: a.p_claim, org_id: a.p_org, client_id: null, ref, employee_id: a.p_employee, patient: a.p_patient, relation: a.p_relation,
+        kind: a.p_kind, hospital: a.p_hospital, claimed: a.p_claimed, approved: null, filed_on: a.p_on, closed_on: null, status: 'submitted',
+        rejection_reason: null, trail: [{ on: a.p_on, status: 'submitted', note: 'Claim registered.', by }], created_at: ts, updated_at: ts,
+      }));
+      return { data: a.p_claim, error: null };
+    },
+    // Move a claim through CLAIM_NEXT, atomically: re-check the transition under the (serialised) lock, apply the
+    // dashboard's moveClaim mutations and append the trail entry { on, status, note?, by } (note omitted when blank).
+    hrms_benefit_move_claim: (a) => {
+      const claim = T('hrms_benefit_claims').find((x) => x.id === a.p_claim && x.org_id === a.p_org && x.client_id === null);
+      if (!claim) return token('CLAIM_NOT_FOUND');
+      const NEXT: Record<string, string[]> = {
+        submitted: ['in_review', 'rejected'], in_review: ['query', 'approved', 'rejected'], query: ['in_review', 'rejected'],
+        approved: ['settled'], settled: [], rejected: ['in_review'],
+      };
+      if (!(NEXT[claim.status] ?? []).includes(a.p_to)) return token('CLAIM_STATE');
+      let closed = claim.closed_on ?? null; let reject = claim.rejection_reason ?? null; let approved = claim.approved ?? null;
+      if (a.p_to === 'approved') approved = Math.round(a.p_approved);
+      if (['settled', 'rejected'].includes(a.p_to)) closed = a.p_on;
+      if (a.p_to === 'rejected') { reject = String(a.p_reason ?? '').trim(); approved = null; }
+      if (a.p_to === 'in_review' && closed != null) { closed = null; reject = null; }
+      const by = (String(a.p_by ?? '').trim()) || 'Unknown';
+      const entry: Row = { on: a.p_on, status: a.p_to, by };
+      const note = String(a.p_note ?? '').trim();
+      if (note) entry.note = note;
+      const ts = assetTick();
+      Object.assign(claim, { status: a.p_to, approved, closed_on: closed, rejection_reason: reject, trail: jsonb([...(claim.trail ?? []), entry]), updated_at: ts });
+      return { data: a.p_claim, error: null };
+    },
+    // Send to payroll: refuse while the month's run is frozen/paid, delete the old tagged rows, insert the new ones,
+    // record the send in the config sent map -- all in one transaction (the amounts are computed by the service engine).
+    hrms_benefit_send_to_payroll: (a) => {
+      if (T('hrms_pay_runs').some((r) => r.org_id === a.p_org && r.client_id === null && r.month === a.p_month && ['frozen', 'paid'].includes(r.status))) return token('RUN_LOCKED');
+      const adj = T('hrms_adjustments');
+      const old = adj.filter((r) => r.org_id === a.p_org && r.client_id === null && r.month === a.p_month && r.note != null && String(r.note).startsWith(a.p_tag));
+      tables.hrms_adjustments = adj.filter((r) => !old.includes(r));
+      const by = (String(a.p_by ?? '').trim()) || 'Unknown';
+      for (const row of (a.p_rows ?? [])) {
+        const ts = assetTick();
+        T('hrms_adjustments').push(normalise({
+          id: crypto.randomUUID(), org_id: a.p_org, client_id: null, employee_id: row.employee_id, month: a.p_month, kind: 'one_time_deduction',
+          amount: Number(row.amount), taxable: false, note: row.note, source: null, created_by: by, created_at: ts, updated_at: ts,
+        }));
+      }
+      const cfg = T('hrms_benefit_config').find((c) => c.org_id === a.p_org && c.client_id === null);
+      if (cfg) { cfg.sent = jsonb({ ...(cfg.sent ?? {}), [a.p_month]: a.p_sent }); cfg.updated_at = assetTick(); }
+      return { data: old.length, error: null };
     },
   };
 
