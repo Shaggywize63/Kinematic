@@ -14,7 +14,7 @@ import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { normalizeMobile, newUserContactProblem } from '../lib/userContact';
 import { userAccessRows, modulePermissionsForNewUser } from '../lib/userAccessRows';
 import { clientGrantedModuleIds } from '../lib/entitlements';
-import { assertMayManageUser, assertMayAssignRole } from '../lib/userGuard';
+import { assertMayManageUser, assertMayAssignRole, assertUserReachable } from '../lib/userGuard';
 import { allowedFlags, isProjectDisabled } from '../services/notificationPolicy';
 import { isPlatformOperator, usesStrictTenantScope } from '../lib/tenantScope';
 import { invalidateAuthCache } from '../middleware/auth';
@@ -893,6 +893,124 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
     throw new AppError(500, `DB update crashed: ${e.message}`, 'DB_CRASH')
   }
 })
+
+// ========================================================================
+// Multiple roles per user (additive).
+//
+// A user's PRIMARY role stays on users.org_role_id (set via createUser/
+// updateUser). ADDITIONAL roles live in the user_roles join table. Effective
+// module permissions are the UNION of every role, resolved in middleware/auth.ts
+// (resolveRoleContext). These endpoints list / add / remove / replace a user's
+// ADDITIONAL roles. A user with no user_roles rows is unchanged (single-role).
+// ========================================================================
+
+// Load an org_role assignable to a user in `orgId` (and `targetClientId`), or
+// throw 404 so role ids can't be probed cross-tenant. Both the target client's
+// own roles and org-level (client_id NULL) roles qualify — mirroring
+// roles.routes scopedSelect's client + org-default visibility.
+async function loadAssignableRole(orgId: string, targetClientId: string | null, roleId: string) {
+  if (!isUUID(roleId)) throw new AppError(400, 'Invalid role id', 'VALIDATION_ERROR');
+  const { data, error } = await supabaseAdmin
+    .from('org_roles')
+    .select('id, name, color, data_scope, permissions, permissions_write, client_id')
+    .eq('id', roleId)
+    .eq('org_id', orgId)
+    .is('deleted_at', null)
+    .maybeSingle();
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const row = data as { id: string; client_id: string | null } | null;
+  if (!row) throw new AppError(404, 'Role not found', 'NOT_FOUND');
+  // Hard tenant isolation: a client-scoped role only applies to that client's users.
+  if (row.client_id && targetClientId && row.client_id !== targetClientId) {
+    throw new AppError(404, 'Role not found', 'NOT_FOUND');
+  }
+  return row as { id: string; name: string | null; color: string | null; data_scope: string | null; permissions: string[] | null; permissions_write: string[] | null; client_id: string | null };
+}
+
+// GET /users/:id/roles — the user's PRIMARY role + every ADDITIONAL role.
+export const listUserRoles = asyncHandler<AuthRequest>(async (req, res) => {
+  await assertUserReachable(req.user!, req.params.id, 'listUserRoles');
+  const { data: u } = await supabaseAdmin.from('users').select('org_role_id').eq('id', req.params.id).maybeSingle();
+  const primaryId = ((u as { org_role_id?: string | null } | null)?.org_role_id) ?? null;
+  const { data: extra } = await supabaseAdmin.from('user_roles').select('org_role_id').eq('user_id', req.params.id);
+  const extraIds = ((extra ?? []) as Array<{ org_role_id: string }>).map((r) => r.org_role_id).filter(Boolean);
+  const ids = Array.from(new Set([primaryId, ...extraIds].filter(Boolean))) as string[];
+  let roleRows: Array<{ id: string }> = [];
+  if (ids.length) {
+    const { data: rows } = await supabaseAdmin
+      .from('org_roles')
+      .select('id, name, color, data_scope, permissions, permissions_write')
+      .in('id', ids)
+      .is('deleted_at', null);
+    roleRows = (rows ?? []) as Array<{ id: string }>;
+  }
+  const byId = new Map(roleRows.map((r) => [r.id, r]));
+  const roles = ids.map((id) => ({ ...(byId.get(id) ?? { id }), is_primary: id === primaryId }));
+  sendSuccess(res, { user_id: req.params.id, primary_role_id: primaryId, roles });
+});
+
+// POST /users/:id/roles  { org_role_id } — add ONE additional role (idempotent).
+export const addUserRole = asyncHandler<AuthRequest>(async (req, res) => {
+  const target = await assertMayManageUser(req.user!, req.params.id, 'addUserRole');
+  if (!target.org_id) throw new AppError(400, 'User has no org', 'VALIDATION_ERROR');
+  const roleId = (req.body?.org_role_id ?? req.body?.role_id) as string;
+  const role = await loadAssignableRole(target.org_id, target.client_id ?? null, roleId);
+  // The PRIMARY role is never duplicated in the join table.
+  const { data: u } = await supabaseAdmin.from('users').select('org_role_id').eq('id', req.params.id).maybeSingle();
+  if (((u as { org_role_id?: string | null } | null)?.org_role_id) === role.id) {
+    return sendSuccess(res, { user_id: req.params.id, org_role_id: role.id, primary: true }, 'Already the primary role');
+  }
+  const { error } = await supabaseAdmin.from('user_roles').upsert(
+    { user_id: req.params.id, org_role_id: role.id, org_id: target.org_id, client_id: target.client_id ?? null, created_by: req.user?.id ?? null },
+    { onConflict: 'user_id,org_role_id', ignoreDuplicates: true },
+  );
+  if (error) throw new AppError(500, `Could not assign role: ${error.message}`, 'DB_ERROR');
+  invalidateAuthCache((cu) => (cu as { id?: string } | undefined)?.id === req.params.id);
+  sendSuccess(res, { user_id: req.params.id, org_role_id: role.id }, 'Role assigned', 201);
+});
+
+// DELETE /users/:id/roles/:roleId — remove ONE additional role (primary unaffected).
+export const removeUserRole = asyncHandler<AuthRequest>(async (req, res) => {
+  const target = await assertMayManageUser(req.user!, req.params.id, 'removeUserRole');
+  if (!target.org_id) throw new AppError(400, 'User has no org', 'VALIDATION_ERROR');
+  const roleId = req.params.roleId;
+  if (!isUUID(roleId)) throw new AppError(400, 'Invalid role id', 'VALIDATION_ERROR');
+  const { error } = await supabaseAdmin
+    .from('user_roles')
+    .delete()
+    .eq('user_id', req.params.id)
+    .eq('org_role_id', roleId)
+    .eq('org_id', target.org_id);
+  if (error) throw new AppError(500, `Could not remove role: ${error.message}`, 'DB_ERROR');
+  invalidateAuthCache((cu) => (cu as { id?: string } | undefined)?.id === req.params.id);
+  sendSuccess(res, { user_id: req.params.id, org_role_id: roleId }, 'Role removed');
+});
+
+// PUT /users/:id/roles  { org_role_ids: [...] } — REPLACE the additional-role set.
+export const setUserRoles = asyncHandler<AuthRequest>(async (req, res) => {
+  const target = await assertMayManageUser(req.user!, req.params.id, 'setUserRoles');
+  if (!target.org_id) throw new AppError(400, 'User has no org', 'VALIDATION_ERROR');
+  const ids = Array.isArray(req.body?.org_role_ids) ? req.body.org_role_ids : null;
+  if (!ids) throw new AppError(400, 'org_role_ids must be an array', 'VALIDATION_ERROR');
+  const { data: u } = await supabaseAdmin.from('users').select('org_role_id').eq('id', req.params.id).maybeSingle();
+  const primaryId = ((u as { org_role_id?: string | null } | null)?.org_role_id) ?? null;
+  const unique = Array.from(new Set((ids as unknown[]).filter((x): x is string => typeof x === 'string')));
+  const toStore: string[] = [];
+  for (const rid of unique) {
+    const role = await loadAssignableRole(target.org_id, target.client_id ?? null, rid); // 404s a bad/foreign id
+    if (role.id !== primaryId) toStore.push(role.id);
+  }
+  // Replace: clear this user's additional roles, then insert the validated set.
+  const del = await supabaseAdmin.from('user_roles').delete().eq('user_id', req.params.id).eq('org_id', target.org_id);
+  if (del.error) throw new AppError(500, `Could not clear roles: ${del.error.message}`, 'DB_ERROR');
+  if (toStore.length) {
+    const rows = toStore.map((rid) => ({ user_id: req.params.id, org_role_id: rid, org_id: target.org_id, client_id: target.client_id ?? null, created_by: req.user?.id ?? null }));
+    const ins = await supabaseAdmin.from('user_roles').insert(rows);
+    if (ins.error) throw new AppError(500, `Could not set roles: ${ins.error.message}`, 'DB_ERROR');
+  }
+  invalidateAuthCache((cu) => (cu as { id?: string } | undefined)?.id === req.params.id);
+  sendSuccess(res, { user_id: req.params.id, org_role_ids: toStore }, 'Roles updated');
+});
 
 export const resetUserPassword = asyncHandler<AuthRequest>(async (req, res) => {
   const { password } = req.body

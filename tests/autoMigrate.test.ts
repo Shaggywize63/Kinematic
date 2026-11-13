@@ -14,9 +14,10 @@ describe('embedded pending migrations', () => {
     'migration_form_ref_no.sql',
     'migration_account_location.sql',
     'migration_activity_type_check.sql',
+    'migration_user_roles.sql',
   ];
 
-  it('embeds exactly the 7 migrations in apply order', () => {
+  it('embeds exactly the expected migrations in apply order', () => {
     expect(PENDING_MIGRATIONS.map((m) => m.name)).toEqual(EXPECTED_ORDER);
   });
 
