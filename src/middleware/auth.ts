@@ -177,6 +177,95 @@ async function maybeDeriveViewerOrg(user: AuthRequest['user'], req: AuthRequest)
 
 import { pickCompany } from '../lib/companyPick';
 
+/**
+ * Resolve a user's effective org-role context as the UNION of their PRIMARY
+ * role (users.org_role_id) and every ADDITIONAL role in the user_roles join
+ * table.
+ *
+ * Multiple roles per user: a user may now hold several org_roles. Their module
+ * access is the union of all roles' `permissions` (read) and `permissions_write`
+ * sets, and the union of every role's `assigned_cities`. The PRIMARY role still
+ * governs the DISPLAYED designation (`name`) and the `data_scope` — secondary
+ * roles only ADD module permissions / city reach, they never change the user's
+ * data-visibility scope. This keeps a single-role user's resolution byte-for-byte
+ * identical to the pre-multi-role behaviour (the one role IS the primary).
+ *
+ * Returns the exact five fields both auth paths stamp onto req.user:
+ *   role_assigned_cities, org_role_data_scope, org_role_name,
+ *   role_permissions, role_permissions_write.
+ * `permissions` / `permissions_write` stay undefined when NO role configured one
+ * (NULL column), so rbac.ts's hasRoleGovernedPerms() legacy fallback is preserved.
+ */
+export async function resolveRoleContext(
+  userId: string,
+  primaryRoleId: string | null | undefined,
+  client: typeof supabaseAdmin = supabaseAdmin,
+): Promise<{
+  role_assigned_cities: string[];
+  org_role_data_scope: 'own' | 'team' | 'all';
+  org_role_name?: string;
+  role_permissions?: string[];
+  role_permissions_write?: string[];
+}> {
+  const ctx = {
+    role_assigned_cities: [] as string[],
+    org_role_data_scope: 'all' as 'own' | 'team' | 'all',
+    org_role_name: undefined as string | undefined,
+    role_permissions: undefined as string[] | undefined,
+    role_permissions_write: undefined as string[] | undefined,
+  };
+
+  // Collect the primary role id plus any additional role ids from user_roles.
+  const roleIds: string[] = [];
+  if (primaryRoleId) roleIds.push(primaryRoleId);
+  try {
+    const { data: extra } = await client.from('user_roles').select('org_role_id').eq('user_id', userId);
+    for (const r of (extra ?? []) as Array<{ org_role_id: string }>) {
+      if (r.org_role_id && !roleIds.includes(r.org_role_id)) roleIds.push(r.org_role_id);
+    }
+  } catch {
+    // user_roles may not exist yet (pre-migration) — fall back to the primary role only.
+  }
+
+  if (roleIds.length === 0) return ctx;
+
+  const { data: rows } = await client
+    .from('org_roles')
+    .select('id, name, assigned_cities, data_scope, permissions, permissions_write')
+    .in('id', roleIds)
+    .is('deleted_at', null);
+  if (!rows || rows.length === 0) return ctx;
+
+  const byId = new Map<string, any>();
+  for (const r of rows as any[]) byId.set(r.id, r);
+
+  // UNION module permissions + assigned cities across every role.
+  const permSet = new Set<string>();
+  const writeSet = new Set<string>();
+  const citySet = new Set<string>();
+  let anyPerms = false;
+  let anyWrite = false;
+  for (const r of rows as any[]) {
+    if (Array.isArray(r.permissions)) { anyPerms = true; for (const p of r.permissions) if (p) permSet.add(p); }
+    if (Array.isArray(r.permissions_write)) { anyWrite = true; for (const p of r.permissions_write) if (p) writeSet.add(p); }
+    if (Array.isArray(r.assigned_cities)) for (const c of r.assigned_cities) if (c) citySet.add(c);
+  }
+  ctx.role_assigned_cities = Array.from(citySet);
+  if (anyPerms) ctx.role_permissions = Array.from(permSet);
+  if (anyWrite) ctx.role_permissions_write = Array.from(writeSet);
+
+  // PRIMARY role governs the displayed designation + data scope (unchanged for
+  // single-role users). Fall back to the first resolved role only when there is
+  // no primary (an additional-only assignment — unusual but defensive).
+  const primary = (primaryRoleId && byId.get(primaryRoleId)) || (rows as any[])[0];
+  if (primary) {
+    if (typeof primary.name === 'string') ctx.org_role_name = primary.name;
+    if (primary.data_scope === 'own' || primary.data_scope === 'team') ctx.org_role_data_scope = primary.data_scope;
+  }
+
+  return ctx;
+}
+
 // Impersonation profile cache — keyed `impersonate:<project>:<targetId>`.
 // Separate from the token-keyed authCache so an impersonated identity is
 // NEVER written under the master's real token. Short TTL like authCache.
@@ -222,29 +311,14 @@ export async function buildUserContext(userId: string): Promise<AuthRequest['use
     if (rel?.name) userCityNames.push(rel.name);
   }
 
-  let roleAssignedCities: string[] = [];
-  let orgRoleDataScope: 'own' | 'team' | 'all' = 'all';
-  let orgRoleName: string | undefined;
-  let rolePermissions: string[] | undefined;
-  let rolePermissionsWrite: string[] | undefined;
-  if (profile.org_role_id) {
-    const { data: roleRow } = await supabaseAdmin
-      .from('org_roles').select('name, assigned_cities, data_scope, permissions, permissions_write')
-      .eq('id', profile.org_role_id).single();
-    if (Array.isArray(roleRow?.assigned_cities)) {
-      roleAssignedCities = (roleRow!.assigned_cities as string[]).filter(Boolean);
-    }
-    if (roleRow?.data_scope === 'own' || roleRow?.data_scope === 'team') {
-      orgRoleDataScope = roleRow.data_scope as 'own' | 'team';
-    }
-    if (typeof roleRow?.name === 'string') orgRoleName = roleRow.name;
-    if (Array.isArray(roleRow?.permissions)) {
-      rolePermissions = (roleRow!.permissions as string[]).filter(Boolean);
-    }
-    if (Array.isArray(roleRow?.permissions_write)) {
-      rolePermissionsWrite = (roleRow!.permissions_write as string[]).filter(Boolean);
-    }
-  }
+  // Union the primary role (users.org_role_id) with any additional roles in
+  // user_roles. Single-role users resolve exactly as before.
+  const roleCtx = await resolveRoleContext(userId, profile.org_role_id);
+  const roleAssignedCities = roleCtx.role_assigned_cities;
+  const orgRoleDataScope = roleCtx.org_role_data_scope;
+  const orgRoleName = roleCtx.org_role_name;
+  const rolePermissions = roleCtx.role_permissions;
+  const rolePermissionsWrite = roleCtx.role_permissions_write;
 
   return {
     ...profile,
@@ -603,34 +677,19 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
   // crm.routes.ts. Most tenants run users at system_role=sub_admin
   // regardless of their actual seniority, so the system-role check
   // alone isn't enough to scope frontline reps to their own data.
-  let roleAssignedCities: string[] = [];
-  let orgRoleDataScope: 'own' | 'team' | 'all' = 'all';
-  let orgRoleName: string | undefined;
   // org_roles.permissions (read) / permissions_write are the source of truth the
   // Roles UI configures. We load them so requireModuleAccess() can gate reads vs
   // writes per module instead of relying on the looser client-entitlement check.
-  let rolePermissions: string[] | undefined;
-  let rolePermissionsWrite: string[] | undefined;
-  if (profile.org_role_id) {
-    const { data: roleRow } = await supabaseAdmin
-      .from('org_roles').select('name, assigned_cities, data_scope, permissions, permissions_write')
-      .eq('id', profile.org_role_id).single();
-    if (Array.isArray(roleRow?.assigned_cities)) {
-      roleAssignedCities = (roleRow!.assigned_cities as string[]).filter(Boolean);
-    }
-    if (roleRow?.data_scope === 'own' || roleRow?.data_scope === 'team') {
-      orgRoleDataScope = roleRow.data_scope as 'own' | 'team';
-    }
-    if (typeof roleRow?.name === 'string') {
-      orgRoleName = roleRow.name;
-    }
-    if (Array.isArray(roleRow?.permissions)) {
-      rolePermissions = (roleRow!.permissions as string[]).filter(Boolean);
-    }
-    if (Array.isArray(roleRow?.permissions_write)) {
-      rolePermissionsWrite = (roleRow!.permissions_write as string[]).filter(Boolean);
-    }
-  }
+  // A user may hold MULTIPLE roles (primary users.org_role_id + additional rows
+  // in user_roles); resolveRoleContext unions their module permissions and
+  // assigned cities. The primary role still drives name + data_scope, so a
+  // single-role user resolves exactly as before.
+  const roleCtx = await resolveRoleContext(verified.sub, profile.org_role_id);
+  const roleAssignedCities = roleCtx.role_assigned_cities;
+  const orgRoleDataScope = roleCtx.org_role_data_scope;
+  const orgRoleName = roleCtx.org_role_name;
+  const rolePermissions = roleCtx.role_permissions;
+  const rolePermissionsWrite = roleCtx.role_permissions_write;
 
   const user = {
     ...profile,
