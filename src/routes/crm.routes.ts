@@ -124,7 +124,7 @@ async function enrichActivities<T extends Record<string, any>>(rows: T[]): Promi
   // Connected-B2B only: add the assignee list (a no-op for every other client).
   return activityExtras.stampAssignees(await stampDirectoryNames(withLinked as any[]));
 }
-import { discoverExportColumns, withLeadNumberColumns } from '../services/crm/exportColumns.helper';
+import { discoverExportColumns, withLeadTypeColumn } from '../services/crm/exportColumns.helper';
 import * as dsarSvc from '../services/crm/dsar.service';
 import * as consentSvc from '../services/crm/consent.service';
 import * as nomineeSvc from '../services/crm/nominee.service';
@@ -1195,12 +1195,12 @@ leads.get('/export', wrap(async (req, res) => {
   // lat/long → re-upload). discoverExportColumns excludes UUIDs by design,
   // so we add it explicitly here rather than un-excluding it globally
   // (which would leak/mislabel ids in deal/contact/account exports).
-  // "Lead No" (right after Lead ID) and "Lead Type" (after Status) are placed explicitly, not auto-discovered.
+  // "Lead Type" (after Status) is placed explicitly, not auto-discovered. (The retired "Lead No" / ref_no column is
+  // no longer emitted.)
   const cols: Array<{ key: string; label: string }> = enriched.length > 0
-    ? withLeadNumberColumns(
+    ? withLeadTypeColumn(
         [{ key: 'id', label: 'Lead ID' }, ...discoverExportColumns(enriched[0] as Record<string, unknown>)],
         enriched as Array<Record<string, unknown>>,
-        isB2bClient(scope.id),
       )
     : [];
   const escape = (v: unknown): string => {

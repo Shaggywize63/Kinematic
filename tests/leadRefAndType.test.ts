@@ -1,12 +1,17 @@
 /**
- * Lead numbers (SR/LD/2627-12) and lead type (requirement | discussion), against an in-memory PostgREST fake:
+ * Lead numbers (SR/LD/2627-12) and lead type (requirement | discussion), against an in-memory PostgREST fake.
+ *
+ * NOTE: the per-lead running number is RETIRED on the live create/email/export paths — new leads are no longer
+ * numbered, email subjects are no longer stamped, and the CSV export no longer carries a "Lead No" column. The
+ * `ref_no` DB column and the `leadRef.ts` helpers stay in place (old leads keep their stored number, and the
+ * admin backfill endpoint still uses the helpers), so the pure-helper, allocateLeadRef and backfill tests remain.
  *
  *   - pure rules: format / prefix / default prefix / financial-year series / subject helper / export columns;
- *   - allocation: connected-B2B only, one series per financial year, never throws;
- *   - createLead: assigns once, never overwrites, ref_no unwritable by clients, lead_type validated, degrades on an
+ *   - allocateLeadRef helper: connected-B2B only, one series per financial year, never throws (helper still exists);
+ *   - createLead: no longer numbers new leads, ref_no unwritable by clients, lead_type validated, degrades on an
  *     unmigrated database;
- *   - reads: q search, lead_type / ref_no filters, CSV columns, detail JSON;
- *   - e-mail subject stamping;
+ *   - reads: q search, lead_type / ref_no filters (old leads keep ref_no), CSV columns, detail JSON;
+ *   - e-mail subjects are sent as-is (no lead-number stamp);
  *   - POST /leads/ref-numbers/backfill (dry run, per-own-FY series, limit/remaining, admin-only, non-B2B, NOT_MIGRATED).
  */
 import express from 'express';
@@ -197,13 +202,13 @@ const crmRouter = require('../src/routes/crm.routes').default as express.Router;
 
 import {
   formatLeadRef, normalizeLeadPrefix, normalizeLeadRef, leadRefPrefixFromSettings, DEFAULT_LEAD_REF_PREFIX,
-  allocateLeadRef, tryAllocateLeadRef, withLeadRefInSubject, subjectHasLeadRef, getLeadRefNo,
+  allocateLeadRef, tryAllocateLeadRef, withLeadRefInSubject, subjectHasLeadRef,
 } from '../src/lib/leadRef';
 import { financialYearCode } from '../src/lib/formRef';
 import { clearClientFlagCache } from '../src/lib/clientFlags';
 import { createLead } from '../src/services/crm/leads.service';
 import { listLeadsWithCount } from '../src/services/crm/leads.service';
-import { withLeadNumberColumns, discoverExportColumns } from '../src/services/crm/exportColumns.helper';
+import { withLeadTypeColumn, discoverExportColumns } from '../src/services/crm/exportColumns.helper';
 import { leadCreateSchema, leadUpdateSchema } from '../src/validators/crm.validators';
 import { sendEmail } from '../src/services/crm/emails.service';
 import { stubProvider } from '../src/services/crm/providers/stub.provider';
@@ -365,7 +370,7 @@ describe('withLeadRefInSubject', () => {
   });
 });
 
-describe('sendEmail stamps the lead number', () => {
+describe('sendEmail no longer stamps the lead number', () => {
   let sent: Row[];
   beforeEach(() => {
     db.tables.crm_email_logs = []; sent = [];
@@ -374,18 +379,13 @@ describe('sendEmail stamps the lead number', () => {
   afterEach(() => jest.restoreAllMocks());
   const base = { org_id: ORG, to: 'x@y.com', body_html: '<p>Hi</p>', bypass_suppression: true };
 
-  it('sends and logs "[ref] subject" for a numbered lead', async () => {
+  it('sends and logs the subject as-is for a lead that still carries an old number', async () => {
     const l = lead({ ref_no: 'SR/LD/2627-12' });
     await sendEmail({ ...base, subject: 'Quote for pumps', lead_id: l.id });
-    expect(sent[0].subject).toBe('[SR/LD/2627-12] Quote for pumps');
-    expect(db.tables.crm_email_logs[0].subject).toBe('[SR/LD/2627-12] Quote for pumps');
+    expect(sent[0].subject).toBe('Quote for pumps');
+    expect(db.tables.crm_email_logs[0].subject).toBe('Quote for pumps');
   });
-  it('does not double-stamp a subject that already has it (a reply)', async () => {
-    const l = lead({ ref_no: 'SR/LD/2627-12' });
-    await sendEmail({ ...base, subject: 'Re: [SR/LD/2627-12] Quote', lead_id: l.id });
-    expect(sent[0].subject).toBe('Re: [SR/LD/2627-12] Quote');
-  });
-  it('leaves the subject alone for an un-numbered lead, no lead, or another org\'s lead', async () => {
+  it('leaves the subject unchanged for an un-numbered lead, no lead, or another org\'s lead', async () => {
     const plain = lead();
     const foreign = lead({ org_id: '00000000-0000-0000-0000-0000000000bb', ref_no: 'SR/LD/2627-3' });
     await sendEmail({ ...base, subject: 'A', lead_id: plain.id });
@@ -393,22 +393,12 @@ describe('sendEmail stamps the lead number', () => {
     await sendEmail({ ...base, subject: 'C', lead_id: foreign.id });
     expect(sent.map((s) => s.subject)).toEqual(['A', 'B', 'C']);
   });
-  it('still sends when the lead lookup fails (unmigrated column, DB error)', async () => {
-    const l = lead({ ref_no: 'SR/LD/2627-12' });
-    db.missingCols.crm_leads = new Set(['ref_no']);
-    await sendEmail({ ...base, subject: 'Quote', lead_id: l.id });
-    expect(sent[0].subject).toBe('Quote');
-    db.missingCols = {}; db.failTables.crm_leads = 'db down';
-    await expect(sendEmail({ ...base, subject: 'Quote2', lead_id: l.id })).resolves.toBeTruthy();
-    expect(sent[1].subject).toBe('Quote2');
-    expect(await getLeadRefNo(ORG, l.id)).toBeNull();
-  });
-  it('stamps the log of a suppressed (not sent) mail too', async () => {
+  it('logs the subject as-is for a suppressed (not sent) mail too', async () => {
     const l = lead({ ref_no: 'SR/LD/2627-12' });
     db.tables.crm_email_unsubscribes = [{ id: 'u1', org_id: ORG, email: 'x@y.com' }];
     await sendEmail({ ...base, bypass_suppression: false, subject: 'Offer', lead_id: l.id });
     expect(sent).toHaveLength(0);
-    expect(db.tables.crm_email_logs[0].subject).toBe('[SR/LD/2627-12] Offer');
+    expect(db.tables.crm_email_logs[0].subject).toBe('Offer');
   });
 });
 
@@ -440,31 +430,32 @@ describe('createLead', () => {
   const make = (extra: Row = {}, client: string | null = SPARK) =>
     createLead({ org_id: ORG, payload: { first_name: 'Asha', client_id: client, ...extra } as any, skipDedup: true });
 
-  it('numbers a connected-B2B lead and stores the lead type', async () => {
+  it('no longer numbers a connected-B2B lead, but still stores the lead type (and makes no allocation call)', async () => {
     const l = await make({ lead_type: 'requirement' });
-    expect(l.ref_no).toMatch(/^SR\/LD\/\d{4}-1$/);
+    expect(l.ref_no ?? null).toBeNull();
     expect(l.lead_type).toBe('requirement');
-    expect(leads()[0]).toMatchObject({ ref_no: l.ref_no, lead_type: 'requirement' });
+    expect(leads()[0]).toMatchObject({ lead_type: 'requirement' });
+    expect(db.rpcCalls).toHaveLength(0);
   });
 
-  it('gives each new lead the next number, once', async () => {
+  it('never allocates a number for new leads, whatever the tenant', async () => {
     const a = await make(); const b = await make({ first_name: 'Bo' });
-    const num = (x: any) => Number(String(x.ref_no).split('-')[1]);
-    expect(num(b)).toBe(num(a) + 1);
-    expect(db.rpcCalls).toHaveLength(2);
+    expect(a.ref_no ?? null).toBeNull();
+    expect(b.ref_no ?? null).toBeNull();
+    expect(db.rpcCalls).toHaveLength(0);
+    expect(db.inserts.filter((i) => i.table === 'crm_leads').every((i) => !('ref_no' in i.row))).toBe(true);
   });
 
-  it('ignores a ref_no sent in the payload (read-only) and allocates its own', async () => {
+  it('ignores a ref_no sent in the payload (read-only) and never writes one', async () => {
     const l = await make({ ref_no: 'SR/LD/2627-999' });
-    expect(l.ref_no).not.toBe('SR/LD/2627-999');
-    expect(l.ref_no).toMatch(/-1$/);
+    expect(l.ref_no ?? null).toBeNull();
     // a non-numbered tenant cannot smuggle one in either
     const o = await make({ ref_no: 'SR/LD/2627-5' }, OTHER);
     expect(o.ref_no ?? null).toBeNull();
-    expect(db.inserts.filter((i) => i.table === 'crm_leads').every((i) => i.row.ref_no !== 'SR/LD/2627-999' && i.row.ref_no !== 'SR/LD/2627-5')).toBe(true);
+    expect(db.inserts.filter((i) => i.table === 'crm_leads').every((i) => !('ref_no' in i.row))).toBe(true);
   });
 
-  it('writes the exact row it always did for a client without numbers and no lead type (no new keys)', async () => {
+  it('writes the exact row it always did for a client without a lead type (no new keys)', async () => {
     await make({}, OTHER);
     const row = db.inserts.find((i) => i.table === 'crm_leads')!.row;
     expect('ref_no' in row).toBe(false);
@@ -483,21 +474,14 @@ describe('createLead', () => {
     expect('lead_type' in db.inserts.find((i) => i.table === 'crm_leads')!.row).toBe(false);
   });
 
-  it('saves the lead un-numbered when the counter is unavailable', async () => {
-    db.rpcMode = 'missing';
-    const l = await make();
-    expect(l.id).toBeTruthy();
-    expect(l.ref_no ?? null).toBeNull();
-  });
-
-  it('degrades on a database without the columns: retries once without ref_no / lead_type and still creates the lead', async () => {
-    db.missingCols.crm_leads = new Set(['ref_no', 'lead_type']);
+  it('degrades on a database without the lead_type column: retries once without it and still creates the lead', async () => {
+    db.missingCols.crm_leads = new Set(['lead_type']);
     const l = await make({ lead_type: 'requirement' });
     expect(l.id).toBeTruthy();
     const attempts = db.inserts.filter((i) => i.table === 'crm_leads');
     expect(attempts).toHaveLength(2);
-    expect('ref_no' in attempts[0].row && 'lead_type' in attempts[0].row).toBe(true);
-    expect('ref_no' in attempts[1].row || 'lead_type' in attempts[1].row).toBe(false);
+    expect('lead_type' in attempts[0].row).toBe(true);
+    expect('lead_type' in attempts[1].row).toBe(false);
     expect(leads()).toHaveLength(1);
   });
 
@@ -514,34 +498,24 @@ describe('createLead', () => {
     expect(db.inserts.filter((i) => i.table === 'crm_leads')).toHaveLength(1);
   });
 
-  it('saves the lead un-numbered if the unique index refuses the number', async () => {
-    const day = new Date();
-    const taken = await allocateLeadRef(SPARK, day); // consume 1
-    lead({ ref_no: formatLeadRef('SR/LD', financialYearCode(day), 2) }); // someone already holds number 2
-    expect(taken).toMatch(/-1$/);
-    const l = await make();
-    expect(l.id).toBeTruthy();
-    expect(l.ref_no ?? null).toBeNull();
-  });
-
-  it('a lead keeps its number: updateLead cannot change or clear ref_no', async () => {
-    const l = await make();
+  it('an old lead keeps its stored number: updateLead cannot change or clear ref_no (read-only)', async () => {
+    // Seed an already-numbered lead (old data) directly, then prove updates can't touch its number.
+    const l = lead({ ref_no: 'SR/LD/2627-42' });
     const { updateLead } = await import('../src/services/crm/leads.service');
     await updateLead(ORG, l.id, { ref_no: 'SR/LD/2627-777', notes: 'hi' } as any);
     await updateLead(ORG, l.id, { ref_no: null, notes: 'again' } as any);
-    expect(leads()[0].ref_no).toBe(l.ref_no);
+    expect(leads().find((r) => r.id === l.id)!.ref_no).toBe('SR/LD/2627-42');
     expect(db.updates.every((u) => !('ref_no' in u.row))).toBe(true);
-    expect(db.rpcCalls).toHaveLength(1); // no new allocation on edit
+    expect(db.rpcCalls).toHaveLength(0); // no allocation anywhere
   });
 });
 
 // ── lead routes ─────────────────────────────────────────────────────────────
 describe('POST /leads and PATCH /leads/:id', () => {
-  it('numbers the new lead, returns ref_no and lead_type, and ignores a client-sent ref_no', async () => {
+  it('does not number the new lead, returns lead_type, and ignores a client-sent ref_no', async () => {
     const res = await post('/crm/leads', { first_name: 'Asha', lead_type: 'requirement', ref_no: 'SR/LD/2627-500' }, SPARK);
     expect(res.status).toBe(201);
-    expect(res.body.data.ref_no).toMatch(/^SR\/LD\/\d{4}-1$/);
-    expect(res.body.data.ref_no).not.toBe('SR/LD/2627-500');
+    expect(res.body.data.ref_no ?? null).toBeNull();
     expect(res.body.data.lead_type).toBe('requirement');
   });
 
@@ -670,7 +644,7 @@ describe('lead list: search, filters', () => {
 });
 
 describe('lead CSV export', () => {
-  it('has "Lead No" after Lead ID and "Lead Type" after Status', async () => {
+  it('has "Lead Type" after Status, and no "Lead No" / "Ref No" column (even when old leads still carry ref_no)', async () => {
     lead({ first_name: 'Anil', ref_no: 'SR/LD/2627-1', lead_type: 'requirement' });
     lead({ first_name: 'Beena', ref_no: 'SR/LD/2627-2', lead_type: null });
     const res = await get('/crm/leads/export', SPARK);
@@ -678,27 +652,30 @@ describe('lead CSV export', () => {
     const [header, ...lines] = res.text.trim().split('\n');
     const cols = header.split(',');
     expect(cols[0]).toBe('Lead ID');
-    expect(cols[1]).toBe('Lead No');
     expect(cols[cols.indexOf('Status') + 1]).toBe('Lead Type');
-    expect(cols.filter((c) => c === 'Lead No' || c === 'Lead Type' || c === 'Ref No')).toEqual(['Lead No', 'Lead Type']);
+    // The retired lead number must not appear under any label.
+    expect(cols.filter((c) => c === 'Lead No' || c === 'Ref No')).toEqual([]);
     const byName = (name: string) => lines.find((l) => l.split(',')[cols.indexOf('First Name')] === name)!.split(',');
-    expect(byName('Anil')[1]).toBe('SR/LD/2627-1');
     expect(byName('Anil')[cols.indexOf('Lead Type')]).toBe('requirement');
     expect(byName('Beena')[cols.indexOf('Lead Type')]).toBe('');
   });
 
-  it('withLeadNumberColumns: Lead Type only on a migrated DB; Lead No only for a numbered client or when a lead has one', () => {
+  it('withLeadTypeColumn: Lead Type placed after Status only on a migrated DB; ref_no is never emitted', () => {
     const base = discoverExportColumns({ id: 'x', first_name: 'a', status: 'new', created_at: 'z', ref_no: null, lead_type: null });
     const lead0 = [{ id: 'x', first_name: 'a', status: 'new', ref_no: null, lead_type: null }];
     const keys = (c: Array<{ key: string }>) => c.map((x) => x.key);
-    expect(keys(withLeadNumberColumns([{ key: 'id', label: 'Lead ID' }, ...base], lead0, false))).not.toContain('ref_no');
-    expect(keys(withLeadNumberColumns([{ key: 'id', label: 'Lead ID' }, ...base], lead0, false))).toContain('lead_type');
-    expect(keys(withLeadNumberColumns([{ key: 'id', label: 'Lead ID' }, ...base], lead0, true)).slice(0, 2)).toEqual(['id', 'ref_no']);
-    expect(keys(withLeadNumberColumns([{ key: 'id', label: 'Lead ID' }, ...base], [{ ...lead0[0], ref_no: 'SR/LD/2627-1' }], false))).toContain('ref_no');
-    // unmigrated rows (no such keys): nothing added
+    // ref_no is excluded by discoverExportColumns now, so it never reaches the column set either way.
+    expect(keys(withLeadTypeColumn([{ key: 'id', label: 'Lead ID' }, ...base], lead0))).not.toContain('ref_no');
+    expect(keys(withLeadTypeColumn([{ key: 'id', label: 'Lead ID' }, ...base], lead0))).toContain('lead_type');
+    // even when a row still carries a (legacy) ref_no value, the column is dropped
+    expect(keys(withLeadTypeColumn([{ key: 'id', label: 'Lead ID' }, ...base], [{ ...lead0[0], ref_no: 'SR/LD/2627-1' }]))).not.toContain('ref_no');
+    // Lead Type lands right after Status
+    const out = keys(withLeadTypeColumn([{ key: 'id', label: 'Lead ID' }, ...base], lead0));
+    expect(out[out.indexOf('status') + 1]).toBe('lead_type');
+    // unmigrated rows (no lead_type key): nothing added
     const unmigrated = discoverExportColumns({ id: 'x', first_name: 'a', status: 'new' });
-    expect(keys(withLeadNumberColumns([{ key: 'id', label: 'Lead ID' }, ...unmigrated], [{ id: 'x', first_name: 'a', status: 'new' }], true)))
-      .not.toEqual(expect.arrayContaining(['ref_no']));
+    expect(keys(withLeadTypeColumn([{ key: 'id', label: 'Lead ID' }, ...unmigrated], [{ id: 'x', first_name: 'a', status: 'new' }])))
+      .not.toContain('lead_type');
   });
 });
 
