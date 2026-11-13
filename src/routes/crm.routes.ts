@@ -3973,6 +3973,150 @@ activities.delete('/:id', wrap(async (req, res) => {
 }));
 router.use('/activities', rbac.requireModuleAccess('crm_activities'), activities);
 
+// ─────────────────────────────────────────────────────────────────────
+// "My Tasks" — the authenticated caller's OWN activities, each stamped
+// with WHO ASSIGNED it. A general CRM capability (every tenant), kept
+// deliberately separate from the full activities list: it is hard-scoped
+// to the caller (owner_id = me OR assigned_to = me), not the role /
+// hierarchy visibility the list applies, so every rep gets exactly their
+// own worklist regardless of their org-role data_scope. Any authenticated
+// user with activities-module access may call it; it never widens past
+// their own rows.
+//
+// Assigner signal: crm_activities has NO dedicated `assigned_by` column.
+// The best available signal is `created_by` — the user who logged /
+// assigned the activity, stamped by crud.create() on every write. We
+// surface it as `assigned_by_name` (null when created_by is null, e.g.
+// system / import / automation rows). An explicit `assigned_by` (distinct
+// from the creator) would require a future additive migration.
+//
+// Resilient: only core columns (org_id, client_id, owner_id, assigned_to,
+// status, due_at, completed_at, created_at, deleted_at) are queried — all
+// present across every tenant — so an optional/absent column degrades to
+// null rather than 500ing.
+const MY_TASK_STATUSES = new Set(['open', 'in_progress', 'completed', 'cancelled']);
+const MY_TASK_DATE_RE = /^\d{4}-\d{2}-\d{2}([T ].*)?$/;
+router.get('/my-tasks', rbac.requireModuleAccess('crm_activities'), wrap(async (req, res) => {
+  const me = userId(req);
+  if (!me || !UUID_RE.test(me)) throw new AppError(401, 'No authenticated user on request', 'NO_USER');
+  const org = orgId(req);
+  const scope = clientScope(req);
+  const nowIso = new Date().toISOString();
+
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
+  const page = Math.max(Number(req.query.page ?? 1) || 1, 1);
+
+  // Optional, validated filters.
+  const statusQ = typeof req.query.status === 'string' ? req.query.status.trim().toLowerCase() : '';
+  const status = MY_TASK_STATUSES.has(statusQ) ? statusQ : null;
+  const overdue = String(req.query.overdue ?? '').toLowerCase() === 'true';
+  const from = typeof req.query.from === 'string' && MY_TASK_DATE_RE.test(req.query.from) ? req.query.from : null;
+  const to = typeof req.query.to === 'string' && MY_TASK_DATE_RE.test(req.query.to) ? req.query.to : null;
+
+  let q = supabaseAdmin
+    .from('crm_activities')
+    .select('*', { count: 'exact' })
+    .eq('org_id', org)
+    .is('deleted_at', null);
+  // Tenant/client scope — strict for client-pinned users / an explicit
+  // picker, shared+own otherwise (same semantics as the activities list).
+  if (scope.id) {
+    q = scope.strict ? q.eq('client_id', scope.id) : q.or(`client_id.is.null,client_id.eq.${scope.id}`);
+  }
+  // MINE: owner_id = me OR assigned_to = me. Activities are usually tracked
+  // via assigned_to (owner_id null), so both columns must be matched. `me`
+  // is a JWT-derived UUID (validated above) — safe to interpolate.
+  q = q.or(`owner_id.eq.${me},assigned_to.eq.${me}`);
+
+  if (status) {
+    // 'completed' also covers the legacy 'done' synonym some tenants store.
+    q = status === 'completed' ? q.in('status', ['completed', 'done']) : q.eq('status', status);
+  } else if (!overdue) {
+    // Sensible default — the actionable worklist: open / upcoming tasks,
+    // excluding anything already completed or cancelled. NULL-status rows
+    // (ad-hoc notes / calls) are kept via the explicit is-null branch so
+    // they don't silently vanish.
+    q = q.or('status.is.null,status.not.in.(completed,done,cancelled)').is('completed_at', null);
+  }
+
+  if (overdue) {
+    // Past its due date and not yet completed.
+    q = q.not('due_at', 'is', null).lt('due_at', nowIso).is('completed_at', null);
+  }
+
+  // Optional due-date window.
+  if (from) q = q.gte('due_at', from);
+  if (to) q = q.lte('due_at', to);
+
+  // Soonest first: nearest due date at the top, undated tasks last.
+  q = q
+    .order('due_at', { ascending: true, nullsFirst: false })
+    .order('created_at', { ascending: true })
+    .range((page - 1) * limit, page * limit - 1);
+
+  const { data, error, count } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const rows = (data ?? []) as Record<string, any>[];
+
+  // Decorate: owner/assignee names + linked lead/contact/account/company/
+  // deal names, then the assigner (created_by → assigned_by_name).
+  const enriched = await enrichActivities(rows);
+  const withAssigner = await stampCreatedByNames(enriched as Array<Record<string, any>>);
+
+  const out = withAssigner.map((r: Record<string, any>) => {
+    const isOverdue =
+      Boolean(r.due_at) &&
+      String(r.due_at) < nowIso &&
+      !r.completed_at &&
+      !['completed', 'done', 'cancelled'].includes(String(r.status ?? '').toLowerCase());
+    return {
+      id: r.id,
+      type: r.type ?? null,
+      subject: r.subject ?? null,
+      body: r.body ?? null,
+      status: r.status ?? null,
+      due_at: r.due_at ?? null,
+      completed_at: r.completed_at ?? null,
+      activity_date: r.activity_date ?? null,
+      created_at: r.created_at ?? null,
+      lead_id: r.lead_id ?? null,
+      lead_name: r.lead_name ?? null,
+      lead_phone: r.lead_phone ?? null,
+      contact_id: r.contact_id ?? null,
+      contact_name: r.contact_name ?? null,
+      account_id: r.account_id ?? null,
+      account_name: r.account_name ?? null,
+      company_id: r.company_id ?? null,
+      company_name: r.company_name ?? null,
+      deal_id: r.deal_id ?? null,
+      deal_name: r.deal_name ?? null,
+      owner_id: r.owner_id ?? null,
+      owner_name: r.owner_name ?? null,
+      assigned_to: r.assigned_to ?? null,
+      assigned_to_name: r.assigned_to_name ?? null,
+      // Assigner = whoever created / logged the activity (best available
+      // signal; see header comment). `assigned_by` is the raw user id,
+      // `assigned_by_name` the resolved display name (null when unknown).
+      assigned_by: r.created_by ?? null,
+      assigned_by_name: r.created_by_name ?? null,
+      is_overdue: isOverdue,
+    };
+  });
+
+  res.json({
+    success: true,
+    data: out,
+    pagination: {
+      total: count ?? 0,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil((count ?? 0) / limit)),
+      hasNext: page * limit < (count ?? 0),
+      hasPrev: page > 1,
+    },
+  });
+}));
+
 const notes = express.Router();
 notes.get('/', wrap(async (req, res) => res.json(
   await crud.clientScopedList('crm_notes', orgId(req), clientScope(req).id, req.query, { softDelete: false, strictClient: clientScope(req).strict })
