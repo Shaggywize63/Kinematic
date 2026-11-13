@@ -17,8 +17,14 @@
 -- authenticated/service_role. The service-role backend (supabaseAdmin) bypasses
 -- RLS. There is no updated_at column (a pure join row is never edited in place),
 -- so no set_updated_at() trigger is attached.
-
-BEGIN;
+--
+-- NOTE: no top-level BEGIN;/COMMIT; wrapper. The boot-time runner applies this
+-- through the exec_migration() RPC (PL/pgSQL EXECUTE), which cannot run
+-- transaction-control statements ("EXECUTE of transaction commands is not
+-- implemented") — the function call is already atomic. (The other migrations
+-- that still carry BEGIN;/COMMIT; were applied via direct psql, never through
+-- this RPC, so they never hit that limitation.) psql -1 would also run this
+-- file atomically, so dropping the wrapper is safe on both paths.
 
 -- ============================================================= user_roles join table
 -- One row per (user, additional role). The user's PRIMARY role stays on
@@ -50,5 +56,3 @@ BEGIN
   END IF;
   EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_roles TO authenticated, service_role';
 END $$;
-
-COMMIT;
