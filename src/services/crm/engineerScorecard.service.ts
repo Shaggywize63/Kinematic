@@ -1,10 +1,18 @@
 // Engineer Scorecard — read-only aggregation for the connected-B2B flow (Spark & Ray).
 //
 // The directors want each sales engineer's performance over a period: attendance,
-// leads, brands worked, quoted value, order value and orders won, optionally broken
-// down by day / week / month. This is PURE aggregation over tables that already
-// exist — there is no migration. Every optional source degrades to 0 / null / []
-// on error so a missing column or table can never 500 the report.
+// leads, contacts, brands worked, quoted value, order value and orders won,
+// optionally broken down by day / week / month. This is PURE aggregation over
+// tables that already exist — there is no migration. Every optional source degrades
+// to 0 / null / [] on error so a missing column or table can never 500 the report.
+//
+// Leads vs contacts (fix): a lead that CONVERTS becomes a contact — convertLead /
+// markLeadWon stamp crm_leads.status='converted' and create a crm_contacts row.
+// `leads_count` previously counted EVERY crm_leads row in range, so those converted
+// leads (now contacts) inflated the engineer's lead number. It now counts only TRUE
+// (non-converted) leads; contacts are reported separately as `contacts_count` straight
+// off crm_contacts, and the converted leads are kept as `converted_leads_count` so the
+// old total stays recoverable (old leads_count === leads_count + converted_leads_count).
 //
 // Gated on `isB2bClient(clientId)`: any non-B2B tenant gets `null` back and the
 // route answers "not available" exactly like the other Spark-only endpoints. All
@@ -78,7 +86,10 @@ function bucketStart(date: string, granularity: Granularity): string {
 
 export interface ScorecardBucket {
   bucket_start: string;
+  /** TRUE (non-converted) leads created in this bucket. Excludes converted leads. */
   leads_count: number;
+  /** Contacts (crm_contacts) created in this bucket. Counted separately from leads. */
+  contacts_count: number;
   orders_won: number;
   order_value: number;
 }
@@ -87,7 +98,22 @@ export interface EngineerRow {
   user_id: string;
   name: string;
   attendance_days: number | null;
+  /**
+   * TRUE leads only: `crm_leads` rows created in range whose status is NOT
+   * 'converted'. A converted lead spawns a `crm_contacts` row (it has become a
+   * contact/customer), so counting it here would count a contact as a lead —
+   * the over-count this report used to carry. See `contacts_count` /
+   * `converted_leads_count` below.
+   */
   leads_count: number;
+  /** Contacts (`crm_contacts`) created in range for this engineer — the separate, authoritative contacts number. */
+  contacts_count: number;
+  /**
+   * Leads created in range that have since converted (status='converted').
+   * Kept so the previous total is fully recoverable:
+   * old `leads_count` (all leads) === `leads_count` + `converted_leads_count`.
+   */
+  converted_leads_count: number;
   orders_won: number;
   quoted_value: number;
   order_value: number;
@@ -96,7 +122,12 @@ export interface EngineerRow {
 }
 
 export interface ScorecardTotals {
+  /** TRUE (non-converted) leads across all engineers. */
   leads_count: number;
+  /** Contacts (crm_contacts) across all engineers. */
+  contacts_count: number;
+  /** Converted leads across all engineers (old leads_count === leads_count + converted_leads_count). */
+  converted_leads_count: number;
   orders_won: number;
   quoted_value: number;
   order_value: number;
@@ -168,6 +199,8 @@ export async function buildEngineerScorecard(params: ScorecardParams): Promise<S
         name: name || userId,
         attendance_days: null,
         leads_count: 0,
+        contacts_count: 0,
+        converted_leads_count: 0,
         orders_won: 0,
         quoted_value: 0,
         order_value: 0,
@@ -202,17 +235,23 @@ export async function buildEngineerScorecard(params: ScorecardParams): Promise<S
     let byKey = buckets.get(userId);
     if (!byKey) buckets.set(userId, (byKey = new Map()));
     let b = byKey.get(key);
-    if (!b) byKey.set(key, (b = { bucket_start: key, leads_count: 0, orders_won: 0, order_value: 0 }));
+    if (!b) byKey.set(key, (b = { bucket_start: key, leads_count: 0, contacts_count: 0, orders_won: 0, order_value: 0 }));
     return b;
   };
 
   // ── Leads created in range, attributed to owner (fallback assigned_to) ────
+  // TRUE leads only: a lead whose status is 'converted' has become a contact
+  // (convertLead / markLeadWon stamp status='converted' and create a crm_contacts
+  // row), so it is counted under `converted_leads_count` and surfaced separately
+  // as a contact below — NOT as a lead. This is the fix for the report counting
+  // contacts as leads. `status` is a core crm_leads column (used bare elsewhere),
+  // so selecting it carries no missing-column risk.
   try {
     const PAGE = 1000;
     for (let fromRow = 0; ; fromRow += PAGE) {
       const { data, error } = await supabaseAdmin
         .from('crm_leads')
-        .select('id, owner_id, assigned_to, created_at')
+        .select('id, owner_id, assigned_to, created_at, status')
         .eq('org_id', orgId)
         .eq('client_id', clientId)
         .is('deleted_at', null)
@@ -226,6 +265,11 @@ export async function buildEngineerScorecard(params: ScorecardParams): Promise<S
         const uid = ownerOf(l);
         if (!uid) continue;
         const row = ensure(uid);
+        if (String(l.status ?? '').toLowerCase() === 'converted') {
+          // Became a contact — do not count as a lead; kept for recoverability.
+          row.converted_leads_count += 1;
+          continue;
+        }
         row.leads_count += 1;
         const d = istDateOf(l.created_at);
         if (d) bucketFor(uid, bucketStart(d, granularity)).leads_count += 1;
@@ -234,6 +278,50 @@ export async function buildEngineerScorecard(params: ScorecardParams): Promise<S
     }
   } catch (e) {
     logger.warn({ err: (e as Error).message }, 'engineerScorecard: leads read failed');
+  }
+
+  // ── Contacts created in range, attributed to owner (fallback assigned_to) ──
+  // Counted SEPARATELY from leads, straight off crm_contacts — the authoritative
+  // source for the engineer's contacts number (a converted lead creates exactly
+  // one such row). Resilient: a legacy crm_contacts without `assigned_to` retries
+  // with owner_id only; any other failure degrades contacts_count to 0.
+  try {
+    const PAGE = 1000;
+    let cols = 'id, owner_id, assigned_to, created_at';
+    let triedOwnerOnly = false;
+    for (let fromRow = 0; ; ) {
+      const { data, error } = await supabaseAdmin
+        .from('crm_contacts')
+        .select(cols)
+        .eq('org_id', orgId)
+        .eq('client_id', clientId)
+        .is('deleted_at', null)
+        .gte('created_at', fromTs)
+        .lte('created_at', toTs)
+        .order('id', { ascending: true })
+        .range(fromRow, fromRow + PAGE - 1);
+      if (error) {
+        if (!triedOwnerOnly && /assigned_to/i.test(error.message)) {
+          cols = 'id, owner_id, created_at';
+          triedOwnerOnly = true;
+          continue; // restart this page with the reduced column set
+        }
+        throw new Error(error.message);
+      }
+      const rows = (data ?? []) as Row[];
+      for (const c of rows) {
+        const uid = ownerOf(c);
+        if (!uid) continue;
+        const row = ensure(uid);
+        row.contacts_count += 1;
+        const d = istDateOf(c.created_at);
+        if (d) bucketFor(uid, bucketStart(d, granularity)).contacts_count += 1;
+      }
+      if (rows.length < PAGE) break;
+      fromRow += PAGE;
+    }
+  } catch (e) {
+    logger.warn({ err: (e as Error).message }, 'engineerScorecard: contacts read failed');
   }
 
   // ── Deals: fetch the client's deals, classify won + active-in-range ───────
@@ -409,7 +497,7 @@ export async function buildEngineerScorecard(params: ScorecardParams): Promise<S
   // ── Finalise rows ─────────────────────────────────────────────────────────
   const engineerRows: EngineerRow[] = [];
   const totalBrands = new Set<string>();
-  const totals: ScorecardTotals = { leads_count: 0, orders_won: 0, quoted_value: 0, order_value: 0, brands: [] };
+  const totals: ScorecardTotals = { leads_count: 0, contacts_count: 0, converted_leads_count: 0, orders_won: 0, quoted_value: 0, order_value: 0, brands: [] };
 
   for (const row of engineers.values()) {
     row.quoted_value = round2(row.quoted_value);
@@ -421,6 +509,8 @@ export async function buildEngineerScorecard(params: ScorecardParams): Promise<S
       .sort((a, b) => a.bucket_start.localeCompare(b.bucket_start));
 
     totals.leads_count += row.leads_count;
+    totals.contacts_count += row.contacts_count;
+    totals.converted_leads_count += row.converted_leads_count;
     totals.orders_won += row.orders_won;
     totals.quoted_value += row.quoted_value;
     totals.order_value += row.order_value;
