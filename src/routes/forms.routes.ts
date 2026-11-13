@@ -20,6 +20,8 @@ router.post('/scan-card',                    ctrl.scanBusinessCard);
 router.post('/submit',                       ctrl.submitForm);
 router.get('/submissions',                   ctrl.getMySubmissions);
 router.get('/submissions/:id',               ctrl.getSubmission);
+// Self-contained, downloadable export of one submission (owner or tenant admin).
+router.get('/submissions/:id/export',        ctrl.exportSubmission);
 // Edit a submitted report — a tenant admin (any rep's) or the submitter (own);
 // the gate lives in the controller so the submitter keeps edit of their own.
 router.patch('/submissions/:id',             ctrl.updateSubmission);
