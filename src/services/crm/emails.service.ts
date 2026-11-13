@@ -6,7 +6,6 @@ import crypto from 'crypto';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { logger } from '../../lib/logger';
-import { getLeadRefNo, withLeadRefInSubject } from '../../lib/leadRef';
 import { stubProvider } from './providers/stub.provider';
 import { resendProvider } from './providers/resend.provider';
 import type { EmailProvider, EmailAttachment } from './providers/emailProvider.interface';
@@ -67,11 +66,8 @@ export interface SendEmailInput {
   track_links?: boolean;
 }
 
-export async function sendEmail(rawInput: SendEmailInput) {
-  // A mail about a numbered lead carries `[SR/LD/2627-12]` in its subject, so a reply or an update can be traced back
-  // to the lead. One subject for the provider AND for the stored log. A failed lookup never blocks the send.
-  const leadRef = await getLeadRefNo(rawInput.org_id, rawInput.lead_id);
-  const input: SendEmailInput = leadRef ? { ...rawInput, subject: withLeadRefInSubject(rawInput.subject, leadRef) } : rawInput;
+export async function sendEmail(input: SendEmailInput) {
+  // Lead numbers are retired: email subjects are sent as-is (no `[SR/LD/...]` stamp). Form refs are unaffected.
   const trackingToken = crypto.randomBytes(16).toString('hex');
   const trackedHtml = wrapTracking(input.body_html, trackingToken, input.track_links !== false);
   const fromEmail = input.from_email

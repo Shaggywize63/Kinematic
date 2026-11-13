@@ -14,7 +14,7 @@ import { validateAndStampCustomFields } from './customFields.service';
 import { assertValidLeadStatus, disqualifiedStatesFor } from './leadStatuses';
 import { isMinor } from '../../lib/age';
 import { logger } from '../../lib/logger';
-import { allocateLeadRef, normalizeLeadRef, LEAD_TYPES } from '../../lib/leadRef';
+import { normalizeLeadRef, LEAD_TYPES } from '../../lib/leadRef';
 import { isB2bClient } from '../../lib/b2bClients';
 import { blamesOptional, isUndefinedColumn, withoutKeys } from '../expenses/dbErrors';
 import type { Lead, LeadStatus } from '../../types/crm.types';
@@ -112,14 +112,14 @@ async function resolveSoleClientId(org_id: string, provided: string | null): Pro
 }
 
 /**
- * Optional lead columns that only exist once migration_lead_ref_and_type.sql has run. An insert that fails because
- * one of them is absent is retried once without them, so lead creation never breaks on an unmigrated tenant.
+ * Optional lead column that only exists once migration_lead_ref_and_type.sql has run. An insert that fails because
+ * it is absent is retried once without it, so lead creation never breaks on an unmigrated tenant.
  */
-export const LEAD_REF_TYPE_COLUMNS = ['ref_no', 'lead_type'] as const;
+export const LEAD_TYPE_COLUMNS = ['lead_type'] as const;
 
 export async function createLead({ org_id, user_id, payload, skipDedup, enforceRequired }: CreateLeadInput) {
-  // The lead number is server-assigned and read-only: whatever a caller (route, import, webhook, KINI) put in the
-  // payload is discarded; the number is only ever allocated below.
+  // `ref_no` (the old per-lead number) is server-owned and read-only: whatever a caller (route, import, webhook,
+  // KINI) put in the payload is discarded. New leads are no longer numbered; the column is left for old leads only.
   delete (payload as Record<string, unknown>).ref_no;
   if (!skipDedup) {
     if (payload.email) {
@@ -303,29 +303,21 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
     approval_requested_by: approvalStatus === 'pending' ? (user_id ?? null) : null,
   };
 
-  // Lead number (connected-B2B clients only; allocateLeadRef never throws and returns null for everyone else). The
-  // keys are only added when there is something to write, so a tenant without lead numbers / a lead type inserts the
-  // exact row it always did.
-  const leadRef = await allocateLeadRef(payload.client_id ?? null);
+  // Lead type (requirement | discussion). The key is only added when the payload carries a valid value, so a tenant
+  // without a lead type inserts the exact row it always did.
   const leadType = (LEAD_TYPES as readonly string[]).includes(p.lead_type as string) ? (p.lead_type as string) : undefined;
-  const insertWithRef: Record<string, unknown> = {
+  const insertWithType: Record<string, unknown> = {
     ...insertRow,
-    ...(leadRef ? { ref_no: leadRef } : {}),
     ...(leadType ? { lead_type: leadType } : {}),
   };
 
-  let { data, error } = await supabaseAdmin.from('crm_leads').insert(insertWithRef).select('*').single();
-  // A tenant database that has not run migration_lead_ref_and_type.sql has neither column: retry once without them
-  // (the lead is saved un-numbered / untyped; the backfill numbers it once the migration is applied).
-  if (error && isUndefinedColumn(error) && blamesOptional(error, LEAD_REF_TYPE_COLUMNS)
-      && LEAD_REF_TYPE_COLUMNS.some((k) => k in insertWithRef)) {
-    logger.warn({ clientId: payload.client_id ?? null, err: error.message }, 'leads: ref_no/lead_type columns missing in this database, saving the lead without them');
-    ({ data, error } = await supabaseAdmin.from('crm_leads').insert(withoutKeys(insertWithRef, LEAD_REF_TYPE_COLUMNS)).select('*').single());
-  } else if (error && (error as { code?: string }).code === '23505' && 'ref_no' in insertWithRef && /ref_no/i.test(String(error.message ?? ''))) {
-    // The lead-number unique index refused the number (cannot happen with the atomic counter unless the series was
-    // reset by hand): save the lead un-numbered rather than failing the create; the backfill numbers it later.
-    logger.warn({ clientId: payload.client_id ?? null, ref: leadRef }, 'leads: lead number already taken, saving the lead without one');
-    ({ data, error } = await supabaseAdmin.from('crm_leads').insert(withoutKeys(insertWithRef, ['ref_no'])).select('*').single());
+  let { data, error } = await supabaseAdmin.from('crm_leads').insert(insertWithType).select('*').single();
+  // A tenant database that has not run migration_lead_ref_and_type.sql has no lead_type column: retry once without it
+  // (the lead is saved untyped).
+  if (error && isUndefinedColumn(error) && blamesOptional(error, LEAD_TYPE_COLUMNS)
+      && LEAD_TYPE_COLUMNS.some((k) => k in insertWithType)) {
+    logger.warn({ clientId: payload.client_id ?? null, err: error.message }, 'leads: lead_type column missing in this database, saving the lead without it');
+    ({ data, error } = await supabaseAdmin.from('crm_leads').insert(withoutKeys(insertWithType, LEAD_TYPE_COLUMNS)).select('*').single());
   }
   if (error) {
     // Race-safe net for the dedup unique indexes (ux_crm_leads_org_email_open
