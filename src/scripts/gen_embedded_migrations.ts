@@ -23,6 +23,7 @@ const FILES = [
   'migration_account_location.sql',
   'migration_activity_type_check.sql',
   'migration_user_roles.sql',
+  'migration_account_geo.sql',
 ];
 
 const root = process.cwd();

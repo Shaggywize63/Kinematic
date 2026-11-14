@@ -417,6 +417,12 @@ export const accountSchema = z.object({
   state: z.string().max(120).optional().nullable(),
   postal_code: z.string().max(20).optional().nullable(),
   country: z.string().max(80).optional().nullable(),
+  // Account geofence — latitude/longitude captured from the New Account form's
+  // Google place pick. Real crm_accounts columns (added by migration_account_geo.sql);
+  // without them here zod strips the pair and the geofence is silently lost on save.
+  // Coerced + range-checked to match the lead lat/lng above and siteSchema's below.
+  latitude:  z.coerce.number().min(-90).max(90).optional().nullable(),
+  longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
   owner_id: optionalUuid,
   territory_id: optionalUuid,
   parent_account_id: optionalUuid,
