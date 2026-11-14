@@ -34,6 +34,7 @@ import * as businessReport from '../services/crm/businessReport.service';
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
+import { blamesOptional, type DbError } from '../services/expenses/dbErrors';
 import * as automationsSvc from '../services/crm/automations.service';
 import * as flowsSvc from '../services/crm/flows.service';
 import * as reportSchedulesSvc from '../services/crm/reportSchedules.service';
@@ -2239,8 +2240,52 @@ function applyAccountOutcome(clientIdForRow: string | null | undefined, payload:
     payload.outcome = o || null;
   }
 }
+/**
+ * Manual-create duplicate guard. Looks for a NON-deleted account in the SAME org + client
+ * scope whose name equals the submitted name (trimmed, case-insensitive) and returns the
+ * existing { id, name } or null. The web "New Account" form pre-checks, but this 409 is the
+ * authoritative backstop.
+ *
+ * Injection-guarded: the name is run through `sanitisePostgrestSearch` (strips the ilike
+ * wildcards `% _ *` and the or-filter syntax `(),"\`) before it reaches the PostgREST
+ * `.ilike` filter, so a value can never smuggle extra predicates in; the final decision is
+ * a plain trimmed/lower-case string compare in JS, so the match is exact rather than a
+ * wildcard contains. Scoped to `orgId(req)` + the request's client scope exactly as create
+ * stamps the row (`client_id = clientId(req)`, null = the org-level bucket), so a same name
+ * under a different client or org is never matched.
+ */
+async function findDuplicateAccountByName(req: Request, rawName: string): Promise<{ id: string; name: string } | null> {
+  const wanted = String(rawName ?? '').trim();
+  if (!wanted) return null;
+  const safe = sanitisePostgrestSearch(wanted);
+  if (!safe) return null; // nothing safe to match on (name was only reserved characters)
+  const scope = clientScope(req);
+  let q = supabaseAdmin
+    .from('crm_accounts')
+    .select('id,name')
+    .eq('org_id', orgId(req))
+    .is('deleted_at', null)
+    .ilike('name', safe);
+  // Mirror how the created row is scoped: client_id = clientId(req) (null → the org-level bucket).
+  q = scope.id ? q.eq('client_id', scope.id) : q.is('client_id', null);
+  const { data, error } = await q.limit(50);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const wantedLc = wanted.toLowerCase();
+  const hit = (data ?? []).find((r: { id: string; name: string | null }) => String(r.name ?? '').trim().toLowerCase() === wantedLc);
+  return hit ? { id: hit.id, name: (hit.name as string) ?? wanted } : null;
+}
 accounts.post('/', idempotency, wrap(async (req, res) => {
   const parsed = parse(v.accountSchema, req.body);
+  // Block a same-name duplicate in this org + client scope (manual "New Account"). Authoritative backstop.
+  const dup = await findDuplicateAccountByName(req, parsed.name);
+  if (dup) {
+    return res.status(409).json({
+      success: false,
+      error: `An account named "${dup.name}" already exists`,
+      code: 'DUPLICATE_ACCOUNT',
+      existing: { id: dup.id, name: dup.name },
+    });
+  }
   const payload: Record<string, unknown> = { ...parsed, client_id: clientId(req) };
   applyAccountOutcome(payload.client_id as string | null, payload);
   sanitizeOwnerId(req, payload);
@@ -2300,6 +2345,17 @@ accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
 accounts.get('/:id/deals', wrap(async (req, res) => res.json(
   await dealLineMakeBrand.stampDealRollups(orgId(req), await crud.list('crm_deals', orgId(req), { account_id: req.params.id, ...req.query }) as Record<string, any>[])
 )));
+// Leads linked to this account (account_id), org-scoped exactly like the contacts handler.
+// Older tenants' crm_leads predate the account_id column — treat that one missing column as
+// "no linked leads" (empty list) rather than a 500, matching how owners.helper.ts degrades.
+accounts.get('/:id/leads', wrap(async (req, res) => {
+  try {
+    return res.json(await crud.list('crm_leads', orgId(req), { account_id: req.params.id, ...req.query }));
+  } catch (e) {
+    if (blamesOptional(e as DbError, ['account_id'])) return res.json([]);
+    throw e;
+  }
+}));
 accounts.get('/:id/activities', wrap(async (req, res) => {
   const visibilityOpts = await activityScopeOpts(req as AuthRequest);
   return res.json(
