@@ -61,6 +61,8 @@ import * as hierarchy from '../services/crm/hierarchy.service';
 import * as telecaller from '../services/crm/telecaller.service';
 import * as afterSales from '../services/crm/afterSales.service';
 import * as dealsSvc from '../services/crm/deals.service';
+import * as desk from '../services/crm/desk.service';
+import * as customerIntel from '../services/crm/customerIntel.service';
 import * as visitBridge from '../services/crm/visitBridge.service';
 import * as importSvc from '../services/crm/import.service';
 import * as activityImportSvc from '../services/crm/activityImport.service';
@@ -4416,18 +4418,40 @@ router.post('/flow-runs/resume', wrap(async (req, res) => {
 //     tombstones it (is_active=false), but the generic list never filtered
 //     is_active, so "deleted" fields kept rendering on the mobile forms.
 //     Admin/tooling can pass include_inactive=1 to see tombstones.
-router.use('/custom-fields', (req, _res, next) => {
-  const q = req.query as Record<string, unknown>;
-  if (q.entity !== undefined) {
-    if (q.entity_type === undefined) q.entity_type = q.entity;
-    delete q.entity;
+const CUSTOM_FIELD_BUILTIN_ENTITIES = new Set<string>(v.CUSTOM_FIELD_BUILTIN_ENTITIES);
+router.use('/custom-fields', async (req, _res, next) => {
+  try {
+    const q = req.query as Record<string, unknown>;
+    if (q.entity !== undefined) {
+      if (q.entity_type === undefined) q.entity_type = q.entity;
+      delete q.entity;
+    }
+    if (req.method === 'GET') {
+      const wantsInactive = q.include_inactive !== undefined && String(q.include_inactive) !== '0' && String(q.include_inactive) !== 'false';
+      delete q.include_inactive; // never let it reach the generic .eq() loop
+      if (!wantsInactive && q.is_active === undefined) q.is_active = 'true';
+    }
+    // A custom object's fields use entity_type = <object.key> (crm_custom_objects.key). On
+    // create / update, verify a non-built-in entity_type names a real custom object for this
+    // tenant, so a typo can't create an orphan field def. (The field-def validator accepts any
+    // key-shaped entity_type; this is where a key that is not a built-in is checked for real.)
+    if (req.method === 'POST' || req.method === 'PATCH') {
+      const et = (req.body as Record<string, unknown> | undefined)?.entity_type;
+      if (typeof et === 'string' && et.length > 0 && !CUSTOM_FIELD_BUILTIN_ENTITIES.has(et)) {
+        try {
+          await customObjectsSvc.getObject(orgId(req), clientId(req), et);
+        } catch (err) {
+          if (err instanceof AppError && err.statusCode === 404) {
+            throw new AppError(400, `entity_type "${et}" is not a built-in entity (lead, contact, account, deal, activity) or an existing custom object`, 'BAD_INPUT');
+          }
+          throw err;
+        }
+      }
+    }
+    next();
+  } catch (e) {
+    next(e);
   }
-  if (req.method === 'GET') {
-    const wantsInactive = q.include_inactive !== undefined && String(q.include_inactive) !== '0' && String(q.include_inactive) !== 'false';
-    delete q.include_inactive; // never let it reach the generic .eq() loop
-    if (!wantsInactive && q.is_active === undefined) q.is_active = 'true';
-  }
-  next();
 });
 attach('/custom-fields', 'crm_custom_field_defs', v.customFieldSchema, { softDelete: false, clientScoped: true });
 
@@ -7227,5 +7251,98 @@ nominees.post('/:id/revoke', wrap(async (req, res) => {
 }));
 
 router.use('/nominees', nominees);
+
+// ======================================================================
+// PHARMA DESK-CALLING  (/crm/desk/*)
+// Daily tele-calling list + the 3 pharma dispositions + reports.
+// Gated on crm_activities (calls are activity-like). All day math is IST.
+// ======================================================================
+const deskRouter = express.Router();
+
+// GET /crm/desk/call-list — today's (or ?date=) calling list for this client.
+deskRouter.get('/call-list', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const q = req.query as Record<string, string>;
+  res.json(await desk.listDailyCallTasks(orgId(req), scope, {
+    date: q.date, status: q.status, assigned_operator: q.assigned_operator,
+    q: q.q, limit: q.limit ? Number(q.limit) : undefined, page: q.page ? Number(q.page) : undefined,
+    onlyMine: q.mine === '1' ? (userId(req) ?? null) : null,
+  }));
+}));
+
+// GET /crm/desk/summary — status counts + order value for a day.
+deskRouter.get('/summary', wrap(async (req, res) => {
+  res.json(await desk.deskDaySummary(orgId(req), clientScope(req), (req.query.date as string) || undefined));
+}));
+
+// POST /crm/desk/generate — (re)build the day's list from the customer master.
+// Idempotent: only adds customers not already on that day. Owner/admin only.
+deskRouter.post('/generate', rbac.requireModuleAccess('crm_settings'), wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const body = parse(z.object({ date: z.string().optional() }), req.body);
+  res.json(await desk.generateDailyCallList(orgId(req), scope.id, { date: body.date, createdBy: userId(req) ?? null }));
+}));
+
+// PATCH /crm/desk/call-list/:id — apply a disposition.
+deskRouter.patch('/call-list/:id', wrap(async (req, res) => {
+  const body = parse(z.object({
+    status: z.enum(['pending', 'order_taken', 'order_pending', 'no_order']),
+    order_value: z.number().nonnegative().optional().nullable(),
+    notes: z.string().max(1000).optional().nullable(),
+  }), req.body);
+  res.json(await desk.updateCallTaskStatus(orgId(req), clientScope(req), req.params.id, body as Parameters<typeof desk.updateCallTaskStatus>[3], userId(req) ?? null));
+}));
+
+// GET /crm/desk/report — daily/weekly/monthly calling report.
+deskRouter.get('/report', wrap(async (req, res) => {
+  const q = req.query as Record<string, string>;
+  const granularity = (['day', 'week', 'month'].includes(q.granularity) ? q.granularity : 'day') as 'day' | 'week' | 'month';
+  res.json(await desk.deskReport(orgId(req), clientScope(req), { from: q.from, to: q.to, granularity }));
+}));
+
+// GET /crm/desk/productivity — per-operator desk productivity.
+deskRouter.get('/productivity', wrap(async (req, res) => {
+  const q = req.query as Record<string, string>;
+  res.json(await desk.operatorProductivity(orgId(req), clientScope(req), { from: q.from, to: q.to }));
+}));
+
+router.use('/desk', rbac.requireModuleAccess('crm_activities'), deskRouter);
+
+// ======================================================================
+// CUSTOMER INTELLIGENCE  (/crm/customer-intel/*)
+// RFM-style per-customer analytics + sales trends from the order ledger.
+// ======================================================================
+const intelRouter = express.Router();
+
+// GET /crm/customer-intel — per-customer RFM + lifecycle labels.
+intelRouter.get('/', wrap(async (req, res) => {
+  const q = req.query as Record<string, string>;
+  res.json(await customerIntel.customerIntelligence(orgId(req), clientScope(req), {
+    lifecycle: q.lifecycle, q: q.q, sort: q.sort, limit: q.limit ? Number(q.limit) : undefined,
+  }));
+}));
+
+// GET /crm/customer-intel/trends — monthly sales, growth, retention, new-vs-repeat.
+intelRouter.get('/trends', wrap(async (req, res) => {
+  res.json(await customerIntel.salesTrends(orgId(req), clientScope(req), { months: req.query.months ? Number(req.query.months) : undefined }));
+}));
+
+// POST /crm/customer-intel/orders — manual lightweight order capture (desk/field).
+intelRouter.post('/orders', wrap(async (req, res) => {
+  const scope = clientScope(req);
+  const body = parse(z.object({
+    customer_type: z.enum(['account', 'lead']).default('account'),
+    customer_id: z.string().uuid(),
+    customer_name: z.string().max(300).optional().nullable(),
+    order_value: z.number().nonnegative(),
+    source: z.enum(['desk', 'field', 'manual']).default('manual'),
+    order_date: z.string().optional(),
+    visit_id: z.string().uuid().optional().nullable(),
+    notes: z.string().max(1000).optional().nullable(),
+  }), req.body);
+  res.status(201).json(await desk.recordCustomerOrder(orgId(req), scope.id, { ...body, captured_by: userId(req) ?? null } as Parameters<typeof desk.recordCustomerOrder>[2]));
+}));
+
+router.use('/customer-intel', rbac.requireModuleAccess('analytics'), intelRouter);
 
 export default router;
