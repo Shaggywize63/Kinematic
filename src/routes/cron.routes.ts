@@ -36,7 +36,7 @@ import {
 } from '../services/crm/portedCronJobs.service';
 import { runCarryForward } from '../services/leave.service';
 import { runRouteDeviationScan } from '../services/routeDeviation.service';
-import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from '../services/alertScans.service';
+import { runMissedVisitScan, runStockExpiryScan, runLowStockScan, runUncontactedScan, runPendingOrderScan, runDormantCustomerScan, runDecliningCustomerScan } from '../services/alertScans.service';
 import { dispatchInvoiceRenewalReminders } from '../services/finance/recurringReminders.service';
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
@@ -528,6 +528,60 @@ router.post('/low-stock-scan', requireEdgeSecret, async (req, res) => {
     res.json({ success: true, data: out });
   } catch (err: any) {
     logger.error(`[cron] low-stock-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * Pharma desk + customer-order alert scans. Each is edge-secret gated, fans out
+ * per project with { all_projects: true }, and is self-gating (a tenant without
+ * the calling desk / order ledger is a no-op). Deduped via the notifications
+ * ledger so re-running never double-notifies.
+ *
+ *   POST /api/v1/cron/desk-uncontacted-scan      — run late in the IST day
+ *   POST /api/v1/cron/desk-pending-order-scan    — run daily
+ *   POST /api/v1/cron/customer-dormant-scan      — run daily
+ *   POST /api/v1/cron/customer-declining-scan    — run daily / weekly
+ */
+router.post('/desk-uncontacted-scan', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
+    const out = await runForRequestedProjects(body, () => runUncontactedScan());
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] desk-uncontacted-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+router.post('/desk-pending-order-scan', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { grace_days?: number; all_projects?: boolean; project?: string };
+    const graceDays = Number.isFinite(body.grace_days) ? Number(body.grace_days) : 1;
+    const out = await runForRequestedProjects(body, () => runPendingOrderScan({ graceDays }));
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] desk-pending-order-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+router.post('/customer-dormant-scan', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { dormant_days?: number; all_projects?: boolean; project?: string };
+    const dormantDays = Number.isFinite(body.dormant_days) ? Number(body.dormant_days) : 30;
+    const out = await runForRequestedProjects(body, () => runDormantCustomerScan({ dormantDays }));
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] customer-dormant-scan crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+router.post('/customer-declining-scan', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
+    const out = await runForRequestedProjects(body, () => runDecliningCustomerScan());
+    res.json({ success: true, data: out });
+  } catch (err: any) {
+    logger.error(`[cron] customer-declining-scan crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });
