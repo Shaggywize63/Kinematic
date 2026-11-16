@@ -456,6 +456,30 @@ describe('the shared trail maths is still mileageFromTrail\'s', () => {
     const s = sumTrailKm([{ lat: 13, lng: 80, captured_at: t('10:00') }, { lat: 13, lng: 80, captured_at: t('10:00') }]);
     expect(s).toMatchObject({ km: 0, segments_counted: 0, segments_skipped: 1, points_used: 2 });
   });
+
+  it('drops stationary GPS jitter (sub-50 m hops over a real gap) but keeps a dense real trail', () => {
+    // A rep standing still: consecutive fixes jitter ~33 m, 10 min apart — GPS noise, not travel.
+    const jitter = [
+      { lat: 13.0,    lng: 80.2, captured_at: t('10:00') },
+      { lat: 13.0003, lng: 80.2, captured_at: t('10:10') },   // ~33 m
+      { lat: 13.0,    lng: 80.2, captured_at: t('10:20') },   // ~33 m back
+      { lat: 13.0003, lng: 80.2, captured_at: t('10:30') },   // ~33 m
+    ];
+    const j = sumTrailKm(jitter, { maxGapMin: Infinity });
+    expect(j).toMatchObject({ km: 0, segments_counted: 0, segments_stationary: 3, points_used: 4 });
+
+    // The SAME short hops a few seconds apart are a real dense drive, not jitter — kept.
+    const base = Date.parse(t('10:00'));
+    const dense = [
+      { lat: 13.0,    lng: 80.2, captured_at: base },
+      { lat: 13.0003, lng: 80.2, captured_at: base + 10_000 },  // ~33 m in 10 s
+      { lat: 13.0006, lng: 80.2, captured_at: base + 20_000 },  // ~33 m in 10 s
+    ];
+    const d = sumTrailKm(dense, { maxGapMin: Infinity });
+    expect(d.segments_counted).toBe(2);
+    expect(d.segments_stationary).toBe(0);
+    expect(d.km).toBeGreaterThan(0.05);
+  });
 });
 
 describe('halts in the day travel (EFocus wave 2)', () => {
