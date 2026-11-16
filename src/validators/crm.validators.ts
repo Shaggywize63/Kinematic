@@ -159,6 +159,21 @@ export const leadContactSchema = z.object({
   form_id: optionalUuid,
 });
 
+// One make/product/qty row under a requirement (Spark & Ray). Make & product come
+// from the tenant's own crm_makes / crm_products lists (by id), with a text snapshot
+// so the line still reads after a make/product is renamed. All parts optional so a
+// half-filled row (e.g. make chosen, product pending) still saves.
+export const leadProductLineSchema = z.object({
+  id: optionalUuid,
+  make_id: optionalUuid,
+  make_name: z.string().max(200).optional().nullable(),
+  product_id: optionalUuid,
+  product_name: z.string().max(200).optional().nullable(),
+  qty: z.coerce.number().nonnegative().optional().nullable(),
+  unit: z.string().max(40).optional().nullable(),
+  line_value: z.coerce.number().nonnegative().optional().nullable(),
+});
+
 // Lead type: a specific need (requirement) or a talk with no work yet (discussion). Optional + nullable; an empty
 // string (a form that posts "" for "not chosen") reads as null. `ref_no` is deliberately NOT here: the lead number
 // is server-assigned and read-only, and zod drops the unknown key from any body that sends it.
@@ -176,6 +191,21 @@ const leadCreateBase = z.object({
   // crm_contacts (de-duped) and linked to the lead's account. B2B capture only;
   // absent for every other flow, so nothing changes for them.
   contacts: z.array(leadContactSchema).max(50).optional(),
+  // ── B2B structured capture (Spark & Ray). All optional; resolved server-side by
+  // visitBridge.applyLeadStructure and ignored for every non-B2B flow. ────────────
+  //   requirement/department/site_id are real crm_leads columns (persist directly);
+  //   group*/location*/plant/product_lines are capture inputs popped before the insert.
+  requirement:    z.string().max(4000).optional().nullable(),   // the lead's own requirement (one lead = one requirement)
+  department:     z.string().max(160).optional().nullable(),    // the contact's department, denormalised onto the lead
+  site_id:        optionalUuid,                                  // the plant/unit, when an existing one is picked
+  group_id:       optionalUuid,                                  // parent-group account, when picked
+  group:          z.string().max(200).optional().nullable(),    // group name to map/create (NINL → Tata Steel Limited)
+  location_id:    optionalUuid,                                  // location/site (the plant's parent), when picked
+  location:       z.string().max(200).optional().nullable(),    // location name to create
+  location_city:  z.string().max(120).optional().nullable(),
+  location_state: z.string().max(120).optional().nullable(),
+  plant:          z.string().max(200).optional().nullable(),    // plant/unit name to create under the location
+  product_lines:  z.array(leadProductLineSchema).max(50).optional(),
   // Name: a lead needs *a* name, but not specifically both parts. Many
   // tenants (e.g. SRS retail construction customers) capture a single
   // given name, and an admin can hide the Last Name field entirely via
