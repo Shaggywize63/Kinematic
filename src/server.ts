@@ -14,7 +14,7 @@ import { runTrackingWatchdog } from './services/trackingWatchdog.service';
 import { runAttendanceSweep } from './services/attendanceSweep.service';
 import { dispatchPendingPushes } from './services/notifications.service';
 import { runRouteDeviationScan } from './services/routeDeviation.service';
-import { runMissedVisitScan, runStockExpiryScan, runLowStockScan } from './services/alertScans.service';
+import { runMissedVisitScan, runStockExpiryScan, runLowStockScan, runTrackingPausedScan } from './services/alertScans.service';
 import { dispatchInvoiceRenewalReminders } from './services/finance/recurringReminders.service';
 import { runScheduledTasks, runProactiveNudges } from './services/crm/ai/kiniScheduler.service';
 import { reconcileCallRecordings } from './services/crm/ai/callRecordingPull.service';
@@ -311,6 +311,20 @@ if (String(process.env.TRACKING_WATCHDOG_ENABLED ?? 'true').toLowerCase() !== 'f
       .catch((e) => logger.warn(`[tracking-watchdog] tick failed: ${e?.message ?? e}`));
   }, everyMs).unref();
   logger.info(`[tracking-watchdog] scheduler enabled (every ${everyMs / 1000}s)`);
+}
+
+// Tracking-paused manager alerts. The watchdog above silently wakes quiet phones; when a checked-in rep's
+// phone STAYS paused past the floor (battery saver / app closed / no signal, but location not switched off),
+// tell that client's own admins/managers so someone can follow up. Re-alerts at most once per 3h per rep
+// (notifications-ledger dedup). Across all tenant projects. Toggle TRACKING_PAUSED_ALERT_ENABLED=false; tune
+// TRACKING_PAUSED_ALERT_INTERVAL_SEC (default 900s).
+if (String(process.env.TRACKING_PAUSED_ALERT_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const everyMs = Math.max(300, Number(process.env.TRACKING_PAUSED_ALERT_INTERVAL_SEC ?? 900)) * 1000;
+  setInterval(() => {
+    forEachProject('tracking-paused', () => runTrackingPausedScan())
+      .catch((e) => logger.warn(`[tracking-paused] tick failed: ${e?.message ?? e}`));
+  }, everyMs).unref();
+  logger.info(`[tracking-paused] alert scheduler enabled (every ${everyMs / 1000}s)`);
 }
 
 // Forgotten check-outs. Every few minutes, across all tenant projects: auto-check-out any shift still open
