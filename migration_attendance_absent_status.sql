@@ -1,0 +1,21 @@
+-- Add the missing `absent` value to the attendance_status enum.
+--
+-- The dashboard attendance-overview override modal (POST /attendance/override,
+-- PATCH /attendance/:id/override) lets an admin set a person's day to
+-- Checked in / Checked out / On leave / Absent / Half day. Those handlers write
+-- the chosen status straight into attendance.status (enum attendance_status).
+-- The enum already had checked_in, on_break, checked_out, half_day and on_leave
+-- (the last added by migration_leave_attendance_link.sql) — but never `absent`,
+-- so picking "Absent" failed with:
+--   invalid input value for enum attendance_status: "absent"
+--
+-- The read side (analytics.controller, attendanceRules.service, the dashboard
+-- MonthlySummary) has always treated `absent` as a first-class status; only the
+-- enum was missing it. This aligns the enum with what every other layer expects.
+--
+-- Additive + idempotent. Apply to every Supabase project the backend serves
+-- (default/Tata + kinematic). After the DDL, reload the PostgREST schema cache
+-- so it accepts the new value on writes:
+--   NOTIFY pgrst, 'reload schema';
+
+alter type public.attendance_status add value if not exists 'absent';
