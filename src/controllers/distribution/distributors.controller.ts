@@ -24,6 +24,7 @@ const distributorSchema = z.object({
   assigned_brands: z.array(z.string().uuid()).optional(),
   region: z.string().optional(),
   city_id: z.string().uuid().optional(),
+  salesman_id: z.string().uuid().nullable().optional(),  // the sales rep this dealer belongs to
   is_active: z.boolean().optional(),
 });
 
@@ -51,6 +52,16 @@ export const get = asyncHandler(async (req: AuthRequest, res: Response) => {
   ok(res, data);
 });
 
+// Dealers assigned to the calling sales rep — their "my dealers" list (mobile app).
+export const myDistributors = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  if (isDemo(user)) return ok(res, getDemoDistributors());
+  const { data, error } = await supabaseAdmin.from('distributors').select('*')
+    .eq('org_id', user.org_id).eq('salesman_id', user.id).eq('is_active', true).order('name');
+  if (error) return badRequest(res, error.message);
+  ok(res, data);
+});
+
 export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   if (isDemo(user)) return created(res, { id: 'demo-new-dist', ...req.body });
@@ -65,6 +76,114 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (error) return badRequest(res, error.message);
   await audit(req, 'distributor.create', 'distributors', data.id, null, data);
   created(res, data, 'Distributor created');
+});
+
+// ── Bulk import (dealer upload) ──────────────────────────────────────────────
+// Accepts { rows: [...] } parsed from the dashboard's CSV upload. Numbers arrive
+// as strings from a spreadsheet, so this schema coerces them; empty cells are
+// dropped before validation. Rows are validated individually and a per-row
+// report is returned so the admin can fix and re-upload only the failures.
+const EMPTY = (v: unknown) => v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
+const importRowSchema = z.object({
+  code: z.string().min(1).max(32),
+  name: z.string().min(1),
+  legal_name: z.string().optional(),
+  gstin: z.string().regex(/^[0-9A-Z]{15}$/, 'GSTIN must be 15 chars').optional(),
+  pan: z.string().regex(/^[A-Z]{5}[0-9]{4}[A-Z]$/, 'PAN format invalid').optional(),
+  state_code: z.string().regex(/^\d{2}$/, 'state_code must be 2 digits').optional(),
+  place_of_supply: z.string().optional(),
+  contact_name: z.string().optional(),
+  contact_mobile: z.string().optional(),
+  email: z.string().email('email invalid').optional(),
+  credit_limit: z.coerce.number().nonnegative().optional(),
+  payment_terms_days: z.coerce.number().int().nonnegative().optional(),
+  customer_class: z.enum(['super_stockist', 'distributor', 'wholesaler']).optional(),
+  region: z.string().optional(),
+  salesman_id: z.string().uuid().optional(),   // assigned sales rep (or give sales_rep_email instead)
+  address: z.record(z.any()).optional(),
+});
+
+export const bulkImport = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const rowsIn: unknown[] = Array.isArray((req.body as { rows?: unknown[] })?.rows) ? (req.body as { rows: unknown[] }).rows : [];
+  if (rowsIn.length === 0) return badRequest(res, 'Body must be { rows: [ … ] } with at least one row');
+  if (rowsIn.length > 2000) return badRequest(res, 'Too many rows — import at most 2000 at a time');
+  if (isDemo(user)) return ok(res, { created: 0, skipped: 0, total: rowsIn.length, errors: [] });
+
+  const errors: Array<{ row: number; code?: string; reason: string }> = [];
+  const valid: Array<{ d: z.infer<typeof importRowSchema>; repEmail?: string }> = [];
+  const seen = new Set<string>();
+
+  rowsIn.forEach((raw, i) => {
+    const rowNo = i + 1;
+    const r = (raw ?? {}) as Record<string, unknown>;
+    // Normalise: trim strings, drop empties, compose address from flat columns, uppercase code/gstin/pan.
+    const clean: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(r)) {
+      if (['address_line1', 'address_line2', 'city', 'pincode'].includes(k)) continue;
+      if (!EMPTY(v)) clean[k] = typeof v === 'string' ? v.trim() : v;
+    }
+    if (typeof clean.code === 'string') clean.code = clean.code.toUpperCase();
+    if (typeof clean.gstin === 'string') clean.gstin = clean.gstin.toUpperCase();
+    if (typeof clean.pan === 'string') clean.pan = clean.pan.toUpperCase();
+    const addr: Record<string, unknown> = {};
+    for (const key of ['address_line1', 'address_line2', 'city', 'pincode'] as const) {
+      if (!EMPTY(r[key])) addr[key.replace('address_', '')] = String(r[key]).trim();
+    }
+    if (Object.keys(addr).length) clean.address = addr;
+
+    const repEmail = typeof clean.sales_rep_email === 'string' ? clean.sales_rep_email.trim().toLowerCase() : undefined;
+    const parsed = importRowSchema.safeParse(clean);
+    if (!parsed.success) { errors.push({ row: rowNo, code: typeof clean.code === 'string' ? clean.code : undefined, reason: parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('; ') }); return; }
+    const key = parsed.data.code.toLowerCase();
+    if (seen.has(key)) { errors.push({ row: rowNo, code: parsed.data.code, reason: 'duplicate code within this file' }); return; }
+    seen.add(key);
+    valid.push({ d: parsed.data, repEmail });
+  });
+
+  // Resolve any sales_rep_email columns to a user id in this org (so dealers can be
+  // assigned to a rep straight from the sheet). Unresolvable emails become per-row errors.
+  const repEmails = [...new Set(valid.map(v => v.repEmail).filter((e): e is string => !!e))];
+  const repMap = new Map<string, string>();
+  if (repEmails.length) {
+    const { data: reps } = await supabaseAdmin.from('users').select('id, email').eq('org_id', user.org_id).in('email', repEmails);
+    for (const r of (reps ?? []) as Array<{ id: string; email: string }>) repMap.set(r.email.toLowerCase(), r.id);
+  }
+
+  // Skip codes that already exist in this org (so re-uploading the same file is safe).
+  let skipped = 0;
+  if (valid.length) {
+    const { data: existing } = await supabaseAdmin.from('distributors')
+      .select('code').eq('org_id', user.org_id).in('code', valid.map(v => v.d.code));
+    const existingSet = new Set((existing ?? []).map((e: { code: string }) => e.code.toLowerCase()));
+    const toInsert: Record<string, unknown>[] = [];
+    for (const { d, repEmail } of valid) {
+      if (existingSet.has(d.code.toLowerCase())) { skipped++; errors.push({ code: d.code, reason: 'already exists — skipped' } as { row: number; code?: string; reason: string }); continue; }
+      let salesman_id = d.salesman_id ?? null;
+      if (repEmail) {
+        const id = repMap.get(repEmail);
+        if (!id) { errors.push({ code: d.code, reason: `sales_rep_email not found: ${repEmail}` } as { row: number; code?: string; reason: string }); continue; }
+        salesman_id = id;
+      }
+      toInsert.push({
+        ...d,
+        salesman_id,
+        customer_class: d.customer_class ?? 'distributor',
+        place_of_supply: d.place_of_supply ?? d.state_code,
+        address: d.address ?? {},
+        org_id: user.org_id,
+        client_id: user.client_id ?? null,
+        created_by: user.id,
+      });
+    }
+    if (toInsert.length) {
+      const { data, error } = await supabaseAdmin.from('distributors').insert(toInsert).select('id');
+      if (error) return badRequest(res, `Import failed while inserting: ${error.message}`);
+      await audit(req, 'distributor.bulk_import', 'distributors', null, null, { created: data?.length ?? 0, skipped, errorCount: errors.length });
+      return ok(res, { created: data?.length ?? 0, skipped, total: rowsIn.length, errors });
+    }
+  }
+  return ok(res, { created: 0, skipped, total: rowsIn.length, errors });
 });
 
 export const update = asyncHandler(async (req: AuthRequest, res: Response) => {

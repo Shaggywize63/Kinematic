@@ -18,6 +18,20 @@ export const MAX_SPEED_KMH = 150;   // faster than this between two fixes = tele
 export const MAX_GAP_MIN = 15;      // gap beyond this = lost trail; don't infer distance across it
 export const MAX_SEGMENT_KM = 20;   // a single consecutive-fix hop beyond this is a jump/bad fix
 
+/**
+ * Stationary-jitter floor. A consumer GPS fix is only accurate to ~5–40 m, so two *distinct* fixes
+ * taken minutes apart while the rep stood still differ by that much — pure noise, not travel. At the
+ * field ping cadence (~10 min) any real movement between two fixes is hundreds of metres to km, so a
+ * sub-floor hop spread over a non-trivial gap is jitter and must NOT accumulate: a day of waiting at
+ * one outlet was adding a fake kilometre or two. We drop the hop's distance only when BOTH hold — the
+ * hop is below [MIN_MOVE_KM] AND the two fixes are at least [JITTER_MIN_GAP_MIN] apart — so a DENSE
+ * real trail (consecutive fixes seconds apart, each a short but genuine step of a drive) is untouched,
+ * and so is every hop long enough to be real movement. Dropping jitter only ever lowers the total, so
+ * the expense-mileage suggestion stays conservative (never over-reimburses).
+ */
+export const MIN_MOVE_KM = 0.05;        // 50 m — below this, over a real gap, is GPS noise not travel
+export const JITTER_MIN_GAP_MIN = 1.5;  // only treat a sub-floor hop as jitter once fixes are this far apart in time
+
 export function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
   const toRad = (d: number) => (d * Math.PI) / 180;
   const dLat = toRad(bLat - aLat);
@@ -46,6 +60,8 @@ export interface TrailSum {
   segments_counted: number;
   /** Segments dropped as a gap / jump / teleport (trail lost between the two fixes). */
   segments_skipped: number;
+  /** Segments dropped as stationary GPS jitter (sub-floor move over a real time gap). */
+  segments_stationary: number;
 }
 
 export interface SumTrailOptions {
@@ -63,12 +79,20 @@ export interface SumTrailOptions {
    * move the total up toward the truth, never above the trail's polyline length.
    */
   maxGapMin?: number;
+  /**
+   * Stationary-jitter floor in km (default [MIN_MOVE_KM]). A hop shorter than this,
+   * spread over at least [JITTER_MIN_GAP_MIN], is treated as GPS noise and dropped.
+   * Pass `0` to disable (e.g. for a deliberately dense trail where short real steps
+   * matter). See [MIN_MOVE_KM].
+   */
+  minMoveKm?: number;
 }
 
 /** Sum the haversine distance over consecutive fixes (in the order given — callers sort by time). */
 export function sumTrailKm(pts: ReadonlyArray<TrailFix>, opts: SumTrailOptions = {}): TrailSum {
   const maxGapMin = opts.maxGapMin ?? MAX_GAP_MIN;
-  let dist = 0, used = 0, excluded = 0, skipped = 0, counted = 0;
+  const minMoveKm = opts.minMoveKm ?? MIN_MOVE_KM;
+  let dist = 0, used = 0, excluded = 0, skipped = 0, counted = 0, stationary = 0;
   let prev: TrailFix | null = null;
   for (const p of pts) {
     if (p.is_mock || p.is_suspect) { excluded++; continue; }
@@ -77,8 +101,14 @@ export function sumTrailKm(pts: ReadonlyArray<TrailFix>, opts: SumTrailOptions =
       const dtMin = (new Date(p.captured_at).getTime() - new Date(prev.captured_at).getTime()) / 60_000;
       const speed = dtMin > 0 ? seg / (dtMin / 60) : Infinity;
       if (dtMin > 0 && dtMin <= maxGapMin && seg <= MAX_SEGMENT_KM && speed <= MAX_SPEED_KMH) {
-        dist += seg;
-        counted++;
+        // Stationary GPS jitter: a sub-floor move spread over a real gap is noise, not travel.
+        // Dense real trails (fixes < JITTER_MIN_GAP_MIN apart) keep their short, genuine steps.
+        if (seg < minMoveKm && dtMin >= JITTER_MIN_GAP_MIN) {
+          stationary++;
+        } else {
+          dist += seg;
+          counted++;
+        }
       } else {
         skipped++;
       }
@@ -86,5 +116,5 @@ export function sumTrailKm(pts: ReadonlyArray<TrailFix>, opts: SumTrailOptions =
     prev = p;
     used++;
   }
-  return { km: dist, points_used: used, points_excluded: excluded, segments_counted: counted, segments_skipped: skipped };
+  return { km: dist, points_used: used, points_excluded: excluded, segments_counted: counted, segments_skipped: skipped, segments_stationary: stationary };
 }
