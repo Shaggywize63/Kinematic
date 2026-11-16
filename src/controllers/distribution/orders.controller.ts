@@ -57,7 +57,11 @@ const lineSchema = z.object({
 });
 
 const orderInputSchema = z.object({
-  outlet_id: z.string().uuid(),
+  // Either an outlet (retail/beat model) or a distributor (dealer-direct model,
+  // e.g. Solar Seeds) must be supplied. A dealer-direct order carries no outlet;
+  // the dealer IS the customer, so outlet_id is null and the catalogue/pricing is
+  // resolved straight from the distributor's customer_class/region.
+  outlet_id: z.string().uuid().optional(),
   distributor_id: z.string().uuid().optional(),
   visit_id: z.string().uuid().optional(),
   // Admin/dashboard only: assign the order to a field user. Ignored (self) for a
@@ -67,6 +71,9 @@ const orderInputSchema = z.object({
   gps: z.object({ lat: z.number(), lng: z.number() }).optional(),
   notes: z.string().max(500).optional(),
   client_total: z.number().optional(),
+}).refine((d) => Boolean(d.outlet_id || d.distributor_id), {
+  message: 'Either outlet_id or distributor_id is required',
+  path: ['outlet_id'],
 });
 
 // ── List + detail (admin/dashboard) ─────────────────────────────────────────
@@ -221,20 +228,28 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
 // Exported so the distribution AI "Place in Orders" path can reuse the exact
 // same outlet → distributor → customer_class/place_of_supply resolution the
 // salesman order-create uses (no divergent pricing context).
-export async function buildPriceContext(user: any, outletId: string, distributorId?: string) {
-  const { data: outlet } = await supabaseAdmin.from('stores')
-    .select('id, name, lat, lng, city_id')
-    .eq('id', outletId).eq('org_id', user.org_id).maybeSingle();
-  if (!outlet) throw new PricerError('OUTLET_NOT_FOUND', 'Outlet not found');
-
-  const { data: ext } = await supabaseAdmin.from('outlet_distribution_ext')
-    .select('*').eq('outlet_id', outletId).maybeSingle();
+export async function buildPriceContext(user: any, outletId?: string | null, distributorId?: string) {
+  // Outlet is optional: dealer-direct orders (a distributor is the customer) pass
+  // no outlet, so there is no store row, no outlet_distribution_ext, no geofence
+  // and no outlet ledger — pricing resolves straight from the distributor.
+  let outlet: any = null;
+  let ext: any = null;
+  if (outletId) {
+    const { data: o } = await supabaseAdmin.from('stores')
+      .select('id, name, lat, lng, city_id')
+      .eq('id', outletId).eq('org_id', user.org_id).maybeSingle();
+    if (!o) throw new PricerError('OUTLET_NOT_FOUND', 'Outlet not found');
+    outlet = o;
+    const { data: e } = await supabaseAdmin.from('outlet_distribution_ext')
+      .select('*').eq('outlet_id', outletId).maybeSingle();
+    ext = e;
+  }
 
   const distId = distributorId || ext?.assigned_distributor_id;
-  if (!distId) throw new PricerError('NO_DISTRIBUTOR', 'No distributor assigned to outlet');
+  if (!distId) throw new PricerError('NO_DISTRIBUTOR', outletId ? 'No distributor assigned to outlet' : 'distributor_id required');
 
   const { data: dist } = await supabaseAdmin.from('distributors')
-    .select('id, state_code, place_of_supply, region, customer_class, is_active')
+    .select('id, name, credit_limit, state_code, place_of_supply, region, customer_class, is_active')
     .eq('id', distId).eq('org_id', user.org_id).maybeSingle();
   if (!dist) throw new PricerError('NO_DISTRIBUTOR', 'Distributor not found');
   if (dist.is_active === false) throw new PricerError('DIST_INACTIVE', 'Distributor is inactive');
@@ -242,7 +257,15 @@ export async function buildPriceContext(user: any, outletId: string, distributor
   const customer_class = ext?.customer_class || dist.customer_class || 'GT';
   const place_of_supply = ext?.state_code || dist.place_of_supply || dist.state_code || null;
 
-  return { outlet, ext, distributor: dist, customer_class, place_of_supply };
+  // Credit context. Beat orders use the outlet's advisory ledger mirror
+  // (outlet_distribution_ext.credit_limit/current_balance). Dealer-direct orders
+  // have no outlet ledger, so fall back to the distributor's own credit_limit with
+  // a 0 balance (advisory only — the hard block still lives at invoice-issue).
+  const credit = ext ?? (dist.credit_limit != null
+    ? { credit_limit: dist.credit_limit, current_balance: 0 }
+    : null);
+
+  return { outlet, ext, credit, distributor: dist, customer_class, place_of_supply };
 }
 
 /**
@@ -309,7 +332,7 @@ export const preview = asyncHandler(async (req: AuthRequest, res: Response) => {
       brand_ids: [],
     });
     const totals = summariseTotals(schemeOut.lines, { roundOff: true });
-    const credit = computeCredit(ctx.ext, totals.grand_total);
+    const credit = computeCredit(ctx.credit, totals.grand_total);
     ok(res, { ...result, lines: schemeOut.lines, applied_schemes: schemeOut.applied, totals, scheme_total: schemeOut.scheme_total, credit });
   } catch (e: any) {
     if (e instanceof PricerError) return conflict(res, `${e.code}: ${e.message}`);
@@ -323,13 +346,89 @@ export const preview = asyncHandler(async (req: AuthRequest, res: Response) => {
 // (mobile browse-all, dashboard order entry) isn't limited to the reorder
 // suggestions. Reads outlet_id from the route param (salesman) or ?outlet_id=
 // (dashboard). Also returns the outlet credit context (order_value 0).
+// Core catalogue resolution shared by the outlet route and the dealer-direct
+// (distributor) route. Pass exactly one of outletId / distributorId.
+async function resolveCatalogue(
+  user: any,
+  target: { outletId?: string | null; distributorId?: string | null },
+) {
+  const ctx = await buildPriceContext(user, target.outletId, target.distributorId || undefined);
+  const region = ctx.distributor.region || 'ALL';
+  const priceList = await pickPriceList({
+    org_id: user.org_id, customer_class: ctx.customer_class, region,
+    client_id: user.client_id, company_scoped: isCompanyScoped(user), select: 'id, version',
+  });
+
+  const credit = computeCredit(ctx.credit, 0);
+  if (!priceList) {
+    return { items: [], price_list_id: null, price_list_version: null, customer_class: ctx.customer_class, credit };
+  }
+
+  const { data: priceItems } = await supabaseAdmin.from('price_list_items')
+    .select('sku_id, base_price, min_qty, max_qty').eq('price_list_id', priceList.id);
+  const skuIds = (priceItems || []).map((p: any) => p.sku_id);
+  const [{ data: prodExt }, { data: skuRows }] = await Promise.all([
+    supabaseAdmin.from('product_distribution_ext')
+      .select('sku_id, hsn_code, gst_rate, uom, pack_size, mrp, is_active').in('sku_id', skuIds),
+    supabaseAdmin.from('skus').select('id, name, sku_code, category').in('id', skuIds),
+  ]);
+  const extMap = new Map((prodExt || []).map((p: any) => [p.sku_id, p]));
+  const skuMap = new Map((skuRows || []).map((s: any) => [s.id, s]));
+
+  const items = (priceItems || [])
+    .filter((pi: any) => { const e: any = extMap.get(pi.sku_id); return !e || e.is_active !== false; })
+    .map((pi: any) => {
+      const e: any = extMap.get(pi.sku_id);
+      const s: any = skuMap.get(pi.sku_id);
+      return {
+        sku_id: pi.sku_id,
+        sku_name: s?.name || null,
+        sku_code: s?.sku_code || null,
+        category: s?.category || null,
+        uom: e?.uom || 'PCS',
+        pack_size: e?.pack_size || 1,
+        mrp: Number(e?.mrp || 0),
+        base_price: Number(pi.base_price),
+        min_qty: pi.min_qty ?? null,
+        max_qty: pi.max_qty ?? null,
+        gst_rate: Number(e?.gst_rate || 0),
+      };
+    })
+    .sort((a, b) =>
+      (a.category || '').localeCompare(b.category || '') ||
+      (a.sku_name || '').localeCompare(b.sku_name || ''));
+
+  return { items, price_list_id: priceList.id, price_list_version: priceList.version, customer_class: ctx.customer_class, credit };
+}
+
+// Dealer-direct catalogue: GET /salesman/distributors/:id/catalogue (route param)
+// or ?distributor_id= on the admin catalogue. Prices every orderable SKU for the
+// dealer's own customer_class/region — no outlet involved.
+export const distributorCatalogue = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const distributorId = (req.params.id || (req.query.distributor_id as string) || '').trim();
+  if (!distributorId) return badRequest(res, 'distributor_id required');
+  if (isDemo(user)) return ok(res, { items: [], price_list_id: null, price_list_version: null, credit: computeCredit({ credit_limit: 50000, current_balance: 0 }, 0) });
+  try {
+    ok(res, await resolveCatalogue(user, { distributorId }));
+  } catch (e: any) {
+    if (e instanceof PricerError) return conflict(res, `${e.code}: ${e.message}`);
+    throw e;
+  }
+});
+
 export const catalogue = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
+  // Admin catalogue accepts a dealer-direct target too (?distributor_id=).
+  const distributorId = (req.query.distributor_id as string || '').trim();
   const outletId = (req.params.id || (req.query.outlet_id as string) || '').trim();
-  if (!outletId) return badRequest(res, 'outlet_id required');
+  if (!outletId && !distributorId) return badRequest(res, 'outlet_id or distributor_id required');
   if (isDemo(user)) return ok(res, { items: [], price_list_id: null, price_list_version: null, credit: computeCredit({ credit_limit: 50000, current_balance: 12000 }, 0) });
 
   try {
+    if (!outletId && distributorId) {
+      return ok(res, await resolveCatalogue(user, { distributorId }));
+    }
     const ctx = await buildPriceContext(user, outletId);
     const region = ctx.distributor.region || 'ALL';
     const priceList = await pickPriceList({
@@ -337,7 +436,7 @@ export const catalogue = asyncHandler(async (req: AuthRequest, res: Response) =>
       client_id: user.client_id, company_scoped: isCompanyScoped(user), select: 'id, version',
     });
 
-    const credit = computeCredit(ctx.ext, 0);
+    const credit = computeCredit(ctx.credit, 0);
     if (!priceList) {
       return ok(res, { items: [], price_list_id: null, price_list_version: null, customer_class: ctx.customer_class, credit });
     }
@@ -432,7 +531,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   // Geofence check.
   let geofence_passed: boolean | null = null;
   let geofence_distance_m: number | null = null;
-  if (parsed.data.gps && (ctx.outlet as any).lat && (ctx.outlet as any).lng) {
+  if (parsed.data.gps && ctx.outlet && (ctx.outlet as any).lat && (ctx.outlet as any).lng) {
     const ext: any = ctx.ext;
     const radius = ext?.geofence_radius_m || 100;
     geofence_distance_m = haversineMeters(
@@ -478,7 +577,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     org_id: user.org_id,
     client_id: user.client_id ?? null,
     order_no: orderNo,
-    outlet_id: parsed.data.outlet_id,
+    outlet_id: parsed.data.outlet_id ?? null,
     distributor_id: ctx.distributor.id,
     salesman_id: assignee.id,
     route_visit_id: parsed.data.visit_id ?? null,
@@ -566,14 +665,15 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   // gated by the client's enabled kinds and never throws, so it can't fail the
   // order. The per-minute dispatch-pushes cron fans the row out to FCM/APNs.
   if (assignee.assigned) {
-    const outletName = (ctx.outlet as any)?.name ? ` for ${(ctx.outlet as any).name}` : '';
+    const targetName = (ctx.outlet as any)?.name || (ctx.distributor as any)?.name;
+    const outletName = targetName ? ` for ${targetName}` : '';
     await notify({
       orgId: user.org_id,
       userId: assignee.id,
       kind: 'order_assigned',
       title: 'New order assigned',
       body: `Order ${orderNo}${outletName} (₹${priced.totals.grand_total}) was assigned to you.`,
-      data: { order_id: order.id, order_no: orderNo, outlet_id: parsed.data.outlet_id },
+      data: { order_id: order.id, order_no: orderNo, outlet_id: parsed.data.outlet_id ?? null },
     });
   }
 
