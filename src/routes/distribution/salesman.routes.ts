@@ -14,6 +14,8 @@ const router = Router();
 
 router.get('/route/today', salesman.routeToday);
 router.get('/distributors', distributors.myDistributors);   // dealers assigned to this rep
+// Dealer-direct order entry: priced catalogue for an assigned dealer (no outlet).
+router.get('/distributors/:id/catalogue', orders.distributorCatalogue);
 
 // Van sales stock: the rep's open load for today, load-in, and end-of-day
 // reconcile (load-out). Rides the same distribution-package gate as the rest
