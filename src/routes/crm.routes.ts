@@ -69,6 +69,7 @@ import * as activityImportSvc from '../services/crm/activityImport.service';
 import * as analyticsSvc from '../services/crm/analytics.service';
 import * as analyticsExt from '../services/crm/analytics-extended.service';
 import * as analyticsPlus from '../services/crm/analytics-leads-plus.service';
+import { leadStructureReport } from '../services/crm/leadStructureReport.service';
 import * as dashboardLayoutSvc from '../services/crm/dashboardLayout.service';
 import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
@@ -5871,6 +5872,23 @@ router.get('/reports/business', requireRole(...MANAGER_ROLES), wrap(async (req, 
     });
   }
   res.json({ success: true, data });
+}));
+
+// Lead-structure report (Spark & Ray): lead counts rolled up by group / company /
+// plant / make / product, with optional drill-down filters. Gated to connected-B2B
+// clients — any other tenant gets empty breakdowns. Mirrors the chain reporting the
+// client signed off on ("how many leads from Tata Steel / how many for MAC").
+router.get('/reports/lead-structure', wrap(async (req, res) => {
+  const cid = String(clientId(req) ?? '').toLowerCase();
+  if (!B2B_LEAD_CLIENT_IDS.has(cid)) {
+    return res.json({ total_leads: 0, by_group: [], by_company: [], by_plant: [], by_make: [], by_product: [] });
+  }
+  const s = (k: string) => (typeof req.query[k] === 'string' && req.query[k] ? String(req.query[k]) : null);
+  const report = await leadStructureReport(
+    { org_id: orgId(req), client_id: clientId(req) },
+    { group_id: s('group_id'), account_id: s('account_id'), site_id: s('site_id'), make_id: s('make_id'), product_id: s('product_id') },
+  );
+  res.json(report);
 }));
 
 // ---------- HIERARCHY (Phase 3 — client-admin org hierarchy) ----------
