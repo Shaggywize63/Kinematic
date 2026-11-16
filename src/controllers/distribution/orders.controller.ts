@@ -346,6 +346,54 @@ export const preview = asyncHandler(async (req: AuthRequest, res: Response) => {
 // (mobile browse-all, dashboard order entry) isn't limited to the reorder
 // suggestions. Reads outlet_id from the route param (salesman) or ?outlet_id=
 // (dashboard). Also returns the outlet credit context (order_value 0).
+// Build the priced catalogue rows for a set of price-list items. The SKU and
+// product-ext lookups are CHUNKED: one `.in('id', skuIds)` with hundreds of UUIDs
+// makes a ~14 KB query string that the PostgREST/nginx URL+header limit rejects,
+// so the lookup silently returned no rows and every sku_name / mrp / uom came back
+// blank (the Solar Seeds 318-SKU list hit this; smaller lists never did). Falls
+// back to the skus row (unit / price) when a product_distribution_ext row is
+// missing, so uom and MRP still render.
+async function buildCatalogueItems(priceItems: any[]) {
+  const skuIds: string[] = (priceItems || []).map((p: any) => p.sku_id);
+  const batches: string[][] = [];
+  for (let i = 0; i < skuIds.length; i += 150) batches.push(skuIds.slice(i, i + 150));
+
+  const extMap = new Map<string, any>();
+  const skuMap = new Map<string, any>();
+  await Promise.all(batches.map(async (ids) => {
+    const [{ data: prodExt }, { data: skuRows }] = await Promise.all([
+      supabaseAdmin.from('product_distribution_ext')
+        .select('sku_id, hsn_code, gst_rate, uom, pack_size, mrp, is_active').in('sku_id', ids),
+      supabaseAdmin.from('skus').select('id, name, sku_code, category, unit, price').in('id', ids),
+    ]);
+    (prodExt || []).forEach((p: any) => extMap.set(p.sku_id, p));
+    (skuRows || []).forEach((s: any) => skuMap.set(s.id, s));
+  }));
+
+  return (priceItems || [])
+    .filter((pi: any) => { const e: any = extMap.get(pi.sku_id); return !e || e.is_active !== false; })
+    .map((pi: any) => {
+      const e: any = extMap.get(pi.sku_id);
+      const s: any = skuMap.get(pi.sku_id);
+      return {
+        sku_id: pi.sku_id,
+        sku_name: s?.name || null,
+        sku_code: s?.sku_code || null,
+        category: s?.category || null,
+        uom: e?.uom || s?.unit || 'PCS',
+        pack_size: e?.pack_size || 1,
+        mrp: Number(e?.mrp || s?.price || 0),
+        base_price: Number(pi.base_price),
+        min_qty: pi.min_qty ?? null,
+        max_qty: pi.max_qty ?? null,
+        gst_rate: Number(e?.gst_rate || 0),
+      };
+    })
+    .sort((a, b) =>
+      (a.category || '').localeCompare(b.category || '') ||
+      (a.sku_name || '').localeCompare(b.sku_name || ''));
+}
+
 // Core catalogue resolution shared by the outlet route and the dealer-direct
 // (distributor) route. Pass exactly one of outletId / distributorId.
 async function resolveCatalogue(
@@ -366,37 +414,7 @@ async function resolveCatalogue(
 
   const { data: priceItems } = await supabaseAdmin.from('price_list_items')
     .select('sku_id, base_price, min_qty, max_qty').eq('price_list_id', priceList.id);
-  const skuIds = (priceItems || []).map((p: any) => p.sku_id);
-  const [{ data: prodExt }, { data: skuRows }] = await Promise.all([
-    supabaseAdmin.from('product_distribution_ext')
-      .select('sku_id, hsn_code, gst_rate, uom, pack_size, mrp, is_active').in('sku_id', skuIds),
-    supabaseAdmin.from('skus').select('id, name, sku_code, category').in('id', skuIds),
-  ]);
-  const extMap = new Map((prodExt || []).map((p: any) => [p.sku_id, p]));
-  const skuMap = new Map((skuRows || []).map((s: any) => [s.id, s]));
-
-  const items = (priceItems || [])
-    .filter((pi: any) => { const e: any = extMap.get(pi.sku_id); return !e || e.is_active !== false; })
-    .map((pi: any) => {
-      const e: any = extMap.get(pi.sku_id);
-      const s: any = skuMap.get(pi.sku_id);
-      return {
-        sku_id: pi.sku_id,
-        sku_name: s?.name || null,
-        sku_code: s?.sku_code || null,
-        category: s?.category || null,
-        uom: e?.uom || 'PCS',
-        pack_size: e?.pack_size || 1,
-        mrp: Number(e?.mrp || 0),
-        base_price: Number(pi.base_price),
-        min_qty: pi.min_qty ?? null,
-        max_qty: pi.max_qty ?? null,
-        gst_rate: Number(e?.gst_rate || 0),
-      };
-    })
-    .sort((a, b) =>
-      (a.category || '').localeCompare(b.category || '') ||
-      (a.sku_name || '').localeCompare(b.sku_name || ''));
+  const items = await buildCatalogueItems(priceItems || []);
 
   return { items, price_list_id: priceList.id, price_list_version: priceList.version, customer_class: ctx.customer_class, credit };
 }
@@ -443,37 +461,7 @@ export const catalogue = asyncHandler(async (req: AuthRequest, res: Response) =>
 
     const { data: priceItems } = await supabaseAdmin.from('price_list_items')
       .select('sku_id, base_price, min_qty, max_qty').eq('price_list_id', priceList.id);
-    const skuIds = (priceItems || []).map((p: any) => p.sku_id);
-    const [{ data: prodExt }, { data: skuRows }] = await Promise.all([
-      supabaseAdmin.from('product_distribution_ext')
-        .select('sku_id, hsn_code, gst_rate, uom, pack_size, mrp, is_active').in('sku_id', skuIds),
-      supabaseAdmin.from('skus').select('id, name, sku_code, category').in('id', skuIds),
-    ]);
-    const extMap = new Map((prodExt || []).map((p: any) => [p.sku_id, p]));
-    const skuMap = new Map((skuRows || []).map((s: any) => [s.id, s]));
-
-    const items = (priceItems || [])
-      .filter((pi: any) => { const e: any = extMap.get(pi.sku_id); return !e || e.is_active !== false; })
-      .map((pi: any) => {
-        const e: any = extMap.get(pi.sku_id);
-        const s: any = skuMap.get(pi.sku_id);
-        return {
-          sku_id: pi.sku_id,
-          sku_name: s?.name || null,
-          sku_code: s?.sku_code || null,
-          category: s?.category || null,
-          uom: e?.uom || 'PCS',
-          pack_size: e?.pack_size || 1,
-          mrp: Number(e?.mrp || 0),
-          base_price: Number(pi.base_price),
-          min_qty: pi.min_qty ?? null,
-          max_qty: pi.max_qty ?? null,
-          gst_rate: Number(e?.gst_rate || 0),
-        };
-      })
-      .sort((a, b) =>
-        (a.category || '').localeCompare(b.category || '') ||
-        (a.sku_name || '').localeCompare(b.sku_name || ''));
+    const items = await buildCatalogueItems(priceItems || []);
 
     ok(res, { items, price_list_id: priceList.id, price_list_version: priceList.version, customer_class: ctx.customer_class, credit });
   } catch (e: any) {
