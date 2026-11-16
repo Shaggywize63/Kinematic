@@ -17,6 +17,7 @@ describe('embedded pending migrations', () => {
     'migration_activity_type_check.sql',
     'migration_user_roles.sql',
     'migration_account_geo.sql',
+    'migration_spark_lead_structure.sql',
   ];
 
   it('embeds exactly the expected migrations in apply order', () => {

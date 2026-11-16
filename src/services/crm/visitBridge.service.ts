@@ -49,26 +49,44 @@ export interface AccountInput {
   phone?: string | null;
   website?: string | null;
   owner_id?: string | null;
+  /** This account only groups its children (a parent "group", e.g. Tata Steel Limited). */
+  is_group?: boolean | null;
+  /** The parent-group account this company maps up to (NINL → Tata Steel Limited). */
+  parent_account_id?: string | null;
 }
 
 /**
  * Resolve a customer company: by explicit id, then by domain, then by
  * case-insensitive exact name within the tenant; create it if nothing matches.
+ * When `parent_account_id` is supplied and the resolved account has none yet, it
+ * is back-filled (so mapping a company to its group is idempotent).
  */
 export async function findOrCreateAccount(ctx: BridgeCtx, input: AccountInput): Promise<{ id: string; created: boolean }> {
+  // On an existing match, back-fill the group link if the row doesn't have one yet.
+  const linkParent = async (id: string): Promise<{ id: string; created: boolean }> => {
+    if (input.parent_account_id) {
+      const { data: cur } = await supabaseAdmin.from('crm_accounts')
+        .select('parent_account_id').eq('org_id', ctx.org_id).eq('id', id).maybeSingle();
+      if (cur && !cur.parent_account_id) {
+        await supabaseAdmin.from('crm_accounts').update({ parent_account_id: input.parent_account_id })
+          .eq('org_id', ctx.org_id).eq('id', id);
+      }
+    }
+    return { id, created: false };
+  };
   if (input.id) {
     const { data } = await scoped(supabaseAdmin.from('crm_accounts').select('id'), ctx).eq('id', input.id).maybeSingle();
-    if (data?.id) return { id: data.id, created: false };
+    if (data?.id) return linkParent(data.id);
   }
   const domain = norm(input.domain).toLowerCase();
   if (domain) {
     const { data } = await scoped(supabaseAdmin.from('crm_accounts').select('id'), ctx).eq('domain', domain).maybeSingle();
-    if (data?.id) return { id: data.id, created: false };
+    if (data?.id) return linkParent(data.id);
   }
   const name = norm(input.name);
   if (name) {
     const { data } = await scoped(supabaseAdmin.from('crm_accounts').select('id'), ctx).ilike('name', name).limit(1);
-    if (data?.[0]?.id) return { id: data[0].id, created: false };
+    if (data?.[0]?.id) return linkParent(data[0].id);
   }
   if (!name) throw new AppError(400, 'Customer name is required to create an account', 'ACCOUNT_NAME_REQUIRED');
   const insert = stamp(ctx, {
@@ -78,6 +96,8 @@ export async function findOrCreateAccount(ctx: BridgeCtx, input: AccountInput): 
     phone: norm(input.phone) || null,
     website: norm(input.website) || null,
     owner_id: input.owner_id ?? ctx.user_id ?? null,
+    is_group: input.is_group ?? false,
+    parent_account_id: input.parent_account_id ?? null,
   });
   const { data, error } = await supabaseAdmin.from('crm_accounts').insert(insert).select('id').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -102,11 +122,17 @@ export interface SiteInput {
   latitude?: number | null;
   longitude?: number | null;
   phone?: string | null;
+  /** 'location' (a site) or 'unit' (a plant under a location). NULL = legacy flat site. */
+  site_kind?: string | null;
+  /** The location this plant/unit sits under (a crm_sites id). */
+  parent_site_id?: string | null;
 }
 
 /**
  * Resolve a plant/site under an account: by explicit id, then by
- * case-insensitive exact name within the account; create it if nothing matches.
+ * case-insensitive exact name within the account (and, when given, the same
+ * parent location — so "Pellet Plant" under Jajpur ≠ one under Korba); create it
+ * if nothing matches.
  */
 export async function findOrCreateSite(ctx: BridgeCtx, input: SiteInput): Promise<{ id: string; created: boolean }> {
   if (!input.account_id) throw new AppError(400, 'account_id is required for a site', 'SITE_ACCOUNT_REQUIRED');
@@ -116,8 +142,10 @@ export async function findOrCreateSite(ctx: BridgeCtx, input: SiteInput): Promis
   }
   const name = norm(input.name);
   if (name) {
-    const { data } = await scoped(supabaseAdmin.from('crm_sites').select('id'), ctx)
-      .eq('account_id', input.account_id).ilike('name', name).limit(1);
+    let q = scoped(supabaseAdmin.from('crm_sites').select('id'), ctx)
+      .eq('account_id', input.account_id).ilike('name', name);
+    q = input.parent_site_id ? q.eq('parent_site_id', input.parent_site_id) : q.is('parent_site_id', null);
+    const { data } = await q.limit(1);
     if (data?.[0]?.id) return { id: data[0].id, created: false };
   }
   if (!name) throw new AppError(400, 'Site name is required to create a site', 'SITE_NAME_REQUIRED');
@@ -136,6 +164,8 @@ export async function findOrCreateSite(ctx: BridgeCtx, input: SiteInput): Promis
     latitude: input.latitude ?? null,
     longitude: input.longitude ?? null,
     phone: norm(input.phone) || null,
+    site_kind: norm(input.site_kind) || null,
+    parent_site_id: input.parent_site_id ?? null,
   });
   const { data, error } = await supabaseAdmin.from('crm_sites').insert(insert).select('id').single();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
@@ -393,6 +423,254 @@ export async function linkLeadToCompany(
     contactIds.push(resolved.id);
   }
   return { account_id: account.id, contact_ids: contactIds };
+}
+
+// ─────────────────────────────────────────── lead structure (Spark & Ray)
+
+export interface LeadProductLineInput {
+  id?: string | null;
+  make_id?: string | null;
+  make_name?: string | null;
+  product_id?: string | null;
+  product_name?: string | null;
+  qty?: number | null;
+  unit?: string | null;
+  line_value?: number | null;
+}
+
+export interface LeadStructureInput {
+  lead_id: string;
+  /** An existing company account the rep picked; else resolved from `company`. */
+  account_id?: string | null;
+  company?: string | null;
+  industry?: string | null;
+  owner_id?: string | null;
+  owner_name?: string | null;
+  /** The person the lead is about, for the display name (else the first contact). */
+  person_name?: string | null;
+  // Group (parent account).
+  group_id?: string | null;
+  group?: string | null;
+  // Location (a parent site) + the plant/unit under it.
+  location_id?: string | null;
+  location?: string | null;
+  location_city?: string | null;
+  location_state?: string | null;
+  plant?: string | null;
+  site_id?: string | null;
+  department?: string | null;
+  requirement?: string | null;
+  contacts?: ContactInput[];
+  product_lines?: LeadProductLineInput[];
+}
+
+/** Format one requirement's product lines for the lead name. Exported for tests. */
+export function productLinesLabel(lines: LeadProductLineInput[]): { segments: string[] } {
+  const parts = lines
+    .map((l) => ({ make: norm(l.make_name), product: norm(l.product_name), qty: l.qty, unit: norm(l.unit) || 'Nos' }))
+    .filter((l) => l.make || l.product || l.qty != null);
+  if (parts.length === 0) return { segments: [] };
+  if (parts.length === 1) {
+    // Single line reads as its own segments: "MAC – PV12 – 12 Nos".
+    const p = parts[0];
+    const seg: string[] = [];
+    if (p.make) seg.push(p.make);
+    if (p.product) seg.push(p.product);
+    if (p.qty != null) seg.push(`${p.qty} ${p.unit}`);
+    return { segments: seg };
+  }
+  // Several lines collapse into one segment: "MAC PV12 ×12; MAC DK-200 ×50".
+  const joined = parts.map((p) => `${[p.make, p.product].filter(Boolean).join(' ')}${p.qty != null ? ` ×${p.qty}` : ''}`.trim()).join('; ');
+  return { segments: joined ? [joined] : [] };
+}
+
+/** Build the human-readable lead name from the resolved chain. Blanks drop out. Exported for tests. */
+export function buildLeadDisplayName(parts: {
+  group?: string | null; company?: string | null; city?: string | null; state?: string | null;
+  plant?: string | null; department?: string | null; person?: string | null; requirement?: string | null;
+  productLines: LeadProductLineInput[]; owner?: string | null;
+}): string {
+  const segs: Array<string | null | undefined> = [
+    parts.group, parts.company, parts.city, parts.state, parts.plant, parts.department, parts.person, parts.requirement,
+    ...productLinesLabel(parts.productLines).segments,
+    parts.owner,
+  ];
+  return segs.map((s) => norm(s)).filter(Boolean).join(' – ');
+}
+
+/** Fill in missing make/product name snapshots from the tenant's lists. */
+async function hydrateProductLineNames(ctx: BridgeCtx, lines: LeadProductLineInput[]): Promise<LeadProductLineInput[]> {
+  const makeIds = Array.from(new Set(lines.filter((l) => l.make_id && !norm(l.make_name)).map((l) => l.make_id as string)));
+  const productIds = Array.from(new Set(lines.filter((l) => l.product_id && !norm(l.product_name)).map((l) => l.product_id as string)));
+  const makeNames = new Map<string, string>();
+  const productNames = new Map<string, string>();
+  if (makeIds.length) {
+    const { data } = await supabaseAdmin.from('crm_makes').select('id, name').eq('org_id', ctx.org_id).in('id', makeIds);
+    for (const m of (data ?? []) as Array<{ id: string; name: string | null }>) makeNames.set(m.id, m.name ?? '');
+  }
+  if (productIds.length) {
+    const { data } = await supabaseAdmin.from('crm_products').select('id, name').eq('org_id', ctx.org_id).in('id', productIds);
+    for (const p of (data ?? []) as Array<{ id: string; name: string | null }>) productNames.set(p.id, p.name ?? '');
+  }
+  return lines.map((l) => ({
+    ...l,
+    make_name: norm(l.make_name) || (l.make_id ? makeNames.get(l.make_id) ?? null : null),
+    product_name: norm(l.product_name) || (l.product_id ? productNames.get(l.product_id) ?? null : null),
+  }));
+}
+
+/** Replace a lead's product lines with the supplied set (idempotent on re-save). */
+async function syncLeadProductLines(ctx: BridgeCtx, leadId: string, lines: LeadProductLineInput[]): Promise<void> {
+  // Hard-delete the lead's existing lines, then insert the new set. The table is
+  // service-role only and small per lead, so a replace is simplest and race-free
+  // within a single save.
+  await supabaseAdmin.from('crm_lead_product_lines').delete().eq('org_id', ctx.org_id).eq('lead_id', leadId);
+  const rows = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => l.make_id || norm(l.make_name) || l.product_id || norm(l.product_name) || l.qty != null)
+    .map(({ l, i }) => stamp(ctx, {
+      lead_id: leadId,
+      make_id: l.make_id ?? null,
+      make_name: norm(l.make_name) || null,
+      product_id: l.product_id ?? null,
+      product_name: norm(l.product_name) || null,
+      qty: l.qty ?? null,
+      unit: norm(l.unit) || null,
+      line_value: l.line_value ?? null,
+      position: i,
+    }));
+  if (rows.length) {
+    const { error } = await supabaseAdmin.from('crm_lead_product_lines').insert(rows);
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  }
+}
+
+/**
+ * The full Spark & Ray lead structure in one call: resolve the group, company,
+ * location and plant (nested, de-duped), resolve the contacts, store the lead's
+ * requirement/department/site, replace its product lines, and compute the
+ * human-readable display name. Idempotent — re-saving converges on the same rows.
+ */
+export async function applyLeadStructure(
+  ctx: BridgeCtx,
+  input: LeadStructureInput,
+): Promise<{ account_id: string | null; group_id: string | null; site_id: string | null; contact_ids: string[]; display_name: string | null }> {
+  const company = norm(input.company);
+  if (!company && !input.account_id) {
+    return { account_id: null, group_id: null, site_id: null, contact_ids: [], display_name: null };
+  }
+
+  // 1. Group (parent account), if the rep mapped one.
+  let groupId: string | null = null;
+  let groupName: string | null = null;
+  if (input.group_id || norm(input.group)) {
+    const group = await findOrCreateAccount(ctx, { id: input.group_id ?? null, name: norm(input.group) || null, is_group: true, owner_id: input.owner_id ?? null });
+    groupId = group.id;
+    groupName = norm(input.group) || null;
+    if (!groupName) {
+      const { data } = await supabaseAdmin.from('crm_accounts').select('name').eq('org_id', ctx.org_id).eq('id', groupId).maybeSingle();
+      groupName = (data?.name as string) ?? null;
+    }
+  }
+
+  // 2. Company account, mapped up to the group.
+  const account = await findOrCreateAccount(ctx, {
+    id: input.account_id ?? null,
+    name: company || null,
+    industry: input.industry ?? null,
+    owner_id: input.owner_id ?? null,
+    parent_account_id: groupId,
+  });
+  let companyName = company;
+  if (!companyName) {
+    const { data } = await supabaseAdmin.from('crm_accounts').select('name').eq('org_id', ctx.org_id).eq('id', account.id).maybeSingle();
+    companyName = (data?.name as string) ?? '';
+  }
+
+  // 3. Location (a parent site) + plant/unit under it.
+  let locationId: string | null = null;
+  let city = norm(input.location_city);
+  let state = norm(input.location_state);
+  if (input.location_id || norm(input.location)) {
+    const location = await findOrCreateSite(ctx, {
+      account_id: account.id, id: input.location_id ?? null, name: norm(input.location) || city || 'Location',
+      city: city || null, state: state || null, site_kind: 'location',
+    });
+    locationId = location.id;
+  }
+  let plantId: string | null = null;
+  let plantName: string | null = null;
+  if (input.site_id || norm(input.plant)) {
+    const plant = await findOrCreateSite(ctx, {
+      account_id: account.id, id: input.site_id ?? null, name: norm(input.plant) || 'Plant',
+      parent_site_id: locationId, site_kind: 'unit',
+    });
+    plantId = plant.id;
+  }
+  const leadSiteId = plantId ?? locationId ?? (input.site_id ?? null);
+  // Pull city/state/plant-name from the resolved site rows when the form didn't send them.
+  if (leadSiteId) {
+    const ids = [leadSiteId, locationId].filter((x): x is string => Boolean(x));
+    const { data: siteRows } = await supabaseAdmin.from('crm_sites').select('id, name, city, state, parent_site_id').eq('org_id', ctx.org_id).in('id', ids);
+    const byId = new Map((siteRows ?? []).map((s: Record<string, unknown>) => [s.id as string, s]));
+    const plantRow = plantId ? byId.get(plantId) : null;
+    const locRow = locationId ? byId.get(locationId) : (plantRow?.parent_site_id ? byId.get(plantRow.parent_site_id as string) : null);
+    if (plantRow) plantName = (plantRow.name as string) ?? null;
+    else if (locRow) plantName = (locRow.name as string) ?? null;
+    if (!city) city = norm((locRow?.city as string) ?? (plantRow?.city as string));
+    if (!state) state = norm((locRow?.state as string) ?? (plantRow?.state as string));
+  }
+
+  // 4. Contacts (each tagged with the account, lead, plant, department).
+  const contactIds: string[] = [];
+  let firstPersonName = norm(input.person_name);
+  for (const c of input.contacts ?? []) {
+    if (!norm(c.first_name) && !norm(c.last_name) && !norm(c.email) && !norm(c.phone) && !norm(c.mobile)) continue;
+    const resolved = await findOrCreateContact(ctx, {
+      ...c,
+      account_id: account.id,
+      lead_id: input.lead_id,
+      site_id: leadSiteId,
+      department: norm(c.department) || norm(input.department) || null,
+      owner_id: c.owner_id ?? input.owner_id ?? null,
+    });
+    contactIds.push(resolved.id);
+    if (!firstPersonName) firstPersonName = [norm(c.first_name), norm(c.last_name)].filter(Boolean).join(' ');
+  }
+
+  // 5. Product lines. `undefined` means the caller didn't touch them (a partial
+  // edit) — keep what's stored and reuse it for the name; an array (even empty)
+  // means replace.
+  let lines: LeadProductLineInput[];
+  if (input.product_lines === undefined) {
+    const { data } = await supabaseAdmin.from('crm_lead_product_lines')
+      .select('make_id, make_name, product_id, product_name, qty, unit, line_value')
+      .eq('org_id', ctx.org_id).eq('lead_id', input.lead_id).order('position', { ascending: true });
+    lines = (data ?? []) as LeadProductLineInput[];
+  } else {
+    lines = await hydrateProductLineNames(ctx, input.product_lines);
+    await syncLeadProductLines(ctx, input.lead_id, lines);
+  }
+
+  // 6. Compute the display name and persist the lead's structured columns.
+  let ownerName = norm(input.owner_name);
+  if (!ownerName && input.owner_id) {
+    const { data } = await supabaseAdmin.from('users').select('name').eq('id', input.owner_id).maybeSingle();
+    ownerName = norm(data?.name);
+  }
+  const display = buildLeadDisplayName({
+    group: groupName, company: companyName, city, state, plant: plantName,
+    department: norm(input.department), person: firstPersonName,
+    requirement: norm(input.requirement), productLines: lines, owner: ownerName,
+  }) || null;
+
+  const patch: Record<string, unknown> = { account_id: account.id, display_name: display };
+  if (leadSiteId) patch.site_id = leadSiteId;
+  if (norm(input.department)) patch.department = norm(input.department);
+  if (norm(input.requirement)) patch.requirement = norm(input.requirement);
+  await supabaseAdmin.from('crm_leads').update(patch).eq('org_id', ctx.org_id).eq('id', input.lead_id);
+
+  return { account_id: account.id, group_id: groupId, site_id: leadSiteId, contact_ids: contactIds, display_name: display };
 }
 
 // ─────────────────────────────────────────────────────────── account timeline

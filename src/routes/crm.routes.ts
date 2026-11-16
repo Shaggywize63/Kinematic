@@ -851,8 +851,14 @@ leads.post('/', idempotency, wrap(async (req, res) => {
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
   // `contacts` and `account_id` are B2B capture inputs, NOT crm_leads columns —
   // pop them before the insert and resolve them into the CRM graph afterwards.
+  // B2B structured-capture inputs that are NOT crm_leads columns — pop them before
+  // the insert and resolve them into the CRM graph afterwards (applyLeadStructure).
+  // requirement / department / site_id stay in `rest`: they ARE columns.
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: consentInput, schedule_visit: scheduleVisit,
-          contacts: leadContacts, account_id: leadAccountId, ...rest } = parsed;
+          contacts: leadContacts, account_id: leadAccountId,
+          group: leadGroup, group_id: leadGroupId, location: leadLocation, location_id: leadLocationId,
+          location_city: leadLocationCity, location_state: leadLocationState, plant: leadPlant,
+          product_lines: leadProductLines, ...rest } = parsed;
   // client_id is the tenant boundary — always derive it server-side from the
   // caller's scope (which honours a super-admin's X-Client-Id header), never from
   // the request body. See SECURITY_AUDIT_2026-07.md finding H-2.
@@ -1017,17 +1023,29 @@ leads.post('/', idempotency, wrap(async (req, res) => {
   const hasCompany = String(payload.company ?? '').trim().length > 0;
   if (lead?.id && B2B_LEAD_CLIENT_IDS.has(leadClientId) && (hasCompany || leadAccountId)) {
     try {
-      const linked = await visitBridge.linkLeadToCompany(bridgeCtx(req), {
+      const structured = await visitBridge.applyLeadStructure(bridgeCtx(req), {
         lead_id: lead.id,
         account_id: (leadAccountId as string | undefined) ?? null,
         company: payload.company as string | null ?? null,
         industry: payload.industry as string | null ?? null,
         owner_id: (payload.owner_id as string | null) ?? userId(req) ?? null,
+        person_name: [payload.first_name, payload.last_name].map((s) => String(s ?? '').trim()).filter(Boolean).join(' ') || null,
+        group_id: (leadGroupId as string | undefined) ?? null,
+        group: (leadGroup as string | undefined) ?? null,
+        location_id: (leadLocationId as string | undefined) ?? null,
+        location: (leadLocation as string | undefined) ?? null,
+        location_city: (leadLocationCity as string | undefined) ?? null,
+        location_state: (leadLocationState as string | undefined) ?? null,
+        plant: (leadPlant as string | undefined) ?? null,
+        site_id: (payload.site_id as string | undefined) ?? null,
+        department: (payload.department as string | undefined) ?? null,
+        requirement: (payload.requirement as string | undefined) ?? null,
         contacts: (leadContacts as visitBridge.ContactInput[] | undefined) ?? [],
+        product_lines: (leadProductLines as visitBridge.LeadProductLineInput[] | undefined) ?? [],
       });
-      b2bResponse = { account_id: linked.account_id, contact_ids: linked.contact_ids };
+      b2bResponse = { account_id: structured.account_id, group_id: structured.group_id, site_id: structured.site_id, contact_ids: structured.contact_ids, display_name: structured.display_name };
     } catch (e) {
-      console.warn(`[b2b_lead] could not link lead ${lead.id} to its company: ${(e as Error).message}`);
+      console.warn(`[b2b_lead] could not apply lead structure for lead ${lead.id}: ${(e as Error).message}`);
     }
   }
 
@@ -1651,7 +1669,10 @@ leads.patch('/:id', wrap(async (req, res) => {
   // update and resolve it into the CRM graph afterwards (same as the create path).
   // `account_id` stays in `rest`: it IS a column, so an explicit link persists
   // directly, and the B2B block below reuses it when resolving the contacts.
-  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: _dropConsent, contacts: leadContacts, ...rest } = parsed;
+  const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: _dropConsent, contacts: leadContacts,
+          group: leadGroup, group_id: leadGroupId, location: leadLocation, location_id: leadLocationId,
+          location_city: leadLocationCity, location_state: leadLocationState, plant: leadPlant,
+          product_lines: leadProductLines, ...rest } = parsed;
   // Edit RBAC — across the whole hierarchy, only the rep who CREATED
   // the lead may edit it. owner_id / assigned_to grant view, but not
   // edit. ASOs viewing a Consumer Champion's lead can read it (it
@@ -1701,20 +1722,35 @@ leads.patch('/:id', wrap(async (req, res) => {
   const editContacts = (leadContacts as visitBridge.ContactInput[] | undefined) ?? [];
   const editAccountId = l?.account_id as string | null | undefined;
   const editCompany = l?.company as string | null | undefined;
-  if (lead?.id && editContacts.length > 0 && B2B_LEAD_CLIENT_IDS.has(editClientId)
+  // Recompute the full structure (so the display name stays fresh) on any B2B lead
+  // edit tied to a company. Product lines are only replaced when the edit sent them
+  // (undefined => keep what's stored); a plain field edit just refreshes the name.
+  if (lead?.id && B2B_LEAD_CLIENT_IDS.has(editClientId)
       && (String(editCompany ?? '').trim().length > 0 || editAccountId)) {
     try {
-      const linked = await visitBridge.linkLeadToCompany(bridgeCtx(req), {
+      const structured = await visitBridge.applyLeadStructure(bridgeCtx(req), {
         lead_id: lead.id,
         account_id: editAccountId ?? null,
         company: editCompany ?? null,
         industry: l?.industry as string | null ?? null,
         owner_id: l?.owner_id as string | null ?? userId(req) ?? null,
+        person_name: [l?.first_name, l?.last_name].map((s) => String(s ?? '').trim()).filter(Boolean).join(' ') || null,
+        group_id: (leadGroupId as string | undefined) ?? null,
+        group: (leadGroup as string | undefined) ?? null,
+        location_id: (leadLocationId as string | undefined) ?? null,
+        location: (leadLocation as string | undefined) ?? null,
+        location_city: (leadLocationCity as string | undefined) ?? null,
+        location_state: (leadLocationState as string | undefined) ?? null,
+        plant: (leadPlant as string | undefined) ?? null,
+        site_id: (l?.site_id as string | undefined) ?? null,
+        department: (l?.department as string | undefined) ?? null,
+        requirement: (l?.requirement as string | undefined) ?? null,
         contacts: editContacts,
+        product_lines: leadProductLines as visitBridge.LeadProductLineInput[] | undefined,
       });
-      b2bResponse = { account_id: linked.account_id, contact_ids: linked.contact_ids };
+      b2bResponse = { account_id: structured.account_id, group_id: structured.group_id, site_id: structured.site_id, contact_ids: structured.contact_ids, display_name: structured.display_name };
     } catch (e) {
-      console.warn(`[b2b_lead] could not resolve contacts on lead ${lead.id} edit: ${(e as Error).message}`);
+      console.warn(`[b2b_lead] could not apply lead structure on lead ${lead.id} edit: ${(e as Error).message}`);
     }
   }
   res.json({ ...await stampSourceName(await stampOwnerName(lead)), ...autoLogResponse, ...b2bResponse });
@@ -1789,6 +1825,15 @@ leads.get('/:id/deals', wrap(async (req, res) => res.json(
 leads.get('/:id/contacts', wrap(async (req, res) => {
   const { city: _c, state: _s, district: _d, block: _b, ...rest } = req.query as Record<string, unknown>;
   return res.json(await crud.list('crm_contacts', orgId(req), { lead_id: req.params.id, ...rest }));
+}));
+// The make/product/qty lines captured under this lead's requirement (Spark & Ray).
+// Org-scoped; ordered by capture position so the lead detail renders them in order.
+leads.get('/:id/product-lines', wrap(async (req, res) => {
+  const { data, error } = await supabaseAdmin.from('crm_lead_product_lines')
+    .select('*').eq('org_id', orgId(req)).eq('lead_id', req.params.id).is('deleted_at', null)
+    .order('position', { ascending: true });
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return res.json(data ?? []);
 }));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
