@@ -29,7 +29,7 @@ describe('notification catalogue', () => {
 
   it('marks the safety notifications as recommended', () => {
     const rec = NOTIFICATION_CATALOG.filter((e) => e.recommended).map((e) => e.kind).sort();
-    expect(rec).toEqual(['security_alert', 'sos']);
+    expect(rec).toEqual(['security_alert', 'sos', 'tracking_paused']);
   });
 
   it('knows the kind every writer derives for a row (row type + data)', () => {

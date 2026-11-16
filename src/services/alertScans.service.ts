@@ -24,6 +24,9 @@ import { logger } from '../lib/logger';
 import { notify, notifyUsers, resolveManagers } from './notify';
 import { buildReplenishment } from './distribution/replenishment.service';
 import { istTodayISO } from '../lib/clientAccess';
+import { staleAfterMs } from './trackingWatchdog.service';
+import { isLiveTrackingDisabled } from '../lib/liveTracking';
+import { dbToday } from '../utils';
 
 const DAY_MS = 86_400_000;
 
@@ -142,6 +145,130 @@ export async function runMissedVisitScan(
 
   logger.info(`[missed-visit] scan: ${byPlan.size} plan(s), ${alerted} alerted`);
   return { plans: byPlan.size, alerted };
+}
+
+// ───────────────────────── Field Force: tracking paused ─────────────────────
+/** Give the watchdog's silent wake-ups a chance to restore tracking before we trouble a manager. */
+const PAUSED_ALERT_FLOOR_MS = 45 * 60_000;
+/** Location explicitly OFF already fires `location_off` inline (location-status.controller) — don't double up. */
+const LOCATION_OFF_STATUSES = new Set(['denied', 'services_off', 'restricted']);
+
+/** Minutes of silence → adaptive "45 min" / "1 h 8 min" / "2 d 3 h" (mirrors the dashboard's trackingPaused.fmtSilence). */
+export function fmtSilence(mins: number): string {
+  if (mins < 60) return `${mins} min`;
+  if (mins < 60 * 24) {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `${h} h ${m} min` : `${h} h`;
+  }
+  const d = Math.floor(mins / (60 * 24));
+  const h = Math.floor((mins % (60 * 24)) / 60);
+  return h ? `${d} d ${h} h` : `${d} d`;
+}
+
+function pingCadenceSeconds(raw: unknown): number {
+  if (typeof raw === 'number' && raw > 0) return raw;
+  if (raw && typeof raw === 'object' && typeof (raw as { value?: unknown }).value === 'number' && (raw as { value: number }).value > 0) {
+    return (raw as { value: number }).value;
+  }
+  return 600;
+}
+
+/**
+ * Tracking-paused scan. A rep CHECKED IN today whose phone has STOPPED sending fixes — battery saver, app
+ * closed in the background, or no signal — as opposed to location being switched off (that fires `location_off`
+ * inline). The tracking watchdog already tries to wake such phones silently; when one stays quiet past
+ * [PAUSED_ALERT_FLOOR_MS] (or 2× the org's ping cadence) we tell the client's own admins/managers so someone
+ * can follow up — the same recipients as the location-off alert, for every client.
+ *
+ * De-duped on the notifications ledger (via [recentlyNotifiedIds] on data.rep_id), so a rep re-alerts at most
+ * once per `dedupHours` (default 3) while they stay paused, and afresh once they report again and later pause.
+ * Self-gating (no checked-in reps → no-op), best-effort, and runs against the AMBIENT project (the scheduler
+ * wraps it per tenant). Delivery still honours each client's notification catalogue — `tracking_paused` must be
+ * switched on for the client in Client Management, exactly like every other kind.
+ */
+export async function runTrackingPausedScan(
+  opts: { now?: number; dedupHours?: number } = {},
+): Promise<{ checked: number; paused: number; alerted: number }> {
+  const now = opts.now ?? Date.now();
+  const dedupHours = Math.max(1, opts.dedupHours ?? 3);
+  const result = { checked: 0, paused: 0, alerted: 0 };
+
+  // Reps checked in today (IST) and not yet checked out — the only people tracking is expected for.
+  const { data: att, error: attErr } = await supabaseAdmin
+    .from('attendance')
+    .select('user_id')
+    .eq('date', dbToday())
+    .not('checkin_at', 'is', null)
+    .is('checkout_at', null)
+    .limit(5000);
+  if (attErr) { logger.warn(`[tracking-paused] attendance query failed: ${attErr.message}`); return result; }
+  const userIds = Array.from(new Set(((att ?? []) as Array<{ user_id: string | null }>).map((a) => a.user_id).filter((x): x is string => !!x)));
+  if (!userIds.length) return result;
+
+  const { data: users, error: uErr } = await supabaseAdmin
+    .from('users')
+    .select('id, name, org_id, client_id, supervisor_id, last_location_updated_at, location_status')
+    .in('id', userIds)
+    .eq('is_active', true)
+    .is('deleted_at', null)
+    .limit(5000);
+  if (uErr) { logger.warn(`[tracking-paused] users query failed: ${uErr.message}`); return result; }
+  const reps = (users ?? []) as Array<{
+    id: string; name: string | null; org_id: string | null; client_id: string | null;
+    supervisor_id: string | null; last_location_updated_at: string | null; location_status: string | null;
+  }>;
+  result.checked = reps.length;
+  if (!reps.length) return result;
+
+  // Each org's configured ping cadence (same source the tracking watchdog uses).
+  const orgIds = Array.from(new Set(reps.map((r) => r.org_id).filter((x): x is string => !!x)));
+  const cadenceByOrg = new Map<string, number>();
+  if (orgIds.length) {
+    const { data: rows } = await supabaseAdmin.from('org_settings').select('org_id, value').eq('key', 'location_ping_interval_seconds').in('org_id', orgIds);
+    for (const r of (rows ?? []) as Array<{ org_id: string; value: unknown }>) cadenceByOrg.set(r.org_id, pingCadenceSeconds(r.value));
+  }
+
+  const alreadyAlerted = await recentlyNotifiedIds('tracking_paused', 'rep_id', dedupHours);
+  const disabledByClient = new Map<string, boolean>();
+  const managerCache = new Map<string, string[]>();
+
+  for (const rep of reps) {
+    if (!rep.org_id) continue;
+    // Location explicitly OFF is a different, more specific alert — skip it here.
+    if (rep.location_status && LOCATION_OFF_STATUSES.has(rep.location_status)) continue;
+    // Tenants opted out of live tracking never get tracking alerts.
+    if (rep.client_id) {
+      if (!disabledByClient.has(rep.client_id)) disabledByClient.set(rep.client_id, await isLiveTrackingDisabled(rep.client_id));
+      if (disabledByClient.get(rep.client_id)) continue;
+    }
+    // "Stopped reporting" needs a prior fix to have stopped — a rep who never sent one today is not "paused".
+    const lastFix = rep.last_location_updated_at ? Date.parse(rep.last_location_updated_at) : 0;
+    if (!Number.isFinite(lastFix) || lastFix <= 0) continue;
+    const cadence = cadenceByOrg.get(rep.org_id) || 600;
+    const threshold = Math.max(PAUSED_ALERT_FLOOR_MS, staleAfterMs(cadence));
+    if (now - lastFix < threshold) continue;
+    result.paused++;
+    if (alreadyAlerted.has(rep.id)) continue;   // re-alert cadence
+
+    const mk = `${rep.org_id}|${rep.client_id || ''}|${rep.supervisor_id || ''}`;
+    if (!managerCache.has(mk)) managerCache.set(mk, await resolveManagers(rep.org_id, { supervisorId: rep.supervisor_id, clientId: rep.client_id }));
+    const managers = managerCache.get(mk) || [];
+    if (!managers.length) continue;
+
+    const mins = Math.floor((now - lastFix) / 60_000);
+    await notifyUsers(managers, {
+      orgId: rep.org_id,
+      kind: 'tracking_paused',
+      title: 'Location tracking paused',
+      body: `${rep.name || 'A field rep'}'s phone has not shared its location for ${fmtSilence(mins)}. It may be out of signal, closed in the background, or stopped by the phone's battery saver.`,
+      data: { rep_id: rep.id, silent_minutes: String(mins) },
+    }, { exclude: rep.id });
+    result.alerted++;
+  }
+
+  logger.info(`[tracking-paused] scan: checked ${result.checked}, paused ${result.paused}, alerted ${result.alerted}`);
+  return result;
 }
 
 // ─────────────────────── Supply Chain: batch near-expiry ────────────────────

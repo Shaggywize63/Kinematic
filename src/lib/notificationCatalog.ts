@@ -60,6 +60,7 @@ export const NOTIFICATION_CATALOG: CatalogEntry[] = [
   // ── Field force ───────────────────────────────────────────────────────────────────────────────────────────
   { kind: 'sos', label: 'SOS / panic alert', group: 'FieldForce', description: 'A field user raised an SOS.', recommended: true },
   { kind: 'location_off', label: 'Location turned off', group: 'FieldForce', description: 'A rep turned location tracking off or denied it.' },
+  { kind: 'tracking_paused', label: 'Location tracking paused', group: 'FieldForce', description: 'A checked-in rep\'s phone stopped sharing location (battery saver, app closed, or no signal) — distinct from location being switched off.', recommended: true },
   { kind: 'missed_visits', label: 'Missed planned visits', group: 'FieldForce', description: 'Outlets on a past beat were never checked into.' },
   { kind: 'route_deviation', label: 'Off-route visit', group: 'FieldForce', description: 'A check-in happened beyond the outlet geofence.' },
   { kind: 'checkout_reminder', label: 'Forgot to check out', group: 'FieldForce', description: 'A shift is still open 10 hours after check-in.' },
