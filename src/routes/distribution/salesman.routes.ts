@@ -7,11 +7,13 @@ import * as payments from '../../controllers/distribution/payments.controller';
 import * as returns from '../../controllers/distribution/returns.controller';
 import * as secondary from '../../controllers/distribution/secondary-sales.controller';
 import * as van from '../../controllers/distribution/van.controller';
+import * as distributors from '../../controllers/distribution/distributors.controller';
 import { idempotency } from '../../middleware/idempotency';
 
 const router = Router();
 
 router.get('/route/today', salesman.routeToday);
+router.get('/distributors', distributors.myDistributors);   // dealers assigned to this rep
 
 // Van sales stock: the rep's open load for today, load-in, and end-of-day
 // reconcile (load-out). Rides the same distribution-package gate as the rest
