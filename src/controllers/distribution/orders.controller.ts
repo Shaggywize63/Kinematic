@@ -347,16 +347,18 @@ export const preview = asyncHandler(async (req: AuthRequest, res: Response) => {
 // suggestions. Reads outlet_id from the route param (salesman) or ?outlet_id=
 // (dashboard). Also returns the outlet credit context (order_value 0).
 // Build the priced catalogue rows for a set of price-list items. The SKU and
-// product-ext lookups are CHUNKED: one `.in('id', skuIds)` with hundreds of UUIDs
-// makes a ~14 KB query string that the PostgREST/nginx URL+header limit rejects,
-// so the lookup silently returned no rows and every sku_name / mrp / uom came back
-// blank (the Solar Seeds 318-SKU list hit this; smaller lists never did). Falls
-// back to the skus row (unit / price) when a product_distribution_ext row is
-// missing, so uom and MRP still render.
+// product-ext lookups are CHUNKED: one `.in('id', skuIds)` with many UUIDs makes a
+// long query string that the Kinematic Supabase rejects, so the lookup silently
+// returned no rows and every sku_name / mrp / uom came back blank (the Solar Seeds
+// 318-SKU list hit this; smaller lists never did). Measured against the live stack:
+// 318 ids -> 414, 150/100 ids -> 502, 50 ids -> 200, so batch at 50 (comfortably
+// under the limit). Falls back to the skus row (unit / price) when a
+// product_distribution_ext row is missing, so uom and MRP still render.
+const CATALOGUE_IN_CHUNK = 50;
 async function buildCatalogueItems(priceItems: any[]) {
   const skuIds: string[] = (priceItems || []).map((p: any) => p.sku_id);
   const batches: string[][] = [];
-  for (let i = 0; i < skuIds.length; i += 150) batches.push(skuIds.slice(i, i + 150));
+  for (let i = 0; i < skuIds.length; i += CATALOGUE_IN_CHUNK) batches.push(skuIds.slice(i, i + CATALOGUE_IN_CHUNK));
 
   const extMap = new Map<string, any>();
   const skuMap = new Map<string, any>();
