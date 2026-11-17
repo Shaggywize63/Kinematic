@@ -6938,13 +6938,19 @@ ai.post('/summarize/account/:id', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const text = await summarizeSvc.summarizeAccount(orgId(req), clientId(req), req.params.id);
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
-  res.json({ text });
+  // The web "Account 360" card (AccountSummaryCard) reads { summary, highlights }
+  // off the response data. The CRM router wraps this as { success, data }, so
+  // returning { text } left data.summary undefined and the card rendered its
+  // empty state even though the summary was generated (and saved to ai_summary).
+  // Emit the shape the client expects; keep `text` for any older consumer.
+  res.json({ summary: text, highlights: [], text });
 }));
 ai.post('/summarize/deal/:id', wrap(async (req, res) => {
   const g = await gateAi(req, res); if (!g.proceed) return;
   const text = await summarizeSvc.summarizeDeal(orgId(req), clientId(req), req.params.id);
   void kiniQuota.recordQuery(g.actor, undefined, platformOf(req));
-  res.json({ text });
+  // Same contract as the account summary: the client reads { summary, highlights }.
+  res.json({ summary: text, highlights: [], text });
 }));
 ai.get('/tools', (_req, res) => res.json(kiniTools.toAnthropicTools()));
 ai.post('/tools/execute', wrap(async (req, res) => {
