@@ -174,6 +174,15 @@ export const leadProductLineSchema = z.object({
   line_value: z.coerce.number().nonnegative().optional().nullable(),
 });
 
+// One customer contact linked to a lead (GM / DGM / procurement …): an existing contact id,
+// optionally flagged primary (the nodal point) with a free-text role. Connected-B2B only.
+export const leadContactLinkSchema = z.object({
+  contact_id: z.string().uuid(),
+  is_primary: z.coerce.boolean().optional(),
+  role: z.string().max(120).optional().nullable(),
+  position: z.coerce.number().int().min(0).max(1000).optional(),
+});
+
 // Lead type: a specific need (requirement) or a talk with no work yet (discussion). Optional + nullable; an empty
 // string (a form that posts "" for "not chosen") reads as null. `ref_no` is deliberately NOT here: the lead number
 // is server-assigned and read-only, and zod drops the unknown key from any body that sends it.
@@ -206,6 +215,7 @@ const leadCreateBase = z.object({
   location_state: z.string().max(120).optional().nullable(),
   plant:          z.string().max(200).optional().nullable(),    // plant/unit name to create under the location
   product_lines:  z.array(leadProductLineSchema).max(50).optional(),
+  lead_contacts:  z.array(leadContactLinkSchema).max(50).optional(),   // customer people on the lead; one primary (nodal)
   // Name: a lead needs *a* name, but not specifically both parts. Many
   // tenants (e.g. SRS retail construction customers) capture a single
   // given name, and an admin can hide the Last Name field entirely via
