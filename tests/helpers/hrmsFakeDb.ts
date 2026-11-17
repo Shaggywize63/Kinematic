@@ -35,6 +35,9 @@ const UNIQUES: Unique[] = [
   { table: 'hrms_benefit_enrolments', cols: ['org_id', 'employee_id'], name: 'hrms_benefit_enrolments_org_emp_uq' },
   { table: 'hrms_benefit_claims', cols: ['org_id', 'ref'], name: 'hrms_benefit_claims_org_ref_uq' },
   { table: 'hrms_benefit_config', cols: ['org_id'], name: 'hrms_benefit_config_org_uq' },
+  { table: 'hrms_comp_bands', cols: ['org_id', 'grade'], name: 'hrms_comp_bands_org_grade_uq' },
+  { table: 'hrms_comp_perf', cols: ['org_id', 'employee_id'], name: 'hrms_comp_perf_org_emp_uq' },
+  { table: 'hrms_merit_cycle', cols: ['org_id'], name: 'hrms_merit_cycle_org_uq' },
 ];
 
 /** The database defaults of the columns the services leave out of an insert. */
@@ -76,6 +79,9 @@ const DEFAULTS: Record<string, () => Row> = {
   hrms_benefit_enrolments: () => ({ health_tier: null, dependants: [], meal_tier: null, nps_tier: null, flex: {} }),
   hrms_benefit_claims: () => ({ approved: null, closed_on: null, rejection_reason: null, trail: [] }),
   hrms_benefit_config: () => ({ extensions: [], reminders: {}, sent: {} }),
+  hrms_comp_bands: () => ({ published: false }),
+  hrms_comp_perf: () => ({ band: null, evidence: null, reply: null }),
+  hrms_merit_cycle: () => ({ name: 'Merit cycle', budget_pct: 0, status: 'draft', decision: null, guidelines: {}, proposals: {}, applied: {} }),
 };
 
 /** jsonb stores an object's keys sorted by length, then bytewise; arrays keep their order. */
@@ -135,7 +141,7 @@ export function createHrmsFakeDb() {
     if (!gone.length) return;
     const ids = new Set(gone.map((g) => g.id));
     if (table === 'hrms_employees') {
-      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances', 'hrms_benefit_enrolments', 'hrms_benefit_claims']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
+      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances', 'hrms_benefit_enrolments', 'hrms_benefit_claims', 'hrms_comp_perf']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
       for (const r of tables.hrms_employees ?? []) if (ids.has(r.reporting_to_id)) r.reporting_to_id = null;
       for (const r of tables.hrms_departments ?? []) if (ids.has(r.head_id)) r.head_id = null;
       for (const r of tables.hrms_assets ?? []) if (ids.has(r.holder_id)) r.holder_id = null;                 // holder_id ON DELETE SET NULL
@@ -426,6 +432,20 @@ export function createHrmsFakeDb() {
       const cfg = T('hrms_benefit_config').find((c) => c.org_id === a.p_org && c.client_id === null);
       if (cfg) { cfg.sent = jsonb({ ...(cfg.sent ?? {}), [a.p_month]: a.p_sent }); cfg.updated_at = assetTick(); }
       return { data: old.length, error: null };
+    },
+    // ── compensation (migration_hrms_compensation.sql) ───────────────────────
+    // Record one issued increment on the cycle singleton, atomically: re-check (cycle exists, approved, not already
+    // applied for this person) under the lock, then set applied[employee] = { on, from, to, letterId, by }.
+    hrms_merit_record_applied: (a) => {
+      const cyc = T('hrms_merit_cycle').find((c) => c.org_id === a.p_org && c.client_id === null);
+      if (!cyc) return token('MERIT_NOT_FOUND');
+      if (cyc.status !== 'approved') return token('MERIT_NOT_APPROVED');
+      const applied = { ...(cyc.applied ?? {}) };
+      if (Object.prototype.hasOwnProperty.call(applied, a.p_employee)) return token('MERIT_ALREADY_APPLIED');
+      const by = (String(a.p_by ?? '').trim()) || 'Unknown';
+      applied[a.p_employee] = { on: a.p_on, from: Math.round(a.p_from), to: Math.round(a.p_to), letterId: String(a.p_letter), by };
+      cyc.applied = jsonb(applied); cyc.updated_at = assetTick();
+      return { data: a.p_employee, error: null };
     },
   };
 

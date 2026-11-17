@@ -21,6 +21,7 @@
  *   *      privacy/...                    phase 5: Privacy/DPDP + Compliance on the server (hrmsPrivacy.routes.ts)
  *   *      assets/...                     phase 6: the Asset register on the server (hrmsAssets.routes.ts)
  *   *      benefits/...                   phase 7: the Benefits module on the server (hrmsBenefits.routes.ts)
+ *   *      compensation/...               phase 8: Compensation (pay bands + merit cycle) (hrmsCompensation.routes.ts)
  *
  * PAN and bank details are encrypted at rest (lib/hrmsCrypto) and masked in every response; they are write-only.
  * If the HRMS tables are not there yet (migration_hrms_core.sql not applied) every call answers 503 HRMS_NOT_READY.
@@ -50,6 +51,7 @@ import lifecycleRoutes from './hrmsLifecycle.routes';
 import privacyRoutes from './hrmsPrivacy.routes';
 import assetsRoutes from './hrmsAssets.routes';
 import benefitsRoutes from './hrmsBenefits.routes';
+import compensationRoutes from './hrmsCompensation.routes';
 import * as payrollSettings from '../services/hrms/payroll/settings.service';
 import { payrollSettingsBody } from '../services/hrms/payroll/schemas';
 
@@ -102,6 +104,9 @@ router.use('/assets', assetsRoutes);
 
 // ── benefits (phase 7) ────────────────────────────────────────────────────────
 router.use('/benefits', benefitsRoutes);
+
+// ── compensation: pay bands + merit cycle (phase 8) ───────────────────────────
+router.use('/compensation', compensationRoutes);
 
 // ── organisation structure ──────────────────────────────────────────────────
 const MASTER_ROUTES: Array<{ path: string; kind: MasterKind; create: Parameters<typeof parse>[0]; update: Parameters<typeof parse>[0] }> = [
