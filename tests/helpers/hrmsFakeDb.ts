@@ -38,6 +38,9 @@ const UNIQUES: Unique[] = [
   { table: 'hrms_comp_bands', cols: ['org_id', 'grade'], name: 'hrms_comp_bands_org_grade_uq' },
   { table: 'hrms_comp_perf', cols: ['org_id', 'employee_id'], name: 'hrms_comp_perf_org_emp_uq' },
   { table: 'hrms_merit_cycle', cols: ['org_id'], name: 'hrms_merit_cycle_org_uq' },
+  { table: 'hrms_ts_projects', cols: ['org_id', 'name'], name: 'hrms_ts_projects_org_name_uq' },
+  { table: 'hrms_ts_sheets', cols: ['org_id', 'employee_id', 'week_start'], name: 'hrms_ts_sheets_org_emp_week_uq' },
+  { table: 'hrms_ts_config', cols: ['org_id'], name: 'hrms_ts_config_org_uq' },
 ];
 
 /** The database defaults of the columns the services leave out of an insert. */
@@ -82,6 +85,9 @@ const DEFAULTS: Record<string, () => Row> = {
   hrms_comp_bands: () => ({ published: false }),
   hrms_comp_perf: () => ({ band: null, evidence: null, reply: null }),
   hrms_merit_cycle: () => ({ name: 'Merit cycle', budget_pct: 0, status: 'draft', decision: null, guidelines: {}, proposals: {}, applied: {} }),
+  hrms_ts_projects: () => ({ client: '', kind: 'client', billable: true, budget_hours: 0, prior_hours: 0, rate: 0, archived: false }),
+  hrms_ts_sheets: () => ({ lines: [], status: 'draft', submitted_on: null, decided_on: null, decided_by: null, comment: null, trail: [] }),
+  hrms_ts_config: () => ({ max_per_day: 12, weekly_cap: 60, standard_week: 40, tracked_ids: [] }),
 };
 
 /** jsonb stores an object's keys sorted by length, then bytewise; arrays keep their order. */
@@ -141,7 +147,7 @@ export function createHrmsFakeDb() {
     if (!gone.length) return;
     const ids = new Set(gone.map((g) => g.id));
     if (table === 'hrms_employees') {
-      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances', 'hrms_benefit_enrolments', 'hrms_benefit_claims', 'hrms_comp_perf']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
+      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances', 'hrms_benefit_enrolments', 'hrms_benefit_claims', 'hrms_comp_perf', 'hrms_ts_sheets']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
       for (const r of tables.hrms_employees ?? []) if (ids.has(r.reporting_to_id)) r.reporting_to_id = null;
       for (const r of tables.hrms_departments ?? []) if (ids.has(r.head_id)) r.head_id = null;
       for (const r of tables.hrms_assets ?? []) if (ids.has(r.holder_id)) r.holder_id = null;                 // holder_id ON DELETE SET NULL
