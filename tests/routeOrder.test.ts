@@ -75,6 +75,24 @@ describe('route registration order', () => {
     }
     expect(offenders).toEqual([]);
   });
+
+  // The same method + path registered twice on one router: Express only ever runs the FIRST handler, so the
+  // second is dead code that looks live. This is how GET /leads/:id/contacts (contacts captured on the lead)
+  // silently shadowed the Spark "people on this lead" handler added later on the same path.
+  it('never registers the same method + path twice on one router', () => {
+    const offenders: string[] = [];
+    for (const { trail, routes } of collectRouters(crmRouter as unknown as RouterLike)) {
+      const seen = new Set<string>();
+      for (const r of routes) {
+        for (const method of r.methods) {
+          const key = `${method.toUpperCase()} ${r.path}`;
+          if (seen.has(key)) offenders.push(`${key} is registered twice (${trail}); the second handler can never be reached`);
+          seen.add(key);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe('the Reports page endpoints', () => {
