@@ -462,6 +462,20 @@ export interface LeadStructureInput {
   requirement?: string | null;
   contacts?: ContactInput[];
   product_lines?: LeadProductLineInput[];
+  /**
+   * The customer people on this lead (GM / DGM / procurement …), each an existing
+   * contact id, with one flagged primary (the nodal point). undefined = leave the
+   * lead's current links untouched; [] = clear them.
+   */
+  lead_contacts?: LeadContactLink[];
+}
+
+/** One customer contact linked to a lead; `is_primary` marks the nodal point (changeable over the deal). */
+export interface LeadContactLink {
+  contact_id: string;
+  is_primary?: boolean;
+  role?: string | null;
+  position?: number;
 }
 
 /** Format one requirement's product lines for the lead name. Exported for tests. */
@@ -484,17 +498,21 @@ export function productLinesLabel(lines: LeadProductLineInput[]): { segments: st
   return { segments: joined ? [joined] : [] };
 }
 
-/** Build the human-readable lead name from the resolved chain. Blanks drop out. Exported for tests. */
+/**
+ * Build the human-readable lead name from the resolved chain. Blanks drop out. Exported for tests.
+ *
+ * Company-centric and short (the client found the full chain too long to scan in the list, and the
+ * PERSON is deliberately dropped from the name because the contact on a lead changes over the course
+ * of the deal — the lead is identified by company · plant · requirement, e.g. "Saj Foods – Dulagarh
+ * – Butterfly valve replacement"). The full chain (group, department, people, product lines, owner)
+ * stays on their own fields and in the structured account view, not crammed into the name.
+ */
 export function buildLeadDisplayName(parts: {
   group?: string | null; company?: string | null; city?: string | null; state?: string | null;
   plant?: string | null; department?: string | null; person?: string | null; requirement?: string | null;
   productLines: LeadProductLineInput[]; owner?: string | null;
 }): string {
-  const segs: Array<string | null | undefined> = [
-    parts.group, parts.company, parts.city, parts.state, parts.plant, parts.department, parts.person, parts.requirement,
-    ...productLinesLabel(parts.productLines).segments,
-    parts.owner,
-  ];
+  const segs: Array<string | null | undefined> = [parts.company, parts.plant, parts.requirement];
   return segs.map((s) => norm(s)).filter(Boolean).join(' – ');
 }
 
@@ -543,6 +561,67 @@ async function syncLeadProductLines(ctx: BridgeCtx, leadId: string, lines: LeadP
     const { error } = await supabaseAdmin.from('crm_lead_product_lines').insert(rows);
     if (error) throw new AppError(500, error.message, 'DB_ERROR');
   }
+}
+
+/**
+ * Replace a lead's customer-contact links (crm_lead_contacts). De-dupes by contact id,
+ * keeps at most one primary (nodal) contact, and falls back to the first row as primary
+ * when the caller flagged none — a lead with people always has a nodal point. Replace is
+ * simplest and race-free within one save (the table is service-role only and small per lead).
+ */
+async function syncLeadContacts(ctx: BridgeCtx, leadId: string, links: LeadContactLink[]): Promise<void> {
+  await supabaseAdmin.from('crm_lead_contacts').delete().eq('org_id', ctx.org_id).eq('lead_id', leadId);
+  const seen = new Set<string>();
+  const unique: LeadContactLink[] = [];
+  for (const l of links) {
+    if (l && l.contact_id && !seen.has(l.contact_id)) { seen.add(l.contact_id); unique.push(l); }
+  }
+  let primaryTaken = false;
+  const rows = unique.map((l, i) => {
+    const isPrimary = !!l.is_primary && !primaryTaken;
+    if (isPrimary) primaryTaken = true;
+    return stamp(ctx, {
+      lead_id: leadId,
+      contact_id: l.contact_id,
+      is_primary: isPrimary,
+      role: norm(l.role) || null,
+      position: typeof l.position === 'number' ? l.position : i,
+    });
+  });
+  // No explicit primary but there are people — the first becomes the nodal point.
+  if (rows.length && !primaryTaken) (rows[0] as Record<string, unknown>).is_primary = true;
+  if (rows.length) {
+    const { error } = await supabaseAdmin.from('crm_lead_contacts').insert(rows);
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  }
+}
+
+export interface LeadContactRow {
+  id: string; contact_id: string; is_primary: boolean; role: string | null; position: number;
+  name: string; title: string | null; phone: string | null; email: string | null;
+}
+
+/** A lead's customer contacts (primary first), joined with the contact's name/title. Never throws on a missing table. */
+export async function getLeadContacts(ctx: BridgeCtx, leadId: string): Promise<LeadContactRow[]> {
+  const { data: links, error } = await supabaseAdmin.from('crm_lead_contacts')
+    .select('id, contact_id, is_primary, role, position')
+    .eq('org_id', ctx.org_id).eq('lead_id', leadId).is('deleted_at', null)
+    .order('is_primary', { ascending: false }).order('position', { ascending: true });
+  if (error) return [];
+  const rows = (links ?? []) as Array<{ id: string; contact_id: string; is_primary: boolean; role: string | null; position: number }>;
+  if (rows.length === 0) return [];
+  const ids = Array.from(new Set(rows.map((r) => r.contact_id)));
+  const { data: contacts } = await supabaseAdmin.from('crm_contacts')
+    .select('id, first_name, last_name, title, phone, email').eq('org_id', ctx.org_id).in('id', ids);
+  const byId = new Map((contacts ?? []).map((c: Record<string, unknown>) => [c.id as string, c]));
+  return rows.map((r) => {
+    const c = byId.get(r.contact_id) as Record<string, unknown> | undefined;
+    const name = c ? [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || 'Contact' : 'Contact';
+    return {
+      id: r.id, contact_id: r.contact_id, is_primary: !!r.is_primary, role: r.role, position: r.position,
+      name, title: (c?.title as string) ?? null, phone: (c?.phone as string) ?? null, email: (c?.email as string) ?? null,
+    };
+  });
 }
 
 /**
@@ -650,6 +729,11 @@ export async function applyLeadStructure(
   } else {
     lines = await hydrateProductLineNames(ctx, input.product_lines);
     await syncLeadProductLines(ctx, input.lead_id, lines);
+  }
+
+  // 5b. Customer-contact links (several people, one primary). undefined = leave as-is.
+  if (input.lead_contacts !== undefined) {
+    await syncLeadContacts(ctx, input.lead_id, input.lead_contacts ?? []);
   }
 
   // 6. Compute the display name and persist the lead's structured columns.

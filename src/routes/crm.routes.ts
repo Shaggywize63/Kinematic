@@ -859,7 +859,7 @@ leads.post('/', idempotency, wrap(async (req, res) => {
           contacts: leadContacts, account_id: leadAccountId,
           group: leadGroup, group_id: leadGroupId, location: leadLocation, location_id: leadLocationId,
           location_city: leadLocationCity, location_state: leadLocationState, plant: leadPlant,
-          product_lines: leadProductLines, ...rest } = parsed;
+          product_lines: leadProductLines, lead_contacts: leadContactLinks, ...rest } = parsed;
   // client_id is the tenant boundary — always derive it server-side from the
   // caller's scope (which honours a super-admin's X-Client-Id header), never from
   // the request body. See SECURITY_AUDIT_2026-07.md finding H-2.
@@ -1043,6 +1043,7 @@ leads.post('/', idempotency, wrap(async (req, res) => {
         requirement: (payload.requirement as string | undefined) ?? null,
         contacts: (leadContacts as visitBridge.ContactInput[] | undefined) ?? [],
         product_lines: (leadProductLines as visitBridge.LeadProductLineInput[] | undefined) ?? [],
+        lead_contacts: leadContactLinks as visitBridge.LeadContactLink[] | undefined,
       });
       b2bResponse = { account_id: structured.account_id, group_id: structured.group_id, site_id: structured.site_id, contact_ids: structured.contact_ids, display_name: structured.display_name };
     } catch (e) {
@@ -1673,7 +1674,7 @@ leads.patch('/:id', wrap(async (req, res) => {
   const { _auto_log_site_visit: _drop, _site_visit_first: _drop2, _consent: _dropConsent, contacts: leadContacts,
           group: leadGroup, group_id: leadGroupId, location: leadLocation, location_id: leadLocationId,
           location_city: leadLocationCity, location_state: leadLocationState, plant: leadPlant,
-          product_lines: leadProductLines, ...rest } = parsed;
+          product_lines: leadProductLines, lead_contacts: leadContactLinks, ...rest } = parsed;
   // Edit RBAC — across the whole hierarchy, only the rep who CREATED
   // the lead may edit it. owner_id / assigned_to grant view, but not
   // edit. ASOs viewing a Consumer Champion's lead can read it (it
@@ -1748,6 +1749,7 @@ leads.patch('/:id', wrap(async (req, res) => {
         requirement: (l?.requirement as string | undefined) ?? null,
         contacts: editContacts,
         product_lines: leadProductLines as visitBridge.LeadProductLineInput[] | undefined,
+        lead_contacts: leadContactLinks as visitBridge.LeadContactLink[] | undefined,
       });
       b2bResponse = { account_id: structured.account_id, group_id: structured.group_id, site_id: structured.site_id, contact_ids: structured.contact_ids, display_name: structured.display_name };
     } catch (e) {
@@ -1835,6 +1837,11 @@ leads.get('/:id/product-lines', wrap(async (req, res) => {
     .order('position', { ascending: true });
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return res.json(data ?? []);
+}));
+// The customer contacts on this lead (GM / DGM / procurement …), primary (nodal) first,
+// each joined with the contact's name/title (Spark & Ray). Empty on an unmigrated DB.
+leads.get('/:id/contacts', wrap(async (req, res) => {
+  return res.json(await visitBridge.getLeadContacts(bridgeCtx(req), req.params.id));
 }));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
