@@ -1662,7 +1662,8 @@ leads.get('/export-area-leads-report', wrap(async (req, res) => {
   sendReportCsv(req, res, 'area-leads-report', cols, [...out, gt]);
 }));
 
-leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))))));
+leads.get('/:id', wrap(async (req, res) => res.json(await visitBridge.stampLeadHeader(orgId(req),
+  await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id)))))));
 leads.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.leadUpdateSchema, req.body);
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
@@ -1838,9 +1839,12 @@ leads.get('/:id/product-lines', wrap(async (req, res) => {
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return res.json(data ?? []);
 }));
-// The customer contacts on this lead (GM / DGM / procurement …), primary (nodal) first,
-// each joined with the contact's name/title (Spark & Ray). Empty on an unmigrated DB.
-leads.get('/:id/contacts', wrap(async (req, res) => {
+// The customer people on this lead (GM / DGM / procurement …), primary (nodal) first, each
+// joined with the contact's name/title (Spark & Ray, crm_lead_contacts). Empty on an unmigrated DB.
+// NOTE: its own path — `/:id/contacts` above already serves the contacts captured on the lead
+// (crm_contacts.lead_id), and Express runs only the first route registered for a path, so this
+// handler was unreachable while it shared that path.
+leads.get('/:id/people', wrap(async (req, res) => {
   return res.json(await visitBridge.getLeadContacts(bridgeCtx(req), req.params.id));
 }));
 leads.post('/bulk-assign', wrap(async (req, res) => {

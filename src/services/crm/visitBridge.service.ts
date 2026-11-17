@@ -499,21 +499,25 @@ export function productLinesLabel(lines: LeadProductLineInput[]): { segments: st
 }
 
 /**
- * Build the human-readable lead name from the resolved chain. Blanks drop out. Exported for tests.
+ * Build the human-readable lead name from the resolved chain. Exported for tests.
  *
- * Company-centric and short (the client found the full chain too long to scan in the list, and the
- * PERSON is deliberately dropped from the name because the contact on a lead changes over the course
- * of the deal — the lead is identified by company · plant · requirement, e.g. "Saj Foods – Dulagarh
- * – Butterfly valve replacement"). The full chain (group, department, people, product lines, owner)
- * stays on their own fields and in the structured account view, not crammed into the name.
+ * The agreed Spark & Ray format (one computed name shared by the lead header and the list row):
+ *
+ *   Account · Plant · Department — Requirement      e.g. "NTPC · Dadri · Procurement — 150 mm Gate Valves"
+ *
+ * Segments drop out cleanly when blank: "NTPC · Dadri — 150 mm Gate Valves" (no department),
+ * "NTPC · Procurement — 150 mm Gate Valves" (no plant), "NTPC · Dadri · Procurement" (no
+ * requirement yet). The PERSON, owner, stage and serial are deliberately NOT in the name — they ride
+ * alongside as metadata (the contact on a lead changes over the deal; the serial is the stable key).
  */
 export function buildLeadDisplayName(parts: {
   group?: string | null; company?: string | null; city?: string | null; state?: string | null;
   plant?: string | null; department?: string | null; person?: string | null; requirement?: string | null;
   productLines: LeadProductLineInput[]; owner?: string | null;
 }): string {
-  const segs: Array<string | null | undefined> = [parts.company, parts.plant, parts.requirement];
-  return segs.map((s) => norm(s)).filter(Boolean).join(' – ');
+  const head = [parts.company, parts.plant, parts.department].map((s) => norm(s)).filter(Boolean).join(' · ');
+  const req = norm(parts.requirement);
+  return [head, req].filter(Boolean).join(' — ');
 }
 
 /** Fill in missing make/product name snapshots from the tenant's lists. */
@@ -622,6 +626,41 @@ export async function getLeadContacts(ctx: BridgeCtx, leadId: string): Promise<L
       name, title: (c?.title as string) ?? null, phone: (c?.phone as string) ?? null, email: (c?.email as string) ?? null,
     };
   });
+}
+
+/**
+ * Lead-detail header extras for a structured (Spark & Ray) lead: the names behind the breadcrumb
+ * (account › plant › department), the primary (nodal) contact chip and the product lines' total
+ * value. Only structured leads (a site or account linked) pay for the lookups; anything else is
+ * returned untouched. Best-effort — a failed lookup just leaves that extra off.
+ */
+export async function stampLeadHeader<T extends object>(org_id: string, lead: T | null): Promise<T | null> {
+  if (!lead) return lead;
+  const row = lead as Record<string, unknown>;
+  const leadId = row.id as string | undefined;
+  const siteId = row.site_id as string | null | undefined;
+  const accountId = row.account_id as string | null | undefined;
+  if (!leadId || (!siteId && !accountId)) return lead;
+  try {
+    const [site, account, lines, people] = await Promise.all([
+      siteId ? supabaseAdmin.from('crm_sites').select('name').eq('org_id', org_id).eq('id', siteId).maybeSingle() : Promise.resolve({ data: null }),
+      accountId ? supabaseAdmin.from('crm_accounts').select('name').eq('org_id', org_id).eq('id', accountId).maybeSingle() : Promise.resolve({ data: null }),
+      supabaseAdmin.from('crm_lead_product_lines').select('line_value').eq('org_id', org_id).eq('lead_id', leadId),
+      getLeadContacts({ org_id, client_id: null }, leadId),
+    ]);
+    const values = ((lines.data ?? []) as Array<{ line_value: number | string | null }>)
+      .map((l) => Number(l.line_value)).filter((n) => Number.isFinite(n) && n > 0);
+    const primary = people.find((p) => p.is_primary) ?? null;
+    return {
+      ...lead,
+      site_name: norm((site.data as { name?: string } | null)?.name) || null,
+      account_name: norm((account.data as { name?: string } | null)?.name) || null,
+      lines_value: values.length ? values.reduce((a, b) => a + b, 0) : null,
+      primary_contact: primary ? { contact_id: primary.contact_id, name: primary.name, title: primary.title, phone: primary.phone } : null,
+    };
+  } catch {
+    return lead;
+  }
 }
 
 /**
