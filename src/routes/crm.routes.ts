@@ -5740,6 +5740,17 @@ targets.put('/leaderboard-role', requireRole(...MANAGER_ROLES), wrap(async (req,
   res.json({ success: true, data: await targetsSvc.setLeaderboardRoleId(orgId(req), clientId(req), role_id) });
 }));
 
+// Manager-facing: one salesperson's SALES target drill-down for an IST month
+// (?month=YYYY-MM, default current) — target, achieved, pending, daily + weekly
+// progress, the customers contributing this month, and a 6-month target-vs-achieved
+// history. Achievement follows the client's configured basis (won deals vs logged
+// entries). userId is validated as a UUID before it reaches any query.
+targets.get('/salesperson/:userId', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  const id = parse(z.string().uuid(), req.params.userId);
+  const month = typeof req.query.month === 'string' && req.query.month ? req.query.month : undefined;
+  res.json({ success: true, data: await targetEntriesSvc.salespersonTargetDetail(orgId(req), clientId(req), id, month) });
+}));
+
 // Manager-facing: list current targets (default + per-FE overrides).
 targets.get('/', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   const typed = await targetTypeOf(req, req.query.type);
