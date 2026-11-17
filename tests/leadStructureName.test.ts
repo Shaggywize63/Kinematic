@@ -1,12 +1,10 @@
 import { buildLeadDisplayName, productLinesLabel } from '../src/services/crm/visitBridge.service';
 
 /**
- * Guards the Spark & Ray lead-name format: company-centric and short —
- *   Company – Plant – Requirement
- * The PERSON is deliberately NOT in the name (the contact on a lead changes over
- * the deal), and the group / city / state / department / product lines / owner are
- * kept on their own fields and the structured account view, not crammed into the
- * name (the client found the full chain too long to scan in the list). Blanks drop.
+ * Guards the agreed Spark & Ray lead-name format —
+ *   Account · Plant · Department — Requirement
+ * The PERSON, owner, product lines, group, city and state are deliberately NOT in
+ * the name (they ride alongside as metadata). Blank segments drop out cleanly.
  */
 describe('buildLeadDisplayName', () => {
   const base = {
@@ -21,22 +19,28 @@ describe('buildLeadDisplayName', () => {
     owner: 'Pallab Mahatha',
   };
 
-  it('is company · plant · requirement, and never includes the person or owner', () => {
+  it('is Account · Plant · Department — Requirement, never the person, owner or products', () => {
     const name = buildLeadDisplayName({
       ...base,
       productLines: [{ make_name: 'MAC', product_name: 'PV12', qty: 12, unit: 'Nos' }],
     });
-    expect(name).toBe('Neelachal Ispat Nigam Limited – Pellet Plant – Replace ASCO Pulse Valve with MAC Pulse Valves');
+    expect(name).toBe('Neelachal Ispat Nigam Limited · Pellet Plant · Instrumentation — Replace ASCO Pulse Valve with MAC Pulse Valves');
     expect(name).not.toContain('Prabhat Kumar'); // person stays out of the name
     expect(name).not.toContain('Pallab Mahatha'); // owner stays out of the name
     expect(name).not.toContain('PV12');           // product lines stay out of the name
+    expect(name).not.toContain('Tata Steel');     // group stays out of the name
+    expect(name).not.toContain('Jajpur');         // city stays out of the name
   });
 
-  it('drops blank segments (no plant / no requirement yet)', () => {
-    expect(buildLeadDisplayName({ ...base, plant: null, requirement: null, productLines: [] }))
-      .toBe('Neelachal Ispat Nigam Limited');
-    expect(buildLeadDisplayName({ ...base, requirement: null, productLines: [] }))
-      .toBe('Neelachal Ispat Nigam Limited – Pellet Plant');
+  it('matches the agreed examples, dropping blank segments cleanly', () => {
+    const ntpc = { company: 'NTPC', plant: 'Dadri', department: 'Procurement', requirement: '150 mm Gate Valves', productLines: [] };
+    expect(buildLeadDisplayName(ntpc)).toBe('NTPC · Dadri · Procurement — 150 mm Gate Valves');
+    expect(buildLeadDisplayName({ ...ntpc, department: null })).toBe('NTPC · Dadri — 150 mm Gate Valves');
+    expect(buildLeadDisplayName({ ...ntpc, plant: '  ' })).toBe('NTPC · Procurement — 150 mm Gate Valves');
+    expect(buildLeadDisplayName({ ...ntpc, requirement: null })).toBe('NTPC · Dadri · Procurement');
+    expect(buildLeadDisplayName({ ...ntpc, plant: null, department: null, requirement: null })).toBe('NTPC');
+    expect(buildLeadDisplayName({ company: null, requirement: 'Valves', productLines: [] })).toBe('Valves');
+    expect(buildLeadDisplayName({ productLines: [] })).toBe('');
   });
 });
 

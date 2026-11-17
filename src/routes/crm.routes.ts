@@ -1662,7 +1662,8 @@ leads.get('/export-area-leads-report', wrap(async (req, res) => {
   sendReportCsv(req, res, 'area-leads-report', cols, [...out, gt]);
 }));
 
-leads.get('/:id', wrap(async (req, res) => res.json(await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))))));
+leads.get('/:id', wrap(async (req, res) => res.json(await visitBridge.stampLeadHeader(orgId(req),
+  await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id)))))));
 leads.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.leadUpdateSchema, req.body);
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
