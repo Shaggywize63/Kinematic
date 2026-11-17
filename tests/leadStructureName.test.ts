@@ -1,10 +1,12 @@
 import { buildLeadDisplayName, productLinesLabel } from '../src/services/crm/visitBridge.service';
 
 /**
- * Guards the Spark & Ray lead-name format the client signed off on:
- *   Group – Company – City – State – Plant – Department – Person – Requirement – <products> – Owner
- * A single product line reads "Make – Product – Qty"; several collapse into one
- * "Make Product ×Qty; …" segment; every blank segment drops out.
+ * Guards the Spark & Ray lead-name format: company-centric and short —
+ *   Company – Plant – Requirement
+ * The PERSON is deliberately NOT in the name (the contact on a lead changes over
+ * the deal), and the group / city / state / department / product lines / owner are
+ * kept on their own fields and the structured account view, not crammed into the
+ * name (the client found the full chain too long to scan in the list). Blanks drop.
  */
 describe('buildLeadDisplayName', () => {
   const base = {
@@ -13,51 +15,28 @@ describe('buildLeadDisplayName', () => {
     city: 'Jajpur',
     state: 'Odisha',
     plant: 'Pellet Plant',
-    department: null as string | null,
+    department: 'Instrumentation' as string | null,
     person: 'Prabhat Kumar',
-    requirement: 'Requirement to Replace ASCO Pulse Valve with MAC Pulse Valves',
+    requirement: 'Replace ASCO Pulse Valve with MAC Pulse Valves',
     owner: 'Pallab Mahatha',
   };
 
-  it('formats the signed-off single-product example exactly', () => {
+  it('is company · plant · requirement, and never includes the person or owner', () => {
     const name = buildLeadDisplayName({
       ...base,
       productLines: [{ make_name: 'MAC', product_name: 'PV12', qty: 12, unit: 'Nos' }],
     });
-    expect(name).toBe(
-      'Tata Steel Limited – Neelachal Ispat Nigam Limited – Jajpur – Odisha – Pellet Plant – ' +
-      'Prabhat Kumar – Requirement to Replace ASCO Pulse Valve with MAC Pulse Valves – MAC – PV12 – 12 Nos – Pallab Mahatha',
-    );
+    expect(name).toBe('Neelachal Ispat Nigam Limited – Pellet Plant – Replace ASCO Pulse Valve with MAC Pulse Valves');
+    expect(name).not.toContain('Prabhat Kumar'); // person stays out of the name
+    expect(name).not.toContain('Pallab Mahatha'); // owner stays out of the name
+    expect(name).not.toContain('PV12');           // product lines stay out of the name
   });
 
-  it('collapses several product lines into one segment', () => {
-    const name = buildLeadDisplayName({
-      ...base,
-      productLines: [
-        { make_name: 'MAC', product_name: 'PV12', qty: 12, unit: 'Nos' },
-        { make_name: 'MAC', product_name: 'DK-200', qty: 50, unit: 'Nos' },
-      ],
-    });
-    expect(name).toContain('– MAC PV12 ×12; MAC DK-200 ×50 – Pallab Mahatha');
-    // the single-line three-segment form must NOT appear when there are several
-    expect(name).not.toContain('– PV12 – 12 Nos');
-  });
-
-  it('drops blank segments (no group, no department, no products yet)', () => {
-    const name = buildLeadDisplayName({
-      ...base,
-      group: null,
-      productLines: [],
-    });
-    expect(name).toBe(
-      'Neelachal Ispat Nigam Limited – Jajpur – Odisha – Pellet Plant – ' +
-      'Prabhat Kumar – Requirement to Replace ASCO Pulse Valve with MAC Pulse Valves – Pallab Mahatha',
-    );
-  });
-
-  it('includes the department when present, between plant and person', () => {
-    const name = buildLeadDisplayName({ ...base, department: 'Instrumentation', productLines: [] });
-    expect(name).toContain('Pellet Plant – Instrumentation – Prabhat Kumar');
+  it('drops blank segments (no plant / no requirement yet)', () => {
+    expect(buildLeadDisplayName({ ...base, plant: null, requirement: null, productLines: [] }))
+      .toBe('Neelachal Ispat Nigam Limited');
+    expect(buildLeadDisplayName({ ...base, requirement: null, productLines: [] }))
+      .toBe('Neelachal Ispat Nigam Limited – Pellet Plant');
   });
 });
 

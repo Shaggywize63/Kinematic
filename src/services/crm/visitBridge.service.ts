@@ -484,17 +484,21 @@ export function productLinesLabel(lines: LeadProductLineInput[]): { segments: st
   return { segments: joined ? [joined] : [] };
 }
 
-/** Build the human-readable lead name from the resolved chain. Blanks drop out. Exported for tests. */
+/**
+ * Build the human-readable lead name from the resolved chain. Blanks drop out. Exported for tests.
+ *
+ * Company-centric and short (the client found the full chain too long to scan in the list, and the
+ * PERSON is deliberately dropped from the name because the contact on a lead changes over the course
+ * of the deal — the lead is identified by company · plant · requirement, e.g. "Saj Foods – Dulagarh
+ * – Butterfly valve replacement"). The full chain (group, department, people, product lines, owner)
+ * stays on their own fields and in the structured account view, not crammed into the name.
+ */
 export function buildLeadDisplayName(parts: {
   group?: string | null; company?: string | null; city?: string | null; state?: string | null;
   plant?: string | null; department?: string | null; person?: string | null; requirement?: string | null;
   productLines: LeadProductLineInput[]; owner?: string | null;
 }): string {
-  const segs: Array<string | null | undefined> = [
-    parts.group, parts.company, parts.city, parts.state, parts.plant, parts.department, parts.person, parts.requirement,
-    ...productLinesLabel(parts.productLines).segments,
-    parts.owner,
-  ];
+  const segs: Array<string | null | undefined> = [parts.company, parts.plant, parts.requirement];
   return segs.map((s) => norm(s)).filter(Boolean).join(' – ');
 }
 
