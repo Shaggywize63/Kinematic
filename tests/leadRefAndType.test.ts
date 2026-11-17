@@ -1,14 +1,13 @@
 /**
  * Lead numbers (SR/LD/2627-12) and lead type (requirement | discussion), against an in-memory PostgREST fake.
  *
- * NOTE: the per-lead running number is RETIRED on the live create/email/export paths — new leads are no longer
- * numbered, email subjects are no longer stamped, and the CSV export no longer carries a "Lead No" column. The
- * `ref_no` DB column and the `leadRef.ts` helpers stay in place (old leads keep their stored number, and the
- * admin backfill endpoint still uses the helpers), so the pure-helper, allocateLeadRef and backfill tests remain.
+ * NOTE: per-lead numbering is RE-ENABLED on create for connected-B2B clients (Spark & Ray) — a new lead is stamped
+ * SR/LD/2627-n again. Email subject stamping and the CSV "Lead No" column stay RETIRED (removed in #672 and not
+ * brought back). `ref_no` remains server-owned and read-only (clients cannot set it); other tenants are never numbered.
  *
  *   - pure rules: format / prefix / default prefix / financial-year series / subject helper / export columns;
- *   - allocateLeadRef helper: connected-B2B only, one series per financial year, never throws (helper still exists);
- *   - createLead: no longer numbers new leads, ref_no unwritable by clients, lead_type validated, degrades on an
+ *   - allocateLeadRef helper: connected-B2B only, one series per financial year, never throws;
+ *   - createLead: numbers a connected-B2B lead, ref_no unwritable by clients, lead_type validated, degrades on an
  *     unmigrated database;
  *   - reads: q search, lead_type / ref_no filters (old leads keep ref_no), CSV columns, detail JSON;
  *   - e-mail subjects are sent as-is (no lead-number stamp);
@@ -430,29 +429,28 @@ describe('createLead', () => {
   const make = (extra: Row = {}, client: string | null = SPARK) =>
     createLead({ org_id: ORG, payload: { first_name: 'Asha', client_id: client, ...extra } as any, skipDedup: true });
 
-  it('no longer numbers a connected-B2B lead, but still stores the lead type (and makes no allocation call)', async () => {
+  it('numbers a connected-B2B lead and stores the lead type', async () => {
     const l = await make({ lead_type: 'requirement' });
-    expect(l.ref_no ?? null).toBeNull();
+    expect(l.ref_no).toBe('SR/LD/2627-1');
     expect(l.lead_type).toBe('requirement');
-    expect(leads()[0]).toMatchObject({ lead_type: 'requirement' });
-    expect(db.rpcCalls).toHaveLength(0);
+    expect(leads()[0]).toMatchObject({ ref_no: 'SR/LD/2627-1', lead_type: 'requirement' });
   });
 
-  it('never allocates a number for new leads, whatever the tenant', async () => {
-    const a = await make(); const b = await make({ first_name: 'Bo' });
-    expect(a.ref_no ?? null).toBeNull();
+  it('allocates a number for a connected-B2B client, but never for another tenant', async () => {
+    const a = await make();                              // SPARK -> numbered
+    const b = await make({ first_name: 'Bo' }, OTHER);   // OTHER -> never numbered
+    expect(a.ref_no).toBe('SR/LD/2627-1');
     expect(b.ref_no ?? null).toBeNull();
-    expect(db.rpcCalls).toHaveLength(0);
-    expect(db.inserts.filter((i) => i.table === 'crm_leads').every((i) => !('ref_no' in i.row))).toBe(true);
+    const otherInserts = db.inserts.filter((i) => i.table === 'crm_leads' && (i.row.client_id ?? null) === OTHER);
+    expect(otherInserts.every((i) => !('ref_no' in i.row))).toBe(true);
   });
 
-  it('ignores a ref_no sent in the payload (read-only) and never writes one', async () => {
+  it('ignores a ref_no sent in the payload (read-only) and allocates its own for a B2B client', async () => {
     const l = await make({ ref_no: 'SR/LD/2627-999' });
-    expect(l.ref_no ?? null).toBeNull();
+    expect(l.ref_no).toBe('SR/LD/2627-1'); // server-allocated, not the client's 999
     // a non-numbered tenant cannot smuggle one in either
     const o = await make({ ref_no: 'SR/LD/2627-5' }, OTHER);
     expect(o.ref_no ?? null).toBeNull();
-    expect(db.inserts.filter((i) => i.table === 'crm_leads').every((i) => !('ref_no' in i.row))).toBe(true);
   });
 
   it('writes the exact row it always did for a client without a lead type (no new keys)', async () => {
@@ -512,10 +510,10 @@ describe('createLead', () => {
 
 // ── lead routes ─────────────────────────────────────────────────────────────
 describe('POST /leads and PATCH /leads/:id', () => {
-  it('does not number the new lead, returns lead_type, and ignores a client-sent ref_no', async () => {
+  it('numbers the new lead, returns lead_type, and ignores a client-sent ref_no', async () => {
     const res = await post('/crm/leads', { first_name: 'Asha', lead_type: 'requirement', ref_no: 'SR/LD/2627-500' }, SPARK);
     expect(res.status).toBe(201);
-    expect(res.body.data.ref_no ?? null).toBeNull();
+    expect(res.body.data.ref_no).toBe('SR/LD/2627-1'); // server-allocated, not the client's 500
     expect(res.body.data.lead_type).toBe('requirement');
   });
 
