@@ -82,6 +82,25 @@ describe('decideAssignRole', () => {
   it('super_admins and operators may assign any role', () => {
     expect(decideAssignRole(actor({ role: 'super_admin' }), 'super_admin', 'x')).toEqual({ ok: true });
   });
+
+  it('refuses to let a super_admin demote themselves, even though they may assign any role to someone else', () => {
+    const d = decideAssignRole(actor({ role: 'super_admin' }), 'sub_admin', 'u-actor') as { ok: false; status: number; message: string };
+    expect(d.ok).toBe(false);
+    expect(d.status).toBe(403);
+    expect(d.message).toMatch(/cannot change your own role/i);
+  });
+
+  it('a self-request reposting the role you already have is a no-op, not a change', () => {
+    expect(decideAssignRole(actor({ role: 'admin' }), 'admin', 'u-actor')).toEqual({ ok: true });
+    expect(decideAssignRole(actor({ role: 'super_admin' }), 'super_admin', 'u-actor')).toEqual({ ok: true });
+  });
+
+  it('platform-operator status does not reopen self-role-changes', () => {
+    // s@kinematicapp.com is a default CROSS_ORG_SUPERADMIN_EMAILS entry, so this actor really is
+    // isPlatformOperator() === true — the self-guard must still win over that bypass.
+    const d = decideAssignRole(actor({ role: 'super_admin', email: 's@kinematicapp.com' }), 'admin', 'u-actor') as { ok: false };
+    expect(d.ok).toBe(false);
+  });
 });
 
 describe('roleRank', () => {

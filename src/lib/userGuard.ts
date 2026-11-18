@@ -61,12 +61,20 @@ export function decideAssignRole(actor: GuardActor, newRole: string | null | und
   if (!newRole) return { ok: true };
   const role = newRole.toLowerCase();
   const actorRole = (actor.role || '').toLowerCase();
+
+  // Self: a role CHANGE, in either direction, never goes through this endpoint — only reposting the
+  // role you already have (a no-op) is allowed. This used to only block RAISING your own role; a
+  // super_admin fell through the bypass below for anything else, so a stray or stale `role` field in a
+  // same-user request — a form default, a retried submit, any bug upstream — silently demoted them,
+  // with no way back in once they could no longer reach the screens that grant roles.
+  if (targetId && actor.id === targetId) {
+    if (role === actorRole) return { ok: true };
+    return { ok: false, status: 403, message: 'You cannot change your own role.', code: 'FORBIDDEN' };
+  }
+
   if (isPlatformOperator(actor) || actorRole === 'super_admin') return { ok: true };
   const above = roleRank(role) > roleRank(actorRole);
   if (!above) return { ok: true };
-  if (targetId && actor.id === targetId) {
-    return { ok: false, status: 403, message: 'You cannot raise your own role.', code: 'FORBIDDEN' };
-  }
   if (rankEnforced()) return { ok: false, status: 403, message: 'You cannot assign a role above your own.', code: 'FORBIDDEN' };
   return { ok: true, shadow: `assign higher role (${actorRole} -> ${role})` };
 }
