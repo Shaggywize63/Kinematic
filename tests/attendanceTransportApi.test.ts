@@ -116,7 +116,7 @@ beforeEach(() => {
 });
 
 describe('GET /attendance/rules -> transport_modes', () => {
-  it('rule ON: the policy vehicles first (vehicle:true), then public transport and other', async () => {
+  it('rule ON: the policy vehicles first (vehicle:true), then the fixed non-vehicle modes', async () => {
     const res = await request(app).get('/attendance/rules');
     expect(res.status).toBe(200);
     expect(res.body.data.rules.track_transport_mode).toBe(true);
@@ -124,17 +124,21 @@ describe('GET /attendance/rules -> transport_modes', () => {
       { id: 'own_bike', label: 'Own Bike', vehicle: true },
       { id: 'own_car', label: 'Own Car', vehicle: true },
       { id: 'public_transport', label: 'Public transport', vehicle: false },
+      { id: 'train', label: 'Train', vehicle: false },
+      { id: 'walk', label: 'Walk', vehicle: false },
       { id: 'other', label: 'Other', vehicle: false },
     ]);
   });
 
-  it('rule ON, policy without vehicle rates: two_wheeler and car + the two fixed ones', async () => {
+  it('rule ON, policy without vehicle rates: two_wheeler and car + the fixed ones', async () => {
     policyRules = {};
     const res = await request(app).get('/attendance/rules');
     expect(res.body.data.transport_modes).toEqual([
       { id: 'two_wheeler', label: 'Two-wheeler', vehicle: true },
       { id: 'car', label: 'Car', vehicle: true },
       { id: 'public_transport', label: 'Public transport', vehicle: false },
+      { id: 'train', label: 'Train', vehicle: false },
+      { id: 'walk', label: 'Walk', vehicle: false },
       { id: 'other', label: 'Other', vehicle: false },
     ]);
   });
@@ -143,7 +147,7 @@ describe('GET /attendance/rules -> transport_modes', () => {
     policyFetchFails = true;
     const res = await request(app).get('/attendance/rules');
     expect(res.status).toBe(200);
-    expect(res.body.data.transport_modes.map((m: any) => m.id)).toEqual(['two_wheeler', 'car', 'public_transport', 'other']);
+    expect(res.body.data.transport_modes.map((m: any) => m.id)).toEqual(['two_wheeler', 'car', 'public_transport', 'train', 'walk', 'other']);
   });
 
   it.each([['a legacy client', CB], ['a configured client with the rule off', CC]])(
