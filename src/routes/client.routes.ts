@@ -26,5 +26,9 @@ router.put('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'
 router.get('/:id/account', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientAccount);
 router.post('/:id/send-welcome', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.sendClientWelcomeEmail);
 router.post('/:id/send-payment-reminder', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.sendClientPaymentReminderEmail);
+// Admins per client: list, add (created in the client's own org / project), switch on or off.
+router.get('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientAdmins);
+router.post('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.addClientAdmin);
+router.patch('/:id/admins/:userId', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.updateClientAdmin);
 
 export default router;

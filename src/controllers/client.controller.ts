@@ -16,6 +16,7 @@ import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, 
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
 import { currentMonth as kiniMonth } from '../services/crm/ai/kiniQuota.service';
 import { invalidateAuthCache } from '../middleware/auth';
+import { parseNewClientAdmin, listClientAdmins, createClientAdmin, setClientAdminActive, moveClientAdminIntoClientOrg, type ClientAdminTarget } from '../services/clientAdmins.service';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
 // its OWN org (a row-level tenant) for isolation, and the parent org that
@@ -1250,4 +1251,79 @@ export const sendClientPaymentReminderEmail = asyncHandler(async (req: AuthReque
   } catch (e: any) {
     badRequest(res, e?.message || 'Could not send the payment reminder');
   }
+});
+
+// ── Admins per client (Client Management → Admins) ───────────────────────────
+// The logins that run a client's own workspace (role `client`). Created in the org, and project, that holds the
+// client's users, NOT the caller's: POST /users stamps the caller's org, which left a master admin's "client admin"
+// unable to see the client's data. See services/clientAdmins.service.ts.
+
+/**
+ * The client (ownership-scoped, like every other per-client route) and where its users live. A client linked to
+ * another project must resolve there: creating its admin in this project would make a login that sees nothing, so a
+ * broken link is refused instead of falling back.
+ */
+async function clientAdminTarget(req: AuthRequest, res: Response): Promise<{ client: Record<string, any>; target: ClientAdminTarget } | null> {
+  const client = await ownedClient(req, res);
+  if (!client) return null;
+  const dp = client.data_project_key as string | undefined;
+  const dcid = client.data_client_id as string | undefined;
+  if (orgPerClient() && dp && isKnownProject(dp) && dp !== currentProjectKey() && dcid && isUUID(dcid)) {
+    const remote = adminClientFor(dp);
+    const { data } = await remote.from('clients').select('id, org_id').eq('id', dcid).maybeSingle();
+    const orgId = (data as { org_id?: string } | null)?.org_id;
+    if (!orgId) {
+      badRequest(res, `This client is linked to a client in the "${dp}" project that could not be found there. Fix "Linked Client ID" on this client, then try again.`);
+      return null;
+    }
+    return { client, target: { admin: remote, orgId, clientId: dcid, project: dp } };
+  }
+  if (!client.org_id) { badRequest(res, 'This client has no organisation yet.'); return null; }
+  return { client, target: { admin: supabaseAdmin, orgId: client.org_id, clientId: client.id, project: currentProjectKey() } };
+}
+
+/** GET /api/v1/clients/:id/admins — the client's admins, plus where they live and the seat usage. */
+export const getClientAdmins = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const found = await clientAdminTarget(req, res);
+  if (!found) return;
+  const { client, target } = found;
+  const [admins, allocated, active] = await Promise.all([
+    listClientAdmins(target, client.email),
+    readSeatCap(target.admin, target.orgId),
+    countActiveUsers(target.admin, target.orgId),
+  ]);
+  ok(res, { admins, project: target.project, seats: { allocated, active } });
+});
+
+/** POST /api/v1/clients/:id/admins — body { name, email, mobile?, password }. */
+export const addClientAdmin = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const parsed = parseNewClientAdmin(req.body);
+  if (!parsed.ok) {
+    const bad = parsed as { message: string; code: string };
+    res.status(400).json({ success: false, error: bad.message, code: bad.code });
+    return;
+  }
+  const found = await clientAdminTarget(req, res);
+  if (!found) return;
+  const admin = await createClientAdmin(found.target, parsed.value);
+  logger.info(`[ClientAdmins] ${req.user!.id} added admin ${admin.id} to client ${found.client.id} (${found.target.project})`);
+  created(res, { ...admin, project: found.target.project });
+});
+
+/**
+ * PATCH /api/v1/clients/:id/admins/:userId — body { is_active: boolean } to switch an admin off or on, or
+ * { move_to_client_org: true } to move an admin stored in another org into the client's org.
+ */
+export const updateClientAdmin = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const b = req.body ?? {};
+  const move = b.move_to_client_org === true;
+  if (!move && typeof b.is_active !== 'boolean') { badRequest(res, 'Send is_active as true or false, or move_to_client_org: true.'); return; }
+  const found = await clientAdminTarget(req, res);
+  if (!found) return;
+  const admin = move
+    ? await moveClientAdminIntoClientOrg(found.target, req.params.userId, found.client.email)
+    : await setClientAdminActive(found.target, req.params.userId, b.is_active, req.user!.id, found.client.email);
+  // A switched-off or moved admin must get the new state on the next request, not when the cached session expires.
+  if (move || b.is_active === false) invalidateAuthCache((u) => u?.id === admin.id);
+  ok(res, admin);
 });
