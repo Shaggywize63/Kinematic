@@ -26,6 +26,7 @@ import { logger } from '../lib/logger';
 import { routedData, notificationKind } from '../lib/notificationRoute';
 import { classifyFcmError } from '../lib/fcmErrors';
 import { allowedFlags } from './notificationPolicy';
+import { forwardToClientWhatsapp } from './clientWhatsappAlerts.service';
 
 export interface DispatchResult {
   scanned: number;
@@ -176,6 +177,12 @@ export async function dispatchPendingPushes(opts?: {
       failed++;
     }
   }
+
+  // Clients that chose WhatsApp alerts (Client Management → WhatsApp alerts) also get the allowed rows on WhatsApp.
+  // After the pushes so a slow WhatsApp send never delays them; best-effort and never throws.
+  await forwardToClientWhatsapp(rows
+    .filter((_, i) => allowed[i])
+    .map((r) => ({ orgId: orgByUser.get(r.user_id) ?? null, kind: notificationKind(r.type, r.data), title: r.title, body: r.body, data: r.data })));
 
   if (credentialFailures > 0) {
     // One loud line per run (the per-row warnings above are easy to miss). The rows are still stamped
