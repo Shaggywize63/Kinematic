@@ -629,6 +629,27 @@ export async function getLeadContacts(ctx: BridgeCtx, leadId: string): Promise<L
 }
 
 /**
+ * Move the nodal (primary) flag to one contact on a lead, as the deal's point person changes over
+ * its life. Clears is_primary on every other link and sets it on the chosen one, in a two-step
+ * write so the table never briefly holds two primaries. The chosen row must be a live link on this
+ * lead; returns the refreshed contact list (primary first) so the caller re-renders from truth.
+ */
+export async function setLeadPrimaryContact(ctx: BridgeCtx, leadId: string, linkId: string): Promise<LeadContactRow[]> {
+  const { data: target, error: findErr } = await supabaseAdmin.from('crm_lead_contacts')
+    .select('id').eq('org_id', ctx.org_id).eq('lead_id', leadId).eq('id', linkId).is('deleted_at', null).maybeSingle();
+  if (findErr) throw new AppError(500, findErr.message, 'DB_ERROR');
+  if (!target) throw new AppError(404, 'That contact is not linked to this lead.', 'NOT_FOUND');
+  // Demote every other link first, then promote the chosen one — never two primaries at once.
+  const { error: clearErr } = await supabaseAdmin.from('crm_lead_contacts')
+    .update({ is_primary: false }).eq('org_id', ctx.org_id).eq('lead_id', leadId).neq('id', linkId);
+  if (clearErr) throw new AppError(500, clearErr.message, 'DB_ERROR');
+  const { error: setErr } = await supabaseAdmin.from('crm_lead_contacts')
+    .update({ is_primary: true }).eq('org_id', ctx.org_id).eq('lead_id', leadId).eq('id', linkId);
+  if (setErr) throw new AppError(500, setErr.message, 'DB_ERROR');
+  return getLeadContacts(ctx, leadId);
+}
+
+/**
  * Lead-detail header extras for a structured (Spark & Ray) lead: the names behind the breadcrumb
  * (account › plant › department), the primary (nodal) contact chip and the product lines' total
  * value. Only structured leads (a site or account linked) pay for the lookups; anything else is

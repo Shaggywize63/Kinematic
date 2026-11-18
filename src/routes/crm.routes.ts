@@ -1858,6 +1858,12 @@ leads.get('/:id/product-lines', wrap(async (req, res) => {
 leads.get('/:id/people', wrap(async (req, res) => {
   return res.json(await visitBridge.getLeadContacts(bridgeCtx(req), req.params.id));
 }));
+// Move the nodal (primary) flag to a different contact as the deal's point person changes. The
+// :linkId is a crm_lead_contacts row id (from /:id/people), not a contact id. Returns the refreshed
+// people list, primary first, so the UI re-renders from the server's truth.
+leads.post('/:id/people/:linkId/primary', wrap(async (req, res) => {
+  return res.json(await visitBridge.setLeadPrimaryContact(bridgeCtx(req), req.params.id, req.params.linkId));
+}));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   // owner_assignment = 'admin_only': assigning is the whole point of this endpoint, so a non-admin is refused (403).
