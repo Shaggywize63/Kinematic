@@ -9,7 +9,7 @@
  * The ids a rep may pick ("allowed modes"), in the order the apps show them:
  *   1. the vehicles of the user's resolved expense policy (`rules.vehicle_rates`), id/label exactly as
  *      the policy has them, flagged `vehicle:true`;
- *   2. `public_transport` and `other`, `vehicle:false`.
+ *   2. the fixed non-vehicle modes `public_transport`, `train`, `walk` and `other`, `vehicle:false`.
  * A policy with no vehicle rates offers `two_wheeler` and `car` (also `vehicle:true`) instead of 1.
  * A policy vehicle that happens to use one of the two fixed ids (e.g. an admin-created "Other") wins,
  * and the fixed entry is not listed twice.
@@ -27,6 +27,8 @@ export const TRANSPORT_MODE_ID_RE = /^[a-z0-9_]{1,40}$/;
 
 export const FIXED_TRANSPORT_MODES: ReadonlyArray<TransportMode> = Object.freeze([
   Object.freeze({ id: 'public_transport', label: 'Public transport', vehicle: false }),
+  Object.freeze({ id: 'train', label: 'Train', vehicle: false }),
+  Object.freeze({ id: 'walk', label: 'Walk', vehicle: false }),
   Object.freeze({ id: 'other', label: 'Other', vehicle: false }),
 ]);
 
@@ -43,10 +45,10 @@ export function trackTransportModeOn(rules: { track_transport_mode?: unknown } |
 /**
  * The allowed modes, in the order the apps show them:
  *   1. the policy's vehicle rates (undefined / empty = the two defaults), `vehicle:true`;
- *   2. the client's own `extraModes` (e.g. Train, Walk) — non-vehicle, admin-configured
+ *   2. the client's own `extraModes` (e.g. Metro, Cycle) — non-vehicle, admin-configured
  *      per client via `attendance_rules.extra_transport_modes`, so a tenant can offer modes
  *      beyond the built-in set without a code change (and no other client is affected);
- *   3. the fixed `public_transport` and `other`, `vehicle:false`.
+ *   3. the fixed non-vehicle modes `public_transport`, `train`, `walk` and `other`, `vehicle:false`.
  * Deduped by id, first occurrence wins (a policy vehicle or extra that reuses a fixed id keeps its own label).
  */
 export function buildTransportModes(
