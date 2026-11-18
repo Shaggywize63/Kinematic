@@ -71,6 +71,7 @@ or its id is missing they fall back to the in-app notification list.
 | `crm_home` | — | CRM Home |
 | `kini_cold_deals` | `count` | Deals |
 | `kini_no_checkin` | — | Attendance / check-in |
+| `checkin_reminder` | — | Attendance / check-in |
 | `checkout_reminder` | `attendance_id` | Attendance / check-in |
 | `low_stock`, `stock_expiry` | — (`batch_id`, `sku_id` for expiry) | Stock |
 | anything else (`route_deviation`, `security_alert`, `location_off`, `kini_reminder`, `finance_invoice_due`, …) | — | The notification list |
@@ -120,6 +121,7 @@ Keep ids under these key names when adding a notification, and prefer
 | 22 | **Attendance regularization** request / decision | (attendance) | Rep / approver | inline — attendance service |
 | 22a | **Forgot to check out** — still checked in 10 h after starting (once per shift). If still open at 12:00 AM IST the shift is auto-checked-out (`attendance.notes` records it). Opt an org out with `org_settings` `attendance_checkout_reminder` / `attendance_auto_checkout` = `false` | `checkout_reminder` | Rep (self) | scheduled — attendance-sweep tick (all projects) |
 | 22b | **Time to check out** — fixed-time variant of 22a at a clock time (default 6:30 PM IST) for a rep on an open shift that started before that time. Opt a client in with `clients.settings.attendance_checkout_reminder_time` = `"18:30"` / `true` / `{ enabled, time }`; the 10 h reminder (22a) is then suppressed for that client so the rep gets exactly one nudge. Same `checkout_reminder` kind (deep-links to Attendance), marked `data.scheduled: true` | `checkout_reminder` | Rep (self) | scheduled — attendance-sweep tick (all projects) |
+| 22c | **Check-in reminder** — a field rep (executive / field executive) has no check-in once shift-start + grace has passed on a working day (once per rep per day, inside a 4 h window after the deadline). Only for clients with shift rules configured at Client Management → Attendance rules (shift_start / grace_minutes / weekly_off); a client with none configured has no deadline to remind against and gets nothing. Skips anyone on approved leave that day | `checkin_reminder` | Rep (self) | scheduled — attendance-sweep tick (all projects) |
 | 23 | **Leave** request / decision | (leave) | Rep / approver | inline — leave service |
 | 24 | **Expense** submitted / decided | (expense) | Rep / approver | inline — expenses service |
 

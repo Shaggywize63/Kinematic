@@ -1,17 +1,25 @@
 /**
- * Attendance sweep — closes the loop on reps who forget to check out.
+ * Attendance sweep — closes the loop on reps who forget to check out, and nudges reps who have not
+ * checked in.
  *
- *  1. Reminder. Ten hours after check-in, a rep who is still checked in gets a push + bell notice
- *     ("don't forget to check out"). A client may instead opt in (clients.settings) to a FIXED-TIME
- *     reminder at a clock time (default 6:30 PM IST); the 10 h one is then suppressed for that client so a
- *     rep gets exactly one nudge. See sendScheduledCheckoutReminders.
+ *  1. Check-out reminder. Ten hours after check-in, a rep who is still checked in gets a push + bell
+ *     notice ("don't forget to check out"). A client may instead opt in (clients.settings) to a
+ *     FIXED-TIME reminder at a clock time (default 6:30 PM IST); the 10 h one is then suppressed for that
+ *     client so a rep gets exactly one nudge. See sendScheduledCheckoutReminders.
  *  2. Auto-checkout. A shift that is still open when its IST day ends is closed at 12:00 AM IST, so the
  *     register never carries an open shift into the next day (a shift forgotten in July was still "Shift
  *     Active" on a rep's phone in October).
+ *  3. Check-in reminder. For a client with shift rules explicitly configured (Client Management →
+ *     Attendance rules), once a working day's shift-start + grace period has passed, a field rep who has
+ *     no check-in yet (and is not on approved leave) gets one nudge — see sendCheckinReminders. Clients
+ *     with no shift rules configured have no deadline to remind against, so they get nothing here (same
+ *     as today).
  *
  * Applies to every tenant project and every client — the caller fans this out per project. No schema
- * change: the close uses existing attendance columns, the reminder reuses the notifications table (as its
- * own dedup ledger, keyed on data.kind + attendance_id) and is delivered by the dispatch-pushes loop.
+ * change: the close uses existing attendance columns, and every reminder reuses the notifications table
+ * (as its own dedup ledger, keyed on data.kind + an id / the day) and is delivered by the dispatch-pushes
+ * loop. Both reminder kinds are also gated by the ordinary Client Management → Notifications catalog
+ * (`notify()` writes nothing for a client that has not switched the kind on) — nothing here bypasses it.
  *
  * Deliberately conservative:
  *   - the close is a conditional update (still open at write time), so a real check-out that lands
@@ -19,11 +27,14 @@
  *   - a shift is closed at the midnight that ends the day it STARTED on, so a backlog is closed at a
  *     sensible time (never "now"), and a shift never shows more than 24 h;
  *   - an org can opt out per feature with org_settings `attendance_auto_checkout` /
- *     `attendance_checkout_reminder` = false (e.g. a client with genuine overnight shifts).
+ *     `attendance_checkout_reminder` = false (e.g. a client with genuine overnight shifts);
+ *   - the check-in reminder only fires inside a bounded window after the deadline (not all day), so a
+ *     rep who checks in at 3 PM never gets a stale "you're late" nudge from the morning.
  */
 import { supabaseAdmin } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { notify } from './notify';
+import { resolveAttendanceRules, lateTrackingOn, parseHHMM, istDateOf, weekdayOf } from './attendanceRules.service';
 
 export const CHECKOUT_REMINDER_KIND = 'checkout_reminder';
 export const AUTO_CHECKOUT_SETTING = 'attendance_auto_checkout';
@@ -352,20 +363,120 @@ export async function sendScheduledCheckoutReminders(now: number = Date.now()): 
   return result;
 }
 
-export interface AttendanceSweepResult { auto_checkout: AutoCheckoutResult; reminders: ReminderResult; scheduled_reminders: ReminderResult }
+// ── check-in reminder ───────────────────────────────────────────────────────
 
-/** One pass for the current project: close what is overdue first, then the fixed-time and 10 h reminders. */
+export const CHECKIN_REMINDER_KIND = 'checkin_reminder';
+/** How long (minutes) after the shift-start deadline a rep may still get the one reminder for the day —
+ *  bounded so a late afternoon check-in never earns a stale "you're late" nudge from the morning. */
+export const CHECKIN_REMINDER_WINDOW_MINUTES = 240;
+const MAX_CHECKIN_ROSTER_PER_RUN = 2000;
+
+// Mirrors the FIELD_ROLES set in controllers/attendance.controller.ts (isFieldRep). Duplicated rather than
+// imported so this sweep stays self-contained and side-effect-free to import (that file pulls in the full
+// attendance controller surface); keep the two in step if field roles ever change.
+const CHECKIN_FIELD_ROLES = ['executive', 'field_executive'];
+
+interface ShiftClient { id: string; org_id: string; deadlineMinute: number; weeklyOff: number[]; shiftLabel: string }
+
+/**
+ * Clients with shift rules EXPLICITLY configured (Client Management → Attendance rules: at least one of
+ * shift_start / shift_end / grace_minutes / weekly_off stored — see lateTrackingEnabled), each resolved to
+ * the minute-of-day a check-in becomes late (shift_start + grace_minutes). A client that never configured
+ * shift rules has no deadline to remind against and is skipped — same as today, nothing changes for it.
+ */
+async function shiftConfiguredClients(): Promise<ShiftClient[]> {
+  const { data, error } = await supabaseAdmin.from('clients').select('id, org_id, settings').not('settings->attendance_rules', 'is', null);
+  if (error) { logger.warn(`[attendance-sweep] shift-rule client lookup failed: ${error.message}`); return []; }
+  const out: ShiftClient[] = [];
+  for (const r of (data ?? []) as Array<{ id: string; org_id: string; settings: unknown }>) {
+    const resolved = resolveAttendanceRules(r.settings);
+    if (!lateTrackingOn(resolved)) continue;
+    const start = parseHHMM(resolved.rules.shift_start);
+    if (start === null) continue;
+    out.push({ id: r.id, org_id: r.org_id, deadlineMinute: start + resolved.rules.grace_minutes, weeklyOff: resolved.rules.weekly_off, shiftLabel: clockLabel(start) });
+  }
+  return out;
+}
+
+/**
+ * Remind a field rep who has not checked in once shift-start + grace has passed on a working day (once
+ * per rep per day). Only for clients with shift rules configured (see shiftConfiguredClients) — a client
+ * that has not set a shift start has no "late" to remind against.
+ */
+export async function sendCheckinReminders(now: number = Date.now()): Promise<ReminderResult> {
+  const result: ReminderResult = { candidates: 0, reminded: 0 };
+  const clients = await shiftConfiguredClients();
+  if (clients.length === 0) return result;
+
+  const todayYmd = istDateOf(now);
+  if (!todayYmd) return result;
+  const nowMinute = istMinuteOfDay(now);
+  const weekday = weekdayOf(todayYmd);
+  const due = clients.filter((c) => !c.weeklyOff.includes(weekday) && nowMinute >= c.deadlineMinute && nowMinute < c.deadlineMinute + CHECKIN_REMINDER_WINDOW_MINUTES);
+  if (due.length === 0) return result;
+
+  const byClient = new Map(due.map((c) => [c.id, c] as const));
+  const { data: userRows, error } = await supabaseAdmin
+    .from('users')
+    .select('id, org_id, client_id, created_at')
+    .in('client_id', due.map((c) => c.id))
+    .in('role', CHECKIN_FIELD_ROLES)
+    .eq('is_active', true)
+    .is('deleted_at', null)
+    .limit(MAX_CHECKIN_ROSTER_PER_RUN);
+  if (error) { logger.warn(`[attendance-sweep] check-in reminder roster lookup failed: ${error.message}`); return result; }
+  const rows = ((userRows ?? []) as Array<{ id: string; org_id: string; client_id: string | null; created_at: string | null }>)
+    .filter((u) => !u.created_at || (istDateOf(u.created_at) ?? todayYmd) <= todayYmd);   // not before they joined
+  result.candidates = rows.length;
+  if (rows.length === 0) return result;
+
+  const userIds = rows.map((u) => u.id);
+  const dayStartIso = new Date(istDayStartMs(now)).toISOString();
+  const [{ data: att }, { data: leaves }, { data: prior }] = await Promise.all([
+    supabaseAdmin.from('attendance').select('user_id, checkin_at').eq('date', todayYmd).in('user_id', userIds),
+    supabaseAdmin.from('leave_requests').select('user_id').eq('status', 'approved').lte('from_date', todayYmd).gte('to_date', todayYmd).in('user_id', userIds),
+    supabaseAdmin.from('notifications').select('user_id').eq('data->>kind', CHECKIN_REMINDER_KIND).in('user_id', userIds).gte('created_at', dayStartIso),
+  ]);
+  const checkedIn = new Set(((att ?? []) as Array<{ user_id: string; checkin_at: string | null }>).filter((r) => r.checkin_at).map((r) => r.user_id));
+  const onLeave = new Set(((leaves ?? []) as Array<{ user_id: string }>).map((r) => r.user_id));
+  const already = new Set(((prior ?? []) as Array<{ user_id: string }>).map((r) => r.user_id));
+
+  for (const u of rows) {
+    if (checkedIn.has(u.id) || onLeave.has(u.id) || already.has(u.id)) continue;
+    const c = u.client_id ? byClient.get(u.client_id) : undefined;
+    if (!c) continue;
+    await notify({
+      orgId: u.org_id,
+      userId: u.id,
+      kind: CHECKIN_REMINDER_KIND,
+      title: "Don't forget to check in",
+      body: `It's past ${c.shiftLabel} — please check in to start your day.`,
+      data: { date: todayYmd },
+    });
+    already.add(u.id);
+    result.reminded++;
+  }
+  if (result.reminded) logger.info(`[attendance-sweep] sent ${result.reminded} check-in reminder(s)`);
+  return result;
+}
+
+export interface AttendanceSweepResult { auto_checkout: AutoCheckoutResult; reminders: ReminderResult; scheduled_reminders: ReminderResult; checkin_reminders: ReminderResult }
+
+/** One pass for the current project: close what is overdue first, then the fixed-time, 10 h and check-in reminders. */
 export async function runAttendanceSweep(opts: { now?: number } = {}): Promise<AttendanceSweepResult> {
   const now = opts.now ?? Date.now();
   const empty = { found: 0, closed: 0, skipped_opt_out: 0 };
   let auto_checkout: AutoCheckoutResult = empty;
   let reminders: ReminderResult = { candidates: 0, reminded: 0 };
   let scheduled_reminders: ReminderResult = { candidates: 0, reminded: 0 };
+  let checkin_reminders: ReminderResult = { candidates: 0, reminded: 0 };
   try { auto_checkout = await autoCheckoutOverdue(now); }
   catch (e: any) { logger.warn(`[attendance-sweep] auto-checkout failed: ${e?.message ?? e}`); }
   try { scheduled_reminders = await sendScheduledCheckoutReminders(now); }
   catch (e: any) { logger.warn(`[attendance-sweep] scheduled reminders failed: ${e?.message ?? e}`); }
   try { reminders = await sendCheckoutReminders(now); }
   catch (e: any) { logger.warn(`[attendance-sweep] reminders failed: ${e?.message ?? e}`); }
-  return { auto_checkout, reminders, scheduled_reminders };
+  try { checkin_reminders = await sendCheckinReminders(now); }
+  catch (e: any) { logger.warn(`[attendance-sweep] check-in reminders failed: ${e?.message ?? e}`); }
+  return { auto_checkout, reminders, scheduled_reminders, checkin_reminders };
 }

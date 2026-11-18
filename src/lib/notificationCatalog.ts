@@ -63,6 +63,7 @@ export const NOTIFICATION_CATALOG: CatalogEntry[] = [
   { kind: 'tracking_paused', label: 'Location tracking paused', group: 'FieldForce', description: 'A checked-in rep\'s phone stopped sharing location (battery saver, app closed, or no signal) — distinct from location being switched off.', recommended: true },
   { kind: 'missed_visits', label: 'Missed planned visits', group: 'FieldForce', description: 'Outlets on a past beat were never checked into.' },
   { kind: 'route_deviation', label: 'Off-route visit', group: 'FieldForce', description: 'A check-in happened beyond the outlet geofence.' },
+  { kind: 'checkin_reminder', label: 'Check-in reminder', group: 'FieldForce', description: 'A rep has not checked in by shift start (plus the grace period) on a working day. Only for clients with shift rules configured.' },
   { kind: 'checkout_reminder', label: 'Forgot to check out', group: 'FieldForce', description: 'A shift is still open 10 hours after check-in.' },
   { kind: 'att_reg_request', label: 'Attendance regularization request', group: 'FieldForce', description: 'A rep asked to correct an attendance record.' },
   { kind: 'att_reg_decision', label: 'Attendance regularization decision', group: 'FieldForce', description: 'The request was approved or rejected.' },

@@ -349,19 +349,22 @@ if (String(process.env.TRACKING_PAUSED_ALERT_ENABLED ?? 'true').toLowerCase() !=
   logger.info(`[tracking-paused] alert scheduler enabled (every ${everyMs / 1000}s)`);
 }
 
-// Forgotten check-outs. Every few minutes, across all tenant projects: auto-check-out any shift still open
-// when its IST day ended (stamped 12:00 AM IST), then remind reps who are still checked in 10 hours after
-// they started. Both steps are idempotent (conditional update / notifications ledger), so overlapping ticks
-// or several instances are harmless. A client with real overnight shifts opts out per org with
-// org_settings `attendance_auto_checkout` / `attendance_checkout_reminder` = false. Toggle the whole job with
-// ATTENDANCE_SWEEP_ENABLED=false; tune with ATTENDANCE_SWEEP_INTERVAL_SEC (default 300s).
+// Forgotten check-outs, and missing check-ins. Every few minutes, across all tenant projects: auto-check-out
+// any shift still open when its IST day ended (stamped 12:00 AM IST); remind reps who are still checked in
+// 10 hours after they started; and, for clients with shift rules configured, remind a field rep who has not
+// checked in once shift-start + grace has passed. All steps are idempotent (conditional update /
+// notifications ledger), so overlapping ticks or several instances are harmless. A client with real overnight
+// shifts opts out per org with org_settings `attendance_auto_checkout` / `attendance_checkout_reminder` =
+// false. Both reminder kinds (`checkout_reminder`, `checkin_reminder`) are also gated by the ordinary Client
+// Management → Notifications catalog, off by default. Toggle the whole job with ATTENDANCE_SWEEP_ENABLED=false;
+// tune with ATTENDANCE_SWEEP_INTERVAL_SEC (default 300s).
 if (String(process.env.ATTENDANCE_SWEEP_ENABLED ?? 'true').toLowerCase() !== 'false') {
   const everyMs = Math.max(60, Number(process.env.ATTENDANCE_SWEEP_INTERVAL_SEC ?? 300)) * 1000;
   setInterval(() => {
     forEachProject('attendance-sweep', () => runAttendanceSweep())
       .catch((e) => logger.warn(`[attendance-sweep] tick failed: ${e?.message ?? e}`));
   }, everyMs).unref();
-  logger.info(`[attendance-sweep] scheduler enabled (every ${everyMs / 1000}s: 10h check-out reminder, 12:00 AM IST auto-checkout)`);
+  logger.info(`[attendance-sweep] scheduler enabled (every ${everyMs / 1000}s: 10h check-out reminder, 12:00 AM IST auto-checkout, check-in reminder)`);
 }
 
 // Field-force route-deviation scan. Periodic tick that alerts supervisors about
