@@ -36,6 +36,18 @@ async function whatsappLeadCaptureEnabled(org_id: string): Promise<boolean> {
   } catch { return false; }
 }
 
+/** Is this number an active user of the org (users.mobile)? Only digits reach the PostgREST filter. */
+async function isOrgUserPhone(org_id: string, phone: string): Promise<boolean> {
+  const last10 = String(phone).replace(/\D/g, '').slice(-10);
+  if (last10.length !== 10) return false;
+  try {
+    const { data } = await supabaseAdmin.from('users').select('id')
+      .eq('org_id', org_id).eq('is_active', true).is('deleted_at', null)
+      .or(`mobile.eq.${last10},mobile.eq.+91${last10},mobile.eq.91${last10},mobile.eq.0${last10}`).limit(1);
+    return !!(data && data.length);
+  } catch { return false; }
+}
+
 export interface SendWhatsappInput {
   org_id: string;
   user_id?: string;
@@ -157,7 +169,9 @@ export async function recordInbound(payload: {
   // creates one (inheriting owner assignment + scoring + the lead_created
   // automation). The number consented by messaging us, so whatsapp_consent=true.
   let leadId: string | null = null;
-  if (!(contact as any)?.id && payload.from_phone && await whatsappLeadCaptureEnabled(payload.org_id)) {
+  if (!(contact as any)?.id && payload.from_phone && await whatsappLeadCaptureEnabled(payload.org_id)
+    // The org's own people (e.g. a rep sending a voice note to create a lead) are not leads themselves.
+    && !(await isOrgUserPhone(payload.org_id, payload.from_phone))) {
     const source_id = await getOrCreateWhatsappSource(payload.org_id);
     if (source_id) {
       try {

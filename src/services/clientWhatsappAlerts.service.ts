@@ -9,6 +9,8 @@
  *   { enabled, template_id, recipients: [{ name, phone }], kinds: [...], daily_summary }
  *
  * `daily_summary` adds the 7 pm manager summary (services/clientDailySummary.service.ts) to the same people.
+ * `voice_leads` lets the client's reps create leads by sending a voice note (or "lead …" text) to the client's WhatsApp
+ * number (services/crm/whatsappVoiceLead.service.ts). Independent of `enabled`: it sends no alerts.
  *
  * Delivery piggybacks on the push dispatcher (services/notifications.service.ts): every notification row that is
  * allowed through the in-app policy is offered here, so every writer is covered without being touched. One event
@@ -49,10 +51,11 @@ const WA_KIND_SET = new Set(WHATSAPP_KINDS);
 
 /** The template we suggest clients get approved in WhatsApp Manager (Utility, so Meta doesn't rate-limit it). */
 export const SUGGESTED_TEMPLATE = {
-  name: 'kinematic_alert',
+  name: 'kinematic_account_alert',
   category: 'UTILITY',
   language: 'en',
-  body: 'Kinematic update for your team: {{1}}. Details: {{2}}. Open the Kinematic app to see more and take action.',
+  // Worded as an account notice: Meta reclassified an earlier "open the app and take action" version as Marketing.
+  body: 'Alert from your Kinematic account: {{1}}. Details: {{2}}. You receive this because your admin turned on WhatsApp alerts for your team.',
 };
 
 export interface Recipient { name: string; phone: string }
@@ -63,9 +66,11 @@ export interface WhatsappAlertSettings {
   kinds: string[];
   /** Also send the end-of-day manager summary (services/clientDailySummary.service.ts). */
   daily_summary: boolean;
+  /** Reps can create leads by WhatsApp voice note (services/crm/whatsappVoiceLead.service.ts). */
+  voice_leads: boolean;
 }
 
-const EMPTY: WhatsappAlertSettings = { enabled: false, template_id: null, recipients: [], kinds: [], daily_summary: false };
+const EMPTY: WhatsappAlertSettings = { enabled: false, template_id: null, recipients: [], kinds: [], daily_summary: false, voice_leads: false };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Digits only, with India's 91 added to a 10-digit number. Null when it can't be a WhatsApp number. */
@@ -86,7 +91,7 @@ export function toSettings(value: unknown): WhatsappAlertSettings {
   }
   const kinds = [...new Set((Array.isArray(v.kinds) ? v.kinds : []).map((k) => canonicalKind(String(k))).filter((k) => WA_KIND_SET.has(k)))];
   const template_id = typeof v.template_id === 'string' && UUID.test(v.template_id) ? v.template_id : null;
-  return { enabled: v.enabled === true, template_id, recipients: recipients.slice(0, MAX_RECIPIENTS), kinds, daily_summary: v.daily_summary === true };
+  return { enabled: v.enabled === true, template_id, recipients: recipients.slice(0, MAX_RECIPIENTS), kinds, daily_summary: v.daily_summary === true, voice_leads: v.voice_leads === true };
 }
 
 export class AlertSettingsError extends Error {}
@@ -127,7 +132,7 @@ export function parseSettingsInput(input: unknown): WhatsappAlertSettings {
     if (!recipients.length) throw new AlertSettingsError('Add at least one person to receive alerts before switching them on.');
     if (!kinds.size && !daily_summary) throw new AlertSettingsError('Choose at least one update, or the daily summary, before switching alerts on.');
   }
-  return { enabled, template_id, recipients, kinds: [...kinds], daily_summary };
+  return { enabled, template_id, recipients, kinds: [...kinds], daily_summary, voice_leads: v.voice_leads === true };
 }
 
 // ── Templates ──────────────────────────────────────────────────────────────────────────────────────────────────
