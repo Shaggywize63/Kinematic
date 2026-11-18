@@ -466,6 +466,11 @@ export const accountSchema = z.object({
   owner_id: optionalUuid,
   territory_id: optionalUuid,
   parent_account_id: optionalUuid,
+  // Connected-B2B (Spark & Ray): marks an account that only GROUPS its children — "NTPC Limited"
+  // over its eleven plant accounts — rather than trading itself. `parent_account_id` was already
+  // here, so the child end of that link saved; without `is_group` zod silently stripped the parent
+  // end, and "Make this a parent account" from the account page would have written nothing.
+  is_group: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional(),
   // Connected-B2B (Spark & Ray): the account's outcome — required when an account is created there, and it
