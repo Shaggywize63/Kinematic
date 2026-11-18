@@ -11,6 +11,7 @@ import { assertAssigneesInOrg } from './activityExtras.service';
 export const DEAL_SECTION_KEYS = [
   'pricing_quoted', 'pricing_discount_pct', 'pricing_final', 'pricing_valid_till',
   'trial_required', 'trial_start', 'trial_end', 'trial_result', 'trial_notes',
+  'trial_awb', 'trial_shipment', 'trial_value',
   'technical_approval_by', 'prepared_by', 'checked_by', 'supervisor_id',
 ] as const;
 

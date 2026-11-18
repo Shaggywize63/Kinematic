@@ -630,6 +630,11 @@ export const dealSchema = z.object({
   trial_end: isoDate,
   trial_result: z.enum(['pending', 'successful', 'failed']).optional().nullable(),
   trial_notes: z.string().trim().max(2000).optional().nullable(),
+  // Sample-dispatch logistics for the trial: the airway bill / docket number, free-text shipment
+  // details (carrier, what was sent, how), and the value of the sample shipped (INR).
+  trial_awb: z.string().trim().max(120).optional().nullable(),
+  trial_shipment: z.string().trim().max(500).optional().nullable(),
+  trial_value: z.number().nonnegative().max(1_000_000_000_000).optional().nullable(),
   technical_approval_by: optionalUuid,
   prepared_by: optionalUuid,
   checked_by: optionalUuid,
