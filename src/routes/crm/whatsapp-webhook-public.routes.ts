@@ -19,6 +19,7 @@ import { Router } from 'express';
 import { knownProjectKeys, adminClientFor, runWithProject, fallbackProjectKey } from '../../lib/projects';
 import { logger } from '../../lib/logger';
 import * as whatsappSvc from '../../services/crm/whatsapp.service';
+import { handleRepLeadMessage, leadMessageKind } from '../../services/crm/whatsappVoiceLead.service';
 
 const router = Router();
 
@@ -133,11 +134,17 @@ router.post('/', async (req, res) => {
               to_phone: value.metadata?.display_phone_number,
               body_text: bodyText,
               button_payload: buttonPayload,
-              media_url: m.image?.id ?? m.document?.id ?? m.video?.id,
+              media_url: m.image?.id ?? m.document?.id ?? m.video?.id ?? m.audio?.id,
               media_type: m.type,
               provider_message_id: m.id,
               in_reply_to: m.context?.id,
             });
+            // A rep's voice note (or "lead …" text) becomes a lead. Detached: transcription takes a while and the
+            // sender (Meta, or the KINI bot forwarding with a short timeout) must get its 200 now. The project
+            // context travels with the promise.
+            if (leadMessageKind(m)) {
+              void handleRepLeadMessage(orgId, m).catch((e) => logger.warn(`[whatsapp-webhook] voice lead failed: ${e?.message || e}`));
+            }
           }
           for (const s of value.statuses ?? []) {
             await whatsappSvc.recordStatusUpdate({

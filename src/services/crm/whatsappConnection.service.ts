@@ -146,6 +146,13 @@ export async function resolveWhatsappProvider(org_id: string): Promise<WhatsappP
   return stubWhatsappProvider;
 }
 
+/** Cloud API credentials for downloading media (voice notes etc.). Null for a BSP, inactive or missing connection. */
+export async function cloudApiCredentials(org_id: string): Promise<{ phone_number_id: string; access_token: string } | null> {
+  const c = await loadFull(org_id);
+  if (!c || !c.is_active || c.connection_type !== 'cloud_api' || !c.phone_number_id || !c.access_token) return null;
+  return { phone_number_id: c.phone_number_id, access_token: c.access_token };
+}
+
 /** The configured "from" number for this org (falls back to the env default at the call site). */
 export async function fromPhoneFor(org_id: string): Promise<string | null> {
   return (await loadFull(org_id))?.from_phone ?? null;

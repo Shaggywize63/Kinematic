@@ -262,6 +262,22 @@ visits outside the outlet geofence). "Today" is the IST day; a section whose dat
 - **Send now**: `POST /api/v1/clients/:id/whatsapp-alerts/test` with `{ "type": "daily_summary" }` sends today's
   figures so far without using up the day.
 
+### Voice note → lead (reps, on the client's WhatsApp number)
+
+`voice_leads: true` in the same setting lets the client's people create leads from WhatsApp
+(`src/services/crm/whatsappVoiceLead.service.ts`, called detached from `routes/crm/whatsapp-webhook-public.routes.ts`):
+
+- **Who**: only active users of the org, matched on the last 10 digits of `users.mobile`. Everyone else is handled as
+  before. A user's own number is never captured as a lead by `whatsapp_lead_capture` either.
+- **What**: a voice note (downloaded from the Cloud API, transcribed by Sarvam with language auto-detect), or a text
+  that starts with "lead" ("lead Ravi Sharma, Sharma Traders, 9876543210"). `extractLead` pulls the fields;
+  `findOrCreateLead` creates the lead or fills an existing one (same phone / email), owned by and created by the rep,
+  source "WhatsApp Voice (KINI)", with the transcript in the notes. Lead approval rules apply as for any rep.
+- **Replies** (free-form, inside the 24-hour window the rep's message opens): an acknowledgement for voice notes, then
+  what was saved, or why not (nothing heard, no name or number found, KINI limit reached, voice not available).
+- **Limits**: counts as one KINI query against the rep's quota; each message is handled once (10-minute dedup by
+  message id). Voice needs a Cloud API connection and `SARVAM_API_KEY`; text works with any connection.
+
 ## Self-gating & tenant safety
 
 The new scans change nothing for tenants that don't use the feature:
