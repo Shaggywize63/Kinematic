@@ -383,12 +383,22 @@ function activityVisibilityScope(req: Request): { user_id: string; columns: stri
  * the call sites stay short. Clients that haven't opted into hierarchy
  * RBAC (Tata Tiscon today) hit the same code path they always did.
  */
-async function activityScopeOpts(req: AuthRequest): Promise<{
+async function activityScopeOpts(req: AuthRequest, entityScoped = false): Promise<{
   visibleOwnerIds?: string[] | null;
   ownerColumns?: string[];
   userScope?: { user_id: string; columns: string[] };
   coAssignedIds?: string[];
 }> {
+  // Connected-B2B (Spark & Ray) record timelines show the WHOLE team's work on that
+  // record. A lead / account / contact / deal `/:id/activities` read is already scoped to
+  // ONE record the caller can see, and the multi-FE (co-assignee) model means every rep on
+  // the lead must see its full timeline, not just their own rows. Without this a rep opening
+  // a lead owned by a teammate got an empty Timeline tab even though activities exist (the
+  // per-user owner filter returned []). The GLOBAL activities list (entityScoped=false) keeps
+  // its owner scope, and every non-B2B tenant is unchanged either way.
+  if (entityScoped && isB2bClient(clientScope(req).id ?? req.user?.client_id ?? null)) {
+    return {};
+  }
   const subtree = await hierarchy.maybeSubtreeOwnerIds(req);
   const coAssignedIds = await coAssignedForCaller(req);
   if (subtree) {
@@ -1798,7 +1808,7 @@ leads.post('/:id/reopen', wrap(async (req, res) =>
 leads.get('/:id/expenses', wrap(async (req, res) => res.json(await expenseRollup.leadExpenseRollup(expenseActor(req), req.params.id))));
 leads.get('/:id/score-history', wrap(async (req, res) => res.json(await leadsSvc.listScoreHistory(orgId(req), req.params.id))));
 leads.get('/:id/activities', wrap(async (req, res) => {
-  const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  const visibilityOpts = await activityScopeOpts(req as AuthRequest, true);
   // The dashboard auto-attaches the global geo scope (?city/&state/...)
   // to every /api/v1/crm/leads/* GET. crm_activities has no geo columns,
   // so passing those through to crud.list runs `.eq('city', …)` against
@@ -2257,7 +2267,7 @@ contacts.patch('/:id', wrap(async (req, res) => {
 }));
 contacts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_contacts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 contacts.get('/:id/activities', wrap(async (req, res) => {
-  const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  const visibilityOpts = await activityScopeOpts(req as AuthRequest, true);
   return res.json(
     await enrichActivities(await crud.list('crm_activities', orgId(req), { contact_id: req.params.id, ...req.query }, {
       // Sort by the generated activity_date column (COALESCE of
@@ -2427,7 +2437,7 @@ accounts.get('/:id/leads', wrap(async (req, res) => {
   }
 }));
 accounts.get('/:id/activities', wrap(async (req, res) => {
-  const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  const visibilityOpts = await activityScopeOpts(req as AuthRequest, true);
   return res.json(
     await enrichActivities(await crud.list('crm_activities', orgId(req), { account_id: req.params.id, ...req.query }, {
       // Sort by the generated activity_date column (COALESCE of
@@ -2842,7 +2852,7 @@ deals.post('/:id/next-action', wrap(async (req, res) => res.json(await nbaSvc.co
 deals.get('/:id/expenses', wrap(async (req, res) => res.json(await expenseRollup.dealExpenseRollup(expenseActor(req), req.params.id))));
 deals.get('/:id/history', wrap(async (req, res) => res.json(await dealsSvc.dealHistory(orgId(req), req.params.id))));
 deals.get('/:id/activities', wrap(async (req, res) => {
-  const visibilityOpts = await activityScopeOpts(req as AuthRequest);
+  const visibilityOpts = await activityScopeOpts(req as AuthRequest, true);
   return res.json(
     await enrichActivities(await crud.list('crm_activities', orgId(req), { deal_id: req.params.id, ...req.query }, {
       // Sort by the generated activity_date column (COALESCE of
