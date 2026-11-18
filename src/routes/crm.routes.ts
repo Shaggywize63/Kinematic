@@ -34,6 +34,7 @@ import * as businessReport from '../services/crm/businessReport.service';
 import { demoCrmMiddleware } from '../utils/demoCrm';
 import * as v from '../validators/crm.validators';
 import * as crud from '../services/crm/crud.service';
+import * as accountRollups from '../services/crm/accountRollups.service';
 import { blamesOptional, type DbError } from '../services/expenses/dbErrors';
 import * as automationsSvc from '../services/crm/automations.service';
 import * as flowsSvc from '../services/crm/flows.service';
@@ -2281,9 +2282,21 @@ const accounts = express.Router();
 accounts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
   const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
-  return res.json(
-    await stampOwnerNames(await crud.clientScopedList('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds }))
-  );
+  const { rows, total, page, limit } = await crud.clientScopedListWithCount('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds });
+  // Same `data` as before (the first 50 rows unless page / limit are sent), so existing callers are unchanged. Additive:
+  // each row carries its deal / contact rollups (open + won deal count and value, contact count) and the response carries
+  // `pagination`, so the dashboard can page and count the whole list instead of the first page.
+  const data = await accountRollups.stampAccountRollups(orgId(req), await stampOwnerNames(rows as Record<string, any>[]));
+  return res.json({
+    success: true,
+    data,
+    pagination: {
+      total, page, limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  });
 }));
 /**
  * Spark & Ray: Outcome now lives on the ACTIVITY, not the account, so an account no longer needs one. The column and
@@ -5738,6 +5751,17 @@ targets.get('/leaderboard-role', requireRole(...MANAGER_ROLES), wrap(async (req,
 targets.put('/leaderboard-role', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
   const role_id = (req.body?.role_id ?? null) as string | null;
   res.json({ success: true, data: await targetsSvc.setLeaderboardRoleId(orgId(req), clientId(req), role_id) });
+}));
+
+// Manager-facing: one salesperson's SALES target drill-down for an IST month
+// (?month=YYYY-MM, default current) — target, achieved, pending, daily + weekly
+// progress, the customers contributing this month, and a 6-month target-vs-achieved
+// history. Achievement follows the client's configured basis (won deals vs logged
+// entries). userId is validated as a UUID before it reaches any query.
+targets.get('/salesperson/:userId', requireRole(...MANAGER_ROLES), wrap(async (req, res) => {
+  const id = parse(z.string().uuid(), req.params.userId);
+  const month = typeof req.query.month === 'string' && req.query.month ? req.query.month : undefined;
+  res.json({ success: true, data: await targetEntriesSvc.salespersonTargetDetail(orgId(req), clientId(req), id, month) });
 }));
 
 // Manager-facing: list current targets (default + per-FE overrides).

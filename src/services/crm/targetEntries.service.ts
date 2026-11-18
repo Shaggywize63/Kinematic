@@ -177,6 +177,54 @@ export function sumRupees(rows: Array<{ amount?: unknown }>): number {
   return rows.reduce((s, r) => s + toCents(r.amount), 0) / 100;
 }
 
+// ── achievement basis (per-client) ───────────────────────────────────────────
+/**
+ * How a client's SALES target is scored: the running total of manually-logged
+ * entries (`manual`, the default — unchanged for every existing client incl.
+ * Tata), or the sum of WON crm_deals in the period (`won_deals`). Opt-in via
+ * `crm_settings.config.targets.achievement_basis`. Anything but the literal
+ * 'won_deals' resolves to 'manual', so a missing/garbled value is safe.
+ * Applies ONLY to the `sales` type; `collection` is always manual.
+ */
+export type AchievementBasis = 'manual' | 'won_deals';
+export async function resolveAchievementBasis(org_id: string, client_id: string | null): Promise<AchievementBasis> {
+  const cfg = await loadCrmConfig(org_id, client_id);
+  const raw = cfg && typeof cfg === 'object'
+    ? (cfg as { targets?: { achievement_basis?: unknown } }).targets?.achievement_basis
+    : null;
+  return raw === 'won_deals' ? 'won_deals' : 'manual';
+}
+
+/**
+ * Won-deal sales value + count per owner in [from, to] (YYYY-MM-DD, inclusive on
+ * `actual_close_date`). Mirrors leaderboard.service's won definition: a deal whose
+ * joined stage is `won`. Summed in whole paise so rupee totals never drift.
+ * `ownerIds` null/empty = every owner.
+ */
+export async function wonSalesByOwner(
+  org_id: string, client_id: string | null, ownerIds: string[] | null, from: string, to: string,
+): Promise<Map<string, { value: number; count: number }>> {
+  let q = supabaseAdmin.from('crm_deals')
+    .select('owner_id, amount, crm_deal_stages!inner(stage_type)')
+    .eq('org_id', org_id).is('deleted_at', null)
+    .not('actual_close_date', 'is', null)
+    .gte('actual_close_date', from).lte('actual_close_date', to)
+    .eq('crm_deal_stages.stage_type', 'won')
+    .range(0, 99999);
+  if (client_id) q = q.eq('client_id', client_id);
+  if (ownerIds && ownerIds.length) q = q.in('owner_id', ownerIds);
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const cents = new Map<string, { c: number; count: number }>();
+  for (const r of (data ?? []) as Array<{ owner_id: string | null; amount: unknown }>) {
+    if (!r.owner_id) continue;
+    const e = cents.get(r.owner_id) ?? { c: 0, count: 0 };
+    e.c += toCents(r.amount); e.count += 1;
+    cents.set(r.owner_id, e);
+  }
+  return new Map(Array.from(cents, ([k, v]) => [k, { value: v.c / 100, count: v.count }]));
+}
+
 // ── progress ────────────────────────────────────────────────────────────────
 /** Entries (kind, user, amount) counting towards the month, optionally for one user. Empty before the migration. */
 async function monthEntries(
@@ -211,10 +259,14 @@ export async function myProgress(actor: Actor, now: number = Date.now()) {
   const types = await loadTargetTypes(actor.org_id, client_id);
   if (!types.length) return { period_start: month.start, period_end: month.end, types: [] };
 
-  const [{ data: me }, rows, entries] = await Promise.all([
+  const basis = await resolveAchievementBasis(actor.org_id, client_id);
+  const wonSales = basis === 'won_deals' && types.some((t) => t.key === 'sales');
+
+  const [{ data: me }, rows, entries, wonMap] = await Promise.all([
     supabaseAdmin.from('users').select('org_role_id, hierarchy_level_id').eq('id', actor.id).maybeSingle(),
     monthTargetRows(actor.org_id, types),
     monthEntries(actor.org_id, client_id, types.map((t) => t.key), month, actor.id),
+    wonSales ? wonSalesByOwner(actor.org_id, client_id, [actor.id], month.start, month.end) : Promise.resolve(null),
   ]);
   const who = { user_id: actor.id, org_role_id: (me as any)?.org_role_id ?? null, hierarchy_level_id: (me as any)?.hierarchy_level_id ?? null };
   return {
@@ -222,7 +274,10 @@ export async function myProgress(actor: Actor, now: number = Date.now()) {
     period_end: month.end,
     types: types.map((t) => {
       const { target, source } = resolveTarget(rows.filter((r) => r.metric === t.metric), who, client_id);
-      const achieved = sumRupees(entries.filter((e) => e.kind === t.key));
+      // SALES on the won-deals basis scores off won crm_deals; everything else stays on logged entries.
+      const achieved = t.key === 'sales' && wonMap
+        ? (wonMap.get(actor.id)?.value ?? 0)
+        : sumRupees(entries.filter((e) => e.kind === t.key));
       return { key: t.key, label: t.label, target, achieved, pct: pctOf(achieved, target), source };
     }),
   };
@@ -243,7 +298,12 @@ export async function typedLeaderboard(
 ) {
   const month = istMonth(now);
   const { users, roleId } = await leaderboardUsers(org_id, client_id, viewer);
-  const [rows, entries] = await Promise.all([monthTargetRows(org_id, [type]), monthEntries(org_id, client_id, [type.key], month)]);
+  const wonSales = type.key === 'sales' && (await resolveAchievementBasis(org_id, client_id)) === 'won_deals';
+  const [rows, entries, wonMap] = await Promise.all([
+    monthTargetRows(org_id, [type]),
+    monthEntries(org_id, client_id, [type.key], month),
+    wonSales ? wonSalesByOwner(org_id, client_id, users.map((u) => u.id), month.start, month.end) : Promise.resolve(null),
+  ]);
 
   const cents = new Map<string, number>();
   for (const e of entries) cents.set(e.user_id, (cents.get(e.user_id) ?? 0) + toCents(e.amount));
@@ -258,7 +318,7 @@ export async function typedLeaderboard(
   const board = users
     .map((u) => {
       const { target } = resolveTarget(rows, { user_id: u.id, org_role_id: u.org_role_id, hierarchy_level_id: u.hierarchy_level_id }, client_id);
-      const achieved = (cents.get(u.id) ?? 0) / 100;
+      const achieved = wonMap ? (wonMap.get(u.id)?.value ?? 0) : (cents.get(u.id) ?? 0) / 100;
       return {
         user_id: u.id as string,
         name: (u.name || u.email || 'User') as string,
@@ -412,4 +472,169 @@ export async function deleteEntry(actor: Actor, id: string, now: number = Date.n
     .eq('id', id).eq('org_id', actor.org_id).is('deleted_at', null);
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
   return { id };
+}
+
+// ── salesperson drill-down ────────────────────────────────────────────────────
+/** Start + end (YYYY-MM-DD) of the calendar month `ym` ("YYYY-MM"). */
+function monthBoundsOf(ym: string): { start: string; end: string } {
+  const [y, m] = ym.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return { start: `${ym}-01`, end: `${ym}-${pad(last)}` };
+}
+
+/** The `n` calendar months ending at (and including) the month that begins `currentStart` ("YYYY-MM-01"), oldest first. */
+function lastNMonths(currentStart: string, n: number): Array<{ month: string; start: string; end: string }> {
+  const [y, m] = currentStart.split('-').map(Number); // m is 1-based
+  const out: Array<{ month: string; start: string; end: string }> = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(y, m - 1 - i, 1));
+    const ym = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}`;
+    out.push({ month: ym, ...monthBoundsOf(ym) });
+  }
+  return out;
+}
+
+/** The Monday (YYYY-MM-DD) of the ISO week containing `date`. */
+function mondayOf(date: string): string {
+  const dow = new Date(Date.parse(`${date}T00:00:00Z`)).getUTCDay(); // 0 Sun..6 Sat
+  return addDays(date, -((dow + 6) % 7));
+}
+
+/**
+ * Every sales contribution for one user across [from, to], as {date, cents, customer}.
+ * On the won-deals basis that is each won deal (dated by actual_close_date, customer =
+ * account name || deal name); on the manual basis it is each logged sales entry (dated
+ * by entry_date, customer = linked lead name). Amounts stay in whole paise until summed.
+ */
+async function salesRowsForUser(
+  org_id: string, client_id: string | null, userId: string, basis: AchievementBasis, from: string, to: string,
+): Promise<Array<{ date: string; cents: number; customer: string | null }>> {
+  if (basis === 'won_deals') {
+    let q = supabaseAdmin.from('crm_deals')
+      .select('amount, actual_close_date, account_id, name, crm_deal_stages!inner(stage_type)')
+      .eq('org_id', org_id).is('deleted_at', null).eq('owner_id', userId)
+      .not('actual_close_date', 'is', null)
+      .gte('actual_close_date', from).lte('actual_close_date', to)
+      .eq('crm_deal_stages.stage_type', 'won').range(0, 99999);
+    if (client_id) q = q.eq('client_id', client_id);
+    const { data, error } = await q;
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+    const rows = (data ?? []) as Array<{ amount: unknown; actual_close_date: string; account_id: string | null; name: string | null }>;
+    const accIds = Array.from(new Set(rows.map((r) => r.account_id).filter(Boolean))) as string[];
+    const accName = new Map<string, string>();
+    if (accIds.length) {
+      const { data: accs } = await supabaseAdmin.from('crm_accounts').select('id, name').in('id', accIds);
+      for (const a of (accs ?? []) as Array<{ id: string; name: string }>) accName.set(a.id, a.name);
+    }
+    return rows.map((r) => ({
+      date: String(r.actual_close_date).slice(0, 10),
+      cents: toCents(r.amount),
+      customer: (r.account_id && accName.get(r.account_id)) || r.name || null,
+    }));
+  }
+  // manual basis — logged sales entries
+  if (!(await hasTargetEntries())) return [];
+  let q = supabaseAdmin.from('crm_target_entries').select('amount, entry_date, lead_id')
+    .eq('org_id', org_id).is('deleted_at', null).eq('kind', 'sales').eq('user_id', userId)
+    .gte('entry_date', from).lte('entry_date', to).range(0, 99999);
+  if (client_id) q = q.eq('client_id', client_id);
+  const { data, error } = await q;
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  const rows = (data ?? []) as Array<{ amount: unknown; entry_date: string; lead_id: string | null }>;
+  const stamped = await stampLinkedEntityNames(rows.map((r) => ({ lead_id: r.lead_id ?? null })));
+  return rows.map((r, i) => ({
+    date: String(r.entry_date).slice(0, 10),
+    cents: toCents(r.amount),
+    customer: r.lead_id ? ((stamped[i] as { lead_name?: string | null }).lead_name || null) : null,
+  }));
+}
+
+export interface SalespersonDetail {
+  user_id: string;
+  name: string | null;
+  basis: AchievementBasis;
+  period_start: string;
+  period_end: string;
+  target: number | null;
+  achieved: number;
+  pending: number | null;
+  pct: number | null;
+  daily: Array<{ date: string; value: number; count: number }>;
+  weekly: Array<{ week_start: string; value: number; count: number }>;
+  historical: Array<{ month: string; target: number | null; achieved: number; pct: number | null }>;
+  customers: Array<{ name: string; value: number; count: number }>;
+}
+
+/**
+ * One salesperson's SALES target drill-down for the given IST month (default: current):
+ * resolved monthly target, achieved + pending, daily and weekly progress, the customers
+ * contributing this month, and target-vs-achieved for the last 6 months. Achievement follows
+ * the client's basis (won deals for an opted-in client such as Aadinath, logged entries
+ * otherwise — unchanged for Tata and every manual client). Read-only; manager-gated at the route.
+ */
+export async function salespersonTargetDetail(
+  org_id: string, client_id: string | null, userId: string, monthParam?: string, now: number = Date.now(),
+): Promise<SalespersonDetail> {
+  const cur = monthParam && /^\d{4}-\d{2}$/.test(monthParam) ? monthBoundsOf(monthParam) : istMonth(now);
+  const basis = await resolveAchievementBasis(org_id, client_id);
+  const salesType = (await loadTargetTypes(org_id, client_id)).find((t) => t.key === 'sales');
+
+  const [{ data: u }, targetRows] = await Promise.all([
+    supabaseAdmin.from('users').select('id, name, email, org_role_id, hierarchy_level_id').eq('id', userId).maybeSingle(),
+    salesType ? monthTargetRows(org_id, [salesType]) : Promise.resolve([] as Array<TargetRowLite & { metric: string }>),
+  ]);
+  const who = { user_id: userId, org_role_id: (u as any)?.org_role_id ?? null, hierarchy_level_id: (u as any)?.hierarchy_level_id ?? null };
+  const target = salesType ? resolveTarget(targetRows, who, client_id).target : null;
+
+  const months = lastNMonths(cur.start, 6);
+  const rows = await salesRowsForUser(org_id, client_id, userId, basis, months[0].start, cur.end);
+
+  const inMonth = rows.filter((r) => r.date >= cur.start && r.date <= cur.end);
+  const achieved = Math.round(inMonth.reduce((s, r) => s + r.cents, 0)) / 100;
+  const pending = target != null ? Math.max(0, target - achieved) : null;
+
+  const bucket = (keyOf: (r: { date: string }) => string) => {
+    const m = new Map<string, { cents: number; count: number }>();
+    for (const r of inMonth) {
+      const k = keyOf(r);
+      const e = m.get(k) ?? { cents: 0, count: 0 };
+      e.cents += r.cents; e.count += 1; m.set(k, e);
+    }
+    return m;
+  };
+
+  const daily = Array.from(bucket((r) => r.date), ([date, v]) => ({ date, value: v.cents / 100, count: v.count }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const weekly = Array.from(bucket((r) => mondayOf(r.date)), ([week_start, v]) => ({ week_start, value: v.cents / 100, count: v.count }))
+    .sort((a, b) => a.week_start.localeCompare(b.week_start));
+
+  const custMap = new Map<string, { cents: number; count: number }>();
+  for (const r of inMonth) {
+    const name = r.customer || 'Unknown';
+    const e = custMap.get(name) ?? { cents: 0, count: 0 };
+    e.cents += r.cents; e.count += 1; custMap.set(name, e);
+  }
+  const customers = Array.from(custMap, ([name, v]) => ({ name, value: v.cents / 100, count: v.count }))
+    .sort((a, b) => b.value - a.value || a.name.localeCompare(b.name)).slice(0, 25);
+
+  const historical = months.map((mo) => {
+    const a = Math.round(rows.filter((r) => r.date >= mo.start && r.date <= mo.end).reduce((s, r) => s + r.cents, 0)) / 100;
+    return { month: mo.month, target, achieved: a, pct: pctOf(a, target) };
+  });
+
+  return {
+    user_id: userId,
+    name: ((u as any)?.name || (u as any)?.email || null) as string | null,
+    basis,
+    period_start: cur.start,
+    period_end: cur.end,
+    target,
+    achieved,
+    pending,
+    pct: pctOf(achieved, target),
+    daily,
+    weekly,
+    historical,
+    customers,
+  };
 }
