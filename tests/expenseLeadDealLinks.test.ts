@@ -419,10 +419,11 @@ const claim = (id: string, status: string, total: number, over: any = {}) =>
   ({ id, org_id: ORG, user_id: REP, claim_no: `EXP-${id}`, title: `claim ${id}`, status, total_amount: total, currency: 'INR', created_at: '2026-10-01T00:00:00Z', lead_id: LEAD, deal_id: DEAL, ...over });
 
 interface RollArrange {
-  claims?: any[]; lead?: any | null; deal?: any | null; deals?: any[]; activities?: any[] | Error;
+  claims?: any[]; lead?: any | null; deal?: any | null; deals?: any[]; activities?: any[] | Error; items?: any[];
 }
 function arrangeRollup(o: RollArrange = {}) {
   __mock.setDefault('expense_claims', { data: o.claims ?? [] });
+  __mock.setDefault('expense_claim_items', { data: o.items ?? [] });
   __mock.setDefault('crm_leads', (c) => ({ data: selectOf(c).startsWith('id, first_name') ? [{ id: LEAD, first_name: 'Asha', last_name: 'Rao' }] : (o.lead === null ? [] : [o.lead ?? { id: LEAD, client_id: null }]) }));
   __mock.setDefault('crm_deals', (c) => {
     const s = selectOf(c);
@@ -456,6 +457,24 @@ describe('totalsOf / spentPct', () => {
   });
 });
 
+describe('byCategoryOf (spend split by type)', () => {
+  it('sums line amounts per category, worst first, skipping rejected lines', () => {
+    const items = [
+      { category: 'travel', amount: 300 }, { category: 'food', amount: 100 },
+      { category: 'travel', amount: 200 }, { category: 'lodging', amount: 500, decision: 'rejected' },
+      { category: 'food', amount: 50, decision: 'approved' },
+    ];
+    expect(rollup.byCategoryOf(items)).toEqual([
+      { category: 'travel', amount: 500, count: 2 },
+      { category: 'food', amount: 150, count: 2 },
+    ]);
+  });
+  it('missing category falls back to misc; empty in → empty out', () => {
+    expect(rollup.byCategoryOf([{ amount: 40 }, { category: '', amount: 10 }])).toEqual([{ category: 'misc', amount: 50, count: 2 }]);
+    expect(rollup.byCategoryOf([])).toEqual([]);
+  });
+});
+
 describe('deal roll-up', () => {
   it('3,000 spent on a 10,000 deal is 30%', async () => {
     arrangeRollup({ claims: [claim('1', 'approved', 2000), claim('2', 'submitted', 1000)] });
@@ -473,7 +492,27 @@ describe('deal roll-up', () => {
       id: '1', claim_no: 'EXP-1', title: 'claim 1', status: 'submitted', total_amount: 1000, currency: 'INR',
       created_at: '2026-10-01T00:00:00Z', user_id: REP, user_name: 'Asha', lead_id: LEAD, deal_id: DEAL, deal_name: 'Tower B steel',
     }]);
-    expect(Object.keys(r).sort()).toEqual(['claims', 'currency', 'opportunity_value', 'spent_pct_of_value', 'totals', 'visit_count']);
+    expect(Object.keys(r).sort()).toEqual(['by_category', 'claims', 'currency', 'opportunity_value', 'spent_pct_of_value', 'totals', 'visit_count']);
+  });
+
+  it('breaks spend down by type from the claims\' line items', async () => {
+    arrangeRollup({
+      claims: [claim('1', 'approved', 500), claim('2', 'submitted', 300)],
+      items: [
+        { claim_id: '1', category: 'travel', amount: 300 },
+        { claim_id: '1', category: 'food', amount: 200 },
+        { claim_id: '2', category: 'travel', amount: 300 },
+      ],
+    });
+    const r = await rollup.dealExpenseRollup(asAdmin, DEAL);
+    expect(r.by_category).toEqual([
+      { category: 'travel', amount: 600, count: 2 },
+      { category: 'food', amount: 200, count: 1 },
+    ]);
+    // The items are fetched for exactly the (non-cancelled) claim ids.
+    const itemChain = __mock.chainsFor('expense_claim_items')[0];
+    expect(itemChain.eqs).toMatchObject({ org_id: ORG });
+    expect(itemChain.ops).toContainEqual({ method: 'in', args: ['claim_id', ['1', '2']] });
   });
 
   it('queries the deal\'s claims in the actor\'s org and client scope, skipping cancelled', async () => {

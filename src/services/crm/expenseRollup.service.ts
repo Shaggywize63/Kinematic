@@ -56,6 +56,14 @@ export interface ExpenseRollupClaim {
   deal_name: string | null;
 }
 
+/** One expense category (type) and what was spent on it across this lead's / deal's claims. */
+export interface ExpenseCategoryBreakdown {
+  category: string;
+  amount: number;
+  /** How many line items fell in this category (across all the record's trips). */
+  count: number;
+}
+
 export interface ExpenseRollup {
   currency: string;
   totals: ExpenseRollupTotals;
@@ -63,6 +71,9 @@ export interface ExpenseRollup {
   opportunity_value: number | null;
   spent_pct_of_value: number | null;
   claims: ExpenseRollupClaim[];
+  /** Spend split by expense type (travel / food / lodging …), worst first — an aggregate, shown to anyone who
+   *  can see the record (like `totals`), even when the per-trip `claims` rows are withheld. */
+  by_category: ExpenseCategoryBreakdown[];
 }
 
 /** The caller as the roll-up needs them: the expense Actor, whose client_id is the request's client scope. */
@@ -70,6 +81,7 @@ export type RollupActor = Actor;
 
 const CLAIM_CAP = 5000;
 const ACTIVITY_CAP = 5000;
+const ITEM_CAP = 20000;
 const SPENT = ['submitted', 'approved', 'reimbursed'];
 
 const round1 = (n: number): number => Math.round(n * 10) / 10;
@@ -93,6 +105,26 @@ export function totalsOf(claims: any[]): ExpenseRollupTotals {
     draft_amount: sum((c) => c.status === 'draft'),
     rejected_amount: sum((c) => c.status === 'rejected'),
   };
+}
+
+/**
+ * Spend split by expense type across the record's trips. Sums each line item's amount into its category,
+ * skipping line items an approver rejected (decision === 'rejected'), so the split reflects money that
+ * counts. Pure, so the arithmetic is unit-testable. Worst first.
+ */
+export function byCategoryOf(items: any[]): ExpenseCategoryBreakdown[] {
+  const m = new Map<string, { amount: number; count: number }>();
+  for (const it of items) {
+    if (it?.decision === 'rejected') continue;
+    const category = String(it?.category || 'misc');
+    const cur = m.get(category) ?? { amount: 0, count: 0 };
+    cur.amount += num(it?.amount);
+    cur.count += 1;
+    m.set(category, cur);
+  }
+  return Array.from(m.entries())
+    .map(([category, v]) => ({ category, amount: round2(v.amount), count: v.count }))
+    .sort((a, b) => b.amount - a.amount || a.category.localeCompare(b.category));
 }
 
 /** spent / value as a percentage with one decimal; null when there is no value to compare against. */
@@ -125,6 +157,20 @@ async function loadClaims(actor: Actor, column: 'lead_id' | 'deal_id', id: strin
   return ((data as any[]) ?? []).filter((c) => c.status !== 'cancelled');
 }
 
+/** The line items of a set of claims, for the by-type breakdown. Empty (never a 500) if the table/columns are absent. */
+async function loadClaimItems(org_id: string, claimIds: string[]): Promise<any[]> {
+  if (!claimIds.length) return [];
+  try {
+    const { data, error } = await supabaseAdmin.from('expense_claim_items')
+      .select('claim_id, category, amount, decision').eq('org_id', org_id).in('claim_id', claimIds).limit(ITEM_CAP);
+    if (error) { logger.warn(`[expenseRollup] claim items lookup failed: ${error.message}`); return []; }
+    return (data as any[]) ?? [];
+  } catch (e: any) {
+    logger.warn(`[expenseRollup] claim items lookup failed: ${e?.message || e}`);
+    return [];
+  }
+}
+
 /** Completed site visits / meetings on the lead, or on the deal plus its lead. 0 if the lookup fails. */
 async function countVisits(org_id: string, leadId: string | null, dealId: string | null): Promise<number> {
   try {
@@ -146,7 +192,7 @@ async function countVisits(org_id: string, leadId: string | null, dealId: string
 }
 
 async function shape(
-  actor: Actor, claims: any[], visit_count: number, opportunity_value: number | null, currency: string | null,
+  actor: Actor, claims: any[], items: any[], visit_count: number, opportunity_value: number | null, currency: string | null,
 ): Promise<ExpenseRollup> {
   const totals = totalsOf(claims);
   // Everyone sees the numbers; the claim rows themselves only an approver / admin, or the claimant for their own.
@@ -158,6 +204,7 @@ async function shape(
     visit_count,
     opportunity_value,
     spent_pct_of_value: spentPct(totals.spent_amount, opportunity_value),
+    by_category: byCategoryOf(items),
     claims: rows.map((c) => ({
       id: c.id, claim_no: c.claim_no ?? null, title: c.title ?? null, status: c.status, total_amount: num(c.total_amount),
       currency: c.currency || 'INR', created_at: c.created_at ?? null, user_id: c.user_id, user_name: c.user_name ?? null,
@@ -181,7 +228,8 @@ export async function leadExpenseRollup(actor: Actor, leadId: string): Promise<E
   ]);
   const dealRows = ((deals.data as any[]) ?? []);
   const value = round2(dealRows.reduce((s, d) => s + num(d.amount), 0));
-  return shape(actor, claims, visits, value > 0 ? value : null, dealRows.find((d) => d.currency)?.currency ?? null);
+  const items = await loadClaimItems(actor.org_id, claims.map((c) => c.id).filter(Boolean));
+  return shape(actor, claims, items, visits, value > 0 ? value : null, dealRows.find((d) => d.currency)?.currency ?? null);
 }
 
 /** GET /crm/deals/:id/expenses — everything spent on this deal; visits are the deal's plus its lead's. */
@@ -199,5 +247,6 @@ export async function dealExpenseRollup(actor: Actor, dealId: string): Promise<E
     countVisits(actor.org_id, leadId, dealId),
   ]);
   const amount = num(d.amount);
-  return shape(actor, claims, visits, amount > 0 ? round2(amount) : null, d.currency ?? null);
+  const items = await loadClaimItems(actor.org_id, claims.map((c) => c.id).filter(Boolean));
+  return shape(actor, claims, items, visits, amount > 0 ? round2(amount) : null, d.currency ?? null);
 }
