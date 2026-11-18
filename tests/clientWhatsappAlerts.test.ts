@@ -59,7 +59,7 @@ describe('settings input', () => {
   it('refuses to switch on without a template, a person and an update', () => {
     expect(() => parseSettingsInput({ enabled: true, recipients: [{ phone: '9811112222' }], kinds: ['sos'] })).toThrow(/template/);
     expect(() => parseSettingsInput({ enabled: true, template_id: TPL, kinds: ['sos'] })).toThrow(/at least one person/);
-    expect(() => parseSettingsInput({ enabled: true, template_id: TPL, recipients: [{ phone: '9811112222' }] })).toThrow(/at least one update/);
+    expect(() => parseSettingsInput({ enabled: true, template_id: TPL, recipients: [{ phone: '9811112222' }] })).toThrow(/at least one update, or the daily summary/);
     // Switched off, an incomplete setup can still be saved as a draft.
     expect(parseSettingsInput({ enabled: false, recipients: [{ phone: '9811112222' }] }).recipients).toEqual([{ name: '', phone: '919811112222' }]);
   });
@@ -117,7 +117,7 @@ describe('PUT /clients/:id/whatsapp-alerts', () => {
     const ins = supa().chainsFor('org_settings').find((c: any) => c.ops.some((o: any) => o.method === 'insert'));
     expect(ins.ops.find((o: any) => o.method === 'insert').args[0]).toEqual({
       org_id: 'org-client', key: WA_SETTING_KEY, updated_by: 'u-admin',
-      value: { enabled: true, template_id: TPL, recipients: [{ name: 'Asha', phone: '919811112222' }], kinds: ['sos', 'leave_request'] },
+      value: { enabled: true, template_id: TPL, recipients: [{ name: 'Asha', phone: '919811112222' }], kinds: ['sos', 'leave_request'], daily_summary: false },
     });
   });
 

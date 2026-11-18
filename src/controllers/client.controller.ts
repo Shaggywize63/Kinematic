@@ -12,6 +12,7 @@ import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
 import { readOrgSettings, writeOrgSettings } from '../services/notificationPolicy';
 import { readAlertSettings, writeAlertSettings, sendTestAlert, AlertSettingsError } from '../services/clientWhatsappAlerts.service';
+import { sendSummaryNow } from '../services/clientDailySummary.service';
 import { cleanAppUiForStore } from '../lib/appItems';
 import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, countActiveUsersByOrg, nextUnpaidInvoicesByCustomer, type NextPayment } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
@@ -1177,13 +1178,17 @@ export const setClientWhatsappAlerts = asyncHandler(async (req: AuthRequest, res
   ok(res, await readAlertSettings(target.orgId, target.admin, target.project));
 });
 
-/** POST /api/v1/clients/:id/whatsapp-alerts/test — send a test alert to every saved recipient. */
+/**
+ * POST /api/v1/clients/:id/whatsapp-alerts/test — send a test alert to every saved recipient.
+ * Body { type: 'daily_summary' } sends today's manager summary so far instead.
+ */
 export const testClientWhatsappAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
   const target = await ownedClientOrg(req, res);
   if (!target) return;
+  const summary = (req.body ?? {}).type === 'daily_summary';
   try {
     // Send from the project that holds the client's WhatsApp connection and templates.
-    const results = await runWithProject(target.project, () => sendTestAlert(target.orgId));
+    const results = await runWithProject(target.project, () => (summary ? sendSummaryNow(target.orgId) : sendTestAlert(target.orgId)));
     ok(res, { results, sent: results.filter((r) => r.status === 'sent').length, failed: results.filter((r) => r.status === 'failed').length });
   } catch (e: any) {
     badRequest(res, e instanceof AlertSettingsError ? e.message : (e?.message || 'Could not send the test alert'));

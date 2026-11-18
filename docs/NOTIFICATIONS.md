@@ -243,6 +243,23 @@ they get, and an approved WhatsApp template. Off by default for every client.
 - **Off switches**: projects in `NOTIFICATIONS_DISABLED_PROJECTS` (Tata by default) send nothing; `CLIENT_WHATSAPP_ALERTS=off`
   stops all forwarding.
 
+### Daily manager summary (7 pm IST)
+
+`daily_summary: true` in the same setting adds one end-of-day message to the same people
+(`src/services/clientDailySummary.service.ts`): attendance (present / on leave / absent of active field reps), planned
+visits done (a stop counts when its status is visited or it has a `checkin_at`), orders booked today and their value
+(excluding draft and cancelled), new leads, the top 3 reps by visits, reps checked in with planned visits but none
+done, and check-ins worth a look (mock GPS or failed face match at check-in, teleport pings, app mock-location alerts,
+visits outside the outlet geofence). "Today" is the IST day; a section whose data can't be read is left out.
+
+- **When**: in-process tick, default 13:30 UTC (19:00 IST): `CLIENT_DAILY_SUMMARY_HOUR_UTC` / `_MINUTE_UTC`;
+  `CLIENT_DAILY_SUMMARY_ENABLED=false` turns it off. Also `POST /api/v1/cron/dispatch-client-daily-summaries`.
+- **Once per client per day**: the sender claims `(org_id, summary_date)` in `client_daily_summary_log` (unique index,
+  `migration_client_daily_summary_log.sql`, applied on boot by `lib/autoMigrate` for the Kinematic project). A failed
+  claim, including a missing table, means no send. A day with no reps, orders or leads is skipped.
+- **Send now**: `POST /api/v1/clients/:id/whatsapp-alerts/test` with `{ "type": "daily_summary" }` sends today's
+  figures so far without using up the day.
+
 ## Self-gating & tenant safety
 
 The new scans change nothing for tenants that don't use the feature:

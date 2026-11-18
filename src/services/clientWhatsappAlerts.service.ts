@@ -6,7 +6,9 @@
  *
  * Stored per org in org_settings `notifications.whatsapp`, on the org that holds the client's users, the same place
  * as the in-app catalogue (services/notificationPolicy.ts):
- *   { enabled, template_id, recipients: [{ name, phone }], kinds: [...] }
+ *   { enabled, template_id, recipients: [{ name, phone }], kinds: [...], daily_summary }
+ *
+ * `daily_summary` adds the 7 pm manager summary (services/clientDailySummary.service.ts) to the same people.
  *
  * Delivery piggybacks on the push dispatcher (services/notifications.service.ts): every notification row that is
  * allowed through the in-app policy is offered here, so every writer is covered without being touched. One event
@@ -59,9 +61,11 @@ export interface WhatsappAlertSettings {
   template_id: string | null;
   recipients: Recipient[];
   kinds: string[];
+  /** Also send the end-of-day manager summary (services/clientDailySummary.service.ts). */
+  daily_summary: boolean;
 }
 
-const EMPTY: WhatsappAlertSettings = { enabled: false, template_id: null, recipients: [], kinds: [] };
+const EMPTY: WhatsappAlertSettings = { enabled: false, template_id: null, recipients: [], kinds: [], daily_summary: false };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Digits only, with India's 91 added to a 10-digit number. Null when it can't be a WhatsApp number. */
@@ -82,7 +86,7 @@ export function toSettings(value: unknown): WhatsappAlertSettings {
   }
   const kinds = [...new Set((Array.isArray(v.kinds) ? v.kinds : []).map((k) => canonicalKind(String(k))).filter((k) => WA_KIND_SET.has(k)))];
   const template_id = typeof v.template_id === 'string' && UUID.test(v.template_id) ? v.template_id : null;
-  return { enabled: v.enabled === true, template_id, recipients: recipients.slice(0, MAX_RECIPIENTS), kinds };
+  return { enabled: v.enabled === true, template_id, recipients: recipients.slice(0, MAX_RECIPIENTS), kinds, daily_summary: v.daily_summary === true };
 }
 
 export class AlertSettingsError extends Error {}
@@ -117,12 +121,13 @@ export function parseSettingsInput(input: unknown): WhatsappAlertSettings {
   }
 
   const enabled = v.enabled === true;
+  const daily_summary = v.daily_summary === true;
   if (enabled) {
     if (!template_id) throw new AlertSettingsError('Choose an approved WhatsApp template before switching alerts on.');
     if (!recipients.length) throw new AlertSettingsError('Add at least one person to receive alerts before switching them on.');
-    if (!kinds.size) throw new AlertSettingsError('Choose at least one update to send before switching alerts on.');
+    if (!kinds.size && !daily_summary) throw new AlertSettingsError('Choose at least one update, or the daily summary, before switching alerts on.');
   }
-  return { enabled, template_id, recipients, kinds: [...kinds] };
+  return { enabled, template_id, recipients, kinds: [...kinds], daily_summary };
 }
 
 // ── Templates ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -221,7 +226,7 @@ export async function writeAlertSettings(orgId: string, input: unknown, updatedB
 export interface SendOutcome { phone: string; name: string; status: 'sent' | 'failed'; error: string | null }
 
 /** Send one alert to every recipient. Runs in the CURRENT project (sendWhatsapp uses the project-scoped client). */
-async function sendToRecipients(orgId: string, s: WhatsappAlertSettings, title: string, body: string): Promise<SendOutcome[]> {
+export async function sendToRecipients(orgId: string, s: WhatsappAlertSettings, title: string, body: string): Promise<SendOutcome[]> {
   if (!s.template_id) return [];
   const t = (await listTemplates(orgId, supabaseAdmin)).find((x) => x.id === s.template_id);
   const vars = templateVariables(placeholderCount(t?.body_text), title, body);
