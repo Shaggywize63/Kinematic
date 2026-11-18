@@ -23,6 +23,7 @@
  *   *      benefits/...                   phase 7: the Benefits module on the server (hrmsBenefits.routes.ts)
  *   *      compensation/...               phase 8: Compensation (pay bands + merit cycle) (hrmsCompensation.routes.ts)
  *      timesheets/...                 phase 9: Timesheets (projects, weekly sheets, limits) (hrmsTimesheets.routes.ts)
+ *      learning/...                   phase 10: Learning (courses, assignments, quizzes, certificates) (hrmsLearning.routes.ts)
  *
  * PAN and bank details are encrypted at rest (lib/hrmsCrypto) and masked in every response; they are write-only.
  * If the HRMS tables are not there yet (migration_hrms_core.sql not applied) every call answers 503 HRMS_NOT_READY.
@@ -54,6 +55,7 @@ import assetsRoutes from './hrmsAssets.routes';
 import benefitsRoutes from './hrmsBenefits.routes';
 import compensationRoutes from './hrmsCompensation.routes';
 import timesheetsRoutes from './hrmsTimesheets.routes';
+import learningRoutes from './hrmsLearning.routes';
 import * as payrollSettings from '../services/hrms/payroll/settings.service';
 import { payrollSettingsBody } from '../services/hrms/payroll/schemas';
 
@@ -112,6 +114,9 @@ router.use('/compensation', compensationRoutes);
 
 // ── timesheets: projects, weekly sheets, limits (phase 9) ─────────────────────
 router.use('/timesheets', timesheetsRoutes);
+
+// ── learning: courses, assignments, quizzes, certificates (phase 10) ──────────
+router.use('/learning', learningRoutes);
 
 // ── organisation structure ──────────────────────────────────────────────────
 const MASTER_ROUTES: Array<{ path: string; kind: MasterKind; create: Parameters<typeof parse>[0]; update: Parameters<typeof parse>[0] }> = [
