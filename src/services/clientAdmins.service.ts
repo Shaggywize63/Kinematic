@@ -26,6 +26,14 @@ export const CLIENT_ADMIN_ROLE = 'client';
 /** Roles listed as a client's admins: `client`, plus older admin-tier rows bound to the client. */
 export const CLIENT_ADMIN_ROLES = ['client', 'main_admin', 'admin'] as const;
 
+/**
+ * Whether a user row counts as one of the client's admins. Checked here, NOT as `.in('role', …)` in the query:
+ * `users.role` is a Postgres enum whose values differ between projects (the Kinematic database has no `main_admin`),
+ * and PostgREST rejects the whole query when a filter names a value the enum does not have.
+ */
+export const isClientAdminRole = (role: unknown): boolean =>
+  (CLIENT_ADMIN_ROLES as readonly string[]).includes(String(role ?? '').toLowerCase());
+
 /** Where a client's users live: the project's admin client, the org, and the client id inside that project. */
 export interface ClientAdminTarget {
   admin: SupabaseClient;
@@ -110,11 +118,12 @@ export async function listClientAdmins(target: ClientAdminTarget, primaryEmail?:
     .from('users')
     .select(LIST_COLS)
     .eq('client_id', target.clientId)
-    .in('role', [...CLIENT_ADMIN_ROLES])
     .is('deleted_at', null)
     .order('created_at', { ascending: true });
   if (error) throw new AppError(500, `Could not load this client’s admins: ${error.message}`, 'DB_ERROR');
-  return ((data || []) as Record<string, unknown>[]).map((r) => toRow(r, target, primaryEmail));
+  return ((data || []) as Record<string, unknown>[])
+    .filter((r) => isClientAdminRole(r.role))
+    .map((r) => toRow(r, target, primaryEmail));
 }
 
 async function assertSeat(target: ClientAdminTarget, email: string | null | undefined): Promise<void> {
@@ -218,10 +227,9 @@ export async function setClientAdminActive(
     .select(LIST_COLS)
     .eq('id', userId)
     .eq('client_id', target.clientId)
-    .in('role', [...CLIENT_ADMIN_ROLES])
     .maybeSingle();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  if (!found) throw new AppError(404, 'Admin not found', 'NOT_FOUND');
+  if (!found || !isClientAdminRole((found as { role?: unknown }).role)) throw new AppError(404, 'Admin not found', 'NOT_FOUND');
   const current = found as Record<string, unknown>;
   if (!active && actorId && actorId === userId) throw new AppError(400, 'You cannot switch off your own login.', 'VALIDATION_ERROR');
   if (current.is_active === active) return toRow(current, target, primaryEmail);
@@ -253,10 +261,9 @@ export async function moveClientAdminIntoClientOrg(
     .select(LIST_COLS)
     .eq('id', userId)
     .eq('client_id', target.clientId)
-    .in('role', [...CLIENT_ADMIN_ROLES])
     .maybeSingle();
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
-  if (!found) throw new AppError(404, 'Admin not found', 'NOT_FOUND');
+  if (!found || !isClientAdminRole((found as { role?: unknown }).role)) throw new AppError(404, 'Admin not found', 'NOT_FOUND');
   const current = found as Record<string, unknown>;
   if (current.org_id === target.orgId) return toRow(current, target, primaryEmail);
 

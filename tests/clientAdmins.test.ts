@@ -214,6 +214,7 @@ describe('GET /clients/:id/admins', () => {
       ? { data: [
         { id: 'a1', name: 'Owner', email: 'Owner@client.co', role: 'client', is_active: true, org_id: 'org-client' },
         { id: 'a2', name: 'Misplaced', email: 'm@client.co', role: 'client', is_active: true, org_id: 'org-parent' },
+        { id: 'fe1', name: 'Field Rep', email: 'rep@client.co', role: 'executive', is_active: true, org_id: 'org-client' },
       ] }
       : { data: [] }));
     supa().setDefault('org_settings', { data: { value: '10' } });
@@ -226,10 +227,10 @@ describe('GET /clients/:id/admins', () => {
     expect(out.data.admins.map((a: any) => [a.id, a.is_primary, a.in_client_org])).toEqual([['a1', true, true], ['a2', false, false]]);
     const list = supa().chainsFor('users').find((c: any) => c.ops.some((o: any) => o.method === 'order'));
     expect(list.eqs).toMatchObject({ client_id: CLIENT });
-    expect(list.ops).toEqual(expect.arrayContaining([
-      { method: 'in', args: ['role', ['client', 'main_admin', 'admin']] },
-      { method: 'is', args: ['deleted_at', null] },
-    ]));
+    expect(list.ops).toEqual(expect.arrayContaining([{ method: 'is', args: ['deleted_at', null] }]));
+    // No role filter in the query: users.role is an enum whose values differ by project (Kinematic has no
+    // main_admin), and PostgREST rejects a filter naming a value the enum lacks. Roles are filtered in code.
+    expect(list.ops.some((o: any) => o.method === 'in')).toBe(false);
   });
 });
 
@@ -252,6 +253,13 @@ describe('PATCH /clients/:id/admins/:userId', () => {
     supa().setDefault('users', { data: null });
     const { status } = await call(updateClientAdmin, { params: { id: CLIENT, userId: OTHER_ADMIN }, body: { is_active: false } });
     expect(status).toBe(404);
+  });
+
+  it('404s for a non-admin user of this client, and changes nothing', async () => {
+    supa().setDefault('users', { data: { ...adminRow, role: 'executive' } });
+    const { status } = await call(updateClientAdmin, { params: { id: CLIENT, userId: OTHER_ADMIN }, body: { is_active: false } });
+    expect(status).toBe(404);
+    expect(supa().chainsFor('users').some((c: any) => c.ops.some((o: any) => o.method === 'update'))).toBe(false);
   });
 
   it('will not let the caller switch off their own login', async () => {
