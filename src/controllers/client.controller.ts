@@ -5,12 +5,13 @@ import { asyncHandler, ok, created, badRequest, notFound, isUUID } from '../util
 import { isDemo, getMockClients } from '../utils/demoData';
 import { clearEntitlementCache } from '../lib/entitlements';
 import { clearClientFlagCache } from '../lib/clientFlags';
-import { currentProjectKey, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor, clearEmailProjectCache } from '../lib/projects';
+import { currentProjectKey, projectHs256Key, getProjectConfig, isKnownProject, adminClientFor, clearEmailProjectCache, runWithProject } from '../lib/projects';
 import { SignJWT } from 'jose';
 import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
 import { encryptSecret, decryptSecret } from '../lib/secretBox';
 import { logger } from '../lib/logger';
 import { readOrgSettings, writeOrgSettings } from '../services/notificationPolicy';
+import { readAlertSettings, writeAlertSettings, sendTestAlert, AlertSettingsError } from '../services/clientWhatsappAlerts.service';
 import { cleanAppUiForStore } from '../lib/appItems';
 import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, countActiveUsersByOrg, nextUnpaidInvoicesByCustomer, type NextPayment } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
@@ -1150,6 +1151,43 @@ export const setClientNotifications = asyncHandler(async (req: AuthRequest, res:
     return;
   }
   ok(res, await readOrgSettings(target.orgId, target.admin, target.project));
+});
+
+// ── WhatsApp alerts per client (Client Management → WhatsApp alerts) ──────────────────────────────────────────
+// Who gets this client's updates on WhatsApp, which updates, and the approved template they go out with. Stored on
+// the org that holds the client's users, like the notification settings above. See services/clientWhatsappAlerts.
+
+/** GET /api/v1/clients/:id/whatsapp-alerts — settings, the updates on offer, approved templates and connection status. */
+export const getClientWhatsappAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const target = await ownedClientOrg(req, res);
+  if (!target) return;
+  ok(res, await readAlertSettings(target.orgId, target.admin, target.project));
+});
+
+/** PUT /api/v1/clients/:id/whatsapp-alerts — body { enabled, template_id, recipients: [{ name, phone }], kinds: [] }. */
+export const setClientWhatsappAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const target = await ownedClientOrg(req, res);
+  if (!target) return;
+  try {
+    await writeAlertSettings(target.orgId, req.body ?? {}, req.user!.id, target.admin);
+  } catch (e: any) {
+    badRequest(res, e instanceof AlertSettingsError ? e.message : (e?.message || 'Could not save WhatsApp alert settings'));
+    return;
+  }
+  ok(res, await readAlertSettings(target.orgId, target.admin, target.project));
+});
+
+/** POST /api/v1/clients/:id/whatsapp-alerts/test — send a test alert to every saved recipient. */
+export const testClientWhatsappAlerts = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const target = await ownedClientOrg(req, res);
+  if (!target) return;
+  try {
+    // Send from the project that holds the client's WhatsApp connection and templates.
+    const results = await runWithProject(target.project, () => sendTestAlert(target.orgId));
+    ok(res, { results, sent: results.filter((r) => r.status === 'sent').length, failed: results.filter((r) => r.status === 'failed').length });
+  } catch (e: any) {
+    badRequest(res, e instanceof AlertSettingsError ? e.message : (e?.message || 'Could not send the test alert'));
+  }
 });
 
 // ── Account & billing (Client Management → Account) ──────────────────────────
