@@ -122,7 +122,20 @@ export async function createLead({ org_id, user_id, payload, skipDedup, enforceR
   // The lead number is server-assigned and read-only: whatever a caller (route, import, webhook, KINI) put in the
   // payload is discarded; the number is only ever allocated below (connected-B2B clients only).
   delete (payload as Record<string, unknown>).ref_no;
-  if (!skipDedup) {
+  // Connected-B2B (Spark & Ray): a lead is a REQUIREMENT, not a person. One nodal
+  // contact at a plant legitimately has several open leads — "NTPC · Dadri ·
+  // Procurement — 150 mm Gate Valves" and "… — Butterfly Valves" are different
+  // opportunities with the same phone and email. Email/phone dedup exists for B2C
+  // inbound, where the phone IS the customer's identity; applied here it rejected
+  // every lead after the first for that person ("A lead with this phone already
+  // exists"), which is the exact flow the structured lead form is built around.
+  //
+  // Duplicates still cannot slip in unnoticed for these clients: the lead form
+  // links an EXISTING contact rather than retyping a person, and the account page
+  // shows the contact's leads together, so a true repeat is visible where it
+  // matters. Every other tenant keeps the guard exactly as it was.
+  const requirementLeads = isB2bClient((payload.client_id as string | null) ?? null);
+  if (!skipDedup && !requirementLeads) {
     if (payload.email) {
       const dup = await dedup.findLeadByEmail(org_id, payload.email);
       if (dup) {
