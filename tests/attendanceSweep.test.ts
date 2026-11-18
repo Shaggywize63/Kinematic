@@ -11,11 +11,12 @@ jest.mock('../src/lib/supabase', () => {
 });
 
 import {
-  autoCheckoutOverdue, sendCheckoutReminders, sendScheduledCheckoutReminders, runAttendanceSweep,
+  autoCheckoutOverdue, sendCheckoutReminders, sendScheduledCheckoutReminders, sendCheckinReminders, runAttendanceSweep,
   istDayStartMs, istDayEndMs, istMinuteOfDay, workedMinutes, scheduledReminderMinute,
-  CHECKOUT_REMINDER_KIND, AUTO_CHECKOUT_NOTE, AUTO_CHECKOUT_SETTING, CHECKOUT_REMINDER_SETTING,
+  CHECKOUT_REMINDER_KIND, CHECKIN_REMINDER_KIND, AUTO_CHECKOUT_NOTE, AUTO_CHECKOUT_SETTING, CHECKOUT_REMINDER_SETTING,
   SCHEDULED_CHECKOUT_REMINDER_SETTING,
 } from '../src/services/attendanceSweep.service';
+import { istDateOf, weekdayOf } from '../src/services/attendanceRules.service';
 
 const supa = () => (global as any).__supa;
 const iso = (s: string) => new Date(s).toISOString();
@@ -281,12 +282,112 @@ describe('fixed-time (6:30 PM) check-out reminder', () => {
   });
 });
 
+describe('check-in reminder (shift-configured clients)', () => {
+  // 05:00Z = 10:30 IST on 2026-10-08. Shift 09:30 + 15 min grace -> deadline 09:45 IST (minute 585),
+  // window open through 13:45 IST (minute 825).
+  const NOW_IN = Date.parse('2026-10-08T05:00:00Z');
+  const TODAY = istDateOf(NOW_IN) as string;
+  const BEFORE_DEADLINE = Date.parse('2026-10-08T03:00:00Z');  // 08:30 IST
+  const AFTER_WINDOW = Date.parse('2026-10-08T09:00:00Z');     // 14:30 IST
+
+  const client = (id: string, rules: Record<string, unknown> = {}) =>
+    ({ id, org_id: 'org-1', settings: { attendance_rules: { shift_start: '09:30', grace_minutes: 15, weekly_off: [], ...rules } } });
+  const user = (id: string, x: Record<string, unknown> = {}) => ({ id: `u-${id}`, org_id: 'org-1', client_id: 'c-1', created_at: '2020-01-01T00:00:00Z', ...x });
+
+  function seed(users: Array<Record<string, any>>, o: {
+    clients?: Array<Record<string, any>>; attendance?: Array<Record<string, any>>; leaves?: Array<Record<string, any>>; prior?: Array<Record<string, unknown>>;
+  } = {}) {
+    supa().setDefault('clients', { data: o.clients ?? [client('c-1')] });
+    supa().setDefault('users', { data: users });
+    supa().setDefault('attendance', { data: o.attendance ?? [] });
+    supa().setDefault('leave_requests', { data: o.leaves ?? [] });
+    supa().setDefault('notifications', (chain: any) => (has(chain, 'insert') ? { data: [] } : { data: o.prior ?? [] }));
+  }
+
+  it('reminds a field rep with no check-in once the deadline has passed', async () => {
+    seed([user('a')]);
+    const r = await sendCheckinReminders(NOW_IN);
+    expect(r).toEqual({ candidates: 1, reminded: 1 });
+    const [n] = insertsOf('notifications');
+    expect(n).toMatchObject({ org_id: 'org-1', user_id: 'u-a', title: "Don't forget to check in", type: 'general', sent_at: null, is_read: false });
+    expect(n.data).toMatchObject({ kind: CHECKIN_REMINDER_KIND, date: TODAY });
+    expect(n.body).toMatch(/9:30 AM/);   // the label is the shift start, not the grace-inclusive deadline
+  });
+
+  it('the roster query scopes to field roles, active users, the due clients', async () => {
+    seed([user('a')]);
+    await sendCheckinReminders(NOW_IN);
+    const q = supa().chainsFor('users')[0];
+    expect(has(q, 'in', 'client_id', ['c-1'])).toBe(true);
+    expect(has(q, 'in', 'role', ['executive', 'field_executive'])).toBe(true);
+    expect(has(q, 'eq', 'is_active', true)).toBe(true);
+    expect(has(q, 'is', 'deleted_at', null)).toBe(true);
+  });
+
+  it('does nothing when no client has shift rules configured (no roster query)', async () => {
+    seed([user('a')], { clients: [] });
+    expect(await sendCheckinReminders(NOW_IN)).toEqual({ candidates: 0, reminded: 0 });
+    expect(supa().chainsFor('users')).toHaveLength(0);
+  });
+
+  it('does nothing before the deadline', async () => {
+    seed([user('a')]);
+    expect(await sendCheckinReminders(BEFORE_DEADLINE)).toEqual({ candidates: 0, reminded: 0 });
+    expect(supa().chainsFor('users')).toHaveLength(0);
+  });
+
+  it('does nothing once the reminder window has closed', async () => {
+    seed([user('a')]);
+    expect(await sendCheckinReminders(AFTER_WINDOW)).toEqual({ candidates: 0, reminded: 0 });
+    expect(supa().chainsFor('users')).toHaveLength(0);
+  });
+
+  it('skips a client\'s weekly-off day', async () => {
+    seed([user('a')], { clients: [client('c-1', { weekly_off: [weekdayOf(TODAY)] })] });
+    expect(await sendCheckinReminders(NOW_IN)).toEqual({ candidates: 0, reminded: 0 });
+  });
+
+  it('excludes a rep who already checked in today', async () => {
+    seed([user('a'), user('b')], { attendance: [{ user_id: 'u-a', checkin_at: '2026-10-08T03:45:00Z' }] });
+    const r = await sendCheckinReminders(NOW_IN);
+    expect(r).toEqual({ candidates: 2, reminded: 1 });
+    expect(insertsOf('notifications').map((n: any) => n.user_id)).toEqual(['u-b']);
+  });
+
+  it('excludes a rep on approved leave today', async () => {
+    seed([user('a'), user('b')], { leaves: [{ user_id: 'u-a' }] });
+    const r = await sendCheckinReminders(NOW_IN);
+    expect(r.reminded).toBe(1);
+    expect(insertsOf('notifications').map((n: any) => n.user_id)).toEqual(['u-b']);
+  });
+
+  it('never reminds the same rep twice in a day', async () => {
+    seed([user('a')], { prior: [{ user_id: 'u-a' }] });
+    expect((await sendCheckinReminders(NOW_IN)).reminded).toBe(0);
+    expect(insertsOf('notifications')).toHaveLength(0);
+  });
+
+  it('a user who joined after today is not a candidate', async () => {
+    seed([user('a'), user('b', { created_at: '2099-01-01T00:00:00Z' })]);
+    const r = await sendCheckinReminders(NOW_IN);
+    expect(r.candidates).toBe(1);
+    expect(insertsOf('notifications').map((n: any) => n.user_id)).toEqual(['u-a']);
+  });
+
+  it('does nothing when there is no roster', async () => {
+    seed([]);
+    expect(await sendCheckinReminders(NOW_IN)).toEqual({ candidates: 0, reminded: 0 });
+    expect(supa().chainsFor('attendance')).toHaveLength(0);
+  });
+});
+
 describe('runAttendanceSweep', () => {
-  it('runs both steps, auto-checkout first', async () => {
+  it('runs every step, auto-checkout first', async () => {
     seedAttendance([]);
     const r = await runAttendanceSweep({ now: NOW });
     expect(r.auto_checkout.found).toBe(0);
     expect(r.reminders.candidates).toBe(0);
+    expect(r.checkin_reminders).toEqual({ candidates: 0, reminded: 0 }); // no client has shift rules configured here
     const order = supa().chainsFor('attendance').map((c: any) => (has(c, 'lt', 'checkin_at', TODAY_START) ? 'close' : 'remind'));
     expect(order).toEqual(['close', 'remind']);
   });
