@@ -85,6 +85,21 @@ describe('crud.list', () => {
     expect(chain.ors).toContain('owner_id.in.(u1,u2),assigned_to.in.(u1,u2)');
   });
 
+  it('ORs co-owned record ids into a scoped owner filter (widens visibility)', async () => {
+    __mock.setDefault('crm_contacts', { data: [] });
+    await crud.list('crm_contacts', ORG, {}, { visibleOwnerIds: ['u1'], coAssignedIds: ['r1', 'r2'] });
+    const chain = __mock.chainsFor('crm_contacts')[0];
+    expect(chain.ors).toContain('owner_id.in.(u1),id.in.(r1,r2)');
+  });
+
+  it('shows co-owned rows even when the owner scope is empty (does not short-circuit)', async () => {
+    __mock.setDefault('crm_contacts', { data: [] });
+    await crud.list('crm_contacts', ORG, {}, { visibleOwnerIds: [], coAssignedIds: ['r1'] });
+    const chain = __mock.chainsFor('crm_contacts')[0];
+    expect(chain.ors).toContain('id.in.(r1)');
+    expect(chain.ops.some((o) => o.method === 'range')).toBe(true); // it finalized, not short-circuited
+  });
+
   it('clamps limit to a maximum of 200 and applies range() pagination', async () => {
     __mock.setDefault('crm_notes', { data: [] });
     await crud.list('crm_notes', ORG, { limit: '9999', page: '3' });

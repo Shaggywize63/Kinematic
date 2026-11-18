@@ -56,6 +56,7 @@ import { ensureLocationMaster } from '../services/crm/locationSeed';
 import { writeAccountResilient } from '../services/crm/accountWrite';
 import * as accountMerge from '../services/crm/accountMerge.service';
 import * as expenseRollup from '../services/crm/expenseRollup.service';
+import * as recordOwners from '../services/crm/recordOwners.service';
 import { audit } from '../utils/audit';
 import { writeActivityResilient, restoreCarrierType } from '../services/crm/activityTypeFallback';
 import * as hierarchy from '../services/crm/hierarchy.service';
@@ -269,6 +270,16 @@ export async function crmVisibleOwnerIds(req: AuthRequest): Promise<string[] | n
   const me = req.user;
   if (crmOwnScope(req, me)) return me?.id ? [me.id] : [];
   return null;
+}
+
+/**
+ * The record ids the caller CO-owns, to widen a scoped list so a co-owner sees the record in their own
+ * list. Skipped (undefined) when `visibleOwnerIds` is null — the caller already sees every record, so
+ * there is nothing to widen and we avoid the extra query.
+ */
+async function coOwnedScope(req: AuthRequest, entity: recordOwners.OwnerEntity, visibleOwnerIds: string[] | null): Promise<string[] | undefined> {
+  if (visibleOwnerIds === null) return undefined;
+  return recordOwners.coOwnedEntityIds(orgId(req), req.user?.id ?? null, entity);
 }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -769,6 +780,22 @@ function parse<S extends z.ZodTypeAny>(schema: S, payload: unknown): z.infer<S> 
   }
 }
 
+/**
+ * Mount the co-owner (additional owners) endpoints on an entity router:
+ *   GET  /:id/co-owners  → the record's co-owners (user_id + name)
+ *   PUT  /:id/co-owners  → replace the co-owner set ({ user_ids: [...] })
+ * The record keeps its single primary owner_id; these are the peers who also see it.
+ */
+function mountCoOwnerRoutes(router: express.Router, entity: recordOwners.OwnerEntity): void {
+  router.get('/:id/co-owners', wrap(async (req, res) => {
+    res.json(await recordOwners.listCoOwners(bridgeCtx(req), entity, req.params.id));
+  }));
+  router.put('/:id/co-owners', wrap(async (req, res) => {
+    const body = parse(z.object({ user_ids: z.array(z.string().uuid()).max(50) }), req.body ?? {});
+    res.json(await recordOwners.setCoOwners(bridgeCtx(req), entity, req.params.id, body.user_ids));
+  }));
+}
+
 // ---------- LEADS ----------------------------------------------------
 const leads = express.Router();
 leads.get('/', wrap(async (req, res) => {
@@ -813,12 +840,17 @@ leads.get('/', wrap(async (req, res) => {
   // Champion (all tenants) and, on non-default projects, every
   // data_scope='own' designation; a team/all-scope manager is NOT own-only.
   const ownOnly = leadsOwnOnly(req, me);
+  // Co-owned leads widen a scoped list so a co-owner sees them too (skipped when the caller already
+  // sees every lead: no owner scope and not own-only).
+  const coOwnedIds = (visibleOwnerIds === null && !ownOnly)
+    ? undefined
+    : await recordOwners.coOwnedEntityIds(orgId(req), selfOwnerId, 'lead');
   // Return both the page and the matching total so the UI can render
   // real pagination ("Page 2 of 47") and a jump control. `data` is the
   // existing array shape every legacy caller expects; `pagination` is
   // additive — old callers ignore it.
   const { rows, total, page, limit } = await leadsSvc.listLeadsWithCount(
-    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity, ownOnly }
+    orgId(req), req.query, scope.id, { strictClient: scope.strict, effectiveCities, visibleOwnerIds, selfOwnerId, includeNullCity, ownOnly, coOwnedIds }
   );
   // Owner UUIDs → owner_name; source UUIDs → source_name; created_by
   // UUIDs → created_by_name. The created_by stamp lets the leads list
@@ -2028,6 +2060,7 @@ router.get('/home', wrap(async (req, res) => {
   res.json({ success: true, data: payload });
 }));
 
+mountCoOwnerRoutes(leads, 'lead');
 router.use('/leads', rbac.requireModuleAccess('crm_leads'), leads);
 
 // ---------- MARKETING VISITS (ad-hoc GPS Start → End tied to a lead) --------
@@ -2212,8 +2245,9 @@ const contactOpts = { searchColumns: ['first_name','last_name','email','phone'] 
 contacts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
   const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
+  const coAssignedIds = await coOwnedScope(req as AuthRequest, 'contact', visibleOwnerIds);
   return res.json(
-    await stampAccountNames(await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds })))
+    await stampAccountNames(await stampOwnerNames(await crud.clientScopedList('crm_contacts', orgId(req), scope.id, req.query, { ...contactOpts, strictClient: scope.strict, visibleOwnerIds, coAssignedIds })))
   );
 }));
 contacts.post('/', idempotency, wrap(async (req, res) => {
@@ -2291,6 +2325,7 @@ contacts.get('/:id/notes', wrap(async (req, res) => res.json(
   await crud.list('crm_notes', orgId(req), { entity_type: 'contact', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
 contacts.get('/:id/emails', wrap(async (req, res) => res.json(await emailsSvc.listLogs(orgId(req), { contact_id: req.params.id }))));
+mountCoOwnerRoutes(contacts, 'contact');
 router.use('/contacts', rbac.requireModuleAccess('crm_contacts'), contacts);
 
 // ---------- ACCOUNTS -------------------------------------------------
@@ -2298,7 +2333,8 @@ const accounts = express.Router();
 accounts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
   const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
-  const { rows, total, page, limit } = await crud.clientScopedListWithCount('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds });
+  const coAssignedIds = await coOwnedScope(req as AuthRequest, 'account', visibleOwnerIds);
+  const { rows, total, page, limit } = await crud.clientScopedListWithCount('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds, coAssignedIds });
   // Same `data` as before (the first 50 rows unless page / limit are sent), so existing callers are unchanged. Additive:
   // each row carries its deal / contact rollups (open + won deal count and value, contact count) and the response carries
   // `pagination`, so the dashboard can page and count the whole list instead of the first page.
@@ -2515,6 +2551,7 @@ accounts.get('/:id/journey', wrap(async (req, res) => {
   const timeline = await visitBridge.getAccountTimeline(bridgeCtx(req), req.params.id);
   res.json(await accountJourney.buildAccountJourney({ orgId: orgId(req), accountId: req.params.id, timeline: timeline as never }));
 }));
+mountCoOwnerRoutes(accounts, 'account');
 router.use('/accounts', rbac.requireModuleAccess('crm_accounts'), accounts);
 
 // ---------- SITES (plants) -------------------------------------------
@@ -2572,9 +2609,10 @@ const deals = express.Router();
 deals.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
   const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
+  const coOwnedIds = await coOwnedScope(req as AuthRequest, 'deal', visibleOwnerIds);
   const [{ rows, total, page, limit }, totals, isSteel] = await Promise.all([
-    dealsSvc.listDealsWithCount(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
-    dealsSvc.dealsTotals(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds }),
+    dealsSvc.listDealsWithCount(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds, coOwnedIds }),
+    dealsSvc.dealsTotals(orgId(req), req.query, scope.id, { strictClient: scope.strict, visibleOwnerIds, coOwnedIds }),
     isSteelDealerClient(scope.id),
   ]);
   // Decorate with owner + linked-lead name/phone + dealer name so the
@@ -2888,6 +2926,7 @@ deals.get('/:id/notes', wrap(async (req, res) => res.json(
 deals.get('/:id/line-items', wrap(async (req, res) => res.json(await productsSvc.listLineItems(orgId(req), req.params.id, { clientId: clientId(req) }))));
 deals.post('/:id/line-items', wrap(async (req, res) =>
   res.status(201).json(await productsSvc.addLineItem(orgId(req), req.params.id, parse(v.lineItemSchema, req.body), userId(req), { clientId: clientId(req) }))));
+mountCoOwnerRoutes(deals, 'deal');
 router.use('/deals', rbac.requireModuleAccess('crm_deals'), deals);
 
 // ── Upsells ─────────────────────────────────────────────────────────────────
