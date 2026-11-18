@@ -6,6 +6,7 @@ import { runScheduledAutomations } from './services/crm/automations.service';
 import { resumeWaitingFlowRuns } from './services/crm/flows.service';
 import { runDueReportDigests } from './services/crm/reportSchedules.service';
 import { runDailyBriefings } from './services/crm/ai/dailyBriefing.service';
+import { runDailySummaries } from './services/clientDailySummary.service';
 import { processDueBroadcastsAllProjects } from './services/crm/broadcast.service';
 import { processDueEmailCampaignsAllProjects } from './services/crm/emailCampaign.service';
 import { runAutoReplenishmentAllProjects } from './services/distribution/replenishment.service';
@@ -122,6 +123,27 @@ if (String(process.env.CRM_DAILY_BRIEFING_ENABLED ?? 'true').toLowerCase() !== '
       .catch((e) => logger.warn(`[daily-briefing] run failed: ${e?.message ?? e}`));
   }, TICK_MIN * 60 * 1000).unref();
   logger.info(`[daily-briefing] scheduler enabled (fires ~${hhmm} UTC ≈ 09:00 IST, all projects)`);
+}
+
+// 7 pm manager summary on WhatsApp, for clients that switched it on (Client Management → WhatsApp alerts). Same
+// 15-minute window pattern as the briefing above; client_daily_summary_log makes it once per client per IST day
+// across ticks, restarts and instances. Default 13:30 UTC = 19:00 IST. Projects with notifications switched off
+// (Tata, by default) send nothing. Toggle with CLIENT_DAILY_SUMMARY_ENABLED=false; set the time with
+// CLIENT_DAILY_SUMMARY_HOUR_UTC / CLIENT_DAILY_SUMMARY_MINUTE_UTC.
+if (String(process.env.CLIENT_DAILY_SUMMARY_ENABLED ?? 'true').toLowerCase() !== 'false') {
+  const targetH = Math.min(23, Math.max(0, Number(process.env.CLIENT_DAILY_SUMMARY_HOUR_UTC ?? 13)));
+  const targetM = Math.min(59, Math.max(0, Number(process.env.CLIENT_DAILY_SUMMARY_MINUTE_UTC ?? 30)));
+  const TICK_MIN = 15;
+  const hhmm = `${String(targetH).padStart(2, '0')}:${String(targetM).padStart(2, '0')}`;
+  setInterval(() => {
+    const now = new Date();
+    const cur = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const target = targetH * 60 + targetM;
+    if (cur < target || cur >= target + TICK_MIN) return;
+    forEachProject('client-daily-summary', () => runDailySummaries())
+      .catch((e) => logger.warn(`[daily-summary] run failed: ${e?.message ?? e}`));
+  }, TICK_MIN * 60 * 1000).unref();
+  logger.info(`[daily-summary] scheduler enabled (fires ~${hhmm} UTC ≈ 19:00 IST, all projects)`);
 }
 
 // WhatsApp broadcast pacing. Short in-process tick that advances every in-flight
