@@ -7,7 +7,7 @@ import { computeDocument, LineInput, round2, num } from './money';
 import { getSettings, getCustomer, pageParams, safeSearch } from './masters.service';
 import { publicDocUrl } from './share';
 import { renderDocumentPdf } from './pdf.service';
-import { normalizeRecurrence, RecurrenceInput } from './recurrence';
+import { normalizeRecurrence, RecurrenceInput, cadenceLabel, specFromRow } from './recurrence';
 
 const db = () => supabaseAdmin;
 const fail = (e: { message: string }) => new AppError(500, e.message, 'DB_ERROR');
@@ -303,29 +303,29 @@ function filteredDocuments(s: FinanceScope, docType: DocType, query: Record<stri
  *  - Outstanding is money a customer still owes on an ISSUED invoice (sent / partially paid) — the same
  *    definition as the Overview's receivables. A draft has not been issued, so its balance (which starts
  *    out equal to its total) is not outstanding. */
-export function sumRows(rows: Array<{ total: number | string; balance: number | string; status: string }>) {
-  let amount = 0, balance = 0, count = 0;
+export function sumRows(rows: Array<{ total: number | string; balance: number | string; status: string; tax_total?: number | string; taxable_value?: number | string }>) {
+  let amount = 0, balance = 0, count = 0, tax = 0, taxable = 0;
   for (const r of rows) {
     if (r.status === 'void') continue;
-    amount += Number(r.total); count++;
+    amount += Number(r.total); tax += Number(r.tax_total ?? 0); taxable += Number(r.taxable_value ?? 0); count++;
     if (r.status === 'sent' || r.status === 'partially_paid') balance += Number(r.balance);
   }
-  return { amount, balance, count };
+  return { amount, balance, count, tax, taxable };
 }
 
 /** Sum of amount / outstanding across EVERY non-void document matching the list filters (all pages). */
 async function sumDocuments(s: FinanceScope, docType: DocType, query: Record<string, unknown>) {
-  let amount = 0, balance = 0, count = 0, fetched = 0;
+  let amount = 0, balance = 0, count = 0, tax = 0, taxable = 0, fetched = 0;
   for (let start = 0; ; start += 1000) {
-    const { data, error } = await filteredDocuments(s, docType, query, 'total,balance,status').order('id', { ascending: true }).range(start, start + 999);
+    const { data, error } = await filteredDocuments(s, docType, query, 'total,balance,status,tax_total,taxable_value').order('id', { ascending: true }).range(start, start + 999);
     if (error) throw fail(error);
-    const batch = (data ?? []) as unknown as Array<{ total: number | string; balance: number | string; status: string }>;
+    const batch = (data ?? []) as unknown as Array<{ total: number | string; balance: number | string; status: string; tax_total: number | string; taxable_value: number | string }>;
     const t = sumRows(batch);
-    amount += t.amount; balance += t.balance; count += t.count; fetched += batch.length;
+    amount += t.amount; balance += t.balance; count += t.count; tax += t.tax; taxable += t.taxable; fetched += batch.length;
     if (batch.length < 1000) break;
     if (fetched >= 100_000) break; // safety valve
   }
-  return { amount: round2(amount), balance: round2(balance), count };
+  return { amount: round2(amount), balance: round2(balance), count, tax: round2(tax), taxable: round2(taxable) };
 }
 
 export async function listDocuments(s: FinanceScope, docType: DocType, query: Record<string, unknown>) {
@@ -333,7 +333,7 @@ export async function listDocuments(s: FinanceScope, docType: DocType, query: Re
   const sort = SORTS.has(String(query.sort)) ? String(query.sort) : 'issue_date';
   const asc = String(query.order).toLowerCase() === 'asc';
   const { data, error, count } = await filteredDocuments(s, docType, query,
-    'id,number,reference_number,doc_type,status,customer_id,customer_snapshot,issue_date,due_date,expiry_date,total,amount_paid,balance,sent_at,created_at',
+    'id,number,reference_number,doc_type,status,customer_id,customer_snapshot,issue_date,due_date,expiry_date,taxable_value,tax_total,total,amount_paid,balance,sent_at,created_at',
     { count: 'exact' }).order(sort, { ascending: asc }).order('created_at', { ascending: false }).range(from, to);
   if (error) throw fail(error);
   const totals = await sumDocuments(s, docType, query);
@@ -341,6 +341,64 @@ export async function listDocuments(s: FinanceScope, docType: DocType, query: Re
   return {
     rows: rows.map((d) => ({ ...d, display_status: displayStatus(d) })),
     total: count ?? 0, page, limit, totals,
+  };
+}
+
+/**
+ * Upcoming invoices — recurring invoices whose next occurrence is due to be raised
+ * within a horizon (default 30 days), plus any already overdue. Read-only: this does
+ * not raise or create anything, it mirrors the renewal-reminder scan as a list the
+ * admin can act on. Ordered soonest first; overdue ones (next_invoice_date <= today)
+ * are flagged and float to the top. `amount` is the last invoice's grand total — the
+ * expected size of the next one — with its GST broken out.
+ */
+export async function upcomingInvoices(s: FinanceScope, query: Record<string, unknown>) {
+  const horizon = Math.min(Math.max(Math.floor(Number(query.days)) || 30, 1), 365);
+  const t = today();
+  const until = addDays(t, horizon);
+
+  const { data, error } = await scoped(db().from('finance_documents').select(
+    'id,number,customer_id,customer_snapshot,next_invoice_date,recurrence_interval,recurrence_custom_every,recurrence_custom_unit,total,taxable_value,tax_total'), s)
+    .eq('doc_type', 'invoice')
+    .eq('recurrence_enabled', true)
+    .is('deleted_at', null)
+    .neq('status', 'void')
+    .not('next_invoice_date', 'is', null)
+    .lte('next_invoice_date', until)
+    .order('next_invoice_date', { ascending: true })
+    .limit(500);
+  if (error) throw fail(error);
+
+  const rows = (data ?? []) as Array<Record<string, unknown>>;
+  const items = rows.map((d) => {
+    const next = String(d.next_invoice_date);
+    const total = Number(d.total) || 0;
+    const tax = Number(d.tax_total) || 0;
+    return {
+      id: d.id as string,
+      number: d.number as string,
+      customer_id: d.customer_id as string | null,
+      customer_name: (d.customer_snapshot as { name?: string } | null)?.name || '—',
+      next_invoice_date: next,
+      cadence: cadenceLabel(specFromRow(d as Parameters<typeof specFromRow>[0])),
+      amount: round2(total),
+      taxable_value: round2(Number(d.taxable_value) || 0),
+      tax_total: round2(tax),
+      days_until: Math.round((new Date(`${next}T00:00:00Z`).getTime() - new Date(`${t}T00:00:00Z`).getTime()) / 86_400_000),
+      overdue: next <= t,
+    };
+  });
+
+  const due_now = items.filter((i) => i.overdue).length;
+  return {
+    rows: items,
+    totals: {
+      count: items.length,
+      due_now,
+      amount: round2(items.reduce((x, i) => x + i.amount, 0)),
+      tax_total: round2(items.reduce((x, i) => x + i.tax_total, 0)),
+    },
+    horizon_days: horizon,
   };
 }
 

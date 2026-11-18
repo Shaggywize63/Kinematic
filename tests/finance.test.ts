@@ -1,6 +1,7 @@
 import { computeDocument, amountInWords, round2, durationLabel, durationOf } from '../src/services/finance/money';
 import { displayStatus, sumRows } from '../src/services/finance/documents.service';
 import { reportToCsv } from '../src/services/finance/reports.service';
+import { cadenceLabel } from '../src/services/finance/recurrence';
 import { isMasterCaller, requireFinanceAccess } from '../src/middleware/financeAccess';
 
 const line = (o: Record<string, unknown> = {}) => ({ name: 'Widget', quantity: 2, rate: 1000, gst_rate: 18, ...o }) as never;
@@ -149,20 +150,45 @@ describe('line duration (rate is per month)', () => {
 
 describe('list totals', () => {
   const rows = [
-    { total: 1000, balance: 1000, status: 'sent' },
-    { total: '2500.50', balance: '500.25', status: 'partially_paid' },
-    { total: 4000, balance: 0, status: 'paid' },
-    { total: 800, balance: 800, status: 'draft' },
-    { total: 9999, balance: 9999, status: 'void' },
+    { total: 1000, balance: 1000, status: 'sent', tax_total: 180, taxable_value: 820 },
+    { total: '2500.50', balance: '500.25', status: 'partially_paid', tax_total: '450.50', taxable_value: '2050' },
+    { total: 4000, balance: 0, status: 'paid', tax_total: 720, taxable_value: 3280 },
+    { total: 800, balance: 800, status: 'draft', tax_total: 144, taxable_value: 656 },
+    { total: 9999, balance: 9999, status: 'void', tax_total: 1800, taxable_value: 8199 },
   ];
   it('leaves a voided invoice out of the amount, the outstanding balance and the count', () => {
-    expect(sumRows(rows.filter((r) => r.status !== 'draft'))).toEqual({ amount: 7500.5, balance: 1500.25, count: 3 });
+    expect(sumRows(rows.filter((r) => r.status !== 'draft'))).toEqual({ amount: 7500.5, balance: 1500.25, count: 3, tax: 1350.5, taxable: 6150 });
   });
   it('outstanding counts only issued invoices (sent / partially paid), never a draft or a void', () => {
     // the draft's balance equals its total (₹800) but it has not been issued, so it is not outstanding
-    expect(sumRows(rows)).toEqual({ amount: 8300.5, balance: 1500.25, count: 4 });
+    expect(sumRows(rows)).toEqual({ amount: 8300.5, balance: 1500.25, count: 4, tax: 1494.5, taxable: 6806 });
+  });
+  it('breaks out GST (tax) and taxable value, and excludes a void invoice from them', () => {
+    // void (₹1800 tax, ₹8199 taxable) is dropped; the other four contribute.
+    const t = sumRows(rows);
+    expect(t.tax).toBe(1494.5);
+    expect(t.taxable).toBe(6806);
   });
   it('is zero when everything in the list is void', () => {
-    expect(sumRows([{ total: 500, balance: 500, status: 'void' }])).toEqual({ amount: 0, balance: 0, count: 0 });
+    expect(sumRows([{ total: 500, balance: 500, status: 'void' }])).toEqual({ amount: 0, balance: 0, count: 0, tax: 0, taxable: 0 });
+  });
+});
+
+describe('recurring cadence labels (upcoming invoices)', () => {
+  it('names the fixed cadences', () => {
+    expect(cadenceLabel({ interval: 'weekly' })).toBe('Weekly');
+    expect(cadenceLabel({ interval: 'monthly' })).toBe('Monthly');
+    expect(cadenceLabel({ interval: 'quarterly' })).toBe('Quarterly');
+    expect(cadenceLabel({ interval: 'half_yearly' })).toBe('Half-yearly');
+    expect(cadenceLabel({ interval: 'yearly' })).toBe('Yearly');
+  });
+  it('describes custom every-N cadences and collapses N=1', () => {
+    expect(cadenceLabel({ interval: 'custom', customEvery: 2, customUnit: 'month' })).toBe('Every 2 months');
+    expect(cadenceLabel({ interval: 'custom', customEvery: 10, customUnit: 'day' })).toBe('Every 10 days');
+    expect(cadenceLabel({ interval: 'custom', customEvery: 1, customUnit: 'day' })).toBe('Daily');
+    expect(cadenceLabel({ interval: 'custom', customEvery: 1, customUnit: 'month' })).toBe('Monthly');
+  });
+  it('falls back to One-off when there is no schedule', () => {
+    expect(cadenceLabel(null)).toBe('One-off');
   });
 });

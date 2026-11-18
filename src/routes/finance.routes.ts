@@ -222,6 +222,12 @@ function mountDocuments(path: 'invoices' | 'quotes', type: docs.DocType) {
     res.send(pdf);
   }));
 }
+// Upcoming (recurring) invoices due to be raised — registered before mountDocuments so
+// `/invoices/upcoming` is not captured by the `/invoices/:id` route.
+router.get('/invoices/upcoming', asyncHandler(async (req: Request, res: Response) => {
+  const r = await docs.upcomingInvoices(scopeOf(req), req.query);
+  res.json({ success: true, data: r.rows, totals: { ...r.totals, horizon_days: r.horizon_days } });
+}));
 mountDocuments('invoices', 'invoice');
 mountDocuments('quotes', 'quote');
 router.post('/invoices/:id/void', asyncHandler(async (req: Request, res: Response) => res.json(await docs.voidInvoice(scopeOf(req), idParam(req)))));
