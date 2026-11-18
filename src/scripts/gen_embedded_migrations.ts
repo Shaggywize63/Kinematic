@@ -27,6 +27,8 @@ const FILES = [
   'migration_spark_lead_structure.sql',
   'migration_lead_contacts.sql',
   'migration_client_daily_summary_log.sql',
+  'migration_deal_trial_dispatch.sql',
+  'migration_record_owners.sql',
 ];
 
 const root = process.cwd();

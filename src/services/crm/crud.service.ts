@@ -86,11 +86,16 @@ export async function list(table: string, org_id: string, query: Record<string, 
     q = q.or(orExpr);
   }
   if (opts.visibleOwnerIds !== undefined && opts.visibleOwnerIds !== null) {
-    if (opts.visibleOwnerIds.length === 0) return [];
-    const cols = opts.ownerColumns && opts.ownerColumns.length ? opts.ownerColumns : ['owner_id'];
-    const ids = opts.visibleOwnerIds.join(',');
-    const orExpr = [...cols.map((c) => `${c}.in.(${ids})`), ...coAssignedClause(opts)].join(',');
-    q = q.or(orExpr);
+    const co = coAssignedClause(opts);
+    if (opts.visibleOwnerIds.length === 0) {
+      // No owners in scope, but the caller may still co-own some rows — show exactly those, else nothing.
+      if (co.length === 0) return [];
+      q = q.or(co.join(','));
+    } else {
+      const cols = opts.ownerColumns && opts.ownerColumns.length ? opts.ownerColumns : ['owner_id'];
+      const ids = opts.visibleOwnerIds.join(',');
+      q = q.or([...cols.map((c) => `${c}.in.(${ids})`), ...co].join(','));
+    }
   }
   if (opts.extraFilters) q = opts.extraFilters(q);
   const dateCol = opts.dateRangeColumn ?? 'created_at';
@@ -167,11 +172,16 @@ export async function clientScopedListWithCount(
     q = q.or(orExpr);
   }
   if (opts.visibleOwnerIds !== undefined && opts.visibleOwnerIds !== null) {
-    if (opts.visibleOwnerIds.length === 0) return { rows: [], total: 0, page, limit };
-    const cols = opts.ownerColumns && opts.ownerColumns.length ? opts.ownerColumns : ['owner_id'];
-    const ids = opts.visibleOwnerIds.join(',');
-    const orExpr = [...cols.map((c) => `${c}.in.(${ids})`), ...coAssignedClause(opts)].join(',');
-    q = q.or(orExpr);
+    const co = coAssignedClause(opts);
+    if (opts.visibleOwnerIds.length === 0) {
+      // No owners in scope, but the caller may still co-own some rows — show exactly those, else nothing.
+      if (co.length === 0) return { rows: [], total: 0, page, limit };
+      q = q.or(co.join(','));
+    } else {
+      const cols = opts.ownerColumns && opts.ownerColumns.length ? opts.ownerColumns : ['owner_id'];
+      const ids = opts.visibleOwnerIds.join(',');
+      q = q.or([...cols.map((c) => `${c}.in.(${ids})`), ...co].join(','));
+    }
   }
   // Apply caller-supplied predicate filters (e.g. the activities list's
   // owner_id OR assigned_to, the view=overdue/upcoming/completed date

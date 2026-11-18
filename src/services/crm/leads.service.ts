@@ -540,7 +540,7 @@ export async function listLeadsWithCount(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean; ownOnly?: boolean; noLeadRef?: boolean } = {},
+  options: { strictClient?: boolean; effectiveCities?: string[] | null; visibleOwnerIds?: string[] | null; selfOwnerId?: string | null; includeNullCity?: boolean; ownOnly?: boolean; noLeadRef?: boolean; coOwnedIds?: string[] } = {},
 ): Promise<{ rows: Lead[]; total: number; page: number; limit: number }> {
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
@@ -594,12 +594,17 @@ export async function listLeadsWithCount(
   // only ever see leads they personally own; city allocation does NOT
   // expand visibility for them. A new Champion with no assigned leads
   // should land on an empty list, not on every lead in their city.
+  // A co-owner (crm_record_owners) sees the lead in their own list even when its primary owner /
+  // city is out of their scope. OR-ed into whichever scope branch runs below; ignored for an
+  // unscoped admin (no branch runs — they already see every lead).
+  const coOwnedPart = options.coOwnedIds && options.coOwnedIds.length ? `id.in.(${options.coOwnedIds.join(',')})` : null;
   if (options.ownOnly) {
     const orParts: string[] = [];
     if (options.selfOwnerId) orParts.push(`owner_id.eq.${options.selfOwnerId}`);
     if (hasOwnerScope && options.visibleOwnerIds!.length > 0) {
       orParts.push(`owner_id.in.(${options.visibleOwnerIds!.join(',')})`);
     }
+    if (coOwnedPart) orParts.push(coOwnedPart);
     if (orParts.length === 0) {
       return { rows: [], total: 0, page, limit };
     }
@@ -618,6 +623,7 @@ export async function listLeadsWithCount(
     if (hasOwnerScope && options.visibleOwnerIds!.length > 0) {
       orParts.push(`owner_id.in.(${options.visibleOwnerIds!.join(',')})`);
     }
+    if (coOwnedPart) orParts.push(coOwnedPart);
     // Null-city leads: only surface broadly when there's NO hierarchy owner
     // bound (admin / data_scope='all'). Under hierarchy they're already
     // covered by the owner-subtree term, so we must not OR-in every

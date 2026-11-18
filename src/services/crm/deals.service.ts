@@ -30,7 +30,7 @@ export async function listDealsWithCount(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; visibleOwnerIds?: string[] | null } = {},
+  options: { strictClient?: boolean; visibleOwnerIds?: string[] | null; coOwnedIds?: string[] } = {},
 ): Promise<{ rows: Deal[]; total: number; page: number; limit: number }> {
   const limit = Math.min(Number(filters.limit ?? 50), 200);
   const page = Math.max(Number(filters.page ?? 1), 1);
@@ -46,8 +46,14 @@ export async function listDealsWithCount(
   // the caller's client has uses_hierarchy_rbac = true; otherwise null
   // and we keep the legacy unfiltered behaviour.
   if (options.visibleOwnerIds !== undefined && options.visibleOwnerIds !== null) {
-    if (options.visibleOwnerIds.length === 0) return { rows: [], total: 0, page, limit };
-    q = q.in('owner_id', options.visibleOwnerIds);
+    // A co-owner (crm_record_owners) also sees the deal even when its primary owner is out of scope.
+    const co = options.coOwnedIds && options.coOwnedIds.length ? [`id.in.(${options.coOwnedIds.join(',')})`] : [];
+    if (options.visibleOwnerIds.length === 0) {
+      if (co.length === 0) return { rows: [], total: 0, page, limit };
+      q = q.or(co.join(','));
+    } else {
+      q = q.or([`owner_id.in.(${options.visibleOwnerIds.join(',')})`, ...co].join(','));
+    }
   }
   if (filters.pipeline_id) q = q.eq('pipeline_id', String(filters.pipeline_id));
   if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));
@@ -93,7 +99,7 @@ export async function dealsTotals(
   org_id: string,
   filters: Record<string, unknown> = {},
   client_id: string | null = null,
-  options: { strictClient?: boolean; visibleOwnerIds?: string[] | null } = {},
+  options: { strictClient?: boolean; visibleOwnerIds?: string[] | null; coOwnedIds?: string[] } = {},
 ): Promise<{ total_value: number; total_volume_kg: number; count: number }> {
   let q = supabaseAdmin.from('crm_deals')
     .select('amount, custom_fields, weight:crm_v_deal_weight(total_kg)')
@@ -104,8 +110,13 @@ export async function dealsTotals(
       : q.or(`client_id.is.null,client_id.eq.${client_id}`);
   }
   if (options.visibleOwnerIds !== undefined && options.visibleOwnerIds !== null) {
-    if (options.visibleOwnerIds.length === 0) return { total_value: 0, total_volume_kg: 0, count: 0 };
-    q = q.in('owner_id', options.visibleOwnerIds);
+    const co = options.coOwnedIds && options.coOwnedIds.length ? [`id.in.(${options.coOwnedIds.join(',')})`] : [];
+    if (options.visibleOwnerIds.length === 0) {
+      if (co.length === 0) return { total_value: 0, total_volume_kg: 0, count: 0 };
+      q = q.or(co.join(','));
+    } else {
+      q = q.or([`owner_id.in.(${options.visibleOwnerIds.join(',')})`, ...co].join(','));
+    }
   }
   if (filters.pipeline_id) q = q.eq('pipeline_id', String(filters.pipeline_id));
   if (filters.stage_id) q = q.eq('stage_id', String(filters.stage_id));

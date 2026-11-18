@@ -104,4 +104,9 @@ describe('applyDealSections', () => {
       orgId: 'o', clientId: SPARK_CLIENT_ID, payload: { trial_start: '2026-11-10', trial_end: '2026-11-01' },
     })).rejects.toThrow(/trial end date/i);
   });
+  it('keeps the trial dispatch details (airway bill, shipment, value) for a connected-B2B client', async () => {
+    const payload: Record<string, unknown> = { trial_awb: 'AWB-1', trial_shipment: 'Blue Dart', trial_value: 4500 };
+    await applyDealSections({ orgId: 'o', clientId: SPARK_CLIENT_ID, payload });
+    expect(payload).toMatchObject({ trial_awb: 'AWB-1', trial_shipment: 'Blue Dart', trial_value: 4500 });
+  });
 });
