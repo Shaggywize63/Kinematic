@@ -206,6 +206,7 @@ import {
 import { financialYearCode } from '../src/lib/formRef';
 import { clearClientFlagCache } from '../src/lib/clientFlags';
 import { createLead } from '../src/services/crm/leads.service';
+import * as dedup from '../src/services/crm/dedup.service';
 import { listLeadsWithCount } from '../src/services/crm/leads.service';
 import { withLeadTypeColumn, discoverExportColumns } from '../src/services/crm/exportColumns.helper';
 import { leadCreateSchema, leadUpdateSchema } from '../src/validators/crm.validators';
@@ -505,6 +506,37 @@ describe('createLead', () => {
     expect(leads().find((r) => r.id === l.id)!.ref_no).toBe('SR/LD/2627-42');
     expect(db.updates.every((u) => !('ref_no' in u.row))).toBe(true);
     expect(db.rpcCalls).toHaveLength(0); // no allocation anywhere
+  });
+
+  // Duplicate email/phone: a connected-B2B lead is a REQUIREMENT, so one contact
+  // legitimately has several. The dedup guard (built for B2C inbound, where the
+  // phone IS the person's identity) must be skipped for connected-B2B clients and
+  // kept for every other tenant.
+  describe('duplicate email / phone', () => {
+    it('does NOT block a second lead for the same contact on a connected-B2B client', async () => {
+      (dedup.findLeadByPhone as jest.Mock).mockResolvedValueOnce({ id: 'existing-1' });
+      (dedup.findLeadByEmail as jest.Mock).mockResolvedValueOnce({ id: 'existing-1' });
+      // skipDedup OFF — the gate must come from the client being connected-B2B, not the flag.
+      const l = await createLead({ org_id: ORG, payload: { first_name: 'Asha', client_id: SPARK, phone: '8695640706', email: 'a@x.com' } as any });
+      expect(l.id).toBeTruthy();
+      // The check is skipped for B2B, so the helpers are never consulted.
+      expect(dedup.findLeadByPhone as jest.Mock).not.toHaveBeenCalled();
+      expect(dedup.findLeadByEmail as jest.Mock).not.toHaveBeenCalled();
+    });
+
+    it('STILL blocks a duplicate phone for any other tenant (guard intact)', async () => {
+      (dedup.findLeadByPhone as jest.Mock).mockResolvedValueOnce({ id: 'existing-9' });
+      await expect(
+        createLead({ org_id: ORG, payload: { first_name: 'Bo', client_id: OTHER, phone: '8695640706' } as any }),
+      ).rejects.toMatchObject({ statusCode: 409, code: 'DUPLICATE_LEAD' });
+    });
+
+    it('STILL blocks a duplicate email for any other tenant', async () => {
+      (dedup.findLeadByEmail as jest.Mock).mockResolvedValueOnce({ id: 'existing-9' });
+      await expect(
+        createLead({ org_id: ORG, payload: { first_name: 'Bo', client_id: OTHER, email: 'dup@x.com' } as any }),
+      ).rejects.toMatchObject({ statusCode: 409, code: 'DUPLICATE_LEAD' });
+    });
   });
 });
 
