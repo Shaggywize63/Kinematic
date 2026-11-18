@@ -9,6 +9,21 @@ const db = () => supabaseAdmin;
 const fail = (e: { message: string }) => new AppError(500, e.message, 'DB_ERROR');
 const EPS = 0.005;
 
+/** The GST portion of a received payment: for each invoice the money was applied to, the share of
+ *  the applied amount that is tax (tax_total / grand total of that invoice). Money not yet applied
+ *  (unused) carries no GST. This is the cash-basis "GST in this receipt". */
+type AllocWithDoc = { amount: number | string; document?: { tax_total?: number | string; total?: number | string } | null };
+function receiptGst(allocations?: AllocWithDoc[] | null): number {
+  let g = 0;
+  for (const a of allocations ?? []) {
+    const total = Number(a.document?.total) || 0;
+    if (total <= 0) continue;
+    g += (Number(a.amount) || 0) * (Number(a.document?.tax_total) || 0) / total;
+  }
+  return round2(g);
+}
+const GST_ALLOC_SELECT = 'allocations:finance_payment_allocations(amount,document:finance_documents(tax_total,total))';
+
 export interface Allocation { document_id: string; amount: number }
 export interface PaymentInput {
   customer_id: string;
@@ -145,26 +160,31 @@ function filteredPayments(s: FinanceScope, query: Record<string, unknown>, selec
 
 /** Sum of amount / unused across EVERY payment matching the list filters (all pages, not just the one on screen). */
 async function sumPayments(s: FinanceScope, query: Record<string, unknown>) {
-  let amount = 0, unused = 0, count = 0;
+  let amount = 0, unused = 0, gst = 0, count = 0;
   for (let start = 0; ; start += 1000) {
-    const { data, error } = await filteredPayments(s, query, 'amount,unused_amount').order('id', { ascending: true }).range(start, start + 999);
+    const { data, error } = await filteredPayments(s, query, `amount,unused_amount,${GST_ALLOC_SELECT}`).order('id', { ascending: true }).range(start, start + 999);
     if (error) throw fail(error);
-    const batch = (data ?? []) as unknown as Array<{ amount: number | string; unused_amount: number | string }>;
-    for (const r of batch) { amount += Number(r.amount); unused += Number(r.unused_amount); }
+    const batch = (data ?? []) as unknown as Array<{ amount: number | string; unused_amount: number | string; allocations?: AllocWithDoc[] }>;
+    for (const r of batch) { amount += Number(r.amount); unused += Number(r.unused_amount); gst += receiptGst(r.allocations); }
     count += batch.length;
     if (batch.length < 1000) break;
     if (count >= 100_000) break; // safety valve
   }
-  return { amount: round2(amount), unused: round2(unused), count };
+  return { amount: round2(amount), unused: round2(unused), gst: round2(gst), count };
 }
 
 export async function listPayments(s: FinanceScope, query: Record<string, unknown>) {
   const { page, limit, from, to } = pageParams(query);
-  const { data, error, count } = await filteredPayments(s, query, '*, customer:finance_customers(id,display_name)', { count: 'exact' })
+  const { data, error, count } = await filteredPayments(s, query, `*, customer:finance_customers(id,display_name), ${GST_ALLOC_SELECT}`, { count: 'exact' })
     .order('payment_date', { ascending: false }).order('created_at', { ascending: false }).range(from, to);
   if (error) throw fail(error);
+  // Break out the GST portion of each receipt (cash basis), then drop the heavy allocations join from the row.
+  const rows = ((data ?? []) as unknown as Array<Record<string, unknown> & { allocations?: AllocWithDoc[] }>).map((r) => {
+    const { allocations, ...rest } = r;
+    return { ...rest, gst: receiptGst(allocations) };
+  });
   const totals = await sumPayments(s, query);
-  return { rows: data ?? [], total: count ?? 0, page, limit, totals };
+  return { rows, total: count ?? 0, page, limit, totals };
 }
 
 export async function updatePayment(s: FinanceScope, id: string, patch: { payment_date?: string; mode?: PaymentInput['mode']; reference?: string | null; notes?: string | null }) {

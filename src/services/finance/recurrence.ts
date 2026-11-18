@@ -78,6 +78,24 @@ export function firstFutureFrom(anchorIso: string, spec: RecurrenceSpec, todayIs
   return next;
 }
 
+/** Human label for a cadence, e.g. "Monthly", "Every 2 weeks" (custom days), "Every 3 months". */
+export function cadenceLabel(spec: RecurrenceSpec | null): string {
+  if (!spec) return 'One-off';
+  switch (spec.interval) {
+    case 'weekly': return 'Weekly';
+    case 'monthly': return 'Monthly';
+    case 'quarterly': return 'Quarterly';
+    case 'half_yearly': return 'Half-yearly';
+    case 'yearly': return 'Yearly';
+    case 'custom': {
+      const n = Math.max(1, Math.floor(Number(spec.customEvery) || 1));
+      const unit = spec.customUnit === 'day' ? 'day' : 'month';
+      return n === 1 ? (unit === 'day' ? 'Daily' : 'Monthly') : `Every ${n} ${unit}s`;
+    }
+    default: return 'Recurring';
+  }
+}
+
 /** Build a spec from stored row columns (for the reminder cron). Null when not recurring. */
 export function specFromRow(row: {
   recurrence_interval?: string | null; recurrence_custom_every?: number | null; recurrence_custom_unit?: string | null;

@@ -68,7 +68,7 @@ export async function dashboard(s: FinanceScope, query: Record<string, unknown>)
     else { overdueCount++; if (days <= 15) buckets.d1_15 += bal; else if (days <= 30) buckets.d16_30 += bal; else if (days <= 45) buckets.d31_45 += bal; else buckets.d45_plus += bal; }
   }
 
-  const invoices = await fetchAll((a, b) => scoped(db().from('finance_documents').select('issue_date,total'), s)
+  const invoices = await fetchAll((a, b) => scoped(db().from('finance_documents').select('issue_date,total,tax_total'), s)
     .eq('doc_type', 'invoice').in('status', REVENUE_STATUSES).is('deleted_at', null).gte('issue_date', from).lte('issue_date', to).range(a, b));
   const pays = await fetchAll((a, b) => scoped(db().from('finance_payments').select('payment_date,amount'), s)
     .is('deleted_at', null).gte('payment_date', from).lte('payment_date', to).range(a, b));
@@ -111,6 +111,8 @@ export async function dashboard(s: FinanceScope, query: Record<string, unknown>)
     totals: {
       sales: round2(months.reduce((x, m) => x + m.sales, 0)),
       receipts: round2(months.reduce((x, m) => x + m.receipts, 0)),
+      // GST charged on the invoices in this period (CGST+SGST+IGST), already included in `sales`.
+      tax: round2(invoices.reduce((x, r) => x + Number(r.tax_total ?? 0), 0)),
     },
     months,
     draft_invoices: counts[0].count ?? 0,
