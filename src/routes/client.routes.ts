@@ -22,9 +22,17 @@ router.post('/:id/packages',    requireAuth, requireRole('admin', 'super_admin')
 // Which notifications from the catalogue this client receives (none by default).
 router.get('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientNotifications);
 router.put('/:id/notifications', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.setClientNotifications);
+// Who gets this client's updates on WhatsApp, and which updates (off by default).
+router.get('/:id/whatsapp-alerts', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientWhatsappAlerts);
+router.put('/:id/whatsapp-alerts', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.setClientWhatsappAlerts);
+router.post('/:id/whatsapp-alerts/test', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.testClientWhatsappAlerts);
 // Account & billing: seat usage, next unpaid invoice, and the two transactional emailers.
 router.get('/:id/account', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientAccount);
 router.post('/:id/send-welcome', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.sendClientWelcomeEmail);
 router.post('/:id/send-payment-reminder', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.sendClientPaymentReminderEmail);
+// Admins per client: list, add (created in the client's own org / project), switch on or off.
+router.get('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientAdmins);
+router.post('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.addClientAdmin);
+router.patch('/:id/admins/:userId', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.updateClientAdmin);
 
 export default router;

@@ -14,6 +14,7 @@
 // Returns both the enabled module IDs AND the enabled package SKUs (derived from
 // the modules' `package` column) so clients can render package-aware UI.
 
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabaseAdmin } from './supabase';
 import { logger } from './logger';
 import { currentProjectKey } from './projects';
@@ -103,10 +104,11 @@ async function orgGrantsDistribution(orgId: string | null | undefined, distIds: 
  * The modules a client was explicitly granted (client_modules: enabled and not expired) — NOT the always-on
  * universal ones. This is the set the Clients page assigns, and what a new user under the client should
  * start with (see modulePermissionsForNewUser). Any failure returns [] so the caller falls back to its
- * previous behaviour instead of blocking user creation.
+ * previous behaviour instead of blocking user creation. `admin` reads another project (a client whose users live
+ * there); it defaults to the current one.
  */
-export async function clientGrantedModuleIds(clientId: string): Promise<string[]> {
-  const { data, error } = await supabaseAdmin
+export async function clientGrantedModuleIds(clientId: string, admin: SupabaseClient = supabaseAdmin): Promise<string[]> {
+  const { data, error } = await admin
     .from('client_modules')
     .select('module_id, expires_at')
     .eq('client_id', clientId)

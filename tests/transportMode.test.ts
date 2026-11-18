@@ -15,11 +15,13 @@ const POLICY_VEHICLES = [
 ];
 
 describe('buildTransportModes', () => {
-  it('lists the policy vehicles first (id/label as in the policy, vehicle:true), then public transport and other', () => {
+  it('lists the policy vehicles first (id/label as in the policy, vehicle:true), then the fixed non-vehicle modes', () => {
     expect(buildTransportModes(POLICY_VEHICLES)).toEqual([
       { id: 'own_bike', label: 'Own Bike', vehicle: true },
       { id: 'own_car', label: 'Own Car', vehicle: true },
       { id: 'public_transport', label: 'Public transport', vehicle: false },
+      { id: 'train', label: 'Train', vehicle: false },
+      { id: 'walk', label: 'Walk', vehicle: false },
       { id: 'other', label: 'Other', vehicle: false },
     ]);
   });
@@ -29,19 +31,21 @@ describe('buildTransportModes', () => {
       { id: 'two_wheeler', label: 'Two-wheeler', vehicle: true },
       { id: 'car', label: 'Car', vehicle: true },
       { id: 'public_transport', label: 'Public transport', vehicle: false },
+      { id: 'train', label: 'Train', vehicle: false },
+      { id: 'walk', label: 'Walk', vehicle: false },
       { id: 'other', label: 'Other', vehicle: false },
     ]);
   });
 
   it('a policy vehicle that reuses a fixed id wins and the fixed entry is not listed twice', () => {
     const modes = buildTransportModes([{ id: 'other', label: 'Other (own)', rate_per_km: 3 }, { id: 'auto', label: 'Auto', rate_per_km: 6 }]);
-    expect(modes.map((m) => m.id)).toEqual(['other', 'auto', 'public_transport']);
+    expect(modes.map((m) => m.id)).toEqual(['other', 'auto', 'public_transport', 'train', 'walk']);
     expect(modes[0]).toEqual({ id: 'other', label: 'Other (own)', vehicle: true });
   });
 
   it('ignores malformed entries and returns fresh objects (the shared constants cannot be corrupted)', () => {
     const modes = buildTransportModes([null as any, { id: '', label: 'x' } as any, { id: 'ok_1', label: 'Fine' }]);
-    expect(modes.map((m) => m.id)).toEqual(['ok_1', 'public_transport', 'other']);
+    expect(modes.map((m) => m.id)).toEqual(['ok_1', 'public_transport', 'train', 'walk', 'other']);
     modes[1].label = 'tampered';
     expect(FIXED_TRANSPORT_MODES[0].label).toBe('Public transport');
     expect(DEFAULT_VEHICLE_TRANSPORT_MODES.map((m) => m.id)).toEqual(['two_wheeler', 'car']);
@@ -63,13 +67,14 @@ describe('buildTransportModes', () => {
     const extra = [
       { id: 'train', label: 'Train' },
       { id: 'BAD ID', label: 'x' } as any,   // id fails the regex → dropped
-      { id: 'walk', label: '  ' } as any,     // blank label → dropped
+      { id: 'walk', label: '  ' } as any,     // blank label → this extra is dropped (the built-in Walk still shows)
       { id: 'other', label: 'My Other' },      // dupes a fixed id → first-wins keeps the extra's label
     ];
     const modes = buildTransportModes(null, extra);
-    expect(modes.map((m) => m.id)).toEqual(['two_wheeler', 'car', 'train', 'other', 'public_transport']);
+    expect(modes.map((m) => m.id)).toEqual(['two_wheeler', 'car', 'train', 'other', 'public_transport', 'walk']);
     expect(modes.find((m) => m.id === 'train')).toEqual({ id: 'train', label: 'Train', vehicle: false });
     expect(modes.find((m) => m.id === 'other')).toEqual({ id: 'other', label: 'My Other', vehicle: false });
+    expect(modes.find((m) => m.id === 'walk')).toEqual({ id: 'walk', label: 'Walk', vehicle: false });
   });
 });
 
@@ -107,7 +112,7 @@ describe('validateTransportMode', () => {
     const r = validateTransportMode('helicopter', allowed);
     expect(r).toMatchObject({ ok: false });
     expect((r as { error: string }).error).toMatch(/Unknown transport_mode "helicopter"/);
-    expect((r as { error: string }).error).toContain('own_bike, own_car, public_transport, other');
+    expect((r as { error: string }).error).toContain('own_bike, own_car, public_transport, train, walk, other');
     // the defaults are not allowed when the policy has its own vehicles
     expect(validateTransportMode('two_wheeler', allowed)).toMatchObject({ ok: false });
   });

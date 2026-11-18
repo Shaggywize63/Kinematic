@@ -41,6 +41,10 @@ const UNIQUES: Unique[] = [
   { table: 'hrms_ts_projects', cols: ['org_id', 'name'], name: 'hrms_ts_projects_org_name_uq' },
   { table: 'hrms_ts_sheets', cols: ['org_id', 'employee_id', 'week_start'], name: 'hrms_ts_sheets_org_emp_week_uq' },
   { table: 'hrms_ts_config', cols: ['org_id'], name: 'hrms_ts_config_org_uq' },
+  { table: 'hrms_learn_courses', cols: ['org_id', 'code'], name: 'hrms_learn_courses_org_code_uq' },
+  { table: 'hrms_learn_certificates', cols: ['org_id', 'seq'], name: 'hrms_learn_cert_org_seq_uq' },
+  { table: 'hrms_learn_certificates', cols: ['org_id', 'number'], name: 'hrms_learn_cert_org_number_uq' },
+  { table: 'hrms_learn_certificates', cols: ['assignment_id'], name: 'hrms_learn_cert_assignment_uq' },
 ];
 
 /** The database defaults of the columns the services leave out of an insert. */
@@ -88,6 +92,14 @@ const DEFAULTS: Record<string, () => Row> = {
   hrms_ts_projects: () => ({ client: '', kind: 'client', billable: true, budget_hours: 0, prior_hours: 0, rate: 0, archived: false }),
   hrms_ts_sheets: () => ({ lines: [], status: 'draft', submitted_on: null, decided_on: null, decided_by: null, comment: null, trail: [] }),
   hrms_ts_config: () => ({ max_per_day: 12, weekly_cap: 60, standard_week: 40, tracked_ids: [] }),
+  hrms_learn_courses: () => ({
+    category: 'compliance', mode: 'self_paced', duration_min: 30, summary: '', mandatory: false,
+    audience: { departmentIds: [], designationIds: [], locationIds: [] }, refresher_months: 0, due_days: 30, owner: '', lessons: [], quiz: [],
+  }),
+  hrms_learn_assignments: () => ({ source: 'manual', steps_done: 0, attempts: 0, completed_on: null, score: null, certificate_no: null }),
+  hrms_learn_certificates: () => ({ expires_on: null }),
+  hrms_learn_reminders: () => ({ reminded_by: '' }),
+  hrms_learn_log: () => ({ at: new Date().toISOString(), by_name: '', detail: null }),
 };
 
 /** jsonb stores an object's keys sorted by length, then bytewise; arrays keep their order. */
@@ -147,7 +159,7 @@ export function createHrmsFakeDb() {
     if (!gone.length) return;
     const ids = new Set(gone.map((g) => g.id));
     if (table === 'hrms_employees') {
-      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances', 'hrms_benefit_enrolments', 'hrms_benefit_claims', 'hrms_comp_perf', 'hrms_ts_sheets']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
+      for (const t of ['hrms_employee_documents', 'hrms_employee_history', 'hrms_attendance', 'hrms_adjustments', 'hrms_roster', 'hrms_leave_balances', 'hrms_benefit_enrolments', 'hrms_benefit_claims', 'hrms_comp_perf', 'hrms_ts_sheets', 'hrms_learn_assignments', 'hrms_learn_certificates', 'hrms_learn_reminders']) tables[t] = (tables[t] ?? []).filter((r) => !ids.has(r.employee_id));
       for (const r of tables.hrms_employees ?? []) if (ids.has(r.reporting_to_id)) r.reporting_to_id = null;
       for (const r of tables.hrms_departments ?? []) if (ids.has(r.head_id)) r.head_id = null;
       for (const r of tables.hrms_assets ?? []) if (ids.has(r.holder_id)) r.holder_id = null;                 // holder_id ON DELETE SET NULL

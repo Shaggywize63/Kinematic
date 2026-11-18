@@ -23,6 +23,9 @@ const STAFF_DOMAINS = new Set([
 ]);
 const domainOf = (email?: string | null): string => String(email || '').split('@')[1]?.toLowerCase().trim() || '';
 
+/** True for an internal / staff email, which never counts toward a seat cap. */
+export const isStaffEmail = (email?: string | null): boolean => STAFF_DOMAINS.has(domainOf(email));
+
 export interface NextPayment {
   invoice_id: string;
   number: string;

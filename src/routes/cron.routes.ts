@@ -18,6 +18,7 @@ import { runRescoreAllLeads, isRescoreAllRunning } from '../services/crm/leads.s
 import { dispatchDueAlerts } from '../services/crm/emailAlerts.service';
 import { runDueReportDigests } from '../services/crm/reportSchedules.service';
 import { runDailyBriefings } from '../services/crm/ai/dailyBriefing.service';
+import { runDailySummaries } from '../services/clientDailySummary.service';
 import { dispatchActivityReminders, dispatchUpcomingActivityReminders } from '../services/crm/activityReminders.service';
 import { runScheduledTasks, runProactiveNudges } from '../services/crm/ai/kiniScheduler.service';
 import { reconcileCallRecordings } from '../services/crm/ai/callRecordingPull.service';
@@ -173,6 +174,23 @@ router.post('/dispatch-daily-briefings', requireEdgeSecret, async (req, res) => 
     res.json({ success: true, data: result });
   } catch (err: any) {
     logger.error(`[cron] dispatch-daily-briefings crashed: ${err?.message || err}`);
+    res.status(500).json({ success: false, error: String(err?.message || err) });
+  }
+});
+
+/**
+ * POST /api/v1/cron/dispatch-client-daily-summaries
+ *
+ * Sends the 7 pm WhatsApp manager summary to every client that switched it on (once per client per IST day, deduped
+ * via client_daily_summary_log). Also runs as an in-process tick (see server.ts).
+ */
+router.post('/dispatch-client-daily-summaries', requireEdgeSecret, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { all_projects?: boolean; project?: string };
+    const result = await runForRequestedProjects(body, () => runDailySummaries());
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error(`[cron] dispatch-client-daily-summaries crashed: ${err?.message || err}`);
     res.status(500).json({ success: false, error: String(err?.message || err) });
   }
 });

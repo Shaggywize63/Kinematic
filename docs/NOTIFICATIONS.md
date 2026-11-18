@@ -219,6 +219,47 @@ Safety and rollout:
   via the project switch) start with none. Turn a client down from Client Management or with the PUT above.
 - Settings are cached for 60 s per process, so a change takes effect within a minute.
 
+## WhatsApp alerts per client (Client Management → WhatsApp alerts)
+
+A client can also get its important updates on WhatsApp: an admin picks up to 10 people (name + number), the updates
+they get, and an approved WhatsApp template. Off by default for every client.
+
+- **Stored** in `org_settings` key `notifications.whatsapp` on the org that holds the client's users:
+  `{ enabled, template_id, recipients: [{ name, phone }], kinds: [...] }`. Service: `src/services/clientWhatsappAlerts.service.ts`.
+- **API** (admin / super_admin, ownership-scoped like `/notifications`): `GET|PUT /api/v1/clients/:id/whatsapp-alerts`,
+  `POST /api/v1/clients/:id/whatsapp-alerts/test` (sends the saved template to the saved people).
+- **Updates on offer** (`WHATSAPP_KINDS`): team-level kinds only: new lead, lead awaiting approval, Google Ads lead,
+  deal won / lost / overdue, SOS, tracking paused, location off, missed visits, off-route visit, attendance
+  regularization, leave request, expense submitted, low stock, stock expiry, invoice reminders. Rep-addressed kinds
+  ("assigned to me", decisions) are not offered.
+- **Delivery**: the push dispatcher hands every row the in-app policy allows to `forwardToClientWhatsapp`, so a kind
+  must also be on under Notifications. Copies of one event (a row per manager) collapse to one message per person,
+  keyed on the record id in `data` (else title + body); the same event is not re-sent for 15 minutes; at most 10 events
+  per client per dispatcher run. Sent from the client's own WhatsApp connection (CRM Settings → WhatsApp) through
+  `sendWhatsapp`, so every message is in `crm_whatsapp_logs`.
+- **Template**: `{{1}}` = the notification title, `{{2}}` = its text; a one-placeholder template gets "title: text".
+  Suggested Utility template `kinematic_alert`: "Kinematic update for your team: {{1}}. Details: {{2}}. Open the
+  Kinematic app to see more and take action."
+- **Off switches**: projects in `NOTIFICATIONS_DISABLED_PROJECTS` (Tata by default) send nothing; `CLIENT_WHATSAPP_ALERTS=off`
+  stops all forwarding.
+
+### Daily manager summary (7 pm IST)
+
+`daily_summary: true` in the same setting adds one end-of-day message to the same people
+(`src/services/clientDailySummary.service.ts`): attendance (present / on leave / absent of active field reps), planned
+visits done (a stop counts when its status is visited or it has a `checkin_at`), orders booked today and their value
+(excluding draft and cancelled), new leads, the top 3 reps by visits, reps checked in with planned visits but none
+done, and check-ins worth a look (mock GPS or failed face match at check-in, teleport pings, app mock-location alerts,
+visits outside the outlet geofence). "Today" is the IST day; a section whose data can't be read is left out.
+
+- **When**: in-process tick, default 13:30 UTC (19:00 IST): `CLIENT_DAILY_SUMMARY_HOUR_UTC` / `_MINUTE_UTC`;
+  `CLIENT_DAILY_SUMMARY_ENABLED=false` turns it off. Also `POST /api/v1/cron/dispatch-client-daily-summaries`.
+- **Once per client per day**: the sender claims `(org_id, summary_date)` in `client_daily_summary_log` (unique index,
+  `migration_client_daily_summary_log.sql`, applied on boot by `lib/autoMigrate` for the Kinematic project). A failed
+  claim, including a missing table, means no send. A day with no reps, orders or leads is skipped.
+- **Send now**: `POST /api/v1/clients/:id/whatsapp-alerts/test` with `{ "type": "daily_summary" }` sends today's
+  figures so far without using up the day.
+
 ## Self-gating & tenant safety
 
 The new scans change nothing for tenants that don't use the feature:

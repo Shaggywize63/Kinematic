@@ -191,7 +191,7 @@ describe('PATCH/GET /org-settings/attendance-rules', () => {
     setUser(repA);
     const rules = await request(app).get('/attendance/rules');
     expect(rules.body.data.rules.track_transport_mode).toBe(true);
-    expect(rules.body.data.transport_modes.map((m: any) => m.id)).toEqual(['two_wheeler', 'car', 'public_transport', 'other']);
+    expect(rules.body.data.transport_modes.map((m: any) => m.id)).toEqual(['two_wheeler', 'car', 'public_transport', 'train', 'walk', 'other']);
   });
 
   it('PATCH with ONLY the new keys on a legacy client stores just those keys (no shift keys appear)', async () => {
