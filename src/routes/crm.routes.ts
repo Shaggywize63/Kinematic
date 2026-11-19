@@ -6831,12 +6831,13 @@ widgets.get('/lead-summary', rbac.requireModuleAccess('crm_leads'), wrap(async (
 }));
 router.use('/widgets', widgets);
 
-// ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
+// ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview + home) ──
+const LAYOUT_PAGES = ['analytics', 'overview', 'ffm', 'home'];
 const layouts = express.Router();
 layouts.get('/:page', wrap(async (req, res) => {
   const page = req.params.page as dashboardLayoutSvc.LayoutPage;
-  if (!['analytics', 'overview', 'ffm'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
+  if (!LAYOUT_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${LAYOUT_PAGES.join(', ')}`, 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
@@ -6844,27 +6845,31 @@ layouts.get('/:page', wrap(async (req, res) => {
 }));
 layouts.put('/:page', wrap(async (req, res) => {
   const page = req.params.page as dashboardLayoutSvc.LayoutPage;
-  if (!['analytics', 'overview', 'ffm'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
+  if (!LAYOUT_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${LAYOUT_PAGES.join(', ')}`, 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
   const config = req.body as dashboardLayoutSvc.DashboardConfig;
   res.json(await dashboardLayoutSvc.saveLayout(uid, orgId(req), clientId(req), page, config));
 }));
-layouts.post('/overview/pin', wrap(async (req, res) => {
+layouts.post('/:page/pin', wrap(async (req, res) => {
+  const page = req.params.page as dashboardLayoutSvc.LayoutPage;
+  if (!LAYOUT_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${LAYOUT_PAGES.join(', ')}`, 'VALIDATION');
+  }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
   const widget = req.body as dashboardLayoutSvc.WidgetInstance;
   if (!widget?.id || !widget?.widget_type) {
     throw new AppError(400, 'widget.id and widget.widget_type are required', 'VALIDATION');
   }
-  res.json(await dashboardLayoutSvc.pinWidgetToOverview(uid, orgId(req), clientId(req), widget));
+  res.json(await dashboardLayoutSvc.pinWidget(uid, orgId(req), clientId(req), page, widget));
 }));
 layouts.delete('/:page/widgets/:widget_id', wrap(async (req, res) => {
   const page = req.params.page as dashboardLayoutSvc.LayoutPage;
-  if (!['analytics', 'overview', 'ffm'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
+  if (!LAYOUT_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${LAYOUT_PAGES.join(', ')}`, 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
