@@ -20,6 +20,7 @@ import { knownProjectKeys, adminClientFor, runWithProject, fallbackProjectKey } 
 import { logger } from '../../lib/logger';
 import * as whatsappSvc from '../../services/crm/whatsapp.service';
 import { handleRepLeadMessage, leadMessageKind } from '../../services/crm/whatsappVoiceLead.service';
+import { handleApprovalTap, isApprovalPayload } from '../../services/whatsappApprovals.service';
 
 const router = Router();
 
@@ -144,6 +145,11 @@ router.post('/', async (req, res) => {
             // context travels with the promise.
             if (leadMessageKind(m)) {
               void handleRepLeadMessage(orgId, m).catch((e) => logger.warn(`[whatsapp-webhook] voice lead failed: ${e?.message || e}`));
+            }
+            // An approver tapped Approve / Reject on a one-tap approval message.
+            if (isApprovalPayload(buttonPayload)) {
+              void handleApprovalTap(orgId, { id: m.id, from: m.from, payload: buttonPayload })
+                .catch((e) => logger.warn(`[whatsapp-webhook] approval tap failed: ${e?.message || e}`));
             }
           }
           for (const s of value.statuses ?? []) {

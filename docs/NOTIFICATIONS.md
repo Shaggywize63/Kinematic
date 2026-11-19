@@ -278,6 +278,29 @@ visits outside the outlet geofence). "Today" is the IST day; a section whose dat
 - **Limits**: counts as one KINI query against the rep's quota; each message is handled once (10-minute dedup by
   message id). Voice needs a Cloud API connection and `SARVAM_API_KEY`; text works with any connection.
 
+### One-tap approvals (approvers, on their own WhatsApp)
+
+`approvals: true` in the same setting sends each leave request, expense claim and attendance correction to its
+approver's own WhatsApp (`users.mobile`) with **Approve** / **Reject** buttons
+(`src/services/whatsappApprovals.service.ts`):
+
+- **Sending**: offered every notification row by the push dispatcher (not filtered by the in-app catalogue: this is
+  its own opt-in). Only the request's *current* approver gets buttons (`approver_id`, still pending / submitted);
+  the other managers told about an expense keep the in-app notice. An escalated expense brings a new message to the
+  next approver. Needs an approved template with "Approve" and "Reject" quick-reply buttons; the suggested one is
+  `kinematic_approval_request` (UTILITY): "Approval request on your Kinematic account: {{1}}. Details: {{2}}. Tap
+  Approve or Reject to record your decision." {{1}} = notification title, {{2}} = body. Without such a template the
+  settings screen says so and nothing is sent.
+- **Buttons** carry `apv:<l|e|r>:<request id>:<a|r>:<signature>`. The signature (HMAC with
+  `WHATSAPP_APPROVAL_SECRET`, else the service-role key) binds a button to the approver it was sent to, so a tap
+  counts only from that approver's number.
+- **Taps**: the webhook hands `apv:` payloads to `handleApprovalTap`, which finds the user by number, builds the same
+  actor the app would (`buildUserContext`) and calls the existing `decide()`: same checks, same notifications to the
+  requester. Notes: "Approved on WhatsApp" / "Rejected on WhatsApp" (expense rejections require a remark, so the
+  claimant sees that one). The approver gets a reply: done, escalated to the next level, already decided, no longer
+  your request, or switched off. Each tap is handled once (message-id dedup).
+- The KINI sales bot, which shares the Kinematic number and forwards to this webhook, ignores `apv:` taps.
+
 ## Self-gating & tenant safety
 
 The new scans change nothing for tenants that don't use the feature:

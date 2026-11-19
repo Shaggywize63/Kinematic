@@ -28,7 +28,7 @@ export function makeBspProvider(cfg: BspConfig): WhatsappProvider {
             template: {
               name: input.template_name,
               language: { code: input.template_language || 'en' },
-              ...templateComponents(input.template_variables),
+              ...templateComponents(input.template_variables, input.template_buttons),
             },
           }
         : { messaging_product: 'whatsapp', to, type: 'text', text: { body: input.body_text || '' } };

@@ -117,7 +117,7 @@ describe('PUT /clients/:id/whatsapp-alerts', () => {
     const ins = supa().chainsFor('org_settings').find((c: any) => c.ops.some((o: any) => o.method === 'insert'));
     expect(ins.ops.find((o: any) => o.method === 'insert').args[0]).toEqual({
       org_id: 'org-client', key: WA_SETTING_KEY, updated_by: 'u-admin',
-      value: { enabled: true, template_id: TPL, recipients: [{ name: 'Asha', phone: '919811112222' }], kinds: ['sos', 'leave_request'], daily_summary: false, voice_leads: false },
+      value: { enabled: true, template_id: TPL, recipients: [{ name: 'Asha', phone: '919811112222' }], kinds: ['sos', 'leave_request'], daily_summary: false, voice_leads: false, approvals: false },
     });
   });
 
