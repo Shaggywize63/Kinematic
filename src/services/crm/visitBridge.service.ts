@@ -271,10 +271,19 @@ async function attachSite(ctx: BridgeCtx, contactId: string, input: ContactInput
     if (!cur.mobile && norm(input.mobile)) patch.mobile = norm(input.mobile);
     // A fresh requirement from this visit is appended, never silently dropped or
     // overwritten — the same person can ask for different things on different trips.
-    if (norm(input.requirement)) {
-      patch.requirement = cur.requirement
-        ? `${cur.requirement}\n• ${norm(input.requirement)}`
-        : norm(input.requirement);
+    // But an identical note is NOT re-appended: repeatedly logging the same
+    // requirement on each visit used to stack duplicate "• …" bullets.
+    const incomingReq = norm(input.requirement);
+    if (incomingReq) {
+      if (!cur.requirement) {
+        patch.requirement = incomingReq;
+      } else {
+        // Compare against existing lines (bullet marker stripped), case-insensitively.
+        const seen = cur.requirement.split('\n').map((l) => l.replace(/^•\s*/, '').trim().toLowerCase());
+        if (!seen.includes(incomingReq.toLowerCase())) {
+          patch.requirement = `${cur.requirement}\n• ${incomingReq}`;
+        }
+      }
     }
   }
   if (Object.keys(patch).length) {
