@@ -73,6 +73,7 @@ import * as analyticsExt from '../services/crm/analytics-extended.service';
 import * as analyticsPlus from '../services/crm/analytics-leads-plus.service';
 import { leadStructureReport } from '../services/crm/leadStructureReport.service';
 import * as dashboardLayoutSvc from '../services/crm/dashboardLayout.service';
+import * as listViewPrefsSvc from '../services/crm/listViewPrefs.service';
 import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
 import * as whatsappSvc from '../services/crm/whatsapp.service';
@@ -6869,6 +6870,29 @@ layouts.delete('/:page/widgets/:widget_id', wrap(async (req, res) => {
   res.json(await dashboardLayoutSvc.removeWidget(uid, orgId(req), clientId(req), page, req.params.widget_id));
 }));
 router.use('/dashboard-layouts', layouts);
+
+// ── LIST VIEW PREFS (per-user column visibility + table/cards/kanban mode) ──
+const listViewPrefs = express.Router();
+listViewPrefs.get('/:entity', wrap(async (req, res) => {
+  const entity = req.params.entity as listViewPrefsSvc.ListViewEntity;
+  if (!listViewPrefsSvc.LIST_VIEW_ENTITIES.includes(entity)) {
+    throw new AppError(400, `entity must be one of ${listViewPrefsSvc.LIST_VIEW_ENTITIES.join(', ')}`, 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  res.json(await listViewPrefsSvc.getListViewPrefs(uid, orgId(req), entity));
+}));
+listViewPrefs.put('/:entity', wrap(async (req, res) => {
+  const entity = req.params.entity as listViewPrefsSvc.ListViewEntity;
+  if (!listViewPrefsSvc.LIST_VIEW_ENTITIES.includes(entity)) {
+    throw new AppError(400, `entity must be one of ${listViewPrefsSvc.LIST_VIEW_ENTITIES.join(', ')}`, 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  const prefs = req.body as listViewPrefsSvc.ListViewPrefs;
+  res.json(await listViewPrefsSvc.saveListViewPrefs(uid, orgId(req), clientId(req), entity, prefs));
+}));
+router.use('/list-view-prefs', listViewPrefs);
 
 router.get('/leaderboard', wrap(async (req, res) => {
   const metric = (req.query.metric === 'revenue' ? 'revenue' : 'count') as leaderboardSvc.LeaderboardMetric;
