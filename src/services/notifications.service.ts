@@ -26,7 +26,7 @@ import { logger } from '../lib/logger';
 import { routedData, notificationKind } from '../lib/notificationRoute';
 import { classifyFcmError } from '../lib/fcmErrors';
 import { allowedFlags } from './notificationPolicy';
-import { forwardToClientWhatsapp } from './clientWhatsappAlerts.service';
+import { forwardToClientWhatsapp, alertsActive } from './clientWhatsappAlerts.service';
 
 export interface DispatchResult {
   scanned: number;
@@ -183,6 +183,16 @@ export async function dispatchPendingPushes(opts?: {
   await forwardToClientWhatsapp(rows
     .filter((_, i) => allowed[i])
     .map((r) => ({ orgId: orgByUser.get(r.user_id) ?? null, kind: notificationKind(r.type, r.data), title: r.title, body: r.body, data: r.data })));
+
+  // One-tap approvals: the approver of a leave / expense / attendance-correction request also gets it on their own
+  // WhatsApp with Approve / Reject buttons, when the client switched that on. Separate opt-in, so it does not follow
+  // the in-app filter. Loaded lazily: it pulls in the leave / expense services.
+  if (alertsActive()) {
+    const { forwardApprovalRequests } = await import('./whatsappApprovals.service');
+    await forwardApprovalRequests(rows.map((r) => ({
+      orgId: orgByUser.get(r.user_id) ?? null, userId: r.user_id, kind: notificationKind(r.type, r.data), title: r.title, body: r.body, data: r.data,
+    })));
+  }
 
   if (credentialFailures > 0) {
     // One loud line per run (the per-row warnings above are easy to miss). The rows are still stamped

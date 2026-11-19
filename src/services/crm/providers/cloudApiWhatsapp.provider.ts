@@ -24,7 +24,7 @@ export function makeCloudApiProvider(cfg: CloudApiConfig): WhatsappProvider {
             template: {
               name: input.template_name,
               language: { code: input.template_language || 'en' },
-              ...templateComponents(input.template_variables),
+              ...templateComponents(input.template_variables, input.template_buttons),
             },
           }
         : { messaging_product: 'whatsapp', to, type: 'text', text: { body: input.body_text || '' } };
@@ -63,17 +63,26 @@ export function providerError(message: string, res: Response, code?: number): Pr
 
 /** Body variables → a Cloud API BODY component. Supports BOTH positional
  *  ({{1}},{{2}}…) and the newer named ({{customer_name}}) template formats:
- *  named parameters must carry `parameter_name`, positional must not. */
-export function templateComponents(vars?: Record<string, string>): Record<string, unknown> {
-  if (!vars) return {};
-  const allKeys = Object.keys(vars);
-  if (!allKeys.length) return {};
-  const numeric = allKeys.filter((k) => /^\d+$/.test(k));
-  if (numeric.length === allKeys.length) {
-    // Positional {{1}},{{2}}… template — order matters, no parameter_name.
-    const keys = numeric.sort((a, b) => Number(a) - Number(b));
-    return { components: [{ type: 'body', parameters: keys.map((k) => ({ type: 'text', text: String(vars[k] ?? '') })) }] };
+ *  named parameters must carry `parameter_name`, positional must not.
+ *  `buttons` are payloads for the template's quick-reply buttons, in order
+ *  (button index 0, 1, …); WhatsApp returns the payload when one is tapped. */
+export function templateComponents(vars?: Record<string, string>, buttons?: string[]): Record<string, unknown> {
+  const components: Array<Record<string, unknown>> = [];
+  const allKeys = Object.keys(vars ?? {});
+  if (vars && allKeys.length) {
+    const numeric = allKeys.filter((k) => /^\d+$/.test(k));
+    if (numeric.length === allKeys.length) {
+      // Positional {{1}},{{2}}… template — order matters, no parameter_name.
+      const keys = numeric.sort((a, b) => Number(a) - Number(b));
+      components.push({ type: 'body', parameters: keys.map((k) => ({ type: 'text', text: String(vars[k] ?? '') })) });
+    } else {
+      // Named {{customer_name}} template — Cloud API requires parameter_name per param.
+      components.push({ type: 'body', parameters: allKeys.map((k) => ({ type: 'text', parameter_name: k, text: String(vars[k] ?? '') })) });
+    }
   }
-  // Named {{customer_name}} template — Cloud API requires parameter_name per param.
-  return { components: [{ type: 'body', parameters: allKeys.map((k) => ({ type: 'text', parameter_name: k, text: String(vars[k] ?? '') })) }] };
+  // forEach skips holes, so a sparse list leaves those buttons on their default payload.
+  (buttons ?? []).forEach((payload, i) => {
+    if (payload) components.push({ type: 'button', sub_type: 'quick_reply', index: String(i), parameters: [{ type: 'payload', payload }] });
+  });
+  return components.length ? { components } : {};
 }
