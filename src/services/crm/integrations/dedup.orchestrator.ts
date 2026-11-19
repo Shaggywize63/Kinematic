@@ -141,6 +141,13 @@ export interface NormalizedLead {
   utm_content?: string | null;
   referrer_url?: string | null;
   landing_page?: string | null;
+  /** Acquisition channel classified from UTM/referrer signals (e.g. "Google
+   *  Ads", "ChatGPT", "Direct") — web_form only (see providers/webForm.ts).
+   *  When set, the webhook controller resolves a per-channel crm_lead_sources
+   *  row instead of using the integration's single default source_id, so the
+   *  CRM leads list shows where a lead actually came from rather than always
+   *  the ingestion method ("Web Form"). */
+  channel?: string | null;
   /** Provider's id for this lead, e.g. Meta `leadgen_id` — kept on the
    *  attribution row for replay/debug, not on the lead itself. */
   external_id?: string | null;
