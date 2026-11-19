@@ -389,6 +389,10 @@ export async function upcomingInvoices(s: FinanceScope, query: Record<string, un
     .eq('recurrence_enabled', true)
     .is('deleted_at', null)
     .neq('status', 'void')
+    // Once the invoice has been shared (public link shared) or sent (emailed / marked sent),
+    // it's been dealt with — drop it from the Upcoming list.
+    .is('shared_at', null)
+    .is('sent_at', null)
     .not('next_invoice_date', 'is', null)
     .lte('next_invoice_date', until)
     .order('next_invoice_date', { ascending: true })
@@ -583,6 +587,14 @@ export async function documentPdf(s: FinanceScope, docType: DocType, id: string)
 
 export async function shareLink(s: FinanceScope, docType: DocType, id: string) {
   const doc = await loadRow(s, id, docType);
+  // Record the first time the link was shared, so the Upcoming-invoices card can drop a
+  // recurring invoice once it has been shared. Only stamps when not already set (keeps the
+  // first-shared time) and never fails the share if the column/update is unavailable.
+  if (!doc.shared_at) {
+    const { error } = await scoped(db().from('finance_documents').update({ shared_at: new Date().toISOString() }), s)
+      .eq('id', id).is('shared_at', null);
+    if (!error) await addEvent(s, id, 'shared', {});
+  }
   return { url: publicDocUrl(doc.share_token as string), token: doc.share_token };
 }
 
