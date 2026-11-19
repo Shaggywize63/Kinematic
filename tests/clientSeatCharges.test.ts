@@ -22,6 +22,7 @@ jest.mock('../src/services/finance/documents.service', () => ({
 
 import {
   priceOf, currentCycleFor, queueSeatCharge, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice,
+  nextPaymentFor, nextPaymentsFor, detectSeatPriceFromInvoice, detectedSeatPrice, findClientByFinanceCustomer,
 } from '../src/services/clientBilling.service';
 
 const supa = () => (global as any).__supa;
@@ -194,5 +195,121 @@ describe('applySeatChargesToInvoice', () => {
     supa().setDefault('client_seat_charges', { data: [] });
     await expect(applySeatChargesToInvoice(scope, 'c1', 'inv-1')).rejects.toThrow('No pending seat charges');
     expect(mockGetDocument).not.toHaveBeenCalled();
+  });
+});
+
+describe('nextPaymentFor / nextPaymentsFor — scheduled fallback', () => {
+  it('returns the real unpaid invoice, marked not scheduled, when one exists', async () => {
+    supa().setDefault('finance_documents', { data: [{ id: 'inv-1', number: 'INV-1', due_date: '2026-11-25', total: 7080, balance: 7080, status: 'sent', share_token: 'tok' }] });
+    const np = await nextPaymentFor('org-1', 'cust-1');
+    expect(np).toMatchObject({ invoice_id: 'inv-1', due_date: '2026-11-25', scheduled: false });
+  });
+
+  it('falls back to the recurring invoice\'s next_invoice_date when nothing is unpaid', async () => {
+    supa().setDefault('finance_documents', (chain: any) => {
+      // First query (nextUnpaidInvoice): filters on status/balance — nothing outstanding.
+      if (chain.eqs.customer_id === 'cust-1' && 'recurrence_enabled' in chain.eqs) {
+        return { data: { next_invoice_date: '2026-12-01', recurrence_interval: 'monthly', recurrence_custom_every: null, recurrence_custom_unit: null } };
+      }
+      return { data: [] };
+    });
+    const np = await nextPaymentFor('org-1', 'cust-1');
+    expect(np).toEqual({ invoice_id: null, number: null, due_date: '2026-12-01', total: null, balance: null, status: 'scheduled', share_token: null, scheduled: true });
+  });
+
+  it('is null when there is no unpaid invoice and no recurring invoice either', async () => {
+    supa().setDefault('finance_documents', { data: [] });
+    expect(await nextPaymentFor('org-1', 'cust-1')).toBeNull();
+  });
+
+  it('batched form merges real + scheduled per customer', async () => {
+    supa().setDefault('finance_documents', (chain: any) => {
+      if (chain.ops.some((o: any) => o.method === 'in') && !('recurrence_enabled' in chain.eqs)) {
+        // nextUnpaidInvoicesByCustomer's batched query — only cust-1 has a real unpaid invoice.
+        return { data: [{ id: 'inv-1', number: 'INV-1', due_date: '2026-11-25', total: 7080, balance: 7080, status: 'sent', share_token: 'tok', customer_id: 'cust-1' }] };
+      }
+      // scheduledNextInvoicesByCustomer's batched query — only cust-2 has a recurring template.
+      return { data: [{ customer_id: 'cust-2', next_invoice_date: '2026-12-05' }] };
+    });
+    const out = await nextPaymentsFor('org-1', ['cust-1', 'cust-2', 'cust-3']);
+    expect(out['cust-1']).toMatchObject({ due_date: '2026-11-25', scheduled: false });
+    expect(out['cust-2']).toMatchObject({ due_date: '2026-12-05', scheduled: true });
+    expect(out['cust-3']).toBeUndefined();
+  });
+});
+
+describe('detectSeatPriceFromInvoice / detectedSeatPrice', () => {
+  it('reads the rate off the line item whose quantity matches active users', async () => {
+    supa().setDefault('finance_documents', { data: { id: 'inv-1' } });
+    supa().setDefault('finance_document_items', { data: [{ quantity: 11, rate: 500 }] });
+    expect(await detectSeatPriceFromInvoice('org-1', 'cust-1', 11)).toBe(500);
+  });
+
+  it('falls back to the highest-quantity line when none matches exactly', async () => {
+    supa().setDefault('finance_documents', { data: { id: 'inv-1' } });
+    supa().setDefault('finance_document_items', { data: [{ quantity: 1, rate: 1000 }, { quantity: 12, rate: 500 }] });
+    expect(await detectSeatPriceFromInvoice('org-1', 'cust-1', 10)).toBe(500);
+  });
+
+  it('is null when the only line has quantity 1 (nothing looks per-seat)', async () => {
+    supa().setDefault('finance_documents', { data: { id: 'inv-1' } });
+    supa().setDefault('finance_document_items', { data: [{ quantity: 1, rate: 1000 }] });
+    expect(await detectSeatPriceFromInvoice('org-1', 'cust-1', 10)).toBeNull();
+  });
+
+  it('is null with no invoice, or no org/customer', async () => {
+    supa().setDefault('finance_documents', { data: null });
+    expect(await detectSeatPriceFromInvoice('org-1', 'cust-1', 10)).toBeNull();
+    expect(await detectSeatPriceFromInvoice('', 'cust-1', 10)).toBeNull();
+  });
+
+  it('detectedSeatPrice resolves org/customer/active-count from the client row', async () => {
+    supa().setDefault('users', { data: [{ id: 'u1', email: 'ravi@aadinath.com' }] });
+    supa().setDefault('finance_documents', { data: { id: 'inv-1' } });
+    supa().setDefault('finance_document_items', { data: [{ quantity: 1, rate: 500 }] });
+    const price = await detectedSeatPrice({ org_id: 'org-1', settings: { billing: { finance_customer_id: 'cust-1' } } });
+    expect(price).toBe(500); // quantity (1) matches the active count (1) we stubbed
+  });
+
+  it('detectedSeatPrice is null with no linked finance customer', async () => {
+    expect(await detectedSeatPrice({ org_id: 'org-1', settings: {} })).toBeNull();
+    expect(await detectedSeatPrice(null)).toBeNull();
+  });
+});
+
+describe('queueSeatCharge — falls back to the detected price', () => {
+  it('uses the detected per-seat price when no explicit price is set', async () => {
+    supa().setDefault('clients', { data: { id: 'c1', org_id: 'org-1', settings: { billing: { finance_customer_id: 'cust-1' } } } });
+    supa().setDefault('users', { data: [] }); // active-user count for detection = 0
+    supa().setDefault('finance_documents', { data: { id: 'inv-1' } });
+    supa().setDefault('finance_document_items', { data: [{ quantity: 5, rate: 500 }] });
+    await queueSeatCharge('c1', 'u1', 'Ravi');
+    const insert = supa().chainsFor('client_seat_charges')[0];
+    const row = insert.ops.find((o: any) => o.method === 'insert')!.args[0] as Record<string, unknown>;
+    expect(row.price_per_user).toBe(500);
+  });
+
+  it('is still a no-op when neither an explicit nor a detected price exists', async () => {
+    supa().setDefault('clients', { data: { id: 'c1', org_id: 'org-1', settings: { billing: { finance_customer_id: 'cust-1' } } } });
+    supa().setDefault('users', { data: [] });
+    supa().setDefault('finance_documents', { data: null });
+    await queueSeatCharge('c1', 'u1', 'Ravi');
+    expect(supa().chainsFor('client_seat_charges').length).toBe(0);
+  });
+});
+
+describe('findClientByFinanceCustomer', () => {
+  it('finds the client whose billing.finance_customer_id matches', async () => {
+    supa().setDefault('clients', { data: [
+      { id: 'c1', settings: { billing: { finance_customer_id: 'cust-x' } } },
+      { id: 'c2', settings: { billing: { finance_customer_id: 'cust-1' } } },
+    ] });
+    expect(await findClientByFinanceCustomer('org-1', 'cust-1')).toEqual({ id: 'c2' });
+  });
+
+  it('is null when no client matches, or org/customer are missing', async () => {
+    supa().setDefault('clients', { data: [{ id: 'c1', settings: {} }] });
+    expect(await findClientByFinanceCustomer('org-1', 'cust-1')).toBeNull();
+    expect(await findClientByFinanceCustomer('', 'cust-1')).toBeNull();
   });
 });

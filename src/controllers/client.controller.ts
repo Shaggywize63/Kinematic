@@ -14,7 +14,7 @@ import { readOrgSettings, writeOrgSettings } from '../services/notificationPolic
 import { readAlertSettings, writeAlertSettings, sendTestAlert, AlertSettingsError } from '../services/clientWhatsappAlerts.service';
 import { sendSummaryNow } from '../services/clientDailySummary.service';
 import { cleanAppUiForStore } from '../lib/appItems';
-import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, countActiveUsersByOrg, nextUnpaidInvoicesByCustomer, type NextPayment, priceOf, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice } from '../services/clientBilling.service';
+import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, nextPaymentFor, countActiveUsersByOrg, nextPaymentsFor, type NextPayment, priceOf, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice, detectedSeatPrice } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
 import { currentMonth as kiniMonth } from '../services/crm/ai/kiniQuota.service';
 import { invalidateAuthCache } from '../middleware/auth';
@@ -265,7 +265,7 @@ async function readNextPayments(clients: Array<Record<string, any>>, user: { org
     if (g) g.push(x); else byOrg.set(org, [x]);
   }
   for (const [org, group] of byOrg) {
-    const map = await nextUnpaidInvoicesByCustomer(org, Array.from(new Set(group.map((x) => x.cust))));
+    const map = await nextPaymentsFor(org, Array.from(new Set(group.map((x) => x.cust))));
     for (const x of group) out[x.c.id] = map[x.cust] ?? null;
   }
   return out;
@@ -1234,7 +1234,7 @@ export const getClientAccount = asyncHandler(async (req: AuthRequest, res: Respo
 
   const financeCustomerId = financeCustomerIdOf(client);
   const nextPayment = financeCustomerId
-    ? await nextUnpaidInvoice(managingOrgId(client, user), financeCustomerId)
+    ? await nextPaymentFor(managingOrgId(client, user), financeCustomerId)
     : null;
 
   ok(res, {
@@ -1246,6 +1246,7 @@ export const getClientAccount = asyncHandler(async (req: AuthRequest, res: Respo
     finance_customer_id: financeCustomerId,
     next_payment: nextPayment,
     price_per_user: priceOf(client),
+    detected_price_per_user: await detectedSeatPrice(client as { org_id?: string | null; settings?: unknown }),
   });
 });
 
