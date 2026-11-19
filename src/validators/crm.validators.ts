@@ -416,6 +416,11 @@ export const contactSchema = z.object({
   mobile: z.string().max(40).optional().nullable(),
   title: z.string().max(120).optional().nullable(),
   department: z.string().max(120).optional().nullable(),
+  // Free-text requirement captured on a B2B (Spark & Ray) contact. A real
+  // crm_contacts column — without it here the dashboard's inline edit on the
+  // lead's "Contacts & requirements" card would be silently dropped by the
+  // PATCH /crm/contacts/:id validator (Zod strips unknown keys).
+  requirement: z.string().max(4000).optional().nullable(),
   linkedin_url: z.string().url().optional().nullable(),
   owner_id: optionalUuid,
   do_not_contact: z.boolean().optional(),
