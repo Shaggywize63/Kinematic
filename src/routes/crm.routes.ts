@@ -74,6 +74,7 @@ import * as analyticsPlus from '../services/crm/analytics-leads-plus.service';
 import { leadStructureReport } from '../services/crm/leadStructureReport.service';
 import * as dashboardLayoutSvc from '../services/crm/dashboardLayout.service';
 import * as listViewPrefsSvc from '../services/crm/listViewPrefs.service';
+import * as panelPrefsSvc from '../services/crm/panelPrefs.service';
 import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
 import * as whatsappSvc from '../services/crm/whatsapp.service';
@@ -6893,6 +6894,29 @@ listViewPrefs.put('/:entity', wrap(async (req, res) => {
   res.json(await listViewPrefsSvc.saveListViewPrefs(uid, orgId(req), clientId(req), entity, prefs));
 }));
 router.use('/list-view-prefs', listViewPrefs);
+
+// ── PANEL PREFS (per-user panel order for CRM detail pages) ──
+const panelPrefs = express.Router();
+panelPrefs.get('/:page', wrap(async (req, res) => {
+  const page = req.params.page as panelPrefsSvc.PanelPage;
+  if (!panelPrefsSvc.PANEL_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${panelPrefsSvc.PANEL_PAGES.join(', ')}`, 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  res.json(await panelPrefsSvc.getPanelOrder(uid, orgId(req), page));
+}));
+panelPrefs.put('/:page', wrap(async (req, res) => {
+  const page = req.params.page as panelPrefsSvc.PanelPage;
+  if (!panelPrefsSvc.PANEL_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${panelPrefsSvc.PANEL_PAGES.join(', ')}`, 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  const prefs = req.body as panelPrefsSvc.PanelPrefs;
+  res.json(await panelPrefsSvc.savePanelOrder(uid, orgId(req), clientId(req), page, prefs));
+}));
+router.use('/panel-prefs', panelPrefs);
 
 router.get('/leaderboard', wrap(async (req, res) => {
   const metric = (req.query.metric === 'revenue' ? 'revenue' : 'count') as leaderboardSvc.LeaderboardMetric;
