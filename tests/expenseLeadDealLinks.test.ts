@@ -202,6 +202,78 @@ describe('linking a claim to a lead and a deal', () => {
   });
 });
 
+// ── setClaimLinks: attach an EXISTING (even approved) claim to a lead / deal ──
+describe('setClaimLinks', () => {
+  const asStranger = { id: OTHER_REP, org_id: ORG, client_id: SPARK_CLIENT_ID, role: 'executive', data_scope: 'own' } as any;
+
+  it('links an already-approved claim to a lead (status does not block it, unlike updateClaim)', async () => {
+    arrange({ claim: draft({ status: 'approved', total_amount: 500, lead_id: null }), lead: { id: LEAD, account_id: ACC_LEAD } });
+    const c: any = await svc.setClaimLinks(asSpark, CLAIM, { lead_id: LEAD });
+    const u = updatesOf('expense_claims').find((x) => 'lead_id' in x)!;
+    expect(u).toMatchObject({ lead_id: LEAD, account_id: ACC_LEAD });
+    // money / status are untouched — only CRM link columns + updated_at are written
+    expect(u).not.toHaveProperty('total_amount');
+    expect(u).not.toHaveProperty('status');
+    expect(c.id).toBe(CLAIM); // returns the (re-read) claim
+  });
+
+  it('derives the lead and account from a deal attached on its own', async () => {
+    arrange({ claim: draft({ status: 'reimbursed' }), deal: { id: DEAL, lead_id: LEAD, account_id: ACC_DEAL } });
+    await svc.setClaimLinks(asSpark, CLAIM, { deal_id: DEAL });
+    expect(updatesOf('expense_claims').find((x) => 'deal_id' in x)).toMatchObject({ deal_id: DEAL, lead_id: LEAD, account_id: ACC_DEAL });
+  });
+
+  it('clears a link when the id is null', async () => {
+    arrange({ claim: draft({ status: 'approved', lead_id: LEAD, deal_id: DEAL }) });
+    await svc.setClaimLinks(asSpark, CLAIM, { lead_id: null, deal_id: null });
+    expect(updatesOf('expense_claims').find((x) => 'lead_id' in x)).toMatchObject({ lead_id: null, deal_id: null });
+  });
+
+  it('the claim\'s approver may link it too', async () => {
+    arrange({ claim: draft({ status: 'submitted', approver_id: OTHER_REP }), lead: { id: LEAD, account_id: null } });
+    await svc.setClaimLinks(asStranger, CLAIM, { lead_id: LEAD });
+    expect(updatesOf('expense_claims').find((x) => 'lead_id' in x)).toMatchObject({ lead_id: LEAD });
+  });
+
+  it('refuses someone who is neither the claimant, the approver, nor an admin', async () => {
+    arrange({ claim: draft({ status: 'approved', approver_id: REP }) });
+    await expect(svc.setClaimLinks(asStranger, CLAIM, { lead_id: LEAD })).rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' });
+    expect(updatesOf('expense_claims')).toHaveLength(0);
+  });
+
+  it('refuses a lead that is not in the org', async () => {
+    arrange({ claim: draft({ status: 'approved' }) });
+    await expect(svc.setClaimLinks(asSpark, CLAIM, { lead_id: LEAD })).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION', message: 'Linked lead not found' });
+  });
+
+  it('404s an unknown claim', async () => {
+    arrange({ claim: null });
+    __mock.setDefault('expense_claims', { data: [] });
+    await expect(svc.setClaimLinks(asSpark, CLAIM, { lead_id: LEAD })).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it('writes nothing for a client that is not connected-B2B (resolveLinks is a no-op)', async () => {
+    arrange({ claim: draft({ status: 'approved' }) });
+    const c: any = await svc.setClaimLinks(asOther, CLAIM, { lead_id: LEAD });
+    expect(updatesOf('expense_claims')).toHaveLength(0);
+    expect(__mock.chainsFor('crm_leads')).toHaveLength(0);
+    expect(c.id).toBe(CLAIM);
+  });
+
+  it('is reachable as PATCH /claims/:id/link and returns { success, data }', async () => {
+    const app = express();
+    app.use(express.json());
+    app.use((req: any, _res, next) => { req.user = asSpark; next(); });
+    app.use('/expenses', expensesRouter);
+    app.use((err: any, _req: any, res: any, _next: any) => res.status(err.statusCode ?? 500).json({ success: false, error: err.message, code: err.code }));
+    arrange({ claim: draft({ status: 'approved' }), lead: { id: LEAD, account_id: null } });
+    const res = await request(app).patch(`/expenses/claims/${CLAIM}/link`).send({ lead_id: LEAD });
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(updatesOf('expense_claims').find((x) => 'lead_id' in x)).toMatchObject({ lead_id: LEAD });
+  });
+});
+
 // ── a tenant database without the new columns ───────────────────────────────
 describe('a database without the lead_id / deal_id columns', () => {
   it('retries a create without ONLY the two new columns, keeping the older links', async () => {

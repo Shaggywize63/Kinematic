@@ -95,6 +95,13 @@ const decisionSchema = z.object({
 });
 const bulkSchema = z.object({ ids: z.array(uuid).min(1).max(100), decision: z.enum(['approved', 'rejected']), note: z.string().max(1000).optional().nullable() });
 const reimburseSchema = z.object({ ref: z.string().max(120).optional() });
+// Attach an existing claim to a lead / deal / account. A null clears that link; the lead usually suffices
+// (the deal, when sent, carries its own lead/account).
+const linkSchema = z.object({
+  lead_id: uuid.nullable().optional(),
+  deal_id: uuid.nullable().optional(),
+  account_id: uuid.nullable().optional(),
+});
 const legacyPolicySchema = z.object({
   currency: z.string().max(8).optional(),
   mileage_rate: num(10_000).optional(),
@@ -332,6 +339,12 @@ router.patch('/claims/:id', asyncHandler<AuthRequest>(async (req, res) => {
   try {
     res.json({ success: true, data: await expenses.updateClaim(actor(req), idParam(req), parse(createSchema, req.body)) });
   } catch (e) { if (!policyBlocked(res, e)) throw e; }
+}));
+// Link an EXISTING claim to a lead / deal (connected-B2B). CRM metadata only, so — unlike PATCH /claims/:id —
+// it is allowed even after the claim is approved/reimbursed; that is how an "old" expense gets attached to a
+// lead. Send lead_id/deal_id to set, or null to clear. The claimant or an approver may do it.
+router.patch('/claims/:id/link', asyncHandler<AuthRequest>(async (req, res) => {
+  res.json({ success: true, data: await expenses.setClaimLinks(actor(req), idParam(req), parse(linkSchema, req.body)) });
 }));
 router.post('/claims/:id/submit', asyncHandler<AuthRequest>(async (req, res) => {
   try {

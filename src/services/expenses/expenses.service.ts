@@ -681,6 +681,26 @@ async function resolveLinks(actor: Actor, body: ClaimBody): Promise<Record<strin
   return out;
 }
 
+/**
+ * Link an EXISTING claim to a lead / deal (CRM metadata only). Unlike `updateClaim`, this is allowed
+ * regardless of the claim's status — the claim's money/lines/policy are untouched, so attaching an
+ * already-approved or reimbursed ("old") expense to a lead is safe. The claimant may link their own
+ * claim; an approver may link any. Clears a link when the corresponding id is sent as null. Connected-B2B
+ * only (resolveLinks returns {} otherwise, so it is a no-op for every other tenant). Returns the claim.
+ */
+export async function setClaimLinks(actor: Actor, id: string, body: ClaimBody) {
+  const c = await loadClaim(actor.org_id, id);
+  if (c.user_id !== actor.id && c.approver_id !== actor.id && !isApprover(actor)) {
+    throw new AppError(403, 'Not your claim', 'FORBIDDEN');
+  }
+  const links = await resolveLinks(actor, body);
+  if (Object.keys(links).length > 0) {
+    const { error } = await updateClaimRow(id, { ...links, updated_at: new Date().toISOString() });
+    if (error) throw dbFailure(error, 'link the expense to this lead');
+  }
+  return getClaim(actor, id);
+}
+
 /** Create a draft claim with its lines. Totals are computed from the lines. */
 export async function createClaim(actor: Actor, body: ClaimBody) {
   const policy = await resolvePolicyForUserId(actor.org_id, actor.client_id ?? null, actor.id);
