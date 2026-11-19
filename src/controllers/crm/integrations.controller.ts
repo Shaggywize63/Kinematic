@@ -70,6 +70,36 @@ function getProvider(id: ProviderId) {
   return null;
 }
 
+// A web-form lead's normalize() step classifies its acquisition channel
+// (Google Ads, ChatGPT, Direct, ...) from UTM/referrer signals — see
+// classifyChannel() in providers/webForm.ts. Route it to its own
+// crm_lead_sources row (created on first sight, org+client scoped like
+// createIntegration's auto-created source above) instead of lumping every
+// web-form lead under the integration's single default source, so the leads
+// list and source-performance reports actually show where a lead came from.
+async function getOrCreateChannelSource(orgId: string, clientId: string | null, name: string): Promise<string | null> {
+  const trimmed = name.trim().slice(0, 120);
+  if (!trimmed) return null;
+  let q = supabaseAdmin.from('crm_lead_sources').select('id').eq('org_id', orgId).eq('name', trimmed);
+  q = clientId ? q.eq('client_id', clientId) : q.is('client_id', null);
+  const { data: existing } = await q.maybeSingle();
+  if ((existing as { id?: string } | null)?.id) return (existing as { id: string }).id;
+
+  const { data: createdRow, error } = await supabaseAdmin.from('crm_lead_sources')
+    .insert({ org_id: orgId, name: trimmed, client_id: clientId })
+    .select('id').single();
+  if ((createdRow as { id?: string } | null)?.id) return (createdRow as { id: string }).id;
+
+  // Lost a race on the (org_id, name) unique constraint — re-fetch.
+  let again = supabaseAdmin.from('crm_lead_sources').select('id').eq('org_id', orgId).eq('name', trimmed);
+  again = clientId ? again.eq('client_id', clientId) : again.is('client_id', null);
+  const { data: row } = await again.maybeSingle();
+  if ((row as { id?: string } | null)?.id) return (row as { id: string }).id;
+
+  logger.error({ orgId, name: trimmed, err: error?.message }, 'getOrCreateChannelSource: failed, falling back to integration default');
+  return null;
+}
+
 function sanitiseIntegration(row: any): IntegrationRow & { webhook_url?: string } {
   // Strip ciphertext from outbound payloads. webhook_secret is only
   // included on the immediate-after-create response (see createIntegration).
@@ -437,17 +467,22 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
     const normalised = await provider.normalize(req.body, integration as IntegrationRow);
     const batch = Array.isArray(normalised) ? normalised : [normalised];
 
+    const integrationClientId = (integration as { client_id?: string | null }).client_id ?? null;
+
     let merged = 0, created = 0;
     for (const n of batch) {
+      const channelSourceId = n.channel
+        ? await getOrCreateChannelSource(integration.org_id, integrationClientId, n.channel)
+        : null;
       const r = await findOrCreateLead({
         org_id: integration.org_id,
-        source_id: integration.source_id!,
+        source_id: channelSourceId ?? integration.source_id!,
         normalized: n,
         integration_id,
         // Stamp the integration's client scope onto the lead so the
         // creating tenant's reps see it without an org-level admin
         // having to re-assign. NULL = org-wide.
-        client_id: (integration as { client_id?: string | null }).client_id ?? null,
+        client_id: integrationClientId,
         raw_event_id: event_id,
       });
       if (r.was_new) created++; else merged++;
@@ -463,7 +498,7 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
         for (const [flag, purpose] of pairs) {
           if (flag === true) {
             await consentSvc.recordConsent(
-              { orgId: integration.org_id, clientId: (integration as { client_id?: string | null }).client_id ?? null },
+              { orgId: integration.org_id, clientId: integrationClientId },
               { subjectType: 'lead', subjectId: r.lead_id, purpose, consented: true, method, source: `integration:${providerId}`, actorUserId: null },
             );
           }
