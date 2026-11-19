@@ -32,13 +32,16 @@ const domainOf = (email?: string | null): string => String(email || '').split('@
 export const isStaffEmail = (email?: string | null): boolean => STAFF_DOMAINS.has(domainOf(email));
 
 export interface NextPayment {
-  invoice_id: string;
-  number: string;
+  invoice_id: string | null;
+  number: string | null;
   due_date: string | null;
-  total: number;
-  balance: number;
+  total: number | null;
+  balance: number | null;
   status: string;
   share_token: string | null;
+  /** True when nothing has actually been invoiced yet — due_date is the linked
+   *  recurring invoice's next_invoice_date, a projection, not a real unpaid bill. */
+  scheduled: boolean;
 }
 
 /** The finance customer this client is billed as, if linked. */
@@ -46,6 +49,21 @@ export function financeCustomerIdOf(client: { settings?: unknown } | null | unde
   const s = (client as { settings?: { billing?: { finance_customer_id?: unknown } } } | null)?.settings;
   const id = s?.billing?.finance_customer_id;
   return typeof id === 'string' && id.trim() ? id.trim() : null;
+}
+
+/** The reverse of financeCustomerIdOf: which client (if any), owned by this
+ *  org, is billed as this finance customer. Used to auto-apply pending seat
+ *  charges the moment a new invoice is raised for that customer (see
+ *  documents.service.ts createDocument). A full scan + JS filter rather than
+ *  a JSON-path query — org-scoped client counts are small, and this sidesteps
+ *  owner_org_id, which doesn't exist on every project (see CLAUDE.md). */
+export async function findClientByFinanceCustomer(orgId: string, customerId: string): Promise<{ id: string } | null> {
+  if (!orgId || !customerId) return null;
+  const { data } = await supabaseAdmin.from('clients').select('id, settings').eq('org_id', orgId);
+  for (const row of (data ?? []) as Array<{ id: string; settings?: unknown }>) {
+    if (financeCustomerIdOf(row) === customerId) return { id: row.id };
+  }
+  return null;
 }
 
 /** Read the seat cap for an org (null = no cap). */
@@ -98,9 +116,52 @@ export async function nextUnpaidInvoicesByCustomer(financeOrgId: string, custome
     out[d.customer_id] = {
       invoice_id: d.id, number: d.number, due_date: d.due_date ?? null,
       total: Number(d.total), balance: Number(d.balance), status: d.status, share_token: d.share_token ?? null,
+      scheduled: false,
     };
   }
   return out;
+}
+
+/** Batched form of currentCycleFor's lookup — the soonest next_invoice_date per
+ *  customer, for clients with no real unpaid invoice yet (see nextPaymentsFor). */
+export async function scheduledNextInvoicesByCustomer(financeOrgId: string, customerIds: string[]): Promise<Record<string, NextPayment>> {
+  const out: Record<string, NextPayment> = {};
+  if (!financeOrgId || !customerIds.length) return out;
+  const { data, error } = await supabaseAdmin
+    .from('finance_documents')
+    .select('customer_id, next_invoice_date')
+    .eq('org_id', financeOrgId)
+    .eq('doc_type', 'invoice')
+    .in('customer_id', customerIds)
+    .eq('recurrence_enabled', true)
+    .is('deleted_at', null)
+    .not('next_invoice_date', 'is', null)
+    .order('next_invoice_date', { ascending: true });
+  if (error || !data) return out;
+  for (const d of data as Array<{ customer_id: string; next_invoice_date: string }>) {
+    if (out[d.customer_id]) continue; // ordered soonest-first, so the first per customer wins
+    out[d.customer_id] = {
+      invoice_id: null, number: null, due_date: d.next_invoice_date, total: null, balance: null,
+      status: 'scheduled', share_token: null, scheduled: true,
+    };
+  }
+  return out;
+}
+
+/**
+ * The client's next payment, for display: a real unpaid invoice if one
+ * exists, else the linked recurring invoice's next_invoice_date as a
+ * "scheduled" projection (nothing owed yet, but this is when the next
+ * charge is due to go out) — rather than showing no date at all just
+ * because the client is currently paid up. Batched sibling of
+ * nextUnpaidInvoicesByCustomer + scheduledNextInvoicesByCustomer, for the
+ * client list; nextPaymentFor below is the single-client form.
+ */
+export async function nextPaymentsFor(financeOrgId: string, customerIds: string[]): Promise<Record<string, NextPayment>> {
+  const real = await nextUnpaidInvoicesByCustomer(financeOrgId, customerIds);
+  const missing = customerIds.filter((id) => !real[id]);
+  const scheduled = missing.length ? await scheduledNextInvoicesByCustomer(financeOrgId, missing) : {};
+  return { ...real, ...scheduled };
 }
 
 /**
@@ -133,6 +194,19 @@ export async function nextUnpaidInvoice(financeOrgId: string, customerId: string
     balance: Number(d.balance),
     status: d.status,
     share_token: d.share_token ?? null,
+    scheduled: false,
+  };
+}
+
+/** Single-client form of nextPaymentsFor — see its doc comment. */
+export async function nextPaymentFor(financeOrgId: string, customerId: string): Promise<NextPayment | null> {
+  const real = await nextUnpaidInvoice(financeOrgId, customerId);
+  if (real) return real;
+  const cycle = await currentCycleFor(financeOrgId, customerId);
+  if (!cycle) return null;
+  return {
+    invoice_id: null, number: null, due_date: cycle.cycle_end, total: null, balance: null,
+    status: 'scheduled', share_token: null, scheduled: true,
   };
 }
 
@@ -224,21 +298,71 @@ export async function currentCycleFor(financeOrgId: string, customerId: string):
 }
 
 /**
+ * A per-seat price inferred from the client's own recurring invoice, for a
+ * client that never set one explicitly in Client Management. Finds the most
+ * recent invoice for the linked finance customer and reads the rate off
+ * whichever line item's quantity matches the current active-user count (the
+ * conventional "N users x rate" bundle line) — falling back to the
+ * highest-quantity line if nothing matches exactly. Null when there's no
+ * linked customer, no invoice, or no line that looks like a per-seat charge.
+ */
+export async function detectSeatPriceFromInvoice(financeOrgId: string, customerId: string, activeUsers: number): Promise<number | null> {
+  if (!financeOrgId || !customerId) return null;
+  const { data: doc } = await supabaseAdmin
+    .from('finance_documents')
+    .select('id')
+    .eq('org_id', financeOrgId)
+    .eq('doc_type', 'invoice')
+    .eq('customer_id', customerId)
+    .is('deleted_at', null)
+    .order('issue_date', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const docId = (doc as { id?: string } | null)?.id;
+  if (!docId) return null;
+
+  const { data: items } = await supabaseAdmin.from('finance_document_items').select('quantity, rate').eq('document_id', docId);
+  const rows = (items ?? []) as Array<{ quantity: number | string; rate: number | string }>;
+  if (!rows.length) return null;
+
+  const exact = rows.find((r) => Number(r.quantity) === activeUsers);
+  if (exact) return round2(Number(exact.rate));
+  const byQty = [...rows].sort((a, b) => Number(b.quantity) - Number(a.quantity))[0];
+  return byQty && Number(byQty.quantity) > 1 ? round2(Number(byQty.rate)) : null;
+}
+
+/** Convenience wrapper: the detected per-seat price for a client row (see
+ *  detectSeatPriceFromInvoice), resolving its finance org/customer/active count. */
+export async function detectedSeatPrice(client: { org_id?: string | null; settings?: unknown } | null | undefined): Promise<number | null> {
+  if (!client) return null;
+  const financeOrgId = String(client.org_id || '');
+  const customerId = financeCustomerIdOf(client as { settings?: unknown });
+  if (!financeOrgId || !customerId) return null;
+  const activeUsers = await countActiveUsers(supabaseAdmin, financeOrgId);
+  return detectSeatPriceFromInvoice(financeOrgId, customerId, activeUsers);
+}
+
+/**
  * Record a pro-rated charge for a seat added today, for a client that has a
- * per-seat price configured. Never throws — a billing hiccup must not block
- * creating or reactivating a user. A no-op when the client has no price set
- * (the default; nothing changes for a client the operator hasn't opted in).
+ * per-seat price configured — explicitly (clients.settings.billing
+ * .price_per_user) or, failing that, detected from its own recurring invoice
+ * (detectedSeatPrice) — so a client whose invoicing already prices per seat
+ * needs no manual setup at all. Never throws — a billing hiccup must not
+ * block creating or reactivating a user. A no-op when neither source yields
+ * a price (nothing changes for a client the operator hasn't opted in and
+ * whose invoice has no per-seat line).
  */
 export async function queueSeatCharge(clientId: string | null | undefined, userId: string | null, userLabel: string): Promise<void> {
   if (!clientId) return;
   try {
     const { data: client } = await supabaseAdmin.from('clients').select('id, org_id, settings').eq('id', clientId).maybeSingle();
     if (!client) return;
-    const pricePerUser = priceOf(client);
-    if (!pricePerUser) return;
 
     const financeOrgId = String((client as { org_id?: string }).org_id || '');
     const customerId = financeCustomerIdOf(client as { settings?: unknown });
+    const pricePerUser = priceOf(client) ?? await detectedSeatPrice(client as { org_id?: string | null; settings?: unknown });
+    if (!pricePerUser) return;
+
     const addedOn = new Date().toISOString().slice(0, 10);
     const cycle = customerId ? await currentCycleFor(financeOrgId, customerId) : null;
 
