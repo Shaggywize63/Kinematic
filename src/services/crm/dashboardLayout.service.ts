@@ -1,10 +1,12 @@
 /**
  * CRM dashboard layout — per-user widget grid persistence.
  *
- * Two pages are tracked:
+ * Pages tracked:
  *   - 'analytics': the customizable Lead Analytics page
  *   - 'overview':  the CRM Overview where users pin widgets they want at
  *                  the top of their landing screen.
+ *   - 'home':      the main CRM Home (mission control) — same pin
+ *                  mechanism as 'overview', a separate pinned set.
  *
  * Storage shape (jsonb column `config`):
  * {
@@ -18,7 +20,7 @@
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 
-export type LayoutPage = 'analytics' | 'overview' | 'ffm';
+export type LayoutPage = 'analytics' | 'overview' | 'ffm' | 'home';
 
 export interface WidgetInstance {
   id: string;
@@ -87,19 +89,20 @@ export async function saveLayout(
   return clean;
 }
 
-/** Pin a widget to the CRM Overview — used by "Add to dashboard" on each analytics tile. */
-export async function pinWidgetToOverview(
+/** Pin a widget to a page's pinned set — used by "Pin to CRM Overview" / "Pin to CRM Home" on each analytics tile. */
+export async function pinWidget(
   user_id: string,
   org_id: string,
   client_id: string | null,
+  page: LayoutPage,
   widget: WidgetInstance,
 ): Promise<DashboardConfig> {
-  const current = await getLayout(user_id, org_id, 'overview');
+  const current = await getLayout(user_id, org_id, page);
 
   const existingIdx = current.widgets.findIndex(w => w.widget_type === widget.widget_type);
   if (existingIdx >= 0) {
     current.widgets[existingIdx] = { ...current.widgets[existingIdx], ...widget };
-    return saveLayout(user_id, org_id, client_id, 'overview', current);
+    return saveLayout(user_id, org_id, client_id, page, current);
   }
 
   current.widgets.push(widget);
@@ -110,7 +113,7 @@ export async function pinWidgetToOverview(
     layout.push({ i: widget.id, x: 0, y: maxY, w, h: 4 });
     current.layouts[bp] = layout;
   }
-  return saveLayout(user_id, org_id, client_id, 'overview', current);
+  return saveLayout(user_id, org_id, client_id, page, current);
 }
 
 export async function removeWidget(

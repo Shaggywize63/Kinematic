@@ -74,6 +74,7 @@ import * as analyticsPlus from '../services/crm/analytics-leads-plus.service';
 import { leadStructureReport } from '../services/crm/leadStructureReport.service';
 import * as dashboardLayoutSvc from '../services/crm/dashboardLayout.service';
 import * as listViewPrefsSvc from '../services/crm/listViewPrefs.service';
+import * as panelPrefsSvc from '../services/crm/panelPrefs.service';
 import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
 import * as whatsappSvc from '../services/crm/whatsapp.service';
@@ -6830,12 +6831,13 @@ widgets.get('/lead-summary', rbac.requireModuleAccess('crm_leads'), wrap(async (
 }));
 router.use('/widgets', widgets);
 
-// ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview) ──
+// ── DASHBOARD LAYOUTS (per-user widget grid for /crm/analytics + overview + home) ──
+const LAYOUT_PAGES = ['analytics', 'overview', 'ffm', 'home'];
 const layouts = express.Router();
 layouts.get('/:page', wrap(async (req, res) => {
   const page = req.params.page as dashboardLayoutSvc.LayoutPage;
-  if (!['analytics', 'overview', 'ffm'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
+  if (!LAYOUT_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${LAYOUT_PAGES.join(', ')}`, 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
@@ -6843,27 +6845,31 @@ layouts.get('/:page', wrap(async (req, res) => {
 }));
 layouts.put('/:page', wrap(async (req, res) => {
   const page = req.params.page as dashboardLayoutSvc.LayoutPage;
-  if (!['analytics', 'overview', 'ffm'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
+  if (!LAYOUT_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${LAYOUT_PAGES.join(', ')}`, 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
   const config = req.body as dashboardLayoutSvc.DashboardConfig;
   res.json(await dashboardLayoutSvc.saveLayout(uid, orgId(req), clientId(req), page, config));
 }));
-layouts.post('/overview/pin', wrap(async (req, res) => {
+layouts.post('/:page/pin', wrap(async (req, res) => {
+  const page = req.params.page as dashboardLayoutSvc.LayoutPage;
+  if (!LAYOUT_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${LAYOUT_PAGES.join(', ')}`, 'VALIDATION');
+  }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
   const widget = req.body as dashboardLayoutSvc.WidgetInstance;
   if (!widget?.id || !widget?.widget_type) {
     throw new AppError(400, 'widget.id and widget.widget_type are required', 'VALIDATION');
   }
-  res.json(await dashboardLayoutSvc.pinWidgetToOverview(uid, orgId(req), clientId(req), widget));
+  res.json(await dashboardLayoutSvc.pinWidget(uid, orgId(req), clientId(req), page, widget));
 }));
 layouts.delete('/:page/widgets/:widget_id', wrap(async (req, res) => {
   const page = req.params.page as dashboardLayoutSvc.LayoutPage;
-  if (!['analytics', 'overview', 'ffm'].includes(page)) {
-    throw new AppError(400, "page must be 'analytics', 'overview' or 'ffm'", 'VALIDATION');
+  if (!LAYOUT_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${LAYOUT_PAGES.join(', ')}`, 'VALIDATION');
   }
   const uid = userId(req);
   if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
@@ -6893,6 +6899,29 @@ listViewPrefs.put('/:entity', wrap(async (req, res) => {
   res.json(await listViewPrefsSvc.saveListViewPrefs(uid, orgId(req), clientId(req), entity, prefs));
 }));
 router.use('/list-view-prefs', listViewPrefs);
+
+// ── PANEL PREFS (per-user panel order for CRM detail pages) ──
+const panelPrefs = express.Router();
+panelPrefs.get('/:page', wrap(async (req, res) => {
+  const page = req.params.page as panelPrefsSvc.PanelPage;
+  if (!panelPrefsSvc.PANEL_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${panelPrefsSvc.PANEL_PAGES.join(', ')}`, 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  res.json(await panelPrefsSvc.getPanelOrder(uid, orgId(req), page));
+}));
+panelPrefs.put('/:page', wrap(async (req, res) => {
+  const page = req.params.page as panelPrefsSvc.PanelPage;
+  if (!panelPrefsSvc.PANEL_PAGES.includes(page)) {
+    throw new AppError(400, `page must be one of ${panelPrefsSvc.PANEL_PAGES.join(', ')}`, 'VALIDATION');
+  }
+  const uid = userId(req);
+  if (!uid) throw new AppError(400, 'No user context on request', 'NO_USER');
+  const prefs = req.body as panelPrefsSvc.PanelPrefs;
+  res.json(await panelPrefsSvc.savePanelOrder(uid, orgId(req), clientId(req), page, prefs));
+}));
+router.use('/panel-prefs', panelPrefs);
 
 router.get('/leaderboard', wrap(async (req, res) => {
   const metric = (req.query.metric === 'revenue' ? 'revenue' : 'count') as leaderboardSvc.LeaderboardMetric;
