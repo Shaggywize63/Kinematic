@@ -11,6 +11,8 @@
  * `daily_summary` adds the 7 pm manager summary (services/clientDailySummary.service.ts) to the same people.
  * `voice_leads` lets the client's reps create leads by sending a voice note (or "lead …" text) to the client's WhatsApp
  * number (services/crm/whatsappVoiceLead.service.ts). Independent of `enabled`: it sends no alerts.
+ * `approvals` sends each leave, expense and attendance-correction request to its approver's own WhatsApp with Approve /
+ * Reject buttons (services/whatsappApprovals.service.ts). Also independent of `enabled` and of the recipient list.
  *
  * Delivery piggybacks on the push dispatcher (services/notifications.service.ts): every notification row that is
  * allowed through the in-app policy is offered here, so every writer is covered without being touched. One event
@@ -58,6 +60,34 @@ export const SUGGESTED_TEMPLATE = {
   body: 'Alert from your Kinematic account: {{1}}. Details: {{2}}. You receive this because your admin turned on WhatsApp alerts for your team.',
 };
 
+/** The template one-tap approvals use. Its two quick-reply buttons carry the decision back. */
+export const SUGGESTED_APPROVAL_TEMPLATE = {
+  name: 'kinematic_approval_request',
+  category: 'UTILITY',
+  language: 'en',
+  body: 'Approval request on your Kinematic account: {{1}}. Details: {{2}}. Tap Approve or Reject to record your decision.',
+  buttons: ['Approve', 'Reject'],
+};
+
+export interface ApprovalTemplate { id: string; name: string; body: string | null; approveIndex: number; rejectIndex: number }
+
+/**
+ * The client's approved template with an "Approve" and a "Reject" quick-reply button. The suggested template wins
+ * when there are several. Button indexes are positions among ALL the template's buttons, as WhatsApp counts them.
+ */
+export function pickApprovalTemplate(templates: TemplateRow[]): ApprovalTemplate | null {
+  const usable: ApprovalTemplate[] = [];
+  for (const t of templates) {
+    if (!isApproved(t) || !Array.isArray(t.buttons)) continue;
+    const qr = (b: { type?: string }) => String(b?.type ?? '').toUpperCase().replace(/[\s-]/g, '_') === 'QUICK_REPLY';
+    const approveIndex = t.buttons.findIndex((b) => qr(b) && /approv/i.test(String(b?.text ?? '')));
+    const rejectIndex = t.buttons.findIndex((b) => qr(b) && /reject|decline/i.test(String(b?.text ?? '')));
+    if (approveIndex < 0 || rejectIndex < 0) continue;
+    usable.push({ id: t.id, name: String(t.meta_template_name ?? ''), body: t.body_text, approveIndex, rejectIndex });
+  }
+  return usable.find((t) => t.name === SUGGESTED_APPROVAL_TEMPLATE.name) ?? usable[0] ?? null;
+}
+
 export interface Recipient { name: string; phone: string }
 export interface WhatsappAlertSettings {
   enabled: boolean;
@@ -68,9 +98,11 @@ export interface WhatsappAlertSettings {
   daily_summary: boolean;
   /** Reps can create leads by WhatsApp voice note (services/crm/whatsappVoiceLead.service.ts). */
   voice_leads: boolean;
+  /** One-tap approvals: approvers get Approve / Reject buttons on WhatsApp. */
+  approvals: boolean;
 }
 
-const EMPTY: WhatsappAlertSettings = { enabled: false, template_id: null, recipients: [], kinds: [], daily_summary: false, voice_leads: false };
+const EMPTY: WhatsappAlertSettings = { enabled: false, template_id: null, recipients: [], kinds: [], daily_summary: false, voice_leads: false, approvals: false };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Digits only, with India's 91 added to a 10-digit number. Null when it can't be a WhatsApp number. */
@@ -91,7 +123,7 @@ export function toSettings(value: unknown): WhatsappAlertSettings {
   }
   const kinds = [...new Set((Array.isArray(v.kinds) ? v.kinds : []).map((k) => canonicalKind(String(k))).filter((k) => WA_KIND_SET.has(k)))];
   const template_id = typeof v.template_id === 'string' && UUID.test(v.template_id) ? v.template_id : null;
-  return { enabled: v.enabled === true, template_id, recipients: recipients.slice(0, MAX_RECIPIENTS), kinds, daily_summary: v.daily_summary === true, voice_leads: v.voice_leads === true };
+  return { enabled: v.enabled === true, template_id, recipients: recipients.slice(0, MAX_RECIPIENTS), kinds, daily_summary: v.daily_summary === true, voice_leads: v.voice_leads === true, approvals: v.approvals === true };
 }
 
 export class AlertSettingsError extends Error {}
@@ -132,7 +164,7 @@ export function parseSettingsInput(input: unknown): WhatsappAlertSettings {
     if (!recipients.length) throw new AlertSettingsError('Add at least one person to receive alerts before switching them on.');
     if (!kinds.size && !daily_summary) throw new AlertSettingsError('Choose at least one update, or the daily summary, before switching alerts on.');
   }
-  return { enabled, template_id, recipients, kinds: [...kinds], daily_summary, voice_leads: v.voice_leads === true };
+  return { enabled, template_id, recipients, kinds: [...kinds], daily_summary, voice_leads: v.voice_leads === true, approvals: v.approvals === true };
 }
 
 // ── Templates ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -158,11 +190,14 @@ export function templateVariables(placeholders: number, title: string, body: str
   return vars;
 }
 
-interface TemplateRow { id: string; meta_template_name: string | null; language: string | null; category: string | null; status: string | null; body_text: string | null }
+export interface TemplateRow {
+  id: string; meta_template_name: string | null; language: string | null; category: string | null; status: string | null;
+  body_text: string | null; buttons?: Array<{ type?: string; text?: string }> | null;
+}
 
-async function listTemplates(orgId: string, client: SupabaseClient): Promise<TemplateRow[]> {
+export async function listTemplates(orgId: string, client: SupabaseClient): Promise<TemplateRow[]> {
   const { data, error } = await client.from('crm_whatsapp_templates')
-    .select('id, meta_template_name, language, category, status, body_text')
+    .select('id, meta_template_name, language, category, status, body_text, buttons')
     .eq('org_id', orgId).is('deleted_at', null).limit(200);
   if (error) {
     logger.warn(`[wa-alerts] template list failed org=${orgId}: ${error.message}`);
@@ -171,7 +206,7 @@ async function listTemplates(orgId: string, client: SupabaseClient): Promise<Tem
   return (data ?? []) as TemplateRow[];
 }
 
-const isApproved = (t: TemplateRow) => String(t.status ?? '').toUpperCase() === 'APPROVED';
+export const isApproved = (t: TemplateRow) => String(t.status ?? '').toUpperCase() === 'APPROVED';
 
 // ── Management (read / write / test) ───────────────────────────────────────────────────────────────────────────
 
@@ -181,6 +216,9 @@ export interface WhatsappAlertView extends WhatsappAlertSettings {
   templates: Array<{ id: string; name: string; language: string; category: string; status: string; body: string; placeholders: number }>;
   catalog: Array<{ kind: string; label: string; group: string; description: string; enabled: boolean; in_app_enabled: boolean }>;
   suggested_template: typeof SUGGESTED_TEMPLATE;
+  /** The approved template one-tap approvals will use, or null when the client has none yet. */
+  approval_template: { id: string; name: string } | null;
+  suggested_approval_template: typeof SUGGESTED_APPROVAL_TEMPLATE;
 }
 
 export async function readAlertSettings(orgId: string, client: SupabaseClient = supabaseAdmin, project: string = currentProjectKey()): Promise<WhatsappAlertView> {
@@ -210,6 +248,8 @@ export async function readAlertSettings(orgId: string, client: SupabaseClient = 
       };
     }),
     suggested_template: SUGGESTED_TEMPLATE,
+    approval_template: (() => { const a = pickApprovalTemplate(templates); return a ? { id: a.id, name: a.name } : null; })(),
+    suggested_approval_template: SUGGESTED_APPROVAL_TEMPLATE,
   };
 }
 

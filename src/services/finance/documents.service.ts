@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
+import { logger } from '../../lib/logger';
 import { sendEmail } from '../crm/emails.service';
 import { FinanceScope, scoped } from './scope';
 import { computeDocument, LineInput, round2, num } from './money';
@@ -8,6 +9,12 @@ import { getSettings, getCustomer, pageParams, safeSearch } from './masters.serv
 import { publicDocUrl } from './share';
 import { renderDocumentPdf } from './pdf.service';
 import { normalizeRecurrence, RecurrenceInput, cadenceLabel, specFromRow } from './recurrence';
+// Namespace import, used only inside function bodies below (never at module
+// load time) — clientBilling.service.ts itself imports this module to build
+// on createDocument/getDocument/updateDocument, so this is a deliberate
+// circular dependency, safe under CommonJS as long as neither side touches
+// the other's exports until a function actually runs.
+import * as billing from '../clientBilling.service';
 
 const db = () => supabaseAdmin;
 const fail = (e: { message: string }) => new AppError(500, e.message, 'DB_ERROR');
@@ -208,6 +215,25 @@ export async function createDocument(
     throw fail(ins.error);
   }
   await addEvent(s, data.id as string, 'created', { number });
+
+  // A brand-new invoice (not a historical import — opts.number is only set for
+  // those) is "the next invoice" for whoever it's billed to. If that customer
+  // is a Client Management client with pending pro-rated seat charges (a seat
+  // added mid-cycle since their last invoice), fold them in now as extra line
+  // items instead of leaving them for a separate manual step. Best-effort —
+  // never block the invoice itself.
+  if (docType === 'invoice' && !opts.number) {
+    try {
+      const client = await billing.findClientByFinanceCustomer(s.org_id, data.customer_id as string);
+      if (client) {
+        const pending = await billing.listPendingSeatCharges(client.id);
+        if (pending.length) await billing.applySeatChargesToInvoice(s, client.id, data.id as string);
+      }
+    } catch (e) {
+      logger.warn(`[documents] auto-apply seat charges failed for invoice ${data.id}: ${(e as Error).message}`);
+    }
+  }
+
   return getDocument(s, data.id as string, docType);
 }
 
@@ -447,7 +473,7 @@ export async function setQuoteStatus(s: FinanceScope, id: string, status: 'accep
   return getDocument(s, id, 'quote');
 }
 
-function inputFromDocument(doc: Awaited<ReturnType<typeof getDocument>>): DocumentInput {
+export function inputFromDocument(doc: Awaited<ReturnType<typeof getDocument>>): DocumentInput {
   return {
     customer_id: doc.customer_id as string,
     reference_number: doc.reference_number, subject: doc.subject,

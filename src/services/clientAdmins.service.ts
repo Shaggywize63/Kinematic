@@ -17,7 +17,7 @@ import { validatePassword } from '../middleware/security';
 import { normalizeMobile, MOBILE_RE } from '../lib/userContact';
 import { clearEmailProjectCache } from '../lib/projects';
 import { clientGrantedModuleIds } from '../lib/entitlements';
-import { readSeatCap, countActiveUsers, isStaffEmail } from './clientBilling.service';
+import { readSeatCap, countActiveUsers, isStaffEmail, queueSeatCharge } from './clientBilling.service';
 import { logger } from '../lib/logger';
 
 /** The role a new client admin gets — the same one the client's first login has always had. */
@@ -207,6 +207,11 @@ export async function createClientAdmin(target: ClientAdminTarget, input: NewCli
 
   // The email now lives in this project: drop any stale login-routing cache.
   clearEmailProjectCache(input.email);
+
+  // A newly-created admin seat may be billed mid-cycle, pro-rated — see
+  // clientBilling.service.ts. No-op for clients without a per-seat price set.
+  await queueSeatCharge(target.clientId, id, input.name);
+
   return toRow(ins.data as Record<string, unknown>, target);
 }
 
@@ -243,6 +248,11 @@ export async function setClientAdminActive(
     .select(LIST_COLS)
     .single();
   if (upErr || !data) throw new AppError(500, `Could not update the admin: ${upErr?.message || 'no row returned'}`, 'DB_ERROR');
+
+  // A reactivated admin seat may be billed mid-cycle, pro-rated. The early
+  // return above (current.is_active === active) already skips a no-op toggle.
+  if (active) await queueSeatCharge(target.clientId, userId, (current.name as string | null) || 'Reactivated admin');
+
   return toRow(data as Record<string, unknown>, target, primaryEmail);
 }
 

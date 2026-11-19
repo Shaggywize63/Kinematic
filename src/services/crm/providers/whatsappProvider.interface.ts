@@ -9,6 +9,8 @@ export interface WhatsappSendInput {
   template_name?: string;
   template_language?: string;
   template_variables?: Record<string, string>;
+  /** Payloads for the template's quick-reply buttons, in button order. WhatsApp sends the payload back when tapped. */
+  template_buttons?: string[];
   media_url?: string;
   media_type?: 'image' | 'document' | 'audio' | 'video' | 'sticker';
 }

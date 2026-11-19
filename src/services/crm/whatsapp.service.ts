@@ -55,6 +55,8 @@ export interface SendWhatsappInput {
   body_text?: string;
   template_id?: string | null;
   template_variables?: Record<string, string>;
+  /** Quick-reply button payloads, in button order (see templateComponents). */
+  template_buttons?: string[];
   media_url?: string;
   media_type?: 'image' | 'document' | 'audio' | 'video' | 'sticker';
   lead_id?: string | null;
@@ -107,6 +109,7 @@ export async function sendWhatsapp(input: SendWhatsappInput) {
       template_name: templateName,
       template_language: templateLang,
       template_variables: input.template_variables,
+      template_buttons: input.template_buttons,
       media_url: input.media_url,
       media_type: input.media_type,
     });
