@@ -1233,7 +1233,10 @@ export const productSchema = z.object({
   // The product reference (its key identifier, e.g. 13280). Unique per org + client, case-insensitive,
   // among non-deleted products; the route hook (services/crm/makesBrands.service) enforces that.
   sku: z.string().trim().min(1).max(120),
-  // Link to one make and one brand. Null clears. Existence is checked by the route hook.
+  // Free-text manufacturer ("Make"), typed on the product (Spark & Ray). Null clears.
+  make: z.string().trim().max(120).optional().nullable(),
+  // Legacy link to one make and one brand from the master lists. Null clears. Existence is checked by the
+  // route hook. `make` (above) is the current field; make_id is kept so existing products keep resolving.
   make_id: optionalUuid,
   brand_id: optionalUuid,
   name: z.string().min(1).max(200),

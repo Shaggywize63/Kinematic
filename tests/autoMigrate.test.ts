@@ -22,6 +22,7 @@ describe('embedded pending migrations', () => {
     'migration_client_daily_summary_log.sql',
     'migration_deal_trial_dispatch.sql',
     'migration_record_owners.sql',
+    'migration_product_make_text.sql',
   ];
 
   it('embeds exactly the expected migrations in apply order', () => {
