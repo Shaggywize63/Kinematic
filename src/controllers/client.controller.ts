@@ -14,7 +14,7 @@ import { readOrgSettings, writeOrgSettings } from '../services/notificationPolic
 import { readAlertSettings, writeAlertSettings, sendTestAlert, AlertSettingsError } from '../services/clientWhatsappAlerts.service';
 import { sendSummaryNow } from '../services/clientDailySummary.service';
 import { cleanAppUiForStore } from '../lib/appItems';
-import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, countActiveUsersByOrg, nextUnpaidInvoicesByCustomer, type NextPayment } from '../services/clientBilling.service';
+import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, countActiveUsersByOrg, nextUnpaidInvoicesByCustomer, type NextPayment, priceOf, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
 import { currentMonth as kiniMonth } from '../services/crm/ai/kiniQuota.service';
 import { invalidateAuthCache } from '../middleware/auth';
@@ -1245,7 +1245,63 @@ export const getClientAccount = asyncHandler(async (req: AuthRequest, res: Respo
     active,
     finance_customer_id: financeCustomerId,
     next_payment: nextPayment,
+    price_per_user: priceOf(client),
   });
+});
+
+/** PUT /api/v1/clients/:id/seat-price — set (or clear) the per-seat price this client is billed.
+ *  Setting this is what turns on mid-cycle pro-rated seat charges for the client (see
+ *  clientBilling.service.ts queueSeatCharge) — a client with no price set is unaffected. */
+export const setClientSeatPrice = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const client = await ownedClient(req, res);
+  if (!client) return;
+
+  const raw = req.body?.price_per_user;
+  const cleared = raw === null || raw === '' || raw === undefined;
+  const price = cleared ? null : Number(raw);
+  if (!cleared && (!Number.isFinite(price) || (price as number) <= 0)) {
+    badRequest(res, 'price_per_user must be a positive number, or null to turn off pro-rated seat billing');
+    return;
+  }
+
+  await setSeatPrice(client.id, price);
+  ok(res, { price_per_user: price });
+});
+
+/** GET /api/v1/clients/:id/seat-charges — pending pro-rated seat charges, queued whenever a
+ *  seat was added or reactivated mid-cycle (see clientBilling.service.ts queueSeatCharge). */
+export const getClientSeatCharges = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const client = await ownedClient(req, res);
+  if (!client) return;
+
+  const charges = await listPendingSeatCharges(client.id);
+  ok(res, {
+    price_per_user: priceOf(client),
+    charges,
+    total: charges.reduce((sum, c) => sum + c.prorated_amount, 0),
+  });
+});
+
+/** POST /api/v1/clients/:id/seat-charges/apply — add every pending seat charge as a line
+ *  item on the given invoice (body: { document_id }), then mark them invoiced. */
+export const applyClientSeatCharges = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const user = req.user!;
+  const client = await ownedClient(req, res);
+  if (!client) return;
+
+  const documentId = String(req.body?.document_id || '');
+  if (!isUUID(documentId)) { badRequest(res, 'document_id must be a valid invoice id'); return; }
+
+  try {
+    const result = await applySeatChargesToInvoice(
+      { org_id: managingOrgId(client, user), client_id: null, user_id: user.id, actor: String(user.email || user.id) },
+      client.id,
+      documentId,
+    );
+    ok(res, result);
+  } catch (e: any) {
+    badRequest(res, e?.message || 'Could not apply the pending seat charges to this invoice');
+  }
 });
 
 /** POST /api/v1/clients/:id/send-welcome — email the client's contact a welcome message. */

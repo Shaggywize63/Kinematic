@@ -447,7 +447,7 @@ export async function setQuoteStatus(s: FinanceScope, id: string, status: 'accep
   return getDocument(s, id, 'quote');
 }
 
-function inputFromDocument(doc: Awaited<ReturnType<typeof getDocument>>): DocumentInput {
+export function inputFromDocument(doc: Awaited<ReturnType<typeof getDocument>>): DocumentInput {
   return {
     customer_id: doc.customer_id as string,
     reference_number: doc.reference_number, subject: doc.subject,

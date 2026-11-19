@@ -30,6 +30,11 @@ router.post('/:id/whatsapp-alerts/test', requireAuth, requireRole('admin', 'supe
 router.get('/:id/account', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientAccount);
 router.post('/:id/send-welcome', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.sendClientWelcomeEmail);
 router.post('/:id/send-payment-reminder', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.sendClientPaymentReminderEmail);
+// Pro-rated mid-cycle seat charges: set the per-seat price, see what's pending
+// (queued when a user/admin is added or reactivated), apply them to an invoice.
+router.put('/:id/seat-price', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.setClientSeatPrice);
+router.get('/:id/seat-charges', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientSeatCharges);
+router.post('/:id/seat-charges/apply', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.applyClientSeatCharges);
 // Admins per client: list, add (created in the client's own org / project), switch on or off.
 router.get('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientAdmins);
 router.post('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.addClientAdmin);

@@ -19,6 +19,7 @@ import { allowedFlags, isProjectDisabled } from '../services/notificationPolicy'
 import { isPlatformOperator, usesStrictTenantScope } from '../lib/tenantScope';
 import { invalidateAuthCache } from '../middleware/auth';
 import { isB2bClient } from '../lib/b2bClients';
+import { queueSeatCharge } from '../services/clientBilling.service';
 
 // VISIT LOGS
 export const getVisitLogs = asyncHandler<AuthRequest>(async (req, res) => {
@@ -723,6 +724,10 @@ export const createUser = asyncHandler<AuthRequest>(async (req, res) => {
     throw new AppError(badRef ? 400 : 500, `Could not save the user's ${writes[failedAt].what}: ${err.message}`, badRef ? 'VALIDATION_ERROR' : 'DB_ERROR')
   }
 
+  // A newly-created seat may be billed mid-cycle, pro-rated — see
+  // clientBilling.service.ts. No-op for clients without a per-seat price set.
+  await queueSeatCharge(pickedClientId, authId, name.trim());
+
   // Report what was actually saved (the caller's list, or the client's modules when none was given).
   sendSuccess(res, { ...data, permissions: permissionRows.map((r) => r.module_id), assigned_cities: assigned_cities || [] }, 'User created', 201)
 })
@@ -814,9 +819,15 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
   }
 
   // Activating a user must respect the org's active-user cap (staff exempt).
+  // Also remembers whether this is a genuine reactivation (was inactive before),
+  // so a redundant is_active:true on an already-active user doesn't double-bill.
+  let reactivatingClientId: string | null = null
   if (updates.is_active === true) {
-    const { data: target } = await supabaseAdmin.from('users').select('org_id, email').eq('id', req.params.id).maybeSingle()
-    if (target) await assertActiveUserCap((target as { org_id?: string }).org_id, (updates.email ?? (target as { email?: string }).email), req.params.id)
+    const { data: target } = await supabaseAdmin.from('users').select('org_id, email, client_id, is_active').eq('id', req.params.id).maybeSingle()
+    if (target) {
+      await assertActiveUserCap((target as { org_id?: string }).org_id, (updates.email ?? (target as { email?: string }).email), req.params.id)
+      if ((target as { is_active?: boolean }).is_active !== true) reactivatingClientId = (target as { client_id?: string | null }).client_id ?? null
+    }
   }
 
   try {
@@ -887,6 +898,10 @@ export const updateUser = asyncHandler<AuthRequest>(async (req, res) => {
       }
     }
     
+    // A reactivated seat may be billed mid-cycle, pro-rated — no-op for
+    // clients without a per-seat price set, and for an already-active user.
+    if (reactivatingClientId) await queueSeatCharge(reactivatingClientId, targetUserId, (data[0] as { name?: string })?.name || 'Reactivated user')
+
     sendSuccess(res, { ...data[0], permissions, assigned_cities }, 'User updated')
   } catch (e: any) {
     if (e instanceof AppError) throw e
