@@ -66,9 +66,22 @@ function parse(schema: z.ZodTypeAny, body: unknown): any {
 // which omitted manager / org_admin / hr — people the claim alerts already go to.
 // What each may actually do is decided in the service (admin, or the claim's approver).
 const APPROVER_ROLES = new Set(['super_admin', 'admin', 'main_admin', 'org_admin', 'sub_admin', 'client', 'city_manager', 'supervisor', 'manager', 'hr', 'program_manager']);
+
+/**
+ * May this role reach the approver endpoints at all? An admin-ish role, EXCEPT one whose org role is
+ * scoped to 'own'. Flat field-force tenants give reps an admin-ish legacy role (e.g. `sub_admin`),
+ * distinguished from real managers only by an org-role `data_scope` of 'own' — such a rep sees only
+ * their own records, so it must be 403'd here, not merely self-scoped later. This keeps the route gate
+ * from being looser than isApprover() in the service layer (which already denies own-scope).
+ */
+export function mayReachApproverEndpoints(role?: string | null, dataScope?: string | null): boolean {
+  if (String(dataScope ?? '').toLowerCase() === 'own') return false;
+  return APPROVER_ROLES.has(String(role ?? '').toLowerCase());
+}
 function requireApprover(req: Request, _res: Response, next: NextFunction) {
-  const u = (req as AuthRequest).user;
-  if (isDemo(u) || APPROVER_ROLES.has(String(u?.role ?? '').toLowerCase())) return next();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const u = (req as AuthRequest).user as any;
+  if (isDemo(u) || mayReachApproverEndpoints(u?.role, u?.org_role_data_scope)) return next();
   return next(new AppError(403, 'Only approvers can do this', 'FORBIDDEN'));
 }
 
