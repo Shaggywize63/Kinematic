@@ -390,6 +390,97 @@ export async function queueSeatCharge(clientId: string | null | undefined, userI
   }
 }
 
+/** The soonest-due recurring invoice (id + schedule) for a linked finance customer, or null. */
+async function recurringInvoiceForCustomer(financeOrgId: string, customerId: string): Promise<
+  { id: string; next_invoice_date: string | null; recurrence_interval: string | null; recurrence_custom_every: number | null; recurrence_custom_unit: string | null } | null> {
+  if (!financeOrgId || !customerId) return null;
+  const { data } = await supabaseAdmin
+    .from('finance_documents')
+    .select('id, next_invoice_date, recurrence_interval, recurrence_custom_every, recurrence_custom_unit')
+    .eq('org_id', financeOrgId).eq('doc_type', 'invoice').eq('customer_id', customerId)
+    .eq('recurrence_enabled', true).is('deleted_at', null)
+    .not('next_invoice_date', 'is', null).order('next_invoice_date', { ascending: true })
+    .limit(1).maybeSingle();
+  return (data as never) ?? null;
+}
+
+/** How many seats the recurring invoice already bills each cycle — the per-seat line's quantity
+ *  (the line whose rate matches the per-seat price, else the highest-quantity "N × rate" line). 0 when
+ *  no such line, so every active seat is treated as not-yet-billed. */
+async function recurringBaselineSeats(invoiceId: string, pricePerUser: number): Promise<number> {
+  const { data: items } = await supabaseAdmin.from('finance_document_items').select('quantity, rate').eq('document_id', invoiceId);
+  const rows = (items ?? []) as Array<{ quantity: number | string; rate: number | string }>;
+  if (!rows.length) return 0;
+  const match = rows.find((r) => round2(Number(r.rate)) === round2(pricePerUser));
+  if (match) return Math.max(0, Math.floor(Number(match.quantity)));
+  const byQty = [...rows].sort((a, b) => Number(b.quantity) - Number(a.quantity))[0];
+  return byQty && Number(byQty.quantity) > 1 ? Math.max(0, Math.floor(Number(byQty.quantity))) : 0;
+}
+
+export interface BillCurrentSeatsResult {
+  queued: number;
+  active_seats: number;
+  baseline_seats: number;
+  already_pending: number;
+  prorated_each: number;
+  total: number;
+  days_charged: number;
+  cycle_days: number;
+  cycle_end: string;
+}
+
+/**
+ * Catch up billing for seats that are active now but not yet charged — the seats beyond what the
+ * client's recurring invoice already bills (active − baseline − already-pending). Each is queued as a
+ * pro-rated seat charge for the days left in the current cycle, then applied to an invoice from the
+ * Account & Billing panel like any auto-queued charge. Requires a per-seat price AND a recurring
+ * invoice (which defines both the cycle to pro-rate against and the baseline already billed), so it
+ * never double-bills seats the recurring invoice already covers. Idempotent: re-running only tops up
+ * the difference, because already-pending charges are subtracted.
+ */
+export async function billCurrentSeats(clientId: string): Promise<BillCurrentSeatsResult> {
+  const { data: client } = await supabaseAdmin.from('clients').select('id, org_id, settings').eq('id', clientId).maybeSingle();
+  if (!client) throw new Error('Client not found');
+  const financeOrgId = String((client as { org_id?: string }).org_id || '');
+  const customerId = financeCustomerIdOf(client as { settings?: unknown });
+  const price = priceOf(client) ?? await detectedSeatPrice(client as { org_id?: string | null; settings?: unknown });
+  if (!price) throw new Error('Set a price per seat first, then try again.');
+  if (!customerId) throw new Error('Link this client to a finance customer first.');
+
+  const inv = await recurringInvoiceForCustomer(financeOrgId, customerId);
+  if (!inv?.next_invoice_date) throw new Error('Set up a recurring invoice for this client first — the billing cycle is needed to pro-rate.');
+  const spec = specFromRow(inv);
+  if (!spec) throw new Error('The recurring invoice has no valid repeat schedule, so the billing cycle cannot be worked out.');
+  const cycle_end = inv.next_invoice_date;
+  const cycle_start = cycleStartBefore(cycle_end, spec);
+  const cycle_days = daysBetween(cycle_start, cycle_end);
+  if (cycle_days <= 0) throw new Error('The billing cycle length could not be determined from the recurring invoice.');
+
+  const baselineSeats = await recurringBaselineSeats(inv.id, price);
+  const activeSeats = await countActiveUsers(supabaseAdmin, financeOrgId);
+  const alreadyPending = (await listPendingSeatCharges(clientId)).length;
+  const toBill = Math.max(0, activeSeats - baselineSeats - alreadyPending);
+
+  const addedOn = new Date().toISOString().slice(0, 10);
+  const daysCharged = Math.max(0, Math.min(cycle_days, daysBetween(addedOn, cycle_end)));
+  const proratedEach = round2(price * daysCharged / cycle_days);
+
+  if (toBill > 0) {
+    const rows = Array.from({ length: toBill }, () => ({
+      client_id: clientId, user_id: null, user_label: 'Current seat',
+      added_on: addedOn, cycle_start, cycle_end, cycle_days,
+      days_charged: daysCharged, price_per_user: price, prorated_amount: proratedEach, status: 'pending',
+    }));
+    const { error } = await supabaseAdmin.from('client_seat_charges').insert(rows);
+    if (error) throw new Error(error.message);
+  }
+
+  return {
+    queued: toBill, active_seats: activeSeats, baseline_seats: baselineSeats, already_pending: alreadyPending,
+    prorated_each: proratedEach, total: round2(proratedEach * toBill), days_charged: daysCharged, cycle_days, cycle_end,
+  };
+}
+
 /** Pending (not yet invoiced) seat charges for a client, oldest first. */
 export async function listPendingSeatCharges(clientId: string): Promise<SeatCharge[]> {
   const { data, error } = await supabaseAdmin

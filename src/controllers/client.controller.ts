@@ -14,7 +14,7 @@ import { readOrgSettings, writeOrgSettings } from '../services/notificationPolic
 import { readAlertSettings, writeAlertSettings, sendTestAlert, AlertSettingsError } from '../services/clientWhatsappAlerts.service';
 import { sendSummaryNow } from '../services/clientDailySummary.service';
 import { cleanAppUiForStore } from '../lib/appItems';
-import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, nextPaymentFor, countActiveUsersByOrg, nextPaymentsFor, type NextPayment, priceOf, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice, detectedSeatPrice } from '../services/clientBilling.service';
+import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, nextPaymentFor, countActiveUsersByOrg, nextPaymentsFor, type NextPayment, priceOf, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice, detectedSeatPrice, billCurrentSeats } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
 import { currentMonth as kiniMonth } from '../services/crm/ai/kiniQuota.service';
 import { invalidateAuthCache } from '../middleware/auth';
@@ -1302,6 +1302,20 @@ export const applyClientSeatCharges = asyncHandler(async (req: AuthRequest, res:
     ok(res, result);
   } catch (e: any) {
     badRequest(res, e?.message || 'Could not apply the pending seat charges to this invoice');
+  }
+});
+
+/** POST /api/v1/clients/:id/seat-charges/bill-current — catch up billing for seats active now but
+ *  not yet charged (active − what the recurring invoice already bills − already-pending), each
+ *  pro-rated for the days left in the cycle. Requires a per-seat price and a recurring invoice. */
+export const billCurrentClientSeats = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const client = await ownedClient(req, res);
+  if (!client) return;
+  try {
+    const result = await billCurrentSeats(client.id);
+    ok(res, result);
+  } catch (e: any) {
+    badRequest(res, e?.message || 'Could not bill the current seats');
   }
 });
 

@@ -35,6 +35,8 @@ router.post('/:id/send-payment-reminder', requireAuth, requireRole('admin', 'sup
 router.put('/:id/seat-price', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.setClientSeatPrice);
 router.get('/:id/seat-charges', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientSeatCharges);
 router.post('/:id/seat-charges/apply', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.applyClientSeatCharges);
+// Catch-up: bill seats active now but not yet charged (pro-rated against the recurring invoice).
+router.post('/:id/seat-charges/bill-current', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.billCurrentClientSeats);
 // Admins per client: list, add (created in the client's own org / project), switch on or off.
 router.get('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientAdmins);
 router.post('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.addClientAdmin);
