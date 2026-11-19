@@ -4109,6 +4109,19 @@ activities.patch('/:id', wrap(async (req, res) => {
   const err = await activityAccessError(req as AuthRequest, existing);
   if (err) throw err;
   const patched = normalizeActivityPayload(parse(v.activitySchemaBase.partial(), req.body));
+  // Spark & Ray: only a tenant admin may mark an activity complete. Reps can log
+  // and edit activities, but flipping an open one to completed (status ->
+  // completed, or a fresh completed_at stamp) is admin-only. Other tenants are
+  // unchanged. Enforced here so the UI gate can't be bypassed.
+  {
+    const actClientId = ((existing as { client_id?: string | null }).client_id) ?? null;
+    const alreadyDone = (existing as { status?: string | null }).status === 'completed'
+      || (existing as { completed_at?: string | null }).completed_at != null;
+    const completing = patched.status === 'completed' || patched.completed_at != null;
+    if (completing && !alreadyDone && isB2bClient(actClientId) && !isTenantAdmin((req as AuthRequest).user)) {
+      throw new AppError(403, 'Only an admin can mark an activity complete.', 'FORBIDDEN');
+    }
+  }
   // Same validate/stamp pass as the create handler for activity
   // custom fields. Merge over the existing custom_fields blob so a
   // partial PATCH that only touches one key doesn't drop the rest.
