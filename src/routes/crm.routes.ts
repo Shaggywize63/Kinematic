@@ -2334,7 +2334,17 @@ accounts.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
   const visibleOwnerIds = await crmVisibleOwnerIds(req as AuthRequest);
   const coAssignedIds = await coOwnedScope(req as AuthRequest, 'account', visibleOwnerIds);
-  const { rows, total, page, limit } = await crud.clientScopedListWithCount('crm_accounts', orgId(req), scope.id, req.query, { searchColumns: ['name','domain','industry'], strictClient: scope.strict, visibleOwnerIds, coAssignedIds });
+  // Parent companies (Spark & Ray "groups") are crm_accounts rows with is_group=true. They would
+  // otherwise appear in the Accounts list alongside the customer companies (confusing — a company and
+  // its parent both show). Default: exclude groups (is_group is NULL or false). `?group=1` returns
+  // ONLY the groups — powering the dashboard's "Parent companies" tab. `group` is not a column, so it
+  // is stripped before the generic key→eq filter runs.
+  const groupsOnly = ['1', 'true', 'yes'].includes(String((req.query as Record<string, unknown>).group ?? '').toLowerCase());
+  const { group: _groupFlag, ...listQuery } = req.query as Record<string, unknown>;
+  const { rows, total, page, limit } = await crud.clientScopedListWithCount('crm_accounts', orgId(req), scope.id, listQuery, {
+    searchColumns: ['name', 'domain', 'industry'], strictClient: scope.strict, visibleOwnerIds, coAssignedIds,
+    extraFilters: (q: any) => (groupsOnly ? q.eq('is_group', true) : q.not('is_group', 'is', true)),
+  });
   // Same `data` as before (the first 50 rows unless page / limit are sent), so existing callers are unchanged. Additive:
   // each row carries its deal / contact rollups (open + won deal count and value, contact count) and the response carries
   // `pagination`, so the dashboard can page and count the whole list instead of the first page.
