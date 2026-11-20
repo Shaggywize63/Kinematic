@@ -375,6 +375,37 @@ describe('GET /analytics/activity-feed — legacy behaviour and scoping are unch
     );
   });
 
+  it('restricts a field rep (executive role) to their OWN submissions, even with a client_id', async () => {
+    __mock.queue('form_submissions', { data: [] });
+
+    await feed({}, { ...USER, role: 'executive' });
+
+    const c = __mock.chainsFor('form_submissions')[0];
+    expect(c.eqs.org_id).toBe(ORG);
+    expect(c.eqs.user_id).toBe(REP); // scoped to the individual, not the client
+    expect(c.ors).toEqual([]);       // never the client-wide OR
+  });
+
+  it('restricts an own-data-scope rep (e.g. sub_admin on a flat tenant) to their OWN submissions', async () => {
+    __mock.queue('form_submissions', { data: [] });
+
+    await feed({}, { ...USER, role: 'sub_admin', org_role_data_scope: 'own' });
+
+    const c = __mock.chainsFor('form_submissions')[0];
+    expect(c.eqs.user_id).toBe(REP);
+    expect(c.ors).toEqual([]);
+  });
+
+  it('ignores ?client_id for a field rep (no cross-rep peeking via the query param)', async () => {
+    __mock.queue('form_submissions', { data: [] });
+
+    await feed({ client_id: OTHER_CLIENT }, { ...USER, client_id: undefined, role: 'executive' });
+
+    const c = __mock.chainsFor('form_submissions')[0];
+    expect(c.eqs.user_id).toBe(REP);
+    expect(c.eqs.client_id).toBeUndefined();
+  });
+
   it('keeps ?client_id scoping when the caller has no client of its own', async () => {
     __mock.queue('form_submissions', { data: [] });
 
