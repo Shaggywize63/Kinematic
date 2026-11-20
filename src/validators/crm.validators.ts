@@ -987,6 +987,13 @@ export const customFieldSchema = z.object({
     // `formula`; the computed value is stamped into `custom_fields`
     // server-side on every read of the parent row.
     'formula',
+    // Google Places-backed address capture. Stores a structured object
+    // ({ address_line1, city, state, postal_code, latitude, longitude })
+    // in custom_fields — same shape GoogleAddressAutocomplete already
+    // returns for the built-in lead address. Early-rollout: gated to the
+    // master admin on the picker UI (dashboard custom-fields page); the
+    // backend accepts it for any org since the gate is a UI convenience.
+    'address',
   ]),
   options: z.array(z.string()).optional().nullable(),
   required: z.boolean().optional(),

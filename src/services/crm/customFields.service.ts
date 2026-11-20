@@ -189,6 +189,25 @@ export async function validateAndStampCustomFields(
         if (typeof raw === 'string') { input[key] = raw; break; }
         throw new AppError(400, `custom_fields.${key}: expected a record id`, 'BAD_CUSTOM_FIELD');
       }
+      case 'address': {
+        // The dashboard's GoogleAddressAutocomplete picker sends a structured
+        // object. Canonicalise to the known keys only (never String() the
+        // object — same "[object Object]" trap the lookup case above avoids);
+        // a bare string (e.g. a non-interactive import) becomes the line1.
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          const o = raw as Record<string, unknown>;
+          const str = (k: string) => (typeof o[k] === 'string' && o[k] ? (o[k] as string) : undefined);
+          const addr: Record<string, string> = { address_line1: str('address_line1') ?? '' };
+          for (const k of ['city', 'state', 'postal_code', 'latitude', 'longitude']) {
+            const v = str(k);
+            if (v) addr[k] = v;
+          }
+          input[key] = addr;
+          break;
+        }
+        if (typeof raw === 'string') { input[key] = { address_line1: raw }; break; }
+        throw new AppError(400, `custom_fields.${key}: expected an address object`, 'BAD_CUSTOM_FIELD');
+      }
       default:
         // text / longtext / email / phone / url — store as string
         input[key] = typeof raw === 'string' ? raw : String(raw);
