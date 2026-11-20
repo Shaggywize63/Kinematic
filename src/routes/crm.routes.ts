@@ -829,6 +829,45 @@ async function stampParentCompanyOnLeads(org_id: string, rows: Array<Record<stri
   }
 }
 
+/**
+ * Spark & Ray customer name: a structured lead links its customer contact(s) via
+ * `crm_lead_contacts` — once the lead form moved to a contact lookup the lead row
+ * itself carries no first/last name. Stamp `contact_name` (the primary / nodal
+ * contact's name) on each lead, batched (two small queries for the whole page),
+ * so the leads list and the activity entity picker can show *who* the lead is
+ * for. Null when the lead has no linked contact; non-Spark tenants keep the name
+ * on the lead row and have no links, so they are untouched.
+ */
+async function stampPrimaryContactOnLeads(org_id: string, rows: Array<Record<string, unknown>>): Promise<void> {
+  const leadIds = [...new Set(rows.map((l) => l.id).filter((v): v is string => typeof v === 'string' && !!v))];
+  if (!leadIds.length) return;
+  const { data: links } = await supabaseAdmin.from('crm_lead_contacts')
+    .select('lead_id, contact_id, is_primary, position')
+    .eq('org_id', org_id).in('lead_id', leadIds).is('deleted_at', null)
+    .order('is_primary', { ascending: false }).order('position', { ascending: true });
+  // Rows are globally ordered primary-first then by position, so the first link
+  // seen for a lead is its nodal contact.
+  const contactIdByLead = new Map<string, string>();
+  for (const r of (links ?? []) as Array<{ lead_id: string; contact_id: string | null }>) {
+    if (r.contact_id && !contactIdByLead.has(r.lead_id)) contactIdByLead.set(r.lead_id, r.contact_id);
+  }
+  const contactIds = [...new Set(contactIdByLead.values())];
+  if (!contactIds.length) return;
+  const { data: contacts } = await supabaseAdmin.from('crm_contacts')
+    .select('id, first_name, last_name').eq('org_id', org_id).in('id', contactIds);
+  const nameById = new Map<string, string | null>();
+  for (const c of (contacts ?? []) as Array<{ id: string; first_name: string | null; last_name: string | null }>) {
+    const name = [c.first_name, c.last_name].filter(Boolean).join(' ').trim();
+    nameById.set(c.id, name || null);
+  }
+  for (const l of rows) {
+    const leadId = typeof l.id === 'string' ? l.id : null;
+    const contactId = leadId ? contactIdByLead.get(leadId) : undefined;
+    // Don't clobber a name the lead row already carries (non-Spark leads).
+    if (l.contact_name == null) l.contact_name = contactId ? (nameById.get(contactId) ?? null) : null;
+  }
+}
+
 const leads = express.Router();
 leads.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
@@ -894,8 +933,12 @@ leads.get('/', wrap(async (req, res) => {
   const stamped = relabelImportedUploader(await stampCreatedByNames(
     (await stampSourceNames(await stampOwnerNames(rows))) as unknown as Array<Record<string, unknown> & { source_name?: string | null; created_by?: string | null; created_by_name?: string | null }>
   ));
-  // Spark & Ray: the parent company (account → parent group) for the leads-list column.
-  await stampParentCompanyOnLeads(orgId(req), stamped as unknown as Array<Record<string, unknown>>);
+  // Spark & Ray: the parent company (account → parent group) for the leads-list column,
+  // and the primary (nodal) customer contact's name so the list / activity picker show who.
+  await Promise.all([
+    stampParentCompanyOnLeads(orgId(req), stamped as unknown as Array<Record<string, unknown>>),
+    stampPrimaryContactOnLeads(orgId(req), stamped as unknown as Array<Record<string, unknown>>),
+  ]);
   res.json({
     success: true,
     data: stamped,
