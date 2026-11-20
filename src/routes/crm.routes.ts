@@ -1737,8 +1737,14 @@ leads.get('/export-area-leads-report', wrap(async (req, res) => {
   sendReportCsv(req, res, 'area-leads-report', cols, [...out, gt]);
 }));
 
-leads.get('/:id', wrap(async (req, res) => res.json(await visitBridge.stampLeadHeader(orgId(req),
-  await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id)))))));
+leads.get('/:id', wrap(async (req, res) => {
+  const lead = await visitBridge.stampLeadHeader(orgId(req),
+    await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))));
+  // Stamp the parent company (account → parent group) so the Edit form can prefill the
+  // "Parent Company / Group" field — the parent is stored on the account, not the lead.
+  await stampParentCompanyOnLeads(orgId(req), [lead as unknown as Record<string, unknown>]);
+  res.json(lead);
+}));
 leads.patch('/:id', wrap(async (req, res) => {
   const parsed = parse(v.leadUpdateSchema, req.body);
   const autoLogSiteVisit = parsed._auto_log_site_visit === true;
