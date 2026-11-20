@@ -797,6 +797,36 @@ function mountCoOwnerRoutes(router: express.Router, entity: recordOwners.OwnerEn
 }
 
 // ---------- LEADS ----------------------------------------------------
+
+/**
+ * Spark & Ray "Parent company" column: each lead's account maps up to a parent
+ * group account (crm_accounts.parent_account_id). Stamp `parent_company` (the
+ * parent's name) on each lead, batched — two small queries for the whole page,
+ * only for leads that carry an account. Null when there is no account / parent.
+ */
+async function stampParentCompanyOnLeads(org_id: string, rows: Array<Record<string, unknown>>): Promise<void> {
+  const accountIds = [...new Set(rows.map((l) => l.account_id).filter((v): v is string => typeof v === 'string' && !!v))];
+  if (!accountIds.length) return;
+  const { data: accounts } = await supabaseAdmin.from('crm_accounts')
+    .select('id, parent_account_id').eq('org_id', org_id).in('id', accountIds);
+  const parentIdByAccount = new Map<string, string>();
+  for (const a of (accounts ?? []) as Array<{ id: string; parent_account_id: string | null }>) {
+    if (a.parent_account_id) parentIdByAccount.set(a.id, a.parent_account_id);
+  }
+  const parentIds = [...new Set(parentIdByAccount.values())];
+  const parentNameById = new Map<string, string | null>();
+  if (parentIds.length) {
+    const { data: parents } = await supabaseAdmin.from('crm_accounts')
+      .select('id, name').eq('org_id', org_id).in('id', parentIds);
+    for (const p of (parents ?? []) as Array<{ id: string; name: string | null }>) parentNameById.set(p.id, p.name ?? null);
+  }
+  for (const l of rows) {
+    const accId = typeof l.account_id === 'string' ? l.account_id : null;
+    const parentId = accId ? parentIdByAccount.get(accId) : undefined;
+    l.parent_company = parentId ? (parentNameById.get(parentId) ?? null) : null;
+  }
+}
+
 const leads = express.Router();
 leads.get('/', wrap(async (req, res) => {
   const scope = clientScope(req);
@@ -862,6 +892,8 @@ leads.get('/', wrap(async (req, res) => {
   const stamped = relabelImportedUploader(await stampCreatedByNames(
     (await stampSourceNames(await stampOwnerNames(rows))) as unknown as Array<Record<string, unknown> & { source_name?: string | null; created_by?: string | null; created_by_name?: string | null }>
   ));
+  // Spark & Ray: the parent company (account → parent group) for the leads-list column.
+  await stampParentCompanyOnLeads(orgId(req), stamped as unknown as Array<Record<string, unknown>>);
   res.json({
     success: true,
     data: stamped,
