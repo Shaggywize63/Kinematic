@@ -244,6 +244,14 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
   const limit = Math.min(50, parseInt(req.query.limit as string || '20', 10));
 
   const userRole = (user.role || '').toLowerCase();
+  // A field rep only ever sees their OWN activity; the client/team-wide feed is for managers and admins.
+  // "Field rep" = an org role scoped to 'own', or the executive / field_executive legacy roles. Without
+  // this gate an own-scope rep with a client_id saw EVERY colleague's submissions in the Home "Recent
+  // Submissions" list (e.g. one eFocus rep seeing another's customer visits), because the feed scoped to
+  // the whole client rather than the individual.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const dataScope = String((user as any).org_role_data_scope || '').toLowerCase();
+  const ownScopeOnly = dataScope === 'own' || userRole === 'executive' || userRole === 'field_executive';
 
   let submissionQuery = supabaseAdmin
     .from('form_submissions')
@@ -252,12 +260,12 @@ export const getActivityFeed = asyncHandler<AuthRequest>(async (req, res) => {
     .order('submitted_at', { ascending: false })
     .limit(limit);
 
-  if (isUUID(user.client_id)) {
+  if (!ownScopeOnly && isUUID(user.client_id)) {
     submissionQuery = submissionQuery.or(`client_id.eq.${user.client_id},user_id.eq.${user.id}`);
-  } else if (isUUID(req.query.client_id)) {
+  } else if (!ownScopeOnly && isUUID(req.query.client_id)) {
     submissionQuery = submissionQuery.eq('client_id', req.query.client_id as string);
   } else {
-    // Show user's own submissions by default
+    // Field reps (own-scope) and any caller without a client see only their own submissions.
     submissionQuery = submissionQuery.eq('user_id', user.id);
   }
 
