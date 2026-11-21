@@ -237,6 +237,12 @@ export async function verifyAndReset(
     type: 'recovery',
   });
   if (verifyErr || !verify?.user) {
+    // Previously silent — every reset failure past this point left zero trace
+    // anywhere (not in the response, which deliberately stays generic for the
+    // user, and not in logs), so a real outage here was indistinguishable from
+    // "nobody tried." Logging the actual provider error (never shown to the
+    // caller) is what makes this flow debuggable at all.
+    logger.warn(`[passwordReset] verifyOtp failed for ${cleanedEmail}: ${verifyErr?.message || 'no user returned'}`);
     return { success: false, error: 'Reset link is invalid or has expired. Request a new one.' };
   }
 
@@ -247,6 +253,7 @@ export async function verifyAndReset(
     password: newPassword,
   });
   if (updErr) {
+    logger.warn(`[passwordReset] updateUserById failed for ${cleanedEmail} (user ${verify.user.id}): ${updErr.message}`);
     return { success: false, error: updErr.message || 'Could not update password' };
   }
 
@@ -259,6 +266,10 @@ export async function verifyAndReset(
     password: newPassword,
   });
   if (signInErr || !session?.session) {
+    // The password DID change (step 2 succeeded) — only the bonus auto-login
+    // failed. Logged at warn (not the same severity as a real reset failure)
+    // since the user's actual goal — a working new password — was met.
+    logger.warn(`[passwordReset] post-reset signInWithPassword failed for ${cleanedEmail}: ${signInErr?.message || 'no session returned'}`);
     return { success: false, error: 'Password updated, but auto-login failed. Sign in manually.' };
   }
 
