@@ -2947,6 +2947,14 @@ deals.get('/:id', wrap(async (req, res) => {
   // so the deal detail page shows the lead's mobile + dealer without
   // extra client-side fetches.
   const deal = await stampOwnerName(await dealsSvc.getDeal(orgId(req), req.params.id));
+  // Flatten the embedded stage relation to stage_name / stage_type / stage_color so the
+  // deal-detail "Stage" field (reads deal.stage_name) is populated — the list route already
+  // does this, but the single GET only returned the nested crm_deal_stages object, leaving
+  // the detail page's Stage field blank even when a stage was chosen at create time.
+  const dealStage = (deal as { crm_deal_stages?: { name?: string | null; stage_type?: string | null; color?: string | null } | null }).crm_deal_stages || null;
+  (deal as Record<string, unknown>).stage_name  = dealStage?.name ?? null;
+  (deal as Record<string, unknown>).stage_type  = dealStage?.stage_type ?? null;
+  (deal as Record<string, unknown>).stage_color = dealStage?.color ?? null;
   const [decorated] = await stampDealerNames(await stampLinkedEntityNames([deal] as never[]) as never[]);
   const [withPeople] = await dealSections.stampDealPeopleNames([decorated] as Record<string, any>[]);
   res.json((await dealLineMakeBrand.stampDealRollups(orgId(req), [withPeople]))[0]);
