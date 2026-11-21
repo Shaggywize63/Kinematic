@@ -2722,9 +2722,16 @@ deals.get('/', wrap(async (req, res) => {
   // deals list (web + mobile) can render "Dealer: Ravi Kumar · Lead:
   // 98765 43210" without resolving UUIDs client-side.
   const stamped = await dealLineMakeBrand.stampDealRollups(orgId(req), await stampDealerNames(await stampLinkedEntityNames(await stampOwnerNames(rows) as never[]) as never[]) as Record<string, any>[]);
+  // Flatten the embedded stage relation to stage_name / stage_type / stage_color so the deals
+  // list renders the stage (the row only carries stage_id + the nested crm_deal_stages object).
+  // Mirrors the single-deal GET and the CSV export; without it the list's Stage column is blank.
+  const withStage = (stamped as Array<Record<string, any>>).map((r) => {
+    const st = (r.crm_deal_stages as { name?: string | null; stage_type?: string | null; color?: string | null } | null) || null;
+    return { ...r, stage_name: st?.name ?? null, stage_type: st?.stage_type ?? null, stage_color: st?.color ?? null };
+  });
   res.json({
     success: true,
-    data: stamped,
+    data: withStage,
     // Value + volume summed across the whole filtered set (all pages).
     // Volume (kg/MT) is a steel-dealer concept (weight-priced deals — SRS/Tata,
     // BMW, PASA); it is meaningless for other tenants like the parent Kinematic
