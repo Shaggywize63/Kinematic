@@ -1979,6 +1979,16 @@ leads.get('/:id/people', wrap(async (req, res) => {
 leads.post('/:id/people/:linkId/primary', wrap(async (req, res) => {
   return res.json(await visitBridge.setLeadPrimaryContact(bridgeCtx(req), req.params.id, req.params.linkId));
 }));
+// Tag another customer person onto the lead (link an existing contact). Body: { contact_id, role? }.
+// Returns the refreshed people list, primary first.
+leads.post('/:id/people', wrap(async (req, res) => {
+  const body = parse(z.object({ contact_id: z.string().uuid(), role: z.string().max(120).optional().nullable() }), req.body);
+  return res.json(await visitBridge.addLeadContact(bridgeCtx(req), req.params.id, { contact_id: body.contact_id as string, role: body.role ?? null }));
+}));
+// Remove a customer person from the lead (soft-delete the link). :linkId is a crm_lead_contacts row id.
+leads.delete('/:id/people/:linkId', wrap(async (req, res) => {
+  return res.json(await visitBridge.removeLeadContact(bridgeCtx(req), req.params.id, req.params.linkId));
+}));
 leads.post('/bulk-assign', wrap(async (req, res) => {
   const body = parse(z.object({ lead_ids: z.array(z.string().uuid()), owner_id: z.string().uuid() }), req.body);
   // owner_assignment = 'admin_only': assigning is the whole point of this endpoint, so a non-admin is refused (403).
