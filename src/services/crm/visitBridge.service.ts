@@ -659,6 +659,56 @@ export async function setLeadPrimaryContact(ctx: BridgeCtx, leadId: string, link
 }
 
 /**
+ * Tag another customer person onto a lead (crm_lead_contacts) so the "People on this lead" card can
+ * grow as more people join the discussion. The contact must already exist in this org/client. Idempotent:
+ * a contact already linked is left as-is. The first person on a lead becomes its nodal (primary) point;
+ * everyone added after is a secondary until promoted. Returns the refreshed people list, primary first.
+ */
+export async function addLeadContact(
+  ctx: BridgeCtx, leadId: string, input: { contact_id: string; role?: string | null },
+): Promise<LeadContactRow[]> {
+  const { data: contact } = await scoped(supabaseAdmin.from('crm_contacts').select('id'), ctx)
+    .eq('id', input.contact_id).maybeSingle();
+  if (!contact) throw new AppError(404, 'That contact was not found.', 'NOT_FOUND');
+  const { data: links } = await supabaseAdmin.from('crm_lead_contacts')
+    .select('id, contact_id, position').eq('org_id', ctx.org_id).eq('lead_id', leadId).is('deleted_at', null);
+  const rows = (links ?? []) as Array<{ id: string; contact_id: string; position: number }>;
+  // Already tagged — nothing to do, just hand back the current list.
+  if (rows.some((r) => r.contact_id === input.contact_id)) return getLeadContacts(ctx, leadId);
+  const nextPos = rows.reduce((m, r) => Math.max(m, r.position ?? 0), -1) + 1;
+  const { error } = await supabaseAdmin.from('crm_lead_contacts').insert(stamp(ctx, {
+    lead_id: leadId, contact_id: input.contact_id,
+    is_primary: rows.length === 0, // the first person on a lead is its nodal point
+    role: norm(input.role) || null, position: nextPos,
+  }));
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  return getLeadContacts(ctx, leadId);
+}
+
+/**
+ * Remove a customer person from a lead (soft-delete the crm_lead_contacts link). If the removed person
+ * was the nodal (primary) point and others remain, the next person (lowest position) is promoted so the
+ * lead always keeps a primary. Returns the refreshed people list.
+ */
+export async function removeLeadContact(ctx: BridgeCtx, leadId: string, linkId: string): Promise<LeadContactRow[]> {
+  const { data: target, error: findErr } = await supabaseAdmin.from('crm_lead_contacts')
+    .select('id, is_primary').eq('org_id', ctx.org_id).eq('lead_id', leadId).eq('id', linkId).is('deleted_at', null).maybeSingle();
+  if (findErr) throw new AppError(500, findErr.message, 'DB_ERROR');
+  if (!target) throw new AppError(404, 'That contact is not linked to this lead.', 'NOT_FOUND');
+  const { error } = await supabaseAdmin.from('crm_lead_contacts')
+    .update({ deleted_at: new Date().toISOString() }).eq('org_id', ctx.org_id).eq('lead_id', leadId).eq('id', linkId);
+  if (error) throw new AppError(500, error.message, 'DB_ERROR');
+  if ((target as { is_primary?: boolean }).is_primary) {
+    const { data: rest } = await supabaseAdmin.from('crm_lead_contacts')
+      .select('id').eq('org_id', ctx.org_id).eq('lead_id', leadId).is('deleted_at', null)
+      .order('position', { ascending: true }).limit(1);
+    const next = (rest ?? [])[0] as { id: string } | undefined;
+    if (next) await supabaseAdmin.from('crm_lead_contacts').update({ is_primary: true }).eq('org_id', ctx.org_id).eq('id', next.id);
+  }
+  return getLeadContacts(ctx, leadId);
+}
+
+/**
  * Lead-detail header extras for a structured (Spark & Ray) lead: the names behind the breadcrumb
  * (account › plant › department), the primary (nodal) contact chip and the product lines' total
  * value. Only structured leads (a site or account linked) pay for the lookups; anything else is
