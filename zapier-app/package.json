@@ -1,0 +1,22 @@
+{
+  "name": "kinematic-zapier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zapier CLI integration for Kinematic CRM — lets non-technical Kinematic admins push leads from Typeform, Google Sheets, Calendly, Mailchimp and ~7000 other Zapier-connected apps straight into their Kinematic CRM, by wrapping the existing Generic Webhook integration (POST /api/v1/integrations/webhook/generic-webhook/:id?key=...).",
+  "main": "index.js",
+  "scripts": {
+    "test": "mocha --recursive test/ --timeout 20000"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "dependencies": {
+    "zapier-platform-core": "19.3.0"
+  },
+  "devDependencies": {
+    "chai": "4.4.1",
+    "mocha": "10.4.0",
+    "nock": "13.5.4"
+  }
+}

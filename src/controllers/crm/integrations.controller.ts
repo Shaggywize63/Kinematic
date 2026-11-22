@@ -549,7 +549,33 @@ export const verifyChallenge = asyncHandler<Request>(async (req, res, next) => {
   }
 
   if (providerId !== 'meta_lead_ads') {
-    res.status(405).json({ ok: false, error: 'GET not supported for this provider' });
+    // Side-effect-free connection test for key-in-URL providers (web_form,
+    // generic_webhook, email_inbound) — used by the Zapier app's auth test,
+    // which pings this on every connection setup/edit. A POST would create a
+    // real lead each time; GET just verifies the secret and confirms the
+    // integration is reachable, matching the "Webhook URL" the admin already
+    // has from the dashboard's success modal.
+    const provider = getProvider(providerId);
+    if (!provider?.verifyWebhook) {
+      res.status(405).json({ ok: false, error: 'GET not supported for this provider' });
+      return;
+    }
+    const { data: integration } = await supabaseAdmin.from('crm_lead_source_integrations')
+      .select('*').eq('id', req.params.id).maybeSingle();
+    if (!integration || integration.provider !== providerId) {
+      res.status(404).json({ ok: false, error: 'integration not found' });
+      return;
+    }
+    if (integration.status === 'disabled') {
+      res.status(403).json({ ok: false, error: 'integration disabled' });
+      return;
+    }
+    const ok = await provider.verifyWebhook(req, integration as IntegrationRow);
+    if (!ok) {
+      res.status(401).json({ ok: false, error: 'invalid or missing key' });
+      return;
+    }
+    res.status(200).json({ ok: true, label: integration.label, provider: integration.provider });
     return;
   }
 
