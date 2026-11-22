@@ -25,6 +25,10 @@ import {
   isConfigured as googleConfigured,
   pullEvents as pullGoogleEvents,
 } from '../services/integrations/googleCalendar.service';
+import {
+  buildAuthUrl as buildMetaAuthUrl,
+  isConfigured as metaConfigured,
+} from '../services/integrations/metaOAuth.service';
 import { AppError } from '../utils';
 import { demoIntegrationsMiddleware } from '../utils/demoCrm';
 import { currentProjectKey } from '../lib/projects';
@@ -102,6 +106,27 @@ router.post('/google/sync', wrap(async (req, res) => {
   if (!status.connected) return res.json({ connected: false, configured: true, imported: 0, updated: 0, cancelled: 0 });
   const counts = await pullGoogleEvents(u.org_id, u.id);
   res.json({ connected: true, configured: true, ...counts });
+}));
+
+// ── Meta (Facebook) OAuth — "Connect with Facebook" for Lead Ads ────────
+// Mirrors the Google Calendar authorize pattern above: sign user/org/
+// project/client into the state JWT so the public, unauthenticated
+// callback (app.ts — Meta redirects there with no auth header) can map
+// the code back to the right tenant. See services/integrations/
+// metaOAuth.service.ts for why this needs no per-user refresh token
+// (Page tokens don't expire the way Google's access tokens do).
+router.get('/meta/authorize', wrap(async (req, res) => {
+  if (!metaConfigured()) throw new AppError(500, 'Meta OAuth is not configured', 'NOT_CONFIGURED');
+  const u = reqUser(req);
+  const headerCid = String(req.headers['x-client-id'] || '').trim();
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const client_id = UUID_RE.test(headerCid) ? headerCid : null;
+  const state = jwt.sign(
+    { uid: u.id, oid: u.org_id, pk: currentProjectKey(), cid: client_id, kind: 'meta_oauth' },
+    stateSecret(),
+    { expiresIn: '10m' },
+  );
+  res.json({ url: buildMetaAuthUrl(state) });
 }));
 
 // ── Lead-source integrations CRUD ────────────────────────────────────────
