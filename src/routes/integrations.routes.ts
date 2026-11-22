@@ -26,6 +26,7 @@ import {
   pullEvents as pullGoogleEvents,
 } from '../services/integrations/googleCalendar.service';
 import { AppError } from '../utils';
+import { metaConfig, completeWhatsappSignup, listLeadAdPages, connectLeadAdPage } from '../services/integrations/metaConnect.service';
 import { demoIntegrationsMiddleware } from '../utils/demoCrm';
 import { currentProjectKey } from '../lib/projects';
 import { moduleAccessAllowed } from '../middleware/rbac';
@@ -102,6 +103,29 @@ router.post('/google/sync', wrap(async (req, res) => {
   if (!status.connected) return res.json({ connected: false, configured: true, imported: 0, updated: 0, cancelled: 0 });
   const counts = await pullGoogleEvents(u.org_id, u.id);
   res.json({ connected: true, configured: true, ...counts });
+}));
+
+// ── Meta connect (WhatsApp Embedded Signup + Lead Ads OAuth) ─────────────
+// Declared before the /:id routes. Writes need the CRM-settings module.
+router.get('/meta/config', wrap(async (_req, res) => { res.json({ success: true, data: metaConfig() }); }));
+
+router.post('/meta/whatsapp/embedded-signup', integrationsGate, wrap(async (req, res) => {
+  const u = reqUser(req);
+  const { code, waba_id, phone_number_id } = req.body || {};
+  res.json({ success: true, data: await completeWhatsappSignup(u.org_id, u.id, { code, waba_id, phone_number_id }) });
+}));
+
+router.post('/meta/lead-ads/pages', integrationsGate, wrap(async (req, res) => {
+  reqUser(req);
+  res.json({ success: true, data: await listLeadAdPages(String(req.body?.code || '')) });
+}));
+
+router.post('/meta/lead-ads/connect', integrationsGate, wrap(async (req, res) => {
+  const u = reqUser(req);
+  const cid = String(req.headers['x-client-id'] || '').trim();
+  const clientId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cid) ? cid : null;
+  const { handle, page_id, label } = req.body || {};
+  res.json({ success: true, data: await connectLeadAdPage(u.org_id, u.id, clientId, { handle, page_id, label }) });
 }));
 
 // ── Lead-source integrations CRUD ────────────────────────────────────────
