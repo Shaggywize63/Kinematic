@@ -392,7 +392,15 @@ import { moduleGate } from './middleware/moduleGate';
 // integration is identified by `:id` in the URL and verified via the
 // per-integration secret (URL key or HMAC, depending on provider).
 // Mirrors the WhatsApp webhook pattern at /crm/webhooks/whatsapp.
-app.use(`${V1}/integrations/webhook`, integrationsPublicRoutes);
+// Mounted at `${V1}/integrations` (not `/integrations/webhook`) so the
+// router can also expose the dedicated inbound-email relay at the exact
+// `/api/v1/integrations/inbound-email/relay` path the SES/Lambda relay
+// posts to; the router itself keeps the `/webhook/:provider/:id` prefix on
+// the pre-existing routes, so those public URLs are unchanged. This mount
+// still runs before the `requireAuth, integrationsRoutes` mount further
+// below, and its routes' literal first segments ("webhook",
+// "inbound-email") never collide with that router's `:id`-shaped paths.
+app.use(`${V1}/integrations`, integrationsPublicRoutes);
 
 // Public Google OAuth callback — Google redirects without an auth
 // header so this MUST be mounted before the requireAuth gate. The

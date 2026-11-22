@@ -5,7 +5,9 @@
  *   - Admin CRUD on crm_lead_source_integrations (auth required, mounted
  *     at /api/v1/integrations).
  *   - Public webhook handler for inbound leads (no auth, rate-limited,
- *     mounted at /api/v1/integrations/webhook/<provider>/:id).
+ *     mounted at /api/v1/integrations/webhook/<provider>/:id), plus the
+ *     dedicated inbound-email relay at /api/v1/integrations/inbound-email/
+ *     relay (same router, see routes/integrations-public.routes.ts).
  *
  * On create, the controller:
  *   - Generates a webhook_secret (32 url-safe bytes) for push providers.
@@ -22,8 +24,9 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { supabaseAdmin } from '../../lib/supabase';
+import { knownProjectKeys, adminClientFor, runWithProject, currentProjectKey, DEFAULT_PROJECT } from '../../lib/projects';
 import { AuthRequest } from '../../types';
-import { asyncHandler, ok, created, badRequest, notFound } from '../../utils';
+import { asyncHandler, ok, created, badRequest, notFound, serverError } from '../../utils';
 import { storeCredentials } from '../../services/crm/integrations/credentialsVault';
 import { findOrCreateLead, type NormalizedLead } from '../../services/crm/integrations/dedup.orchestrator';
 import * as consentSvc from '../../services/crm/consent.service';
@@ -127,12 +130,21 @@ export const listIntegrations = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const getIntegration = asyncHandler<AuthRequest>(async (req, res) => {
   const { org_id } = req.user!;
+  // inbound_email_alias is a secret-ish value like webhook_secret (the
+  // unguessable token IS the auth), so it belongs in the full response the
+  // same way webhook_secret is. But the column only exists on the Kinematic
+  // tenant's DB so far (see createIntegration) — selecting it unconditionally
+  // would 400 every getIntegration call on any other project (e.g. Tata),
+  // where the column doesn't exist at all. Include it only when this request
+  // is actually running against the Kinematic project.
+  const cols = 'id, org_id, provider, label, source_id, status, config, last_synced_at, last_error, last_event_count, webhook_secret, created_at, updated_at'
+    + (currentProjectKey() === 'kinematic' ? ', inbound_email_alias' : '');
   const { data, error } = await supabaseAdmin.from('crm_lead_source_integrations')
-    .select('id, org_id, provider, label, source_id, status, config, last_synced_at, last_error, last_event_count, webhook_secret, created_at, updated_at')
+    .select(cols)
     .eq('org_id', org_id).eq('id', req.params.id).maybeSingle();
   if (error) return badRequest(res, error.message);
   if (!data) return notFound(res, 'Integration not found');
-  if (limitedView(res)) return ok(res, limited(data as Record<string, unknown>));
+  if (limitedView(res)) return ok(res, limited(data as unknown as Record<string, unknown>));
   return ok(res, sanitiseIntegration(data));
 });
 
@@ -178,11 +190,38 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
     ? crypto.randomBytes(24).toString('base64url')
     : null;
 
+  // 2b. For email_inbound, also mint a dedicated inbound-email alias —
+  //     <token>@inbox.kinematicapp.com — so the admin can just forward/CC
+  //     enquiry mail there with zero mail-provider setup (an SES receipt
+  //     rule + relay Lambda already route ANY address at that subdomain to
+  //     POST /api/v1/integrations/inbound-email/relay). Short, lowercase
+  //     alphanumeric: unlike webhook_secret above this has to be
+  //     typeable/readable inside an email address, not just URL-safe.
+  //     The backing `inbound_email_alias` column only exists on the
+  //     Kinematic tenant's DB so far (migration hasn't run for Tata), so
+  //     gate on currentProjectKey() to leave every other project's insert
+  //     byte-for-byte unchanged (CLAUDE.md: keep Tata's production
+  //     behaviour unchanged when adding a multi-project feature).
+  const ALIAS_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const generateAliasToken = (): string => {
+    const bytes = crypto.randomBytes(10);
+    let out = '';
+    for (let i = 0; i < 10; i++) out += ALIAS_ALPHABET[bytes[i] % ALIAS_ALPHABET.length];
+    return out;
+  };
+  const wantsInboundAlias = provider === 'email_inbound' && currentProjectKey() === 'kinematic';
+
   // 3. Insert the integration row. client_id flows through from the
   //    creating user's active client picker so inbound leads auto-
-  //    scope correctly (see findOrCreateLead).
-  const { data: integration, error: intErr } = await supabaseAdmin.from('crm_lead_source_integrations')
-    .insert({
+  //    scope correctly (see findOrCreateLead). Retry a couple of times on
+  //    an inbound_email_alias collision (the unique partial index) — same
+  //    spirit as getOrCreateChannelSource's race handling above, just
+  //    regenerating the random value instead of re-querying an existing row.
+  const MAX_ALIAS_ATTEMPTS = 3;
+  let integration: any = null;
+  let intErr: any = null;
+  for (let attempt = 1; attempt <= (wantsInboundAlias ? MAX_ALIAS_ATTEMPTS : 1); attempt++) {
+    const insertRow: Record<string, unknown> = {
       org_id,
       provider,
       label: label?.trim() || PROVIDER_LABEL[provider],
@@ -192,13 +231,30 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
       webhook_secret,
       created_by: user_id,
       client_id: integration_client_id,
-    })
-    .select('*')
-    .single();
-  if (intErr) {
+    };
+    if (wantsInboundAlias) insertRow.inbound_email_alias = `${generateAliasToken()}@inbox.kinematicapp.com`;
+
+    const { data, error } = await supabaseAdmin.from('crm_lead_source_integrations')
+      .insert(insertRow)
+      .select('*')
+      .single();
+    integration = data;
+    intErr = error;
+    if (!error) break;
+    // 23505 = unique_violation. Only retry when it's plausibly our alias
+    // index (collisions are "very unlikely" per spec) — any other error
+    // bails immediately instead of burning retries.
+    if (!(wantsInboundAlias && error.code === '23505' && attempt < MAX_ALIAS_ATTEMPTS)) break;
+    logger.warn({ org_id, attempt }, 'createIntegration: inbound_email_alias collision, regenerating and retrying');
+  }
+  if (intErr || !integration) {
     // Roll back the source we just created so we don't leak orphans.
     await supabaseAdmin.from('crm_lead_sources').delete().eq('id', source.id);
-    return badRequest(res, `Failed to create integration: ${intErr.message}`);
+    if (wantsInboundAlias && intErr?.code === '23505') {
+      logger.error({ org_id }, 'createIntegration: could not generate a unique inbound_email_alias after retries');
+      return serverError(res, 'Could not generate a unique inbound email alias — please try again');
+    }
+    return badRequest(res, `Failed to create integration: ${intErr?.message ?? 'unknown error'}`);
   }
 
   // 4. Optionally store provider credentials (encrypted at rest).
@@ -235,6 +291,7 @@ export const createIntegration = asyncHandler<AuthRequest>(async (req, res) => {
     ...sanitiseIntegration(integration),
     webhook_secret,
     webhook_url,
+    inbound_email_alias: (integration as { inbound_email_alias?: string | null }).inbound_email_alias ?? null,
     source: { id: source.id, name: source.name },
   });
 });
@@ -466,52 +523,7 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
   try {
     const normalised = await provider.normalize(req.body, integration as IntegrationRow);
     const batch = Array.isArray(normalised) ? normalised : [normalised];
-
-    const integrationClientId = (integration as { client_id?: string | null }).client_id ?? null;
-
-    let merged = 0, created = 0;
-    for (const n of batch) {
-      const channelSourceId = n.channel
-        ? await getOrCreateChannelSource(integration.org_id, integrationClientId, n.channel)
-        : null;
-      const r = await findOrCreateLead({
-        org_id: integration.org_id,
-        source_id: channelSourceId ?? integration.source_id!,
-        normalized: n,
-        integration_id,
-        // Stamp the integration's client scope onto the lead so the
-        // creating tenant's reps see it without an org-level admin
-        // having to re-assign. NULL = org-wide.
-        client_id: integrationClientId,
-        raw_event_id: event_id,
-      });
-      if (r.was_new) created++; else merged++;
-      // Record affirmative WhatsApp / marketing opt-in in the DPDP consent
-      // ledger (who/when/how/purpose), so consent from the public form or the
-      // WhatsApp bot is demonstrable — best-effort, never fails ingestion.
-      try {
-        const method = providerId === 'web_form' ? 'web_form' : 'api';
-        const pairs: Array<[boolean | undefined, string]> = [
-          [n.whatsapp_consent, 'whatsapp'],
-          [n.marketing_consent, 'marketing'],
-        ];
-        for (const [flag, purpose] of pairs) {
-          if (flag === true) {
-            await consentSvc.recordConsent(
-              { orgId: integration.org_id, clientId: integrationClientId },
-              { subjectType: 'lead', subjectId: r.lead_id, purpose, consented: true, method, source: `integration:${providerId}`, actorUserId: null },
-            );
-          }
-        }
-      } catch (e) {
-        logger.warn({ integration_id, err: (e as Error).message }, 'inboundWebhook: consent ledger write failed');
-      }
-      // For single-event payloads, attach lead_id to the event row.
-      if (batch.length === 1) {
-        await finishEvent(event_id, { lead_id: r.lead_id, was_dedup: !r.was_new });
-      }
-    }
-    await bumpIntegrationCounters(integration_id, false);
+    const { created, merged } = await processInboundLeads(integration as IntegrationRow, providerId, batch, event_id);
     res.status(200).json({ ok: true, created, merged });
   } catch (e) {
     const err = (e as Error).message;
@@ -521,6 +533,162 @@ export const inboundWebhook = asyncHandler<Request>(async (req, res) => {
     // Still 200 — the error is recorded; we don't want retries.
     res.status(200).json({ ok: true });
   }
+});
+
+/**
+ * Shared normalize→dedup→consent→event-log pipeline for an already-verified
+ * integration. Extracted from inboundWebhook so the dedicated inbound-email
+ * relay (POST /api/v1/integrations/inbound-email/relay — a different auth
+ * model, no :id in the URL) goes through the EXACT SAME path as the
+ * :provider/:id webhook, instead of a second, divergent implementation. Both
+ * entry points call this after their own signature/secret check and
+ * provider.normalize(...).
+ */
+async function processInboundLeads(
+  integration: IntegrationRow,
+  providerId: ProviderId,
+  normalized: NormalizedLead[],
+  event_id: string,
+): Promise<{ created: number; merged: number }> {
+  const integrationClientId = (integration as { client_id?: string | null }).client_id ?? null;
+
+  let merged = 0, created = 0;
+  for (const n of normalized) {
+    const channelSourceId = n.channel
+      ? await getOrCreateChannelSource(integration.org_id, integrationClientId, n.channel)
+      : null;
+    const r = await findOrCreateLead({
+      org_id: integration.org_id,
+      source_id: channelSourceId ?? integration.source_id!,
+      normalized: n,
+      integration_id: integration.id,
+      // Stamp the integration's client scope onto the lead so the
+      // creating tenant's reps see it without an org-level admin
+      // having to re-assign. NULL = org-wide.
+      client_id: integrationClientId,
+      raw_event_id: event_id,
+    });
+    if (r.was_new) created++; else merged++;
+    // Record affirmative WhatsApp / marketing opt-in in the DPDP consent
+    // ledger (who/when/how/purpose), so consent from the public form or the
+    // WhatsApp bot is demonstrable — best-effort, never fails ingestion.
+    try {
+      const method = providerId === 'web_form' ? 'web_form' : 'api';
+      const pairs: Array<[boolean | undefined, string]> = [
+        [n.whatsapp_consent, 'whatsapp'],
+        [n.marketing_consent, 'marketing'],
+      ];
+      for (const [flag, purpose] of pairs) {
+        if (flag === true) {
+          await consentSvc.recordConsent(
+            { orgId: integration.org_id, clientId: integrationClientId },
+            { subjectType: 'lead', subjectId: r.lead_id, purpose, consented: true, method, source: `integration:${providerId}`, actorUserId: null },
+          );
+        }
+      }
+    } catch (e) {
+      logger.warn({ integration_id: integration.id, err: (e as Error).message }, 'processInboundLeads: consent ledger write failed');
+    }
+    // For single-event payloads, attach lead_id to the event row.
+    if (normalized.length === 1) {
+      await finishEvent(event_id, { lead_id: r.lead_id, was_dedup: !r.was_new });
+    }
+  }
+  await bumpIntegrationCounters(integration.id, false);
+  return { created, merged };
+}
+
+// ── Dedicated inbound-email relay ───────────────────────────────────────
+// POST /api/v1/integrations/inbound-email/relay — hit by the
+// kinematic-inbound-email-relay Lambda (SES receipt rule → S3 → Lambda →
+// here) for ANY address at inbox.kinematicapp.com. No :id in the path (the
+// Lambda doesn't know which integration owns the alias — that's the whole
+// point) and no requireAuth; authenticated instead by a shared
+// X-Relay-Secret header (INBOUND_EMAIL_RELAY_SECRET), constant-time
+// compared like the provider webhook secrets below.
+//
+// The alias → integration lookup has to probe every known Supabase project:
+// this surface carries no X-Kinematic-Project header, and inbound_email_alias
+// only exists on the Kinematic tenant's schema today (see createIntegration),
+// so withProject's usual fallback (Tata in production) would never find it.
+// Mirrors resolveProjectForCaptureTokenAsync / resolveProjectForEmailTrackingTokenAsync
+// in lib/projects.ts — same idea, kept local here since this is the only
+// caller and those helpers are keyed to their own specific columns.
+
+function verifyRelaySecret(req: Request): boolean {
+  const secret = process.env.INBOUND_EMAIL_RELAY_SECRET;
+  if (!secret) return false;
+  const provided = req.headers['x-relay-secret'];
+  if (typeof provided !== 'string' || provided.length !== secret.length) return false;
+  let diff = 0;
+  for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ secret.charCodeAt(i);
+  return diff === 0;
+}
+
+export const inboundEmailRelay = asyncHandler<Request>(async (req, res) => {
+  if (!verifyRelaySecret(req)) {
+    res.status(401).json({ ok: false });
+    return;
+  }
+
+  const body = (req.body && typeof req.body === 'object') ? (req.body as Record<string, unknown>) : {};
+  const token = String(body.to || '').split('@')[0].trim().toLowerCase();
+  if (!token) {
+    res.status(200).json({ ok: true, message: 'unknown alias' });
+    return;
+  }
+  const aliasAddress = `${token}@inbox.kinematicapp.com`;
+
+  const keys = Array.from(new Set(knownProjectKeys()));
+  const projectOrder = [...keys.filter((k) => k !== DEFAULT_PROJECT), DEFAULT_PROJECT];
+
+  let integration: IntegrationRow | null = null;
+  let ownerProject: string | null = null;
+  for (const key of projectOrder) {
+    try {
+      const { data } = await adminClientFor(key)
+        .from('crm_lead_source_integrations')
+        .select('*')
+        .ilike('inbound_email_alias', aliasAddress)
+        .eq('provider', 'email_inbound')
+        .maybeSingle();
+      if (data) {
+        integration = data as IntegrationRow;
+        ownerProject = key;
+        break;
+      }
+    } catch {
+      // Project unreachable, or its schema doesn't have inbound_email_alias
+      // yet (e.g. Tata) — skip it and try the next.
+    }
+  }
+
+  if (!integration || !ownerProject || integration.status === 'disabled') {
+    // Always 200 — this is invoked by an async Lambda with no retry
+    // semantics depending on our response, and we don't want SES/the Lambda
+    // retry-storming an unknown or disabled alias either way (same
+    // always-200 convention as inboundWebhook above).
+    res.status(200).json({ ok: true, message: 'unknown alias' });
+    return;
+  }
+
+  const foundIntegration = integration;
+  const foundProject = ownerProject;
+  await runWithProject(foundProject, async () => {
+    const event_id = await logInboundEvent(foundIntegration.id, foundIntegration.org_id, 'email_inbound', body, true);
+    try {
+      const normalised = await emailInboundProvider.normalize(body, foundIntegration);
+      const batch = Array.isArray(normalised) ? normalised : [normalised];
+      const { created, merged } = await processInboundLeads(foundIntegration, 'email_inbound', batch, event_id);
+      res.status(200).json({ ok: true, created, merged });
+    } catch (e) {
+      const err = (e as Error).message;
+      logger.error({ integration_id: foundIntegration.id, err }, 'inboundEmailRelay: processing failed');
+      await finishEvent(event_id, { error: err });
+      await bumpIntegrationCounters(foundIntegration.id, true, err);
+      res.status(200).json({ ok: true });
+    }
+  });
 });
 
 // ── Meta-style verify challenge (GET) ──────────────────────────────────────────
@@ -549,33 +717,7 @@ export const verifyChallenge = asyncHandler<Request>(async (req, res, next) => {
   }
 
   if (providerId !== 'meta_lead_ads') {
-    // Side-effect-free connection test for key-in-URL providers (web_form,
-    // generic_webhook, email_inbound) — used by the Zapier app's auth test,
-    // which pings this on every connection setup/edit. A POST would create a
-    // real lead each time; GET just verifies the secret and confirms the
-    // integration is reachable, matching the "Webhook URL" the admin already
-    // has from the dashboard's success modal.
-    const provider = getProvider(providerId);
-    if (!provider?.verifyWebhook) {
-      res.status(405).json({ ok: false, error: 'GET not supported for this provider' });
-      return;
-    }
-    const { data: integration } = await supabaseAdmin.from('crm_lead_source_integrations')
-      .select('*').eq('id', req.params.id).maybeSingle();
-    if (!integration || integration.provider !== providerId) {
-      res.status(404).json({ ok: false, error: 'integration not found' });
-      return;
-    }
-    if (integration.status === 'disabled') {
-      res.status(403).json({ ok: false, error: 'integration disabled' });
-      return;
-    }
-    const ok = await provider.verifyWebhook(req, integration as IntegrationRow);
-    if (!ok) {
-      res.status(401).json({ ok: false, error: 'invalid or missing key' });
-      return;
-    }
-    res.status(200).json({ ok: true, label: integration.label, provider: integration.provider });
+    res.status(405).json({ ok: false, error: 'GET not supported for this provider' });
     return;
   }
 
