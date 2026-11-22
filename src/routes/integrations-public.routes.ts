@@ -20,7 +20,10 @@
 import { Router } from 'express';
 import { perRouteLimit } from '../middleware/security';
 import { withIntegrationProject } from '../middleware/withProject';
-import { inboundWebhook, verifyChallenge, inboundEmailRelay } from '../controllers/crm/integrations.controller';
+import {
+  inboundWebhook, verifyChallenge, inboundEmailRelay,
+  metaAppWebhookVerify, metaAppWebhookReceive, metaOAuthCallback,
+} from '../controllers/crm/integrations.controller';
 
 const router = Router();
 
@@ -57,5 +60,17 @@ router.post('/webhook/:provider/:id', withIntegrationProject, webhookLimit, inbo
 // controller itself probes every known project for the alias and authenticates
 // via X-Relay-Secret instead of the `?key=`/:id shape above.
 router.post('/inbound-email/relay', webhookLimit, inboundEmailRelay);
+
+// Meta (Facebook) OAuth — "Connect with Facebook" for Lead Ads.
+//   - /meta/oauth-callback: Meta redirects the browser here after consent
+//     (GET, query string, no auth header) — identity comes from the signed
+//     state minted by the authenticated /meta/authorize route.
+//   - /meta/app-webhook: the APP-LEVEL leadgen webhook, shared by every
+//     OAuth-connected tenant's Pages (see metaOAuth.service.ts). GET is
+//     Meta's one-time subscription handshake; POST is the actual lead
+//     events, HMAC-verified with the shared META_APP_SECRET.
+router.get('/meta/oauth-callback', webhookLimit, metaOAuthCallback);
+router.get('/meta/app-webhook', webhookLimit, metaAppWebhookVerify);
+router.post('/meta/app-webhook', webhookLimit, metaAppWebhookReceive);
 
 export default router;

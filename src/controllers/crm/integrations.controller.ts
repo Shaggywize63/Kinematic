@@ -41,6 +41,7 @@ import { ivrMissedCallProvider } from '../../services/crm/integrations/providers
 import type { ProviderId, IntegrationRow } from '../../services/crm/integrations/providers/types';
 import { ingestCallRecording } from '../../services/crm/ai/callRecordingIngest.service';
 import { deriveCallKey, claimForIngest, markIngested, markCallStatus } from '../../services/crm/ai/telephonyCallLog.service';
+import * as metaOAuth from '../../services/integrations/metaOAuth.service';
 import { logger } from '../../lib/logger';
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
@@ -771,4 +772,166 @@ export const verifyChallenge = asyncHandler<Request>(async (req, res, next) => {
 
   // Meta wants the raw challenge string, NOT JSON.
   res.status(200).type('text/plain').send(challenge);
+});
+
+// ── Meta (Facebook) app-level webhook — OAuth-connected integrations ───
+//
+// Meta's "leadgen" webhook subscription is APP-LEVEL: one callback URL per
+// App, shared by every Page subscribed to it, however many different
+// Kinematic tenants own those Pages. That's unlike the :provider/:id
+// webhook above (one URL per integration, bring-your-own-App-Secret) — see
+// services/integrations/metaOAuth.service.ts's header comment for the full
+// picture. This endpoint:
+//   - verifies the HMAC with Kinematic's OWN shared META_APP_SECRET, not a
+//     per-integration one;
+//   - has no :id and no X-Kinematic-Project header, so (like
+//     inboundEmailRelay above) it resolves the owning integration by
+//     probing every known project for a config.page_id match;
+//   - reuses metaLeadAdsProvider.normalize() + processInboundLeads()
+//     UNCHANGED — normalize() already filters a payload down to the
+//     entries matching one integration's config.page_id, so feeding it the
+//     same (possibly multi-Page) raw body once per matched integration is
+//     correct, just a little redundant scanning per extra Page in the
+//     batch. Real-world batches are small (a handful of entries), so this
+//     is not worth optimising in v1.
+
+export const metaAppWebhookVerify = asyncHandler<Request>(async (req, res) => {
+  const mode      = (req.query['hub.mode']         as string | undefined) ?? '';
+  const verifyTok = (req.query['hub.verify_token'] as string | undefined) ?? '';
+  const challenge = (req.query['hub.challenge']    as string | undefined) ?? '';
+  if (mode !== 'subscribe' || !challenge || !verifyTok) {
+    res.status(400).json({ ok: false, error: 'missing hub.mode/verify_token/challenge' });
+    return;
+  }
+  let expected: string;
+  try { expected = metaOAuth.appWebhookVerifyToken(); }
+  catch { res.status(500).json({ ok: false, error: 'not configured' }); return; }
+  if (verifyTok !== expected) {
+    res.status(403).json({ ok: false, error: 'verify_token mismatch' });
+    return;
+  }
+  res.status(200).type('text/plain').send(challenge);
+});
+
+interface MetaWebhookEntryShape { id?: string; changes?: Array<{ field?: string; value?: { page_id?: string } }> }
+
+/** Distinct Page ids referenced anywhere in a Meta webhook payload — each
+ *  `entry[]` item's own `id` IS the Page id; `changes[].value.page_id`
+ *  duplicates it per Meta's docs, checked too in case of a shape we
+ *  haven't seen. */
+function pageIdsInPayload(body: unknown): string[] {
+  const entries = (body as { entry?: MetaWebhookEntryShape[] })?.entry ?? [];
+  const ids = new Set<string>();
+  for (const e of entries) {
+    if (e.id) ids.add(e.id);
+    for (const c of e.changes ?? []) {
+      if (c.value?.page_id) ids.add(c.value.page_id);
+    }
+  }
+  return Array.from(ids);
+}
+
+/** Probe every known project for an OAuth-connected meta_lead_ads
+ *  integration owning this Page id. Mirrors inboundEmailRelay's
+ *  project-probing above — same reason (no routing header on this
+ *  surface) and same idiom. */
+async function findMetaIntegrationByPageId(pageId: string): Promise<{ integration: IntegrationRow; project: string } | null> {
+  const keys = Array.from(new Set(knownProjectKeys()));
+  const projectOrder = [...keys.filter((k) => k !== DEFAULT_PROJECT), DEFAULT_PROJECT];
+  for (const key of projectOrder) {
+    try {
+      const { data } = await adminClientFor(key)
+        .from('crm_lead_source_integrations')
+        .select('*')
+        .eq('provider', 'meta_lead_ads')
+        .filter('config->>page_id', 'eq', pageId)
+        .maybeSingle();
+      if (data) return { integration: data as IntegrationRow, project: key };
+    } catch {
+      // Project unreachable — skip, try the next.
+    }
+  }
+  return null;
+}
+
+export const metaAppWebhookReceive = asyncHandler<Request>(async (req, res) => {
+  const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+  const sig = req.headers['x-hub-signature-256'] as string | undefined;
+  if (!metaOAuth.verifyAppWebhookSignature(sig, rawBody)) {
+    res.status(200).json({ ok: true, message: 'signature verification failed' });
+    return;
+  }
+
+  const body = (req.body ?? {}) as { object?: string };
+  if (body.object !== 'page') {
+    res.status(200).json({ ok: true, message: 'ignored (not a page object event)' });
+    return;
+  }
+
+  const pageIds = pageIdsInPayload(req.body);
+  for (const pageId of pageIds) {
+    const found = await findMetaIntegrationByPageId(pageId);
+    if (!found || found.integration.status === 'disabled') continue;
+    const { integration, project } = found;
+    await runWithProject(project, async () => {
+      const event_id = await logInboundEvent(integration.id, integration.org_id, 'meta_lead_ads', req.body, true);
+      try {
+        const normalised = await metaLeadAdsProvider.normalize(req.body, integration);
+        const batch = Array.isArray(normalised) ? normalised : [normalised];
+        await processInboundLeads(integration, 'meta_lead_ads', batch, event_id);
+      } catch (e) {
+        const err = (e as Error).message;
+        logger.error({ integration_id: integration.id, page_id: pageId, err }, 'metaAppWebhookReceive: processing failed');
+        await finishEvent(event_id, { error: err });
+        await bumpIntegrationCounters(integration.id, true, err);
+      }
+    });
+  }
+  // Always 200 — same "never cause a retry storm" convention as every
+  // other inbound path in this file.
+  res.status(200).json({ ok: true });
+});
+
+// ── Meta (Facebook) OAuth callback ──────────────────────────────────────
+// Public — Meta redirects here with no auth header after consent, so
+// identity comes entirely from the signed state (see /meta/authorize in
+// routes/integrations.routes.ts). Mirrors the Google Calendar callback
+// pattern in app.ts, kept here instead so it can reuse this file's
+// multi-project helpers without a second set of imports.
+
+export const metaOAuthCallback = asyncHandler<Request>(async (req, res) => {
+  const dashUrl = process.env.DASHBOARD_URL || 'http://localhost:3000';
+  const back = `${dashUrl}/dashboard/crm/settings/integrations`;
+  const withParam = (base: string, k: string, v: string) =>
+    `${base}${base.includes('?') ? '&' : '?'}${k}=${encodeURIComponent(v)}`;
+
+  if (!metaOAuth.isConfigured()) {
+    res.redirect(withParam(back, 'meta_error', 'not_configured'));
+    return;
+  }
+  const code  = String(req.query.code || '');
+  const state = String(req.query.state || '');
+  const err   = String(req.query.error || req.query.error_description || '');
+  if (err) { res.redirect(withParam(back, 'meta_error', err)); return; }
+  if (!code || !state) { res.redirect(withParam(back, 'meta_error', 'missing_params')); return; }
+
+  const jwtLib = await import('jsonwebtoken');
+  const secret = process.env.GOOGLE_OAUTH_STATE_SECRET || process.env.SUPABASE_JWT_SECRET || 'dev-only-secret-replace-me';
+  let payload: { uid?: string; oid?: string; pk?: string; cid?: string | null; kind?: string } | null = null;
+  try { payload = jwtLib.default.verify(state, secret) as typeof payload; } catch { payload = null; }
+  if (!payload || payload.kind !== 'meta_oauth' || !payload.uid || !payload.oid) {
+    res.redirect(withParam(back, 'meta_error', 'invalid_state'));
+    return;
+  }
+  const { isKnownProject } = await import('../../lib/projects');
+  const projectKey = payload.pk && isKnownProject(payload.pk) ? payload.pk : DEFAULT_PROJECT;
+
+  try {
+    const results = await runWithProject(projectKey, () =>
+      metaOAuth.completeOAuth(payload!.oid!, payload!.uid!, payload!.cid ?? null, code));
+    res.redirect(withParam(back, 'meta_connected', String(results.length)));
+  } catch (e) {
+    logger.error({ err: (e as Error).message }, 'metaOAuthCallback: completeOAuth failed');
+    res.redirect(withParam(back, 'meta_error', (e as Error).message.slice(0, 200)));
+  }
 });
