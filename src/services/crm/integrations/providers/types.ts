@@ -25,6 +25,12 @@ export interface IntegrationRow {
   status: 'pending' | 'active' | 'error' | 'disabled';
   config: Record<string, unknown>;
   webhook_secret: string | null;
+  /** Dedicated inbound-email alias (`<token>@inbox.kinematicapp.com`) for
+   *  email_inbound integrations — see integrations.controller.ts's
+   *  createIntegration / inboundEmailRelay. Only populated on the Kinematic
+   *  tenant's DB today; absent (not just null) on projects whose schema
+   *  hasn't had the migration run (e.g. Tata). */
+  inbound_email_alias: string | null;
   last_synced_at: string | null;
   last_error: string | null;
   last_event_count: number;
