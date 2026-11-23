@@ -27,6 +27,7 @@ import { chunk } from '../lib/chunk';
 import { isSteelDealerClient } from '../lib/steelDealer';
 import * as activityExtras from '../services/crm/activityExtras.service';
 import * as accountJourney from '../services/crm/accountJourney.service';
+import * as accountDocsSvc from '../services/crm/accountDocuments.service';
 import * as dealSections from '../services/crm/dealSections.service';
 import * as engineerScorecard from '../services/crm/engineerScorecard.service';
 import * as businessReport from '../services/crm/businessReport.service';
@@ -2597,6 +2598,32 @@ accounts.get('/:id/activities', wrap(async (req, res) => {
 accounts.get('/:id/notes', wrap(async (req, res) => res.json(
   await crud.list('crm_notes', orgId(req), { entity_type: 'account', entity_id: req.params.id, ...req.query }, { softDelete: false })
 )));
+// ---- Documents: reference files (price lists, contracts, spec sheets) attached to an account ----
+// The bytes already live in BUCKET_MATERIALS by the time this runs — the dashboard uploads via the
+// existing POST /api/v1/upload/material first, then calls this route with the returned path to record
+// the link. `bucket` is never taken from the request body: it is always this known constant, so a
+// caller cannot point a document row at storage this route doesn't control.
+const ACCOUNT_DOCS_BUCKET = process.env.BUCKET_MATERIALS || 'kinematic-materials';
+accounts.get('/:id/documents', wrap(async (req, res) => {
+  await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id); // 404s if not this tenant's
+  res.json(await accountDocsSvc.listAccountDocuments(orgId(req), req.params.id));
+}));
+accounts.post('/:id/documents', wrap(async (req, res) => {
+  const acc = await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id) as Record<string, any>;
+  const body = parse(v.accountDocumentSchema, req.body);
+  const doc = await accountDocsSvc.createAccountDocument({
+    orgId: orgId(req), clientId: (acc.client_id as string | null) ?? null, accountId: req.params.id,
+    uploadedBy: userId(req) ?? null, name: body.name, fileName: body.file_name,
+    contentType: body.content_type ?? null, sizeBytes: body.size_bytes ?? null,
+    bucket: ACCOUNT_DOCS_BUCKET, path: body.path,
+  });
+  res.status(201).json(doc);
+}));
+accounts.delete('/:id/documents/:documentId', wrap(async (req, res) => {
+  await crud.get('crm_accounts', orgId(req), req.params.id, true, clientScope(req).id);
+  await accountDocsSvc.deleteAccountDocument(orgId(req), req.params.id, req.params.documentId);
+  res.status(204).end();
+}));
 accounts.post('/:id/summarize', wrap(async (req, res) =>
   res.json({ text: await summarizeSvc.summarizeAccount(orgId(req), clientId(req), req.params.id) })));
 // Sites (plants) under an account.

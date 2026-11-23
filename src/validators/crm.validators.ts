@@ -654,6 +654,19 @@ export const accountUpdateSchema = z.object({
   contact_id: optionalUuid,
 });
 
+// The bytes are already uploaded via POST /api/v1/upload/material before this call — this schema
+// only carries the metadata + object reference it returned. `bucket` is NOT accepted here: the route
+// always stamps the known materials bucket itself, so a caller can't point a document row at an
+// arbitrary bucket. `path` is the object path from that upload response (org_id/user_id/uuid.ext),
+// re-validated at read time by GET /api/v1/media/sign the same way every other upload type already is.
+export const accountDocumentSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  file_name: z.string().trim().min(1).max(255),
+  content_type: z.string().trim().max(120).optional().nullable(),
+  size_bytes: z.number().int().nonnegative().optional().nullable(),
+  path: z.string().trim().min(1).max(500),
+});
+
 export const moveStageSchema = z.object({ stage_id: uuid });
 export const winSchema = z.object({
   actual_close_date: isoDate,
