@@ -171,7 +171,7 @@ jest.mock('../src/lib/logger', () => ({ logger: { warn: jest.fn(), info: jest.fn
 const { __db: db } = require('../src/lib/supabase') as { __db: FakeDb };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const crmRouter = require('../src/routes/crm.routes').default as express.Router;
-import { parsePrice } from '../src/services/crm/productImport.service';
+import { parsePrice, parseTaxRate } from '../src/services/crm/productImport.service';
 
 const ORG = '00000000-0000-0000-0000-0000000000aa';
 const OTHER_ORG = '00000000-0000-0000-0000-0000000000bb';
@@ -592,6 +592,32 @@ describe('POST /products/bulk', () => {
     expect(parsePrice('1.2.3').error).toBeTruthy();
     expect(parsePrice('-5').error).toBe('Price cannot be negative');
     expect(parsePrice(NaN).error).toBeTruthy();
+  });
+
+  it('parses tax rates', () => {
+    expect(parseTaxRate('18')).toEqual({ value: 18 });
+    expect(parseTaxRate('18%')).toEqual({ value: 18 });
+    expect(parseTaxRate(' 12.5 ')).toEqual({ value: 12.5 });
+    expect(parseTaxRate(0)).toEqual({ value: 0 });
+    expect(parseTaxRate('')).toEqual({ value: undefined });
+    expect(parseTaxRate(undefined)).toEqual({ value: undefined });
+    expect(parseTaxRate('abc').error).toBeTruthy();
+    expect(parseTaxRate('-5').error).toBe('Tax rate must be between 0 and 100');
+    expect(parseTaxRate('101').error).toBe('Tax rate must be between 0 and 100');
+    expect(parseTaxRate(NaN).error).toBeTruthy();
+  });
+
+  it('creates and updates carry a tax_rate_pct column when the file has one', async () => {
+    const p = product('T1', { name: 'Old', tax_rate_pct: 5 });
+    const res = await bulk([
+      { reference: 'T1', name: 'Old', tax_rate_pct: '18%' },
+      { reference: 'T2', name: 'New', tax_rate_pct: 12.5 },
+      { reference: 'T3', name: 'Bad', tax_rate_pct: '200' },
+    ]);
+    expect(res.body.data).toMatchObject({ created: 1, updated: 1, skipped: 0 });
+    expect(res.body.data.errors).toEqual([{ row: 3, reference: 'T3', message: 'Tax rate must be between 0 and 100' }]);
+    expect(p).toMatchObject({ tax_rate_pct: 18 });
+    expect(products().find((pr) => pr.sku === 'T2')).toMatchObject({ tax_rate_pct: 12.5 });
   });
 
   it('a duplicate reference inside the file: the later row wins, the earlier is skipped with a message', async () => {
