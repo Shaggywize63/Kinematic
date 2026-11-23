@@ -19,6 +19,7 @@ import { sendClientWelcome, sendClientPaymentReminder } from '../services/client
 import { currentMonth as kiniMonth } from '../services/crm/ai/kiniQuota.service';
 import { invalidateAuthCache } from '../middleware/auth';
 import { parseNewClientAdmin, listClientAdmins, createClientAdmin, setClientAdminActive, moveClientAdminIntoClientOrg, type ClientAdminTarget } from '../services/clientAdmins.service';
+import * as clientDocsSvc from '../services/clientDocuments.service';
 
 // Org-per-client is now the universal onboarding model: EVERY new client gets
 // its OWN org (a row-level tenant) for isolation, and the parent org that
@@ -1422,6 +1423,47 @@ export const addClientAdmin = asyncHandler(async (req: AuthRequest, res: Respons
   const admin = await createClientAdmin(found.target, parsed.value);
   logger.info(`[ClientAdmins] ${req.user!.id} added admin ${admin.id} to client ${found.client.id} (${found.target.project})`);
   created(res, { ...admin, project: found.target.project });
+});
+
+// ---- Documents: reference files (e.g. a client's own price list) attached to this client row ----
+// The bytes already live in BUCKET_MATERIALS by the time this runs — the dashboard uploads via the
+// existing POST /api/v1/upload/material first, then calls this route with the returned path to record
+// the link. `bucket` is never taken from the request body: it is always this known constant, so a
+// caller cannot point a document row at storage this route doesn't control.
+const CLIENT_DOCS_BUCKET = process.env.BUCKET_MATERIALS || 'kinematic-materials';
+
+export const getClientDocuments = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+  ok(res, await clientDocsSvc.listClientDocuments(id));
+});
+
+export const addClientDocument = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const name = typeof b.name === 'string' ? b.name.trim() : '';
+  const fileName = typeof b.file_name === 'string' ? b.file_name.trim() : '';
+  const path = typeof b.path === 'string' ? b.path.trim() : '';
+  if (!name) { badRequest(res, 'name is required'); return; }
+  if (!fileName) { badRequest(res, 'file_name is required'); return; }
+  if (!path) { badRequest(res, 'path is required'); return; }
+  const { data: client } = await supabaseAdmin.from('clients').select('org_id').eq('id', id).maybeSingle();
+  const doc = await clientDocsSvc.createClientDocument({
+    clientId: id, orgId: (client as { org_id?: string } | null)?.org_id ?? null, uploadedBy: req.user!.id,
+    name, fileName,
+    contentType: typeof b.content_type === 'string' ? b.content_type : null,
+    sizeBytes: typeof b.size_bytes === 'number' ? b.size_bytes : null,
+    bucket: CLIENT_DOCS_BUCKET, path,
+  });
+  created(res, doc);
+});
+
+export const deleteClientDocument = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { id, documentId } = req.params;
+  if (!isUUID(id)) { notFound(res, 'Invalid client ID'); return; }
+  await clientDocsSvc.deleteClientDocument(id, documentId);
+  res.status(204).end();
 });
 
 /**
