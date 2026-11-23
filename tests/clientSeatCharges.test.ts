@@ -23,6 +23,7 @@ jest.mock('../src/services/finance/documents.service', () => ({
 import {
   priceOf, currentCycleFor, queueSeatCharge, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice,
   nextPaymentFor, nextPaymentsFor, detectSeatPriceFromInvoice, detectedSeatPrice, findClientByFinanceCustomer,
+  renewalInfoFor, renewalInfoByCustomer, overdueInfoFrom, type NextPayment,
 } from '../src/services/clientBilling.service';
 
 const supa = () => (global as any).__supa;
@@ -295,6 +296,119 @@ describe('queueSeatCharge — falls back to the detected price', () => {
     supa().setDefault('finance_documents', { data: null });
     await queueSeatCharge('c1', 'u1', 'Ravi');
     expect(supa().chainsFor('client_seat_charges').length).toBe(0);
+  });
+});
+
+describe('renewalInfoFor — days left + percent consumed', () => {
+  it('derives days_left and percent_consumed from the recurring cycle', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-21T00:00:00Z'));
+    try {
+      // Cycle 2026-11-01 → 2026-12-01 (30 days). Today is day 20, so 10 days left, 67% consumed.
+      supa().setDefault('finance_documents', {
+        data: { next_invoice_date: '2026-12-01', recurrence_interval: 'monthly', recurrence_custom_every: null, recurrence_custom_unit: null },
+      });
+      const r = await renewalInfoFor('org-1', 'cust-1');
+      expect(r).toEqual({ cycle_start: '2026-11-01', cycle_end: '2026-12-01', cycle_days: 30, days_left: 10, percent_consumed: 67 });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('reports 90%+ consumed as the cycle nears its end (the red-highlight threshold)', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-29T00:00:00Z'));
+    try {
+      supa().setDefault('finance_documents', {
+        data: { next_invoice_date: '2026-12-01', recurrence_interval: 'monthly', recurrence_custom_every: null, recurrence_custom_unit: null },
+      });
+      const r = await renewalInfoFor('org-1', 'cust-1');
+      expect(r!.days_left).toBe(2);
+      expect(r!.percent_consumed).toBeGreaterThanOrEqual(90); // 28/30 ≈ 93%
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('clamps percent_consumed to 100 and lets days_left go negative once the cycle has ended', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-12-05T00:00:00Z'));
+    try {
+      supa().setDefault('finance_documents', {
+        data: { next_invoice_date: '2026-12-01', recurrence_interval: 'monthly', recurrence_custom_every: null, recurrence_custom_unit: null },
+      });
+      const r = await renewalInfoFor('org-1', 'cust-1');
+      expect(r!.days_left).toBe(-4);
+      expect(r!.percent_consumed).toBe(100);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('is null when the client has no recurring invoice', async () => {
+    supa().setDefault('finance_documents', { data: null });
+    expect(await renewalInfoFor('org-1', 'cust-1')).toBeNull();
+  });
+});
+
+describe('renewalInfoByCustomer — batched', () => {
+  it('derives a renewal window per customer, first (soonest-due) invoice winning', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-21T00:00:00Z'));
+    try {
+      supa().setDefault('finance_documents', { data: [
+        { customer_id: 'cust-1', next_invoice_date: '2026-12-01', recurrence_interval: 'monthly', recurrence_custom_every: null, recurrence_custom_unit: null },
+        { customer_id: 'cust-1', next_invoice_date: '2027-01-01', recurrence_interval: 'monthly', recurrence_custom_every: null, recurrence_custom_unit: null },
+        { customer_id: 'cust-2', next_invoice_date: '2026-11-28', recurrence_interval: 'custom', recurrence_custom_every: 14, recurrence_custom_unit: 'day' },
+      ] });
+      const out = await renewalInfoByCustomer('org-1', ['cust-1', 'cust-2', 'cust-3']);
+      expect(out['cust-1']).toMatchObject({ cycle_end: '2026-12-01', days_left: 10 });
+      expect(out['cust-2']).toMatchObject({ cycle_start: '2026-11-14', cycle_end: '2026-11-28', cycle_days: 14 });
+      expect(out['cust-3']).toBeUndefined();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('is empty with no org or no customers', async () => {
+    expect(await renewalInfoByCustomer('', ['cust-1'])).toEqual({});
+    expect(await renewalInfoByCustomer('org-1', [])).toEqual({});
+  });
+});
+
+describe('overdueInfoFrom — derived from an already-fetched NextPayment', () => {
+  const real = (overrides: Partial<NextPayment> = {}): NextPayment => ({
+    invoice_id: 'inv-1', number: 'INV-1', due_date: '2026-11-01', total: 7080, balance: 7080,
+    status: 'sent', share_token: 'tok', scheduled: false, ...overrides,
+  });
+
+  it('reports days overdue for a real unpaid invoice whose due date has passed', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-21T00:00:00Z'));
+    try {
+      expect(overdueInfoFrom(real({ due_date: '2026-11-01' }))).toEqual({
+        invoice_id: 'inv-1', number: 'INV-1', due_date: '2026-11-01', balance: 7080, days_overdue: 20,
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('is null for a scheduled projection (nothing actually billed yet)', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-21T00:00:00Z'));
+    try {
+      const scheduled: NextPayment = { invoice_id: null, number: null, due_date: '2026-10-01', total: null, balance: null, status: 'scheduled', share_token: null, scheduled: true };
+      expect(overdueInfoFrom(scheduled)).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('is null when the due date is today or in the future, and when there is no payment', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-21T00:00:00Z'));
+    try {
+      expect(overdueInfoFrom(real({ due_date: '2026-11-21' }))).toBeNull();
+      expect(overdueInfoFrom(real({ due_date: '2026-12-01' }))).toBeNull();
+      expect(overdueInfoFrom(null)).toBeNull();
+      expect(overdueInfoFrom(undefined)).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

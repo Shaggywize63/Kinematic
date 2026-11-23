@@ -14,7 +14,7 @@ import { readOrgSettings, writeOrgSettings } from '../services/notificationPolic
 import { readAlertSettings, writeAlertSettings, sendTestAlert, AlertSettingsError } from '../services/clientWhatsappAlerts.service';
 import { sendSummaryNow } from '../services/clientDailySummary.service';
 import { cleanAppUiForStore } from '../lib/appItems';
-import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, nextPaymentFor, countActiveUsersByOrg, nextPaymentsFor, type NextPayment, priceOf, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice, detectedSeatPrice, billCurrentSeats } from '../services/clientBilling.service';
+import { financeCustomerIdOf, readSeatCap, countActiveUsers, nextUnpaidInvoice, nextPaymentFor, countActiveUsersByOrg, nextPaymentsFor, type NextPayment, priceOf, listPendingSeatCharges, setSeatPrice, applySeatChargesToInvoice, detectedSeatPrice, billCurrentSeats, renewalInfoFor, renewalInfoByCustomer, overdueInfoFrom, type RenewalInfo, type OverdueInfo } from '../services/clientBilling.service';
 import { sendClientWelcome, sendClientPaymentReminder } from '../services/clientEmails.service';
 import { currentMonth as kiniMonth } from '../services/crm/ai/kiniQuota.service';
 import { invalidateAuthCache } from '../middleware/auth';
@@ -272,6 +272,29 @@ async function readNextPayments(clients: Array<Record<string, any>>, user: { org
   return out;
 }
 
+/** Renewal (billing-cycle) window per client linked to a finance customer (batched by the managing
+ *  org) — mirrors readNextPayments's per-org batching exactly, so SRS/BMW/PASA (three different
+ *  owning orgs) are each covered by their own batched query rather than one query per client. */
+async function readRenewalInfo(clients: Array<Record<string, any>>, user: { org_id?: string }): Promise<Record<string, RenewalInfo | null>> {
+  const out: Record<string, RenewalInfo | null> = {};
+  const linked = clients
+    .map((c) => ({ c, cust: financeCustomerIdOf(c) }))
+    .filter((x): x is { c: Record<string, any>; cust: string } => !!x.cust);
+  if (!linked.length) return out;
+  const byOrg = new Map<string, Array<{ c: Record<string, any>; cust: string }>>();
+  for (const x of linked) {
+    const org = managingOrgId(x.c, user);
+    if (!org) continue;
+    const g = byOrg.get(org);
+    if (g) g.push(x); else byOrg.set(org, [x]);
+  }
+  for (const [org, group] of byOrg) {
+    const map = await renewalInfoByCustomer(org, Array.from(new Set(group.map((x) => x.cust))));
+    for (const x of group) out[x.c.id] = map[x.cust] ?? null;
+  }
+  return out;
+}
+
 /**
  * GET /api/v1/clients
  * Admin only: List all clients for the organization
@@ -324,6 +347,7 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
   const caps = await readUserCaps(liveClients as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
   const activeCounts = await readActiveCounts(liveClients as Array<{ id: string; org_id?: string; data_project_key?: string; data_client_id?: string }>);
   const nextPayments = await readNextPayments(liveClients as Array<Record<string, any>>, user);
+  const renewals = await readRenewalInfo(liveClients as Array<Record<string, any>>, user);
   const kini = await readKiniLimits(liveClients as CapClient[]);
   const results = liveClients.map(client => ({
     ...client,
@@ -333,6 +357,8 @@ export const getClients = asyncHandler(async (req: AuthRequest, res: Response) =
     kini_org_used_this_month: kini[client.id]?.org_used ?? 0,
     active_users: activeCounts[client.id] ?? 0,
     next_payment: nextPayments[client.id] ?? null,
+    renewal: renewals[client.id] ?? null,
+    overdue: overdueInfoFrom(nextPayments[client.id]),
     modules: (accessData || [])
       .filter(a => a.client_id === client.id
         && (!a.expires_at || new Date(a.expires_at).getTime() > now))
@@ -1237,6 +1263,9 @@ export const getClientAccount = asyncHandler(async (req: AuthRequest, res: Respo
   const nextPayment = financeCustomerId
     ? await nextPaymentFor(managingOrgId(client, user), financeCustomerId)
     : null;
+  const renewal = financeCustomerId
+    ? await renewalInfoFor(managingOrgId(client, user), financeCustomerId)
+    : null;
 
   ok(res, {
     name: client.name,
@@ -1246,6 +1275,8 @@ export const getClientAccount = asyncHandler(async (req: AuthRequest, res: Respo
     active,
     finance_customer_id: financeCustomerId,
     next_payment: nextPayment,
+    renewal,
+    overdue: overdueInfoFrom(nextPayment),
     price_per_user: priceOf(client),
     detected_price_per_user: await detectedSeatPrice(client as { org_id?: string | null; settings?: unknown }),
   });

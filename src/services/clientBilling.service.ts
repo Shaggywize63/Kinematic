@@ -297,6 +297,102 @@ export async function currentCycleFor(financeOrgId: string, customerId: string):
   return { cycle_start, cycle_end, cycle_days: daysBetween(cycle_start, cycle_end) };
 }
 
+// ── Renewal (billing-cycle) status + overdue status, for Client Management ──
+//
+// "Days left for renewal" and the 90%-consumed red highlight are derived from
+// the SAME recurring-invoice cycle currentCycleFor already computes for
+// proration — there's no separate "renewal date" field on clients (and none is
+// added here), so this stays driven by real Finance data rather than a second,
+// parallel source of truth. A client not linked to a finance customer, or
+// linked but with no recurring invoice, has no renewal info — the UI shows
+// "—", not a guess.
+
+export interface RenewalInfo {
+  cycle_start: string;
+  cycle_end: string;
+  cycle_days: number;
+  /** Negative once the cycle has run past cycle_end (the next recurring invoice
+   *  hasn't fired/been picked up yet) — the UI treats <= 0 the same as "ended". */
+  days_left: number;
+  /** 0–100, how much of the current cycle has elapsed. */
+  percent_consumed: number;
+}
+
+function renewalInfoFromCycle(cycle: CycleWindow): RenewalInfo {
+  const today = new Date().toISOString().slice(0, 10);
+  const daysLeft = daysBetween(today, cycle.cycle_end);
+  const consumedPct = cycle.cycle_days > 0 ? ((cycle.cycle_days - daysLeft) / cycle.cycle_days) * 100 : 100;
+  return {
+    cycle_start: cycle.cycle_start,
+    cycle_end: cycle.cycle_end,
+    cycle_days: cycle.cycle_days,
+    days_left: daysLeft,
+    percent_consumed: Math.max(0, Math.min(100, Math.round(consumedPct))),
+  };
+}
+
+/** Single-client renewal window — see currentCycleFor for the source. Null when not linked to a
+ *  finance customer, or linked but no recurring invoice is set up (nothing to derive a cycle from). */
+export async function renewalInfoFor(financeOrgId: string, customerId: string): Promise<RenewalInfo | null> {
+  const cycle = await currentCycleFor(financeOrgId, customerId);
+  return cycle ? renewalInfoFromCycle(cycle) : null;
+}
+
+/** Batched form of renewalInfoFor, for the client list — one query per finance org. Mirrors
+ *  scheduledNextInvoicesByCustomer's query shape, adding the recurrence fields needed to derive the
+ *  cycle. First (soonest-due) recurring invoice per customer wins, like currentCycleFor. */
+export async function renewalInfoByCustomer(financeOrgId: string, customerIds: string[]): Promise<Record<string, RenewalInfo>> {
+  const out: Record<string, RenewalInfo> = {};
+  if (!financeOrgId || !customerIds.length) return out;
+  const { data, error } = await supabaseAdmin
+    .from('finance_documents')
+    .select('customer_id, next_invoice_date, recurrence_interval, recurrence_custom_every, recurrence_custom_unit')
+    .eq('org_id', financeOrgId)
+    .eq('doc_type', 'invoice')
+    .in('customer_id', customerIds)
+    .eq('recurrence_enabled', true)
+    .is('deleted_at', null)
+    .not('next_invoice_date', 'is', null)
+    .order('next_invoice_date', { ascending: true });
+  if (error || !data) return out;
+  for (const row of data as Array<{
+    customer_id: string; next_invoice_date: string; recurrence_interval: string | null;
+    recurrence_custom_every: number | null; recurrence_custom_unit: string | null;
+  }>) {
+    if (out[row.customer_id]) continue; // ordered soonest-first, so the first per customer wins
+    const spec = specFromRow(row);
+    if (!spec) continue;
+    const cycle_end = row.next_invoice_date;
+    const cycle_start = cycleStartBefore(cycle_end, spec);
+    out[row.customer_id] = renewalInfoFromCycle({ cycle_start, cycle_end, cycle_days: daysBetween(cycle_start, cycle_end) });
+  }
+  return out;
+}
+
+export interface OverdueInfo {
+  invoice_id: string;
+  number: string | null;
+  due_date: string;
+  balance: number | null;
+  days_overdue: number;
+}
+
+/** Derived from an already-fetched NextPayment — no extra query. Overdue only when it's a REAL unpaid
+ *  invoice (not a "scheduled" projection with nothing actually billed yet) whose due date has passed.
+ *  Same day-count formula as the Finance module's receivables-ageing buckets (finance/reports.service.ts). */
+export function overdueInfoFrom(payment: NextPayment | null | undefined): OverdueInfo | null {
+  if (!payment || payment.scheduled || !payment.due_date || !payment.invoice_id) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  if (payment.due_date >= today) return null;
+  return {
+    invoice_id: payment.invoice_id,
+    number: payment.number,
+    due_date: payment.due_date,
+    balance: payment.balance,
+    days_overdue: daysBetween(payment.due_date, today),
+  };
+}
+
 /**
  * A per-seat price inferred from the client's own recurring invoice, for a
  * client that never set one explicitly in Client Management. Finds the most
