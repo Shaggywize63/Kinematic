@@ -24,7 +24,7 @@ export const MAX_IMPORT_ROWS = 2000;
 
 export interface ImportRowInput {
   reference?: unknown; name?: unknown; make?: unknown; brand?: unknown;
-  unit?: unknown; price?: unknown; category?: unknown; description?: unknown;
+  unit?: unknown; price?: unknown; category?: unknown; description?: unknown; tax_rate_pct?: unknown;
 }
 export interface ImportInput { rows: unknown[]; create_missing?: boolean; update_existing?: boolean }
 export interface ImportRowError { row: number; reference: string; message: string }
@@ -60,9 +60,29 @@ export function parsePrice(v: unknown): { value: number | undefined; error?: str
   return { value: Number(cleaned) };
 }
 
+/** Parse a tax-rate cell: 18, "18", "18%". Blank = not given; out of [0,100] is an error. */
+export function parseTaxRate(v: unknown): { value: number | undefined; error?: string } {
+  if (v === undefined || v === null) return { value: undefined };
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v)) return { value: undefined, error: `Tax rate "${v}" is not a number` };
+    if (v < 0 || v > 100) return { value: undefined, error: 'Tax rate must be between 0 and 100' };
+    return { value: v };
+  }
+  if (typeof v !== 'string') return { value: undefined, error: 'Tax rate is not a number' };
+  const raw = v.trim();
+  if (!raw) return { value: undefined };
+  const cleaned = raw.replace(/%$/, '').replace(/\s/g, '');
+  if (/^-/.test(cleaned)) return { value: undefined, error: 'Tax rate must be between 0 and 100' };
+  if (!/^\d+\.?\d*$/.test(cleaned)) return { value: undefined, error: `Tax rate "${raw}" is not a number` };
+  const n = Number(cleaned);
+  if (n > 100) return { value: undefined, error: 'Tax rate must be between 0 and 100' };
+  return { value: n };
+}
+
 interface Prepared {
   row: number; reference: string; name: string;
   make?: string; brand?: string; unit?: string; price?: number; category?: string; description?: string;
+  tax_rate_pct?: number;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -120,6 +140,8 @@ export async function importProducts(ctx: ImportCtx, input: ImportInput): Promis
     if (name.length > 200) { fail(n, reference, 'Name is longer than 200 characters'); return; }
     const price = parsePrice(r.price);
     if (price.error) { fail(n, reference, price.error); return; }
+    const taxRate = parseTaxRate(r.tax_rate_pct);
+    if (taxRate.error) { fail(n, reference, taxRate.error); return; }
     const unit = cell(r.unit);
     if (unit.length > 40) { fail(n, reference, 'Unit is longer than 40 characters'); return; }
     const make = cell(r.make);
@@ -130,6 +152,7 @@ export async function importProducts(ctx: ImportCtx, input: ImportInput): Promis
       row: n, reference, name,
       ...(make ? { make } : {}), ...(brand ? { brand } : {}),
       ...(unit ? { unit } : {}), ...(price.value !== undefined ? { price: price.value } : {}),
+      ...(taxRate.value !== undefined ? { tax_rate_pct: taxRate.value } : {}),
       ...(cell(r.category) ? { category: cell(r.category) } : {}),
       ...(cell(r.description) ? { description: cell(r.description) } : {}),
     });
@@ -251,6 +274,7 @@ async function importWork(
       if (p.description !== undefined) patch.description = p.description;
       if (p.unit !== undefined) patch.unit = p.unit;
       if (p.price !== undefined) patch.price = p.price;
+      if (p.tax_rate_pct !== undefined) patch.tax_rate_pct = p.tax_rate_pct;
       if (categoryId) patch.category_id = categoryId;
       if (makeId) patch.make_id = makeId;
       if (brandId) patch.brand_id = brandId;
@@ -259,7 +283,8 @@ async function importWork(
       continue;
     }
     const parsed = productSchema.safeParse({
-      sku: p.reference, name: p.name, description: p.description, unit: p.unit, price: p.price, category_id: categoryId,
+      sku: p.reference, name: p.name, description: p.description, unit: p.unit, price: p.price,
+      tax_rate_pct: p.tax_rate_pct, category_id: categoryId,
     });
     if (!parsed.success) {
       fail(p.row, p.reference, parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));
