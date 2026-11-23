@@ -42,4 +42,8 @@ router.get('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clie
 router.post('/:id/admins', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.addClientAdmin);
 router.patch('/:id/admins/:userId', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.updateClientAdmin);
 
+router.get('/:id/documents', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.getClientDocuments);
+router.post('/:id/documents', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.addClientDocument);
+router.delete('/:id/documents/:documentId', requireAuth, requireRole('admin', 'super_admin'), clientCtrl.deleteClientDocument);
+
 export default router;
