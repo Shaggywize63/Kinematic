@@ -79,6 +79,7 @@ import * as leaderboardSvc from '../services/crm/leaderboard.service';
 import * as emailsSvc from '../services/crm/emails.service';
 import * as whatsappSvc from '../services/crm/whatsapp.service';
 import * as whatsappConn from '../services/crm/whatsappConnection.service';
+import * as metaWhatsappEmbeddedSignup from '../services/integrations/metaWhatsappEmbeddedSignup.service';
 import * as broadcastSvc from '../services/crm/broadcast.service';
 import { isBroadcastEnabled, BROADCAST_DISABLED_MESSAGE } from '../lib/broadcastEntitlement';
 import * as emailCampaignSvc from '../services/crm/emailCampaign.service';
@@ -6419,6 +6420,24 @@ whatsapp.put('/connection', waAdminOnly, wrap(async (req, res) => {
 }));
 whatsapp.post('/connection/test', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await whatsappConn.testConnection(orgId(req)) })));
 whatsapp.post('/templates/sync', waAdminOnly, wrap(async (req, res) => res.json({ success: true, data: await whatsappConn.syncTemplates(orgId(req)) })));
+
+// ── WhatsApp Embedded Signup — connect via Meta's own hosted UI instead of
+// hand-typing Phone Number ID / WABA ID / access token. The config endpoint
+// is read-only (any authenticated user with WhatsApp module access, not
+// just admins) so the Settings page can show/hide the "Connect WhatsApp"
+// button; completing a signup still requires waAdminOnly, same as the
+// manual connection form.
+whatsapp.get('/embedded-signup/config', wrap(async (req, res) => {
+  res.json({ success: true, data: metaWhatsappEmbeddedSignup.publicConfig() });
+}));
+whatsapp.post('/embedded-signup', waAdminOnly, wrap(async (req, res) => {
+  const { code, phone_number_id, waba_id } = req.body as { code?: string; phone_number_id?: string; waba_id?: string };
+  if (!code) return res.status(400).json({ success: false, error: 'Missing code from the signup flow' });
+  const result = await metaWhatsappEmbeddedSignup.completeEmbeddedSignup(
+    orgId(req), userId(req), code, String(phone_number_id || ''), String(waba_id || ''),
+  );
+  res.json({ success: true, data: result });
+}));
 
 router.use('/whatsapp', rbac.requireModuleAccess('crm_whatsapp'), whatsapp);
 
