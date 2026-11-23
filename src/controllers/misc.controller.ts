@@ -18,7 +18,6 @@ import { assertMayManageUser, assertMayAssignRole, assertUserReachable } from '.
 import { allowedFlags, isProjectDisabled } from '../services/notificationPolicy';
 import { isPlatformOperator, usesStrictTenantScope } from '../lib/tenantScope';
 import { invalidateAuthCache } from '../middleware/auth';
-import { isB2bClient } from '../lib/b2bClients';
 import { queueSeatCharge } from '../services/clientBilling.service';
 
 // VISIT LOGS
@@ -214,14 +213,19 @@ export const getUsers = asyncHandler(async (req: AuthRequest, res: Response, nex
     return sendSuccess(res, data, 'Success', 200);
   }
   
-  // Connected-B2B (Spark & Ray) picker: the client admin (role `client`) and the field executives need the
-  // people list for owner / assignee / deal-people dropdowns, but are not allowed the full directory. They get a
+  // Lead/deal assignment picker: the client admin (role `client`) and the field executives need the people
+  // list for owner / assignee / deal-people dropdowns, but are not allowed the full directory. They get a
   // minimal projection of their OWN client's active users — no phones, permissions or attendance. Every other
-  // caller (and every other tenant) is untouched.
+  // caller is untouched. This used to be gated on isB2bClient(), which only covers Spark (and whichever extra
+  // ids B2B_LEAD_CLIENT_IDS adds) — but every client's CRM dashboard calls this same ?scope=assignable picker
+  // for its "assign to" dropdown, not just the connected-B2B tenants, so any other client's non-directory
+  // caller (e.g. a client-role admin like Mr. Water's) got a 403 and an "assign to" list that silently showed
+  // no users. The gate is now just "caller is pinned to a client + org", matching how every other client-id
+  // filter in this file already scopes a non-directory caller to their own tenant.
   const callerRole = String(user.role ?? '').toLowerCase();
   const directoryRoles = ['admin', 'super_admin', 'supervisor', 'hr'];
   if (String(req.query.scope) === 'assignable' && !directoryRoles.includes(callerRole)) {
-    if (!isB2bClient(user.client_id) || !user.org_id) throw new AppError(403, 'Requires one of: admin, super_admin, supervisor, hr', 'FORBIDDEN');
+    if (!isUUID(user.client_id) || !user.org_id) throw new AppError(403, 'Requires one of: admin, super_admin, supervisor, hr', 'FORBIDDEN');
     const { data: people, error: peopleErr } = await supabaseAdmin.from('users')
       .select('id, name, email, role')
       .eq('org_id', user.org_id).eq('client_id', user.client_id as string)
