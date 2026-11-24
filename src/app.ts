@@ -61,6 +61,8 @@ import tallyAgentPublicRoutes    from './routes/tally-agent-public.routes';
 import capturePublicRoutes       from './routes/distribution/capture-public.routes';
 import distCaptureAdminRoutes    from './routes/distribution/capture-admin.routes';
 import kiniPublicRoutes          from './routes/kini-public.routes';
+import supportPublicRoutes       from './routes/support-public.routes';
+import supportRoutes             from './routes/support.routes';
 import appVersionRoutes          from './routes/app-version.routes';
 import orgSettingsRoutes         from './routes/org-settings.routes';
 import cronRoutes                from './routes/cron.routes';
@@ -467,6 +469,8 @@ app.use(`${V1}/distribution/capture`, capturePublicRoutes);
 // shared secret (KINI_WEB_CHAT_KEY) checked in the controller. Mounted
 // BEFORE the auth catch-all so it never needs a Supabase JWT.
 app.use(`${V1}/kini/public`, kiniPublicRoutes);
+// KINI WhatsApp bot → support tickets (shared KINI key, checked in the controller).
+app.use(`${V1}/support/public`, supportPublicRoutes);
 // Public invoice/quote share links — token in the path is the credential, so this
 // must sit BEFORE the global requireAuth gate below.
 app.use(`${V1}/finance/public`, financePublicRoutes);
@@ -599,6 +603,7 @@ app.use(`${V1}/leaderboard`,   requireAuth, leaderboardRoutes);
 app.use(`${V1}/notifications`, requireAuth, notifRoutes);
 app.use(`${V1}/learning`,      requireAuth, learningRoutes);
 app.use(`${V1}/grievances`,    requireAuth, requireModule('grievances'), grievanceRoutes);
+app.use(`${V1}/support`,       supportRoutes); // Help & Support + the support inbox; every user, no module gate
 app.use(`${V1}/analytics`,     requireAuth, enforceCityScope, analyticsRoutes);
 app.use(`${V1}/visits`,        requireAuth, enforceCityScope, visitlogRoutes);
 app.use(`${V1}/upload`,        requireAuth, uploadRoutes);
