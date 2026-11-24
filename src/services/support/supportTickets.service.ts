@@ -1,0 +1,370 @@
+/**
+ * Support tickets: customers raise them, the Kinematic team works them, the customer hears back.
+ *
+ * Ways in:
+ *   - Dashboard → Help & Support (any logged-in user; the ticket belongs to their organisation).
+ *   - KINI on WhatsApp → "Raise an issue" (the bot posts here with the shared KINI key; the sender is matched to a
+ *     user by mobile number when possible).
+ *
+ * One queue for every customer, whatever project their data lives in: tickets are always stored in the Kinematic
+ * project (SUPPORT_PROJECT). Platform operators (tenantScope.isPlatformOperator) see and update all of them in the
+ * dashboard's support inbox; the owner can also update them from WhatsApp through the bot.
+ *
+ * When the team changes a ticket's status or replies, the customer is told:
+ *   - on WhatsApp, from Kinematic's own number (the org whose WhatsApp connection is SUPPORT_WHATSAPP_NUMBER):
+ *     free-form inside the 24-hour window the customer's last message opened, else the approved `handoff_reply`
+ *     template when it has been synced, else not at all (the response says why);
+ *   - in the app, as a notification to the user who raised it (in their own project).
+ * When a customer raises a ticket or replies from the dashboard, the team is told on WhatsApp through the support
+ * org's own WhatsApp alerts (Client Management → WhatsApp alerts: its template and people). WhatsApp-raised tickets
+ * are announced by the bot itself.
+ */
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { adminClientFor, isKnownProject, listProjectKeys, runWithProject } from '../../lib/projects';
+import { logger } from '../../lib/logger';
+import { sendWhatsapp } from '../crm/whatsapp.service';
+import { WA_SETTING_KEY, toSettings, sendToRecipients, listTemplates, isApproved, normalizePhone } from '../clientWhatsappAlerts.service';
+
+export const SUPPORT_PROJECT = (process.env.SUPPORT_PROJECT || 'kinematic').trim();
+const SUPPORT_NUMBER = () => (process.env.SUPPORT_WHATSAPP_NUMBER || '919220299228').replace(/\D/g, '');
+const WINDOW_MS = 23 * 3600_000;
+
+export const STATUSES = ['open', 'in_progress', 'waiting_on_customer', 'resolved', 'closed'] as const;
+export const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
+export const CATEGORIES = ['how_to', 'bug', 'data', 'billing', 'feature_request', 'other'] as const;
+export const ACTIVE: readonly TicketStatus[] = ['open', 'in_progress', 'waiting_on_customer'];
+export type TicketStatus = (typeof STATUSES)[number];
+export type TicketPriority = (typeof PRIORITIES)[number];
+export type TicketCategory = (typeof CATEGORIES)[number];
+
+export const STATUS_LABEL: Record<TicketStatus, string> = {
+  open: 'Open', in_progress: 'In progress', waiting_on_customer: 'Waiting on you', resolved: 'Resolved', closed: 'Closed',
+};
+
+export interface Ticket {
+  id: string; ref: string; status: TicketStatus; priority: TicketPriority; category: TicketCategory;
+  subject: string; description: string; channel: 'whatsapp' | 'dashboard' | 'app';
+  project_key: string | null; org_id: string | null; org_name: string | null; raised_by_user_id: string | null;
+  contact_name: string | null; contact_phone: string | null; contact_email: string | null;
+  resolution_note: string | null; created_at: string; updated_at: string; resolved_at: string | null;
+}
+export interface TicketEvent {
+  id: string; ticket_id: string; kind: 'created' | 'status' | 'comment'; author_type: 'customer' | 'team' | 'system';
+  author_name: string | null; from_status: string | null; to_status: string | null; body: string | null; created_at: string;
+}
+export interface CustomerNotified { whatsapp: 'sent' | 'template' | 'skipped' | 'failed'; note?: string }
+
+export class SupportError extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+
+/** The Kinematic project's admin client, where every ticket lives. */
+export const supportDb = (): SupabaseClient => adminClientFor(isKnownProject(SUPPORT_PROJECT) ? SUPPORT_PROJECT : undefined);
+
+const clean = (v: unknown, max: number): string => String(v ?? '').replace(/\u0000/g, '').trim().slice(0, max);
+const oneOf = <T extends string>(list: readonly T[], v: unknown, fallback: T): T => (list.includes(v as T) ? (v as T) : fallback);
+const digits = (s: unknown) => String(s ?? '').replace(/\D/g, '');
+
+// ── Customer identity ─────────────────────────────────────────────────────────────────────────────────────────
+
+export interface Requester {
+  project_key: string | null; org_id: string | null; org_name: string | null; user_id: string | null;
+  name: string | null; phone: string | null; email: string | null;
+}
+
+async function orgName(db: SupabaseClient, orgId: string | null | undefined): Promise<string | null> {
+  if (!orgId) return null;
+  const { data } = await db.from('organisations').select('name').eq('id', orgId).maybeSingle();
+  return (data as { name?: string | null } | null)?.name ?? null;
+}
+
+/** The dashboard user raising a ticket, with their mobile so WhatsApp updates can reach them. */
+export async function requesterFromUser(project: string, user: { id: string; org_id: string; name?: string | null; email?: string | null; mobile?: string | null }): Promise<Requester> {
+  const db = adminClientFor(project);
+  return {
+    project_key: project, org_id: user.org_id, org_name: await orgName(db, user.org_id).catch(() => null), user_id: user.id,
+    name: user.name ?? null, phone: normalizePhone(user.mobile) ?? null, email: user.email ?? null,
+  };
+}
+
+/** Who is this WhatsApp number? An active user of any project, matched on the last 10 digits, or just the number. */
+export async function requesterFromPhone(phone: string, fallbackName?: string | null): Promise<Requester> {
+  const p = digits(phone);
+  const last10 = p.slice(-10);
+  const base: Requester = { project_key: null, org_id: null, org_name: null, user_id: null, name: fallbackName ?? null, phone: p || null, email: null };
+  if (last10.length !== 10) return base;
+  for (const key of listProjectKeys()) {
+    try {
+      const db = adminClientFor(key);
+      const { data } = await db.from('users').select('id, org_id, name, email')
+        .eq('is_active', true).is('deleted_at', null)
+        .or(`mobile.eq.${last10},mobile.eq.+91${last10},mobile.eq.91${last10},mobile.eq.0${last10}`)
+        .limit(1).maybeSingle();
+      const u = data as { id: string; org_id: string; name: string | null; email: string | null } | null;
+      if (u) {
+        return { ...base, project_key: key, org_id: u.org_id, org_name: await orgName(db, u.org_id).catch(() => null), user_id: u.id, name: u.name ?? base.name, email: u.email };
+      }
+    } catch (e: any) {
+      logger.warn(`[support] phone lookup failed in project=${key}: ${e?.message || e}`);
+    }
+  }
+  return base;
+}
+
+// ── Reads ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+export interface ListFilter { status?: string; q?: string; scope?: { project_key: string; org_id: string } | null; phone?: string }
+
+export async function listTickets(f: ListFilter): Promise<{ tickets: Ticket[]; counts: Record<TicketStatus, number> }> {
+  const db = supportDb();
+  const scoped = <Q extends { eq: (c: string, v: unknown) => Q; or: (e: string) => Q }>(q: Q): Q => {
+    let out = q;
+    if (f.scope) out = out.eq('project_key', f.scope.project_key).eq('org_id', f.scope.org_id);
+    if (f.phone) {
+      const last10 = digits(f.phone).slice(-10);
+      out = out.or(`contact_phone.eq.${digits(f.phone)},contact_phone.eq.91${last10},contact_phone.eq.${last10}`);
+    }
+    return out;
+  };
+  let q = scoped(db.from('support_tickets').select('*') as any);
+  const status = (f.status || 'active').toLowerCase();
+  if (status === 'active') q = q.in('status', ACTIVE as unknown as string[]);
+  else if ((STATUSES as readonly string[]).includes(status)) q = q.eq('status', status);
+  const term = clean(f.q, 80).replace(/[%,()*\\]/g, ' ').trim();
+  if (term) q = q.or(`ref.ilike.%${term}%,subject.ilike.%${term}%,org_name.ilike.%${term}%,contact_name.ilike.%${term}%,contact_phone.ilike.%${term}%`);
+  const { data, error } = await q.order('created_at', { ascending: false }).limit(200);
+  if (error) throw new Error(error.message);
+
+  const { data: all } = await scoped(db.from('support_tickets').select('status') as any).limit(5000);
+  const counts = Object.fromEntries(STATUSES.map((s) => [s, 0])) as Record<TicketStatus, number>;
+  for (const r of (all ?? []) as Array<{ status: TicketStatus }>) if (r.status in counts) counts[r.status]++;
+  return { tickets: (data ?? []) as Ticket[], counts };
+}
+
+export async function getTicket(idOrRef: string): Promise<Ticket | null> {
+  const col = /^KM-\d+$/i.test(idOrRef) ? 'ref' : 'id';
+  if (col === 'id' && !/^[0-9a-f-]{36}$/i.test(idOrRef)) return null;
+  const { data } = await supportDb().from('support_tickets').select('*').eq(col, col === 'ref' ? idOrRef.toUpperCase() : idOrRef).maybeSingle();
+  return (data as Ticket | null) ?? null;
+}
+
+export async function listEvents(ticketId: string): Promise<TicketEvent[]> {
+  const { data } = await supportDb().from('support_ticket_events').select('*').eq('ticket_id', ticketId).order('created_at', { ascending: true });
+  return (data ?? []) as TicketEvent[];
+}
+
+/** May this customer see the ticket? Their organisation's tickets, or (WhatsApp) the ones raised from their number. */
+export function belongsTo(t: Ticket, scope: { project_key: string; org_id: string }): boolean {
+  return !!t.org_id && t.org_id === scope.org_id && (t.project_key ?? SUPPORT_PROJECT) === scope.project_key;
+}
+
+// ── Writes ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+async function addEvent(e: Omit<TicketEvent, 'id' | 'created_at'>): Promise<void> {
+  const { error } = await supportDb().from('support_ticket_events').insert(e);
+  if (error) logger.warn(`[support] event insert failed ticket=${e.ticket_id}: ${error.message}`);
+}
+
+export interface CreateInput { subject?: unknown; description?: unknown; category?: unknown; priority?: unknown; channel: Ticket['channel'] }
+
+export async function createTicket(input: CreateInput, who: Requester, opts: { notifyTeam: boolean }): Promise<Ticket> {
+  const description = clean(input.description, 5000);
+  const subject = clean(input.subject, 150) || description.split('\n')[0].slice(0, 80);
+  if (subject.length < 3) throw new SupportError(400, 'Add a short subject (at least 3 characters).');
+  if (description.length < 10) throw new SupportError(400, 'Describe the issue in a little more detail (at least 10 characters).');
+  const row = {
+    subject, description,
+    category: oneOf(CATEGORIES, input.category, 'other'),
+    priority: oneOf(PRIORITIES, input.priority, 'normal'),
+    channel: input.channel,
+    project_key: who.project_key, org_id: who.org_id, org_name: who.org_name, raised_by_user_id: who.user_id,
+    contact_name: who.name, contact_phone: who.phone, contact_email: who.email,
+  };
+  const { data, error } = await supportDb().from('support_tickets').insert(row).select('*').single();
+  if (error || !data) throw new Error(error?.message || 'Could not save the ticket');
+  const t = data as Ticket;
+  await addEvent({ ticket_id: t.id, kind: 'created', author_type: 'customer', author_name: who.name, from_status: null, to_status: 'open', body: null });
+  if (opts.notifyTeam) await alertTeam(`New support ticket ${t.ref}`, `${who.org_name || who.name || 'A customer'}: ${t.subject}. ${t.description}`);
+  return t;
+}
+
+export interface Actor { type: 'team' | 'customer'; name: string | null }
+
+export interface UpdateInput { status?: unknown; priority?: unknown; note?: unknown }
+
+/**
+ * Change status / priority. The team may set anything; a customer may only confirm it's fixed (resolved) or say it
+ * still isn't (open, with a note). The note is what the customer (or the team) is told.
+ */
+export async function updateTicket(t: Ticket, input: UpdateInput, actor: Actor, opts: { notifyTeam: boolean }): Promise<{ ticket: Ticket; customer_notified?: CustomerNotified }> {
+  const note = clean(input.note, 2000) || null;
+  const status = input.status === undefined || input.status === null || input.status === '' ? undefined : String(input.status);
+  const priority = input.priority === undefined || input.priority === null || input.priority === '' ? undefined : String(input.priority);
+  if (status !== undefined && !(STATUSES as readonly string[]).includes(status)) throw new SupportError(400, `Unknown status "${status}".`);
+  if (priority !== undefined && !(PRIORITIES as readonly string[]).includes(priority)) throw new SupportError(400, `Unknown priority "${priority}".`);
+  if (actor.type === 'customer') {
+    if (priority !== undefined || (status !== 'resolved' && status !== 'open')) throw new SupportError(403, 'You can mark the ticket as fixed, or say it is still not working.');
+    if (status === 'open' && !note) throw new SupportError(400, "Tell us what's still not working.");
+  }
+  if (status === undefined && priority === undefined && !note) throw new SupportError(400, 'Nothing to update.');
+
+  const prevStatus = t.status;
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  const statusChanged = status !== undefined && status !== prevStatus;
+  if (statusChanged) {
+    patch.status = status;
+    if (status === 'resolved' || status === 'closed') patch.resolved_at = t.resolved_at ?? new Date().toISOString();
+    else patch.resolved_at = null;
+    if (actor.type === 'team' && (status === 'resolved' || status === 'closed') && note) patch.resolution_note = note;
+  }
+  if (priority !== undefined) patch.priority = priority;
+  const { data, error } = await supportDb().from('support_tickets').update(patch).eq('id', t.id).select('*').single();
+  if (error || !data) throw new Error(error?.message || 'Could not update the ticket');
+  const next = data as Ticket;
+
+  if (statusChanged) {
+    await addEvent({ ticket_id: t.id, kind: 'status', author_type: actor.type, author_name: actor.name, from_status: prevStatus, to_status: status!, body: note });
+  } else if (note) {
+    await addEvent({ ticket_id: t.id, kind: 'comment', author_type: actor.type, author_name: actor.name, from_status: null, to_status: null, body: note });
+  }
+
+  if (actor.type === 'team' && (statusChanged || note)) {
+    const message = statusChanged ? statusMessage(next, note) : commentMessage(next, note!);
+    return { ticket: next, customer_notified: await notifyCustomer(next, message, actor.name) };
+  }
+  if (actor.type === 'customer' && opts.notifyTeam && statusChanged) {
+    await alertTeam(status === 'resolved' ? `Ticket ${t.ref} confirmed fixed` : `Ticket ${t.ref} reopened`, `${t.org_name || t.contact_name || 'Customer'}: ${note || t.subject}`);
+  }
+  return { ticket: next };
+}
+
+/** A reply on the ticket. A customer reply reopens a resolved / closed ticket; a team reply goes to the customer. */
+export async function addComment(t: Ticket, bodyRaw: unknown, actor: Actor, opts: { notifyTeam: boolean }): Promise<{ ticket: Ticket; customer_notified?: CustomerNotified }> {
+  const body = clean(bodyRaw, 3000);
+  if (!body) throw new SupportError(400, 'Write a message first.');
+  let ticket = t;
+  const prevStatus = t.status;
+  const reopen = actor.type === 'customer' && (prevStatus === 'resolved' || prevStatus === 'closed' || prevStatus === 'waiting_on_customer');
+  const now = new Date().toISOString();
+  const patch: Record<string, unknown> = { updated_at: now };
+  if (reopen) { patch.status = 'open'; patch.resolved_at = null; }
+  const { data } = await supportDb().from('support_tickets').update(patch).eq('id', t.id).select('*').single();
+  if (data) ticket = data as Ticket;
+  await addEvent({ ticket_id: t.id, kind: 'comment', author_type: actor.type, author_name: actor.name, from_status: null, to_status: null, body });
+  if (reopen) await addEvent({ ticket_id: t.id, kind: 'status', author_type: 'system', author_name: null, from_status: prevStatus, to_status: 'open', body: null });
+
+  if (actor.type === 'team') return { ticket, customer_notified: await notifyCustomer(ticket, commentMessage(ticket, body), actor.name) };
+  if (opts.notifyTeam) await alertTeam(`Reply on ticket ${t.ref}`, `${t.org_name || t.contact_name || 'Customer'}: ${body}`);
+  return { ticket };
+}
+
+// ── Telling people ────────────────────────────────────────────────────────────────────────────────────────────
+
+export function statusMessage(t: Ticket, note: string | null): string {
+  const n = note ? `\n${note}` : '';
+  switch (t.status) {
+    case 'resolved':
+      return `✅ Your Kinematic support ticket *${t.ref}* (${t.subject}) is resolved.${n}\n\nStill not working? Reply *reopen ${t.ref}* and tell us what you see.`;
+    case 'closed':
+      return `Your Kinematic support ticket *${t.ref}* (${t.subject}) is closed.${n}`;
+    case 'in_progress':
+      return `🛠 We're working on your Kinematic support ticket *${t.ref}* (${t.subject}).${n}`;
+    case 'waiting_on_customer':
+      return `❓ We need a bit more from you on ticket *${t.ref}* (${t.subject}).${n}\n\nReply starting with ${t.ref} and your answer.`;
+    default:
+      return `🔁 Your Kinematic support ticket *${t.ref}* (${t.subject}) is open again.${n}`;
+  }
+}
+
+export const commentMessage = (t: Ticket, body: string): string =>
+  `💬 Update on your Kinematic support ticket *${t.ref}*:\n${body}\n\nReply starting with ${t.ref} to answer.`;
+
+let supportOrgCache: { at: number; org: string | null } | null = null;
+/** Test seam. */
+export const _resetSupportState = (): void => { supportOrgCache = null; };
+
+/** The org (Kinematic project) whose WhatsApp connection is Kinematic's own number. */
+export async function supportOrgId(): Promise<string | null> {
+  if (process.env.SUPPORT_ORG_ID) return process.env.SUPPORT_ORG_ID;
+  if (supportOrgCache && Date.now() - supportOrgCache.at < 10 * 60_000) return supportOrgCache.org;
+  const want = SUPPORT_NUMBER().slice(-10);
+  const { data } = await supportDb().from('crm_whatsapp_connections').select('org_id, from_phone, is_active').eq('is_active', true).limit(500);
+  const row = ((data ?? []) as Array<{ org_id: string; from_phone: string | null }>).find((r) => digits(r.from_phone).slice(-10) === want);
+  supportOrgCache = { at: Date.now(), org: row?.org_id ?? null };
+  return supportOrgCache.org;
+}
+
+/** Did this number write to Kinematic's WhatsApp in the last 23 hours? (The bot copies every message to the CRM.) */
+async function inWindow(orgId: string, phone: string): Promise<boolean> {
+  const since = new Date(Date.now() - WINDOW_MS).toISOString();
+  const { data } = await supportDb().from('crm_whatsapp_logs').select('id')
+    .eq('org_id', orgId).eq('direction', 'inbound').in('from_phone', [phone, `+${phone}`]).gte('created_at', since).limit(1);
+  return !!(data && (data as unknown[]).length);
+}
+
+const firstName = (n: string | null | undefined) => (String(n ?? '').trim().split(/\s+/)[0] || 'there');
+
+/** Tell the customer on WhatsApp (and in the app). Never throws. */
+export async function notifyCustomer(t: Ticket, message: string, teamName: string | null): Promise<CustomerNotified> {
+  await notifyInApp(t, message).catch(() => undefined);
+  const phone = normalizePhone(t.contact_phone);
+  if (!phone) return { whatsapp: 'skipped', note: 'No WhatsApp number on this ticket. The customer was told in the app.' };
+  try {
+    return await runWithProject(SUPPORT_PROJECT, async () => {
+      const orgId = await supportOrgId();
+      if (!orgId) return { whatsapp: 'skipped' as const, note: "Kinematic's WhatsApp number isn't connected in CRM Settings → WhatsApp, so no WhatsApp was sent." };
+      if (await inWindow(orgId, phone)) {
+        const r = await sendWhatsapp({ org_id: orgId, to: phone, body_text: message });
+        return r.status === 'sent' ? { whatsapp: 'sent' as const } : { whatsapp: 'failed' as const, note: r.error || 'WhatsApp send failed' };
+      }
+      const tpl = (await listTemplates(orgId, supportDb())).find((x) => x.meta_template_name === 'handoff_reply' && isApproved(x));
+      if (!tpl) {
+        return { whatsapp: 'skipped' as const, note: "The customer hasn't messaged on WhatsApp in the last 24 hours and the handoff_reply template isn't synced, so no WhatsApp was sent. They were told in the app." };
+      }
+      const flat = message.replace(/\*/g, '').replace(/\s*\n+\s*/g, ' ').slice(0, 900);
+      const r = await sendWhatsapp({
+        org_id: orgId, to: phone, template_id: tpl.id,
+        template_variables: { 1: firstName(t.contact_name), 2: firstName(teamName) === 'there' ? 'Kinematic support' : firstName(teamName), 3: flat },
+      });
+      return r.status === 'sent' ? { whatsapp: 'template' as const } : { whatsapp: 'failed' as const, note: r.error || 'WhatsApp send failed' };
+    });
+  } catch (e: any) {
+    logger.warn(`[support] WhatsApp to customer failed ticket=${t.ref}: ${e?.message || e}`);
+    return { whatsapp: 'failed', note: e?.message || 'WhatsApp send failed' };
+  }
+}
+
+/** In-app notification for the user who raised it, in their own project. */
+async function notifyInApp(t: Ticket, message: string): Promise<void> {
+  if (!t.raised_by_user_id || !t.org_id || !t.project_key || !isKnownProject(t.project_key)) return;
+  const { error } = await adminClientFor(t.project_key).from('notifications').insert({
+    org_id: t.org_id, user_id: t.raised_by_user_id,
+    title: `Support ticket ${t.ref}: ${STATUS_LABEL[t.status] ?? t.status}`,
+    body: message.replace(/\*/g, '').slice(0, 500),
+    type: 'general',
+    data: { kind: 'support_ticket', ticket_id: t.id, ref: t.ref },
+    is_read: false, sent_at: null,
+  });
+  if (error) logger.warn(`[support] in-app notification failed ticket=${t.ref}: ${error.message}`);
+}
+
+/** Tell the support team, through the support org's own WhatsApp alerts (its template and people). Never throws. */
+export async function alertTeam(title: string, body: string): Promise<void> {
+  try {
+    await runWithProject(SUPPORT_PROJECT, async () => {
+      const orgId = await supportOrgId();
+      if (!orgId) return;
+      const { data } = await supportDb().from('org_settings').select('value').eq('org_id', orgId).eq('key', WA_SETTING_KEY).maybeSingle();
+      const s = toSettings((data as { value?: unknown } | null)?.value);
+      if (!s.template_id || !s.recipients.length) {
+        logger.info(`[support] no WhatsApp alert people set for the support org; "${title}" not sent`);
+        return;
+      }
+      const out = await sendToRecipients(orgId, s, title, body);
+      const failed = out.filter((o) => o.status === 'failed');
+      if (failed.length) logger.warn(`[support] team alert failed for ${failed.length}/${out.length}: ${failed[0].error}`);
+    });
+  } catch (e: any) {
+    logger.warn(`[support] team alert failed: ${e?.message || e}`);
+  }
+}

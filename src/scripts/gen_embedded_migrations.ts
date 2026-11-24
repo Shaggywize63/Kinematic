@@ -30,6 +30,7 @@ const FILES = [
   'migration_deal_trial_dispatch.sql',
   'migration_record_owners.sql',
   'migration_product_make_text.sql',
+  'migration_support_tickets.sql',
 ];
 
 const root = process.cwd();
