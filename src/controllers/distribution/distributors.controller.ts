@@ -53,11 +53,41 @@ export const get = asyncHandler(async (req: AuthRequest, res: Response) => {
 });
 
 // Dealers assigned to the calling sales rep — their "my dealers" list (mobile app).
+/**
+ * Whether this client hands every rep its whole dealer book instead of scoping by
+ * `distributors.salesman_id`. Stored per client at
+ * `clients.settings.distribution.dealers_visible_to_all_reps`.
+ *
+ * Defaults to FALSE on purpose, and is deliberately NOT inferred from "this rep has no
+ * dealers assigned": Solar Seeds assigns every one of its 269 dealers to a rep AND still
+ * has 17 active reps with none, so an inferred fallback would quietly hand those reps the
+ * entire book. A tenant that does not assign dealers at all opts in explicitly instead.
+ */
+async function dealersVisibleToAllReps(clientId: string | null | undefined): Promise<boolean> {
+  if (!clientId) return false;
+  try {
+    const { data } = await supabaseAdmin.from('clients').select('settings').eq('id', clientId).maybeSingle();
+    const settings = (data as { settings?: { distribution?: { dealers_visible_to_all_reps?: unknown } } } | null)?.settings;
+    return settings?.distribution?.dealers_visible_to_all_reps === true;
+  } catch {
+    // A missing/unreadable settings blob must never widen what a rep can see.
+    return false;
+  }
+}
+
 export const myDistributors = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = req.user!;
   if (isDemo(user)) return ok(res, getDemoDistributors());
-  const { data, error } = await supabaseAdmin.from('distributors').select('*')
-    .eq('org_id', user.org_id).eq('salesman_id', user.id).eq('is_active', true).order('name');
+  let q = supabaseAdmin.from('distributors').select('*')
+    .eq('org_id', user.org_id).eq('is_active', true);
+  if (await dealersVisibleToAllReps(user.client_id)) {
+    // Unassigned model: every rep sees the client's whole dealer book. Still hard-scoped to
+    // the rep's OWN client, so this can never reach past their tenant.
+    if (user.client_id) q = q.eq('client_id', user.client_id);
+  } else {
+    q = q.eq('salesman_id', user.id);
+  }
+  const { data, error } = await q.order('name');
   if (error) return badRequest(res, error.message);
   ok(res, data);
 });
