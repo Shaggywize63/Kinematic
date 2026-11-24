@@ -88,6 +88,7 @@ import distStagesRoutes        from './routes/distribution/stages.routes';
 import distAiRoutes            from './routes/distribution/ai.routes';
 import distBrandsRoutes        from './routes/distribution/brands.routes';
 import distDistributorsRoutes  from './routes/distribution/distributors.routes';
+import distIncentivesRoutes    from './routes/distribution/incentives.routes';
 import distPriceListsRoutes    from './routes/distribution/price-lists.routes';
 import distOrdersRoutes        from './routes/distribution/orders.routes';
 import distSalesmanRoutes      from './routes/distribution/salesman.routes';
@@ -655,6 +656,7 @@ app.use(`${V1}/distribution/stages`,         requireAuth, requireModule('distrib
 app.use(`${V1}/distribution/ai`,             requireAuth, requireModule('distribution'),              distAiRoutes);
 app.use(`${V1}/distribution/brands`,         requireAuth, requireModule('distribution_brands'),       distBrandsRoutes);
 app.use(`${V1}/distribution/distributors`,   requireAuth, requireModule('distribution_distributors'), distDistributorsRoutes);
+app.use(`${V1}/distribution/incentives`,     requireAuth, requireModule('distribution_incentives'),   distIncentivesRoutes);
 app.use(`${V1}/distribution/price-lists`,    requireAuth, requireModule('distribution_pricing'),      distPriceListsRoutes);
 app.use(`${V1}/distribution/orders`,         requireAuth, requireModule('distribution_orders'),       distOrdersRoutes);
 app.use(`${V1}/distribution/invoices`,       requireAuth, requireModule('distribution_invoicing'),    distInvoicesRoutes);
