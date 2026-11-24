@@ -977,9 +977,9 @@ export const flowStepSchema = z.object({
 // (see customObjects.service.ts), so the field-def validator must accept those keys too.
 // The /custom-fields route verifies that a non-built-in key names a real custom object for
 // the tenant, so this stays a permissive identifier check (same shape as a custom object key).
-export const CUSTOM_FIELD_BUILTIN_ENTITIES = ['lead', 'contact', 'account', 'deal', 'activity'] as const;
+export const CUSTOM_FIELD_BUILTIN_ENTITIES = ['lead', 'contact', 'account', 'deal', 'activity', 'product'] as const;
 export const customFieldEntityType = z.string().trim().min(1).max(50)
-  .regex(/^[a-z][a-z0-9_]*$/, 'entity_type must be a built-in entity (lead, contact, account, deal, activity) or a custom object key');
+  .regex(/^[a-z][a-z0-9_]*$/, 'entity_type must be a built-in entity (lead, contact, account, deal, activity, product) or a custom object key');
 
 export const customFieldSchema = z.object({
   entity_type: customFieldEntityType,

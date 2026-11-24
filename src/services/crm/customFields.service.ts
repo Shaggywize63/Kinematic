@@ -22,7 +22,7 @@ import { supabaseAdmin } from '../../lib/supabase';
 import { AppError } from '../../utils';
 import { stampFormulaValues } from './formula.service';
 
-type FieldDef = {
+export type FieldDef = {
   field_key: string;
   field_type: string;
   options?: string[] | null;
@@ -42,7 +42,7 @@ const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
 /** Loads the active field defs for an entity, scoped to the tenant. We
  *  intentionally fetch the full set (universal + client-scoped) so a
  *  field defined as universal is validated for every client. */
-async function loadDefs(orgId: string, clientId: string | null, entity: string): Promise<FieldDef[]> {
+export async function loadFieldDefs(orgId: string, clientId: string | null, entity: string): Promise<FieldDef[]> {
   // select('*') (not an explicit column list) so this stays resilient if a
   // project's DB hasn't had the `applies_to` column added yet — the field is
   // simply absent on the row and treated as 'both'. Only the Kinematic project
@@ -128,7 +128,22 @@ export async function validateAndStampCustomFields(
   // Fast path: nothing sent AND not enforcing required-ness → skip the defs
   // round trip entirely (preserves the original inbound/import behaviour).
   if (Object.keys(input).length === 0 && !opts?.enforceRequired) return input;
-  const defs = await loadDefs(orgId, clientId, entity);
+  return coerceCustomFields(await loadFieldDefs(orgId, clientId, entity), input, opts);
+}
+
+/**
+ * The coercion / validation / required-enforcement / formula pass with the field
+ * defs ALREADY IN HAND. Pure (no DB round trip), so a bulk caller can load the
+ * defs once and run thousands of rows through it — the product CSV import does
+ * exactly that, and turns a thrown AppError into a per-row error instead of
+ * failing the whole file. `validateAndStampCustomFields` is the one-row wrapper.
+ */
+export function coerceCustomFields(
+  defs: FieldDef[],
+  incoming: Record<string, unknown> | null | undefined,
+  opts?: { enforceRequired?: boolean; isB2c?: boolean },
+): Record<string, unknown> {
+  const input = { ...(incoming ?? {}) };
   if (defs.length === 0) return input;
   const byKey = new Map(defs.map((d) => [d.field_key, d]));
 

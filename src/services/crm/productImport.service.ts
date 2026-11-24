@@ -2,6 +2,10 @@
  * Bulk product import: the client pastes / uploads a spreadsheet of products, each with a reference (the
  * `sku`), a name and optionally a make, brand, unit, price, category and description.
  *
+ * Beyond those built-ins a row may carry `custom_fields` — the client's OWN product columns, defined in
+ * Settings → Custom Fields with entity_type 'product'. Values are coerced / validated against those defs
+ * (so an "MRP" currency column rejects "n/a" on that row alone) and merged into crm_products.custom_fields.
+ *
  * Rows are independent: one bad row never blocks the others. Makes and brands are matched by case-insensitive
  * trimmed name (created when `create_missing`), categories by name (unknown ones are ignored, never created),
  * and a row whose reference already exists updates that product (when `update_existing`).
@@ -16,6 +20,7 @@ import { chunk } from '../../lib/chunk';
 import { productSchema } from '../../validators/crm.validators';
 import { isMissingSchemaError } from './accountMerge.service';
 import { KINDS, TaxonomyKind, notMigrated, dbError } from './makesBrands.service';
+import { coerceCustomFields, loadFieldDefs, type FieldDef } from './customFields.service';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
@@ -25,6 +30,8 @@ export const MAX_IMPORT_ROWS = 2000;
 export interface ImportRowInput {
   reference?: unknown; name?: unknown; make?: unknown; brand?: unknown;
   unit?: unknown; price?: unknown; category?: unknown; description?: unknown; tax_rate_pct?: unknown;
+  /** The client's own product columns, keyed by field_key (crm_custom_field_defs, entity_type 'product'). */
+  custom_fields?: unknown;
 }
 export interface ImportInput { rows: unknown[]; create_missing?: boolean; update_existing?: boolean }
 export interface ImportRowError { row: number; reference: string; message: string }
@@ -79,10 +86,33 @@ export function parseTaxRate(v: unknown): { value: number | undefined; error?: s
   return { value: n };
 }
 
+/**
+ * Money as a spreadsheet writes it, for the client's own number / currency columns: "1,699.00", "₹ 1,699",
+ * "Rs. 99". The shared custom-field coercion is deliberately strict (Number("1,699.00") is NaN), and the
+ * built-in `price` column already gets this treatment here — so a currency column of the client's own must
+ * not be the one place a pasted sheet fails. A string that still is not a number is left untouched, so the
+ * coercion below reports it as that row's error.
+ */
+function normalizeNumericCells(defs: FieldDef[], cf: Record<string, unknown>): Record<string, unknown> {
+  const numeric = new Set(
+    defs.filter((d) => d.field_type === 'number' || d.field_type === 'currency').map((d) => d.field_key),
+  );
+  if (numeric.size === 0) return cf;
+  const out: Record<string, unknown> = { ...cf };
+  for (const [key, value] of Object.entries(out)) {
+    if (!numeric.has(key) || typeof value !== 'string') continue;
+    const cleaned = value.trim().replace(/inr|rs\.?|[₹$,\s]/gi, '');
+    // A number column may be negative (a discount, an offset); currency is checked by the coercion.
+    if (/^-?(\d+\.?\d*|\.\d+)$/.test(cleaned)) out[key] = Number(cleaned);
+  }
+  return out;
+}
+
 interface Prepared {
   row: number; reference: string; name: string;
   make?: string; brand?: string; unit?: string; price?: number; category?: string; description?: string;
   tax_rate_pct?: number;
+  custom_fields?: Record<string, unknown>;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -148,8 +178,14 @@ export async function importProducts(ctx: ImportCtx, input: ImportInput): Promis
     const brand = cell(r.brand);
     if (make.length > 120) { fail(n, reference, 'Make is longer than 120 characters'); return; }
     if (brand.length > 120) { fail(n, reference, 'Brand is longer than 120 characters'); return; }
+    // The client's own columns arrive as an object; anything else (a string, an array) is ignored rather
+    // than failing the row — the sheet's built-in columns are still worth importing.
+    const custom = (r.custom_fields && typeof r.custom_fields === 'object' && !Array.isArray(r.custom_fields))
+      ? (r.custom_fields as Record<string, unknown>)
+      : undefined;
     prepared.push({
       row: n, reference, name,
+      ...(custom && Object.keys(custom).length > 0 ? { custom_fields: custom } : {}),
       ...(make ? { make } : {}), ...(brand ? { brand } : {}),
       ...(unit ? { unit } : {}), ...(price.value !== undefined ? { price: price.value } : {}),
       ...(taxRate.value !== undefined ? { tax_rate_pct: taxRate.value } : {}),
@@ -192,7 +228,7 @@ async function importWork(
 
   // Existing products (this client's list) keyed by case-insensitive reference.
   const existing = new Map<string, Row>();
-  for (const p of await loadAll('crm_products', 'id,sku', orgId, clientId)) {
+  for (const p of await loadAll('crm_products', 'id,sku,custom_fields', orgId, clientId)) {
     const k = lower(p.sku);
     if (k && !existing.has(k)) existing.set(k, p);
   }
@@ -245,6 +281,14 @@ async function importWork(
     return { id: String((data as Row).id) };
   };
 
+  // The client's product column definitions, loaded ONCE for the whole file (not per row). With none defined
+  // the values pass through as given — same free-form-blob behaviour the lead/deal import paths have.
+  let fieldDefs: FieldDef[] = [];
+  if (work.some((p) => p.custom_fields)) {
+    try { fieldDefs = await loadFieldDefs(orgId, clientId, 'product'); }
+    catch { fieldDefs = []; }
+  }
+
   const creates: Array<{ p: Prepared; payload: Row }> = [];
   const updates: Array<{ p: Prepared; id: string; patch: Row }> = [];
 
@@ -269,6 +313,17 @@ async function importWork(
     }
     const categoryId = p.category ? categories.get(lower(p.category)) : undefined;
 
+    // Coerce / validate this row's own columns. A bad value ("n/a" in a number column) fails THIS row only.
+    let customFields: Record<string, unknown> | undefined;
+    if (p.custom_fields) {
+      try {
+        customFields = coerceCustomFields(fieldDefs, normalizeNumericCells(fieldDefs, p.custom_fields));
+      } catch (e) {
+        fail(p.row, p.reference, e instanceof AppError ? e.message : 'Could not read the custom columns on this row');
+        continue;
+      }
+    }
+
     if (found) {
       const patch: Row = { name: p.name };
       if (p.description !== undefined) patch.description = p.description;
@@ -278,6 +333,13 @@ async function importWork(
       if (categoryId) patch.category_id = categoryId;
       if (makeId) patch.make_id = makeId;
       if (brandId) patch.brand_id = brandId;
+      // Merge: a sheet that carries only some of the client's columns must not wipe the others.
+      if (customFields && Object.keys(customFields).length > 0) {
+        const existingCf = (found.custom_fields && typeof found.custom_fields === 'object' && !Array.isArray(found.custom_fields))
+          ? (found.custom_fields as Record<string, unknown>)
+          : {};
+        patch.custom_fields = { ...existingCf, ...customFields };
+      }
       if (userId) patch.updated_by = userId;
       updates.push({ p, id: String(found.id), patch });
       continue;
@@ -285,6 +347,7 @@ async function importWork(
     const parsed = productSchema.safeParse({
       sku: p.reference, name: p.name, description: p.description, unit: p.unit, price: p.price,
       tax_rate_pct: p.tax_rate_pct, category_id: categoryId,
+      ...(customFields && Object.keys(customFields).length > 0 ? { custom_fields: customFields } : {}),
     });
     if (!parsed.success) {
       fail(p.row, p.reference, parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));

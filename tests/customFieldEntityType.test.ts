@@ -12,7 +12,7 @@ const base = { field_key: 'need_by', label: 'Needed by', field_type: 'date' as c
 
 describe('customFieldSchema entity_type', () => {
   it('accepts every built-in entity', () => {
-    for (const et of ['lead', 'contact', 'account', 'deal', 'activity']) {
+    for (const et of ['lead', 'contact', 'account', 'deal', 'activity', 'product']) {
       const r = v.customFieldSchema.safeParse({ ...base, entity_type: et });
       expect({ et, ok: r.success }).toEqual({ et, ok: true });
     }
@@ -33,6 +33,8 @@ describe('customFieldSchema entity_type', () => {
   });
 
   it('exposes the built-in list used by the route to decide when to check for a custom object', () => {
-    expect([...v.CUSTOM_FIELD_BUILTIN_ENTITIES]).toEqual(['lead', 'contact', 'account', 'deal', 'activity']);
+    // 'product' is a built-in here so a product column can be defined without inventing a custom object
+    // for it: product forms, the products list and the CSV import template all read these defs.
+    expect([...v.CUSTOM_FIELD_BUILTIN_ENTITIES]).toEqual(['lead', 'contact', 'account', 'deal', 'activity', 'product']);
   });
 });

@@ -4726,7 +4726,7 @@ router.use('/custom-fields', async (req, _res, next) => {
           await customObjectsSvc.getObject(orgId(req), clientId(req), et);
         } catch (err) {
           if (err instanceof AppError && err.statusCode === 404) {
-            throw new AppError(400, `entity_type "${et}" is not a built-in entity (lead, contact, account, deal, activity) or an existing custom object`, 'BAD_INPUT');
+            throw new AppError(400, `entity_type "${et}" is not a built-in entity (lead, contact, account, deal, activity, product) or an existing custom object`, 'BAD_INPUT');
           }
           throw err;
         }
@@ -5739,6 +5739,13 @@ productHooks.post('/', wrap(async (req, res, next) => {
     if (typeof body.sku === 'string' && body.sku.trim()) {
       await makesBrandsSvc.assertReferenceUnique(orgId(req), cs.id, body.sku);
     }
+    // The client's OWN product columns (Settings -> Custom Fields, entity "product"): coerce types,
+    // canonicalise lookups, stamp formulas and drop hidden keys -- mirrors the lead / contact / deal paths.
+    if (body.custom_fields !== undefined) {
+      body.custom_fields = await validateAndStampCustomFields(
+        orgId(req), cs.id, 'product', body.custom_fields as Record<string, unknown>,
+      );
+    }
   }
   stampProductNames(res);
   next();
@@ -5752,6 +5759,11 @@ productHooks.patch('/:id', wrap(async (req, res, next) => {
       const owner = await makesBrandsSvc.productClientId(orgId(req), req.params.id);
       // An unknown id is left for the generic route to 404.
       if (owner !== undefined) await makesBrandsSvc.assertReferenceUnique(orgId(req), owner, body.sku, req.params.id);
+    }
+    if (body.custom_fields !== undefined) {
+      body.custom_fields = await validateAndStampCustomFields(
+        orgId(req), cs.id, 'product', body.custom_fields as Record<string, unknown>,
+      );
     }
   }
   stampProductNames(res);
