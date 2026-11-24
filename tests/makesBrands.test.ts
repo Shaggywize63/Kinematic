@@ -5,7 +5,8 @@
  *   - products: make_id / brand_id validation, make_name / brand_name stamping, list filters, reference
  *     uniqueness on create and patch;
  *   - POST /products/bulk: create / update / skip / errors, create_missing and update_existing off, price parsing,
- *     duplicate references in the file, the 2000-row cap, category matching;
+ *     duplicate references in the file, the 2000-row cap, category matching, and the client's OWN product
+ *     columns (crm_custom_field_defs, entity_type 'product') being typed, merged on update and reported per row;
  *   - a database without the migration: 503 NOT_MIGRATED on writes, product reads keep working.
  */
 import express from 'express';
@@ -202,9 +203,18 @@ const product = (sku: string, extra: Row = {}): Row => {
   return row;
 };
 const products = () => db.tables.crm_products;
+/** One of the client's own product columns (crm_custom_field_defs, entity_type 'product'). */
+const productField = (field_key: string, field_type: string, extra: Row = {}): Row => {
+  const row = {
+    id: uid(), org_id: ORG, client_id: null, entity_type: 'product', field_key,
+    label: field_key, field_type, options: null, required: false, position: 0, is_active: true, ...extra,
+  };
+  db.tables.crm_custom_field_defs.push(row);
+  return row;
+};
 
 beforeEach(() => {
-  db.tables = { crm_makes: [], crm_brands: [], crm_products: [], crm_product_categories: [] };
+  db.tables = { crm_makes: [], crm_brands: [], crm_products: [], crm_product_categories: [], crm_custom_field_defs: [] };
   db.missingTables = new Set(); db.missingCols = {}; db.failTables = {}; db.seq = 0;
   db.beforeInsert = undefined; db.rejectInsert = undefined;
 });
@@ -760,5 +770,113 @@ describe('NOT_MIGRATED mapping on products', () => {
     const res = await post('/crm/products', { sku: 'W2', name: 'w', weight_kg: 3 });
     expect(res.status).toBe(500);
     expect(res.body.error.code).toBe('DB_ERROR');
+  });
+});
+
+// ── The client's own product columns on import and on CRUD ──────────────────
+// Defined in Settings -> Custom Fields with entity_type 'product' (client-scoped, so each client has its
+// own set) and persisted in crm_products.custom_fields. The import types them against those defs.
+describe("the client's own product columns", () => {
+  const bulk = (rows: unknown, extra: Row = {}, client?: string) => post('/crm/products/bulk', { rows, ...extra }, client);
+
+  it('types each value against its column definition', async () => {
+    productField('mrp', 'currency');
+    productField('qty_per_box', 'number');
+    productField('imported', 'boolean');
+    productField('launch_on', 'date');
+    productField('fitments', 'multiselect');
+    const res = await bulk([{
+      reference: 'FL-ZH01', name: 'FL-ZH01', price: 800, tax_rate_pct: 18,
+      // MRP arrives as a sheet writes it, with a thousands separator.
+      custom_fields: { mrp: '1,699.00', qty_per_box: '12', imported: 'yes', launch_on: '2026-04-20', fitments: ['Rifle', 'Tripod'] },
+    }]);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ created: 1, updated: 0, errors: [] });
+    expect(products()[0]).toMatchObject({ sku: 'FL-ZH01', price: 800, tax_rate_pct: 18 });
+    expect(products()[0].custom_fields).toEqual({
+      mrp: 1699, qty_per_box: 12, imported: true, launch_on: '2026-04-20', fitments: ['Rifle', 'Tripod'],
+    });
+  });
+
+  it('a value that does not fit its column fails that row only', async () => {
+    productField('mrp', 'number');
+    const res = await bulk([
+      { reference: 'A1', name: 'A', custom_fields: { mrp: 'n/a' } },
+      { reference: 'A2', name: 'B', custom_fields: { mrp: '2199' } },
+    ]);
+    expect(res.body.data).toMatchObject({ created: 1, updated: 0 });
+    expect(res.body.data.errors).toEqual([
+      { row: 1, reference: 'A1', message: expect.stringContaining('custom_fields.mrp') },
+    ]);
+    expect(products().map((p) => p.sku)).toEqual(['A2']);
+    expect(products()[0].custom_fields).toEqual({ mrp: 2199 });
+  });
+
+  it('an update MERGES the columns the sheet carries, keeping the others', async () => {
+    productField('mrp', 'currency');
+    productField('dp_with_gst', 'currency');
+    const p = product('AB-1', { custom_fields: { mrp: 100, dp_with_gst: 118, hsn: 'keep-me' } });
+    const res = await bulk([{ reference: 'ab-1', name: 'New name', custom_fields: { mrp: '200' } }]);
+    expect(res.body.data).toMatchObject({ created: 0, updated: 1, errors: [] });
+    expect(p.custom_fields).toEqual({ mrp: 200, dp_with_gst: 118, hsn: 'keep-me' });
+  });
+
+  it('a row with no columns of its own leaves custom_fields untouched', async () => {
+    productField('mrp', 'currency');
+    const p = product('AB-1', { custom_fields: { mrp: 100 } });
+    await bulk([{ reference: 'AB-1', name: 'Renamed' }]);
+    expect(p).toMatchObject({ name: 'Renamed' });
+    expect(p.custom_fields).toEqual({ mrp: 100 });
+  });
+
+  it('a column the admin has hidden is never persisted', async () => {
+    productField('mrp', 'currency');
+    productField('old_code', 'text', { hidden: true });
+    await bulk([{ reference: 'A1', name: 'A', custom_fields: { mrp: 10, old_code: 'X1' } }]);
+    expect(products()[0].custom_fields).toEqual({ mrp: 10 });
+  });
+
+  it('with no columns defined the values still import, as given', async () => {
+    const res = await bulk([{ reference: 'A1', name: 'A', custom_fields: { whatever: 'as typed' } }]);
+    expect(res.body.data).toMatchObject({ created: 1, errors: [] });
+    expect(products()[0].custom_fields).toEqual({ whatever: 'as typed' });
+  });
+
+  it('a custom_fields that is not an object is ignored, and the row still imports', async () => {
+    productField('mrp', 'currency');
+    const res = await bulk([{ reference: 'A1', name: 'A', price: 5, custom_fields: 'nonsense' }]);
+    expect(res.body.data).toMatchObject({ created: 1, errors: [] });
+    expect(products()[0]).toMatchObject({ sku: 'A1', price: 5 });
+  });
+
+  it('POST /products types the columns too, and a bad value is a 400', async () => {
+    productField('mrp', 'currency');
+    const ok = await post('/crm/products', { sku: 'P1', name: 'P1', price: 1, custom_fields: { mrp: 1699 } });
+    expect(ok.status).toBe(201);
+    expect(products()[0].custom_fields).toMatchObject({ mrp: 1699 });
+    const bad = await post('/crm/products', { sku: 'P2', name: 'P2', custom_fields: { mrp: 'n/a' } });
+    expect(bad.status).toBe(400);
+  });
+
+  it('PATCH /products/:id types the columns', async () => {
+    productField('mrp', 'currency');
+    const p = product('P1');
+    const res = await patch(`/crm/products/${p.id}`, { custom_fields: { mrp: '2199' } });
+    expect(res.status).toBe(200);
+    expect(p.custom_fields).toMatchObject({ mrp: 2199 });
+  });
+
+  it("a client-scoped column applies to that client's import", async () => {
+    productField('mrp', 'currency', { client_id: CLIENT });
+    const res = await bulk([{ reference: 'A1', name: 'A', custom_fields: { mrp: '1,699.00' } }], {}, CLIENT);
+    expect(res.body.data).toMatchObject({ created: 1, errors: [] });
+    expect(products()[0]).toMatchObject({ client_id: CLIENT });
+    expect(products()[0].custom_fields).toEqual({ mrp: 1699 });
+  });
+
+  it('a universal column applies to every client', async () => {
+    productField('mrp', 'currency');
+    await bulk([{ reference: 'A1', name: 'A', custom_fields: { mrp: '100' } }], {}, CLIENT);
+    expect(products()[0].custom_fields).toEqual({ mrp: 100 });
   });
 });
