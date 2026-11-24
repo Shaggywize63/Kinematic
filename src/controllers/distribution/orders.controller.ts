@@ -7,6 +7,7 @@ import { insertOrderWithFreeNo } from '../../services/distribution/orderNumber';
 import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound, conflict, forbidden, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
+import * as incentives from '../../services/distribution/incentive.service';
 import { priceCart, haversineMeters, PricerError, CartLineInput } from '../../services/order-pricer';
 import { applySchemes, SCHEME_ENGINE_VERSION } from '../../services/scheme-engine';
 import { summariseTotals } from '../../services/tax';
@@ -198,6 +199,10 @@ export const approve = asyncHandler(async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
   await audit(req, 'order.approve', 'orders', data.id, before, data);
+  // Accrue the rep's incentive, if this client has a rule that earns on approval. Fire-and-forget
+  // on purpose: an incentive problem must never fail an order approval, and the UNIQUE(order_id)
+  // guard means a retry cannot double-pay.
+  incentives.accrueInBackground(data);
   ok(res, data, 'Order approved');
 });
 
@@ -221,6 +226,9 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id).eq('org_id', user.org_id).select().single();
   if (error) return badRequest(res, error.message);
   await audit(req, 'order.cancel', 'orders', data.id, before, data);
+  // An order that already earned its incentive (earn_on = 'placed' or 'approved') must give it
+  // back. Reversed, not deleted, so the clawback stays visible in the ledger.
+  incentives.reverseInBackground(data.id, reason || 'Order cancelled');
   ok(res, data, 'Order cancelled');
 });
 
