@@ -876,6 +876,55 @@ export async function applyLeadStructure(
   return { account_id: account.id, group_id: groupId, site_id: leadSiteId, contact_ids: contactIds, display_name: display };
 }
 
+/**
+ * Cascade an account rename to its leads. A Spark lead's display name and its free-text company
+ * snapshot are baked from the account name at create/structure time (see buildLeadDisplayName), so
+ * renaming the account would otherwise leave every existing lead showing the OLD name in its title
+ * and in the identity strip's Account box. This re-derives each linked lead's `display_name`
+ * (Account · Plant · Department — Requirement, with the new account name) and refreshes its `company`
+ * text, so the rename flows through to the lead header, list row and identity strip.
+ *
+ * Best-effort and idempotent: a tenant whose crm_leads predates `account_id` or `display_name` is a
+ * no-op (the account rename itself already succeeded), never a 500.
+ */
+export async function recomputeLeadNamesForAccount(org_id: string, accountId: string, newAccountName: string): Promise<void> {
+  const name = norm(newAccountName);
+  if (!accountId || !name) return;
+  try {
+    const { data: leads, error } = await supabaseAdmin
+      .from('crm_leads')
+      .select('id, department, requirement, site_id')
+      .eq('org_id', org_id)
+      .eq('account_id', accountId);
+    if (error || !leads || leads.length === 0) return;
+
+    // Resolve the plant (site) names once for the whole batch.
+    const siteIds = Array.from(new Set((leads as Array<{ site_id?: string | null }>).filter((l) => l.site_id).map((l) => l.site_id as string)));
+    const siteName = new Map<string, string>();
+    if (siteIds.length) {
+      const { data: sites } = await supabaseAdmin.from('crm_sites').select('id, name').eq('org_id', org_id).in('id', siteIds);
+      for (const s of (sites ?? []) as Array<{ id: string; name: string | null }>) siteName.set(s.id, norm(s.name));
+    }
+
+    for (const l of leads as Array<{ id: string; department?: string | null; requirement?: string | null; site_id?: string | null }>) {
+      const display = buildLeadDisplayName({
+        company: name,
+        plant: l.site_id ? (siteName.get(l.site_id) || null) : null,
+        department: l.department ?? null,
+        requirement: l.requirement ?? null,
+        productLines: [],
+      }) || null;
+      // Refresh both the title (display_name) and the free-text company snapshot the strip falls
+      // back to. Keep them in one update so a lead never shows a new title with an old company.
+      await supabaseAdmin.from('crm_leads')
+        .update({ company: name, display_name: display })
+        .eq('org_id', org_id).eq('id', l.id);
+    }
+  } catch {
+    // The rename already persisted; a cascade failure must not fail the request.
+  }
+}
+
 // ─────────────────────────────────────────────────────────── account timeline
 
 /** A single thing that happened at a customer — a visit, a form, or a follow-up. */

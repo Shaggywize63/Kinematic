@@ -2563,7 +2563,15 @@ accounts.patch('/:id', wrap(async (req, res) => {
       payload.custom_fields as Record<string, unknown>,
     );
   }
-  res.json(await stampOwnerName(await writeAccountResilient(payload, 'patch', (p) => crud.update('crm_accounts', orgId(req), req.params.id, p, userId(req), clientScope(req).id))));
+  const updated = await stampOwnerName(await writeAccountResilient(payload, 'patch', (p) => crud.update('crm_accounts', orgId(req), req.params.id, p, userId(req), clientScope(req).id)));
+  // Renaming an account must flow through to its leads: their title (display_name) and the identity
+  // strip's Account box are baked from the account name, so re-derive them for every linked lead.
+  // Best-effort — the account update already succeeded; a cascade hiccup never fails the response.
+  if (typeof payload.name === 'string') {
+    const newName = ((updated as Record<string, unknown> | null)?.name as string | undefined) ?? (payload.name as string);
+    await visitBridge.recomputeLeadNamesForAccount(orgId(req), req.params.id, newName);
+  }
+  res.json(updated);
 }));
 accounts.delete('/:id', wrap(async (req, res) => { await crud.softDelete('crm_accounts', orgId(req), req.params.id, clientScope(req).id); res.status(204).end(); }));
 accounts.get('/:id/contacts', wrap(async (req, res) => res.json(
