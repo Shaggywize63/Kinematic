@@ -879,4 +879,28 @@ describe("the client's own product columns", () => {
     await bulk([{ reference: 'A1', name: 'A', custom_fields: { mrp: '100' } }], {}, CLIENT);
     expect(products()[0].custom_fields).toEqual({ mrp: 100 });
   });
+
+  // The other half of the two cases above: loadFieldDefs scopes to the client the
+  // IMPORTED ROWS belong to, so a column one client defined never types another
+  // client's file — or an org-level one. Before that scoping was explicit, an
+  // import with no client header loaded EVERY client's product columns, and
+  // whichever def came back first decided how the cell was typed (or failed the
+  // row). `mrp` here is a currency column, so "1,699.00" is observable either
+  // way: typed to 1699 when the def is in scope, passed through verbatim when it
+  // is not.
+  it('a client-scoped column does NOT apply to an org-level import', async () => {
+    productField('mrp', 'currency', { client_id: CLIENT });
+    const res = await bulk([{ reference: 'A1', name: 'A', custom_fields: { mrp: '1,699.00' } }]);
+    expect(res.body.data).toMatchObject({ created: 1, errors: [] });
+    expect(products()[0]).toMatchObject({ client_id: null });
+    expect(products()[0].custom_fields).toEqual({ mrp: '1,699.00' });
+  });
+
+  it("another client's column does NOT apply to this client's import", async () => {
+    productField('mrp', 'currency', { client_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' });
+    const res = await bulk([{ reference: 'A1', name: 'A', custom_fields: { mrp: '1,699.00' } }], {}, CLIENT);
+    expect(res.body.data).toMatchObject({ created: 1, errors: [] });
+    expect(products()[0]).toMatchObject({ client_id: CLIENT });
+    expect(products()[0].custom_fields).toEqual({ mrp: '1,699.00' });
+  });
 });

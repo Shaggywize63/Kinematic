@@ -39,9 +39,23 @@ export type FieldDef = {
 
 const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
 
-/** Loads the active field defs for an entity, scoped to the tenant. We
- *  intentionally fetch the full set (universal + client-scoped) so a
- *  field defined as universal is validated for every client. */
+/** Loads the active field defs for an entity, scoped to the tenant.
+ *
+ *  `clientId` is the CLIENT OF THE ROW BEING WRITTEN — callers pass
+ *  `payload.client_id ?? null`, the existing row's `client_id`, or (for the
+ *  product import) the request's client scope, which is what its rows are
+ *  stamped with. So the def set follows the row:
+ *
+ *   - client present -> universal (client_id NULL) + that client's defs, so a
+ *     field defined as universal is validated for every client;
+ *   - no client -> UNIVERSAL ONLY. The row is org-level, and a def scoped to
+ *     some client has no bearing on a row that is not that client's.
+ *
+ *  The org-level branch is explicit on purpose: without it the query carried
+ *  no client filter at all and loaded EVERY client's defs for the org, so one
+ *  client's rules (type coercion, hidden-key stripping, required enforcement,
+ *  formula stamping) were applied to a row belonging to a different client or
+ *  to none. The else branch below carries the rest of that reasoning. */
 export async function loadFieldDefs(orgId: string, clientId: string | null, entity: string): Promise<FieldDef[]> {
   // select('*') (not an explicit column list) so this stays resilient if a
   // project's DB hasn't had the `applies_to` column added yet — the field is
@@ -55,6 +69,23 @@ export async function loadFieldDefs(orgId: string, clientId: string | null, enti
     .eq('is_active', true);
   if (clientId) {
     q = q.or(`client_id.is.null,client_id.eq.${clientId}`);
+  } else {
+    // Org-level write (the row's client_id is NULL) -> universal defs only.
+    // This mirrors every other rule-reader that keys off the payload's client:
+    // enforceLeadRequiredFields / stripHiddenLeadFields / leadConsentRequired
+    // read crm_settings with `client_id ? .eq(client_id) : .is(null)`
+    // (crm.routes.ts), leadCustomDefs reads THIS table the same way
+    // (ai/extractLead.service.ts), and exactClient does it for the product
+    // import (productImport.service.ts).
+    //
+    // Deliberate behaviour change: a def scoped to client X is no longer
+    // enforced on an org-level write. That enforcement was accidental — in a
+    // multi-client org it stacked every client's rules onto one row, so two
+    // clients with different required keys made an org-level create
+    // unsatisfiable — and a client's rule means nothing on a row that is not
+    // that client's. Org-wide rules belong on a universal def (client_id
+    // NULL), which this branch still honours.
+    q = q.is('client_id', null);
   }
   const { data, error } = await q;
   if (error) throw new AppError(500, error.message, 'DB_ERROR');
