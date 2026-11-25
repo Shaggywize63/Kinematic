@@ -197,10 +197,22 @@ export async function commitJob(
   // The importer may not choose lead owners (lead_form.owner_assignment = 'admin_only' and they are not an
   // admin): the file's owner / owner_email columns are ignored and every lead takes the default owner.
   ignoreOwnerColumns = false,
+  // Admin's "assign every imported lead to this one team member". When set, it
+  // overrides any per-row owner_email / owner_name column so the whole file goes
+  // to that user. The route only passes it for a caller who may choose owners.
+  defaultOwnerId: string | null = null,
 ) {
   const { data: job, error: loadErr } = await supabaseAdmin.from('crm_import_jobs').select('*')
     .eq('org_id', org_id).eq('id', job_id).eq('kind', 'leads').single();
   if (loadErr || !job) throw new AppError(404, 'Import job not found', 'NOT_FOUND');
+
+  // A chosen assignee must be a real user in this org, or the whole file would
+  // silently fall back to the normal assignment chain. Fail fast with a 400.
+  if (defaultOwnerId) {
+    const { data: ownerUser } = await supabaseAdmin.from('users')
+      .select('id').eq('org_id', org_id).eq('id', defaultOwnerId).maybeSingle();
+    if (!ownerUser) throw new AppError(400, 'Assignee is not a user in your organization', 'INVALID_OWNER');
+  }
 
   const stored = (job.data ?? {}) as { headers?: string[]; rows?: Record<string, unknown>[] };
   const rows = stored.rows ?? [];
@@ -213,7 +225,7 @@ export async function commitJob(
 
   // Fire-and-forget. Node keeps this in the event loop until it finishes,
   // even after the HTTP response has been returned to the FE.
-  void runCommitInBackground(org_id, job_id, user_id, client_id, rows, (job.mapping ?? {}) as Record<string, string>, Array.isArray(job.errors) ? job.errors : [], ignoreOwnerColumns);
+  void runCommitInBackground(org_id, job_id, user_id, client_id, rows, (job.mapping ?? {}) as Record<string, string>, Array.isArray(job.errors) ? job.errors : [], ignoreOwnerColumns, defaultOwnerId);
 
   return { ...job, status: 'running', processed_rows: 0, total_rows: rows.length };
 }
@@ -227,6 +239,7 @@ async function runCommitInBackground(
   mapping: Record<string, string>,
   existingErrors: any[],
   ignoreOwnerColumns = false,
+  defaultOwnerId: string | null = null,
 ) {
   // Auto-create or fetch the single "Excel/CSV Import" lead source per org
   // so every import attributes its leads consistently. Reports and
@@ -319,7 +332,12 @@ async function runCommitInBackground(
       // is present. Email wins when both columns are mapped.
       const ownerVal = textOrNull(mapped.owner_email) ?? textOrNull(mapped.owner_name);
       const ownerKey = ownerVal ? ownerVal.toLowerCase() : null;
-      const owner_id = ownerKey && !ignoreOwnerColumns ? (ownerByEmail.get(ownerKey) ?? ownerByName.get(ownerKey) ?? null) : null;
+      const resolvedOwnerId = ownerKey && !ignoreOwnerColumns ? (ownerByEmail.get(ownerKey) ?? ownerByName.get(ownerKey) ?? null) : null;
+      // "Assign all to <user>" (admin-chosen) wins over any per-row owner
+      // column: the whole file goes to that one team member. ignoreOwnerColumns
+      // still forces null (a non-admin import can't assign at all), and the
+      // route never passes a defaultOwnerId when the caller may not choose owners.
+      const owner_id = ignoreOwnerColumns ? null : (defaultOwnerId ?? resolvedOwnerId);
       const srcName = textOrNull(mapped.source);
       const rowSourceId = (srcName && sourceByName.get(srcName.toLowerCase())) || source_id;
       try {

@@ -1071,7 +1071,10 @@ export const importPreviewSchema = z.object({
   job_id: uuid,
   mapping: z.record(z.string()),
 });
-export const importCommitSchema = z.object({ job_id: uuid });
+// `default_owner_id` is the admin's "assign every imported lead to this one
+// team member" choice. Only honoured when the caller may choose owners (the
+// route drops it otherwise) and when it names a real user in the org.
+export const importCommitSchema = z.object({ job_id: uuid, default_owner_id: uuid.optional() });
 
 // Frontend posts `{ thread, goal, tone, lead_id?, deal_id? }`; backend service
 // reads `{ incoming_message, intent }`. Accept both names via preprocess so
