@@ -382,20 +382,44 @@ describe('POST /crm/leads/bulk-assign', () => {
 
 // ── the other user-facing paths ─────────────────────────────────────────────
 describe('CSV import commit', () => {
-  const commit = () => request(app).post('/crm/import/commit').send({ job_id: '88888888-8888-8888-8888-888888888888' });
+  const JOB = '88888888-8888-8888-8888-888888888888';
+  const ASSIGNEE = '99999999-9999-9999-9999-999999999999';
+  const commit = () => request(app).post('/crm/import/commit').send({ job_id: JOB });
+  const commitAssignAll = (owner: string) => request(app).post('/crm/import/commit').send({ job_id: JOB, default_owner_id: owner });
 
   it("tells the import to ignore the owner columns for a non-admin on an 'admin_only' client", async () => {
     flagged();
     for (const p of ['rep', 'subAdminOwn', 'supervisor'] as Person[]) {
       commitJob.mockClear(); as(p);
       expect((await commit()).status).toBe(200);
-      expect({ p, args: commitJob.mock.calls[0] }).toEqual({ p, args: [ORG, expect.any(String), PEOPLE[p].id, CLIENT, true] });
+      expect({ p, args: commitJob.mock.calls[0] }).toEqual({ p, args: [ORG, expect.any(String), PEOPLE[p].id, CLIENT, true, null] });
     }
   });
   it('lets an admin import owners', async () => {
     flagged(); as('admin');
     await commit();
     expect(commitJob.mock.calls[0][4]).toBe(false);
+  });
+  it('passes the admin\'s "assign all to <user>" through as the default owner', async () => {
+    flagged(); as('admin');
+    await commitAssignAll(ASSIGNEE);
+    // [4] = ignoreOwnerColumns (false for an admin), [5] = defaultOwnerId.
+    expect(commitJob.mock.calls[0][4]).toBe(false);
+    expect(commitJob.mock.calls[0][5]).toBe(ASSIGNEE);
+  });
+  it('drops "assign all to" for a non-admin so it cannot assign leads it may not', async () => {
+    flagged();
+    for (const p of ['rep', 'subAdminOwn', 'supervisor'] as Person[]) {
+      commitJob.mockClear(); as(p);
+      expect((await commitAssignAll(ASSIGNEE)).status).toBe(200);
+      expect(commitJob.mock.calls[0][4]).toBe(true);   // owner columns ignored
+      expect(commitJob.mock.calls[0][5]).toBe(null);   // and the chosen assignee dropped
+    }
+  });
+  it('an admin on a client without the setting can still assign all to one user', async () => {
+    as('admin');   // no flagged() → owner_assignment not admin_only
+    await commitAssignAll(ASSIGNEE);
+    expect(commitJob.mock.calls[0][5]).toBe(ASSIGNEE);
   });
   it('is untouched for a client without the setting', async () => {
     for (const p of Object.keys(PEOPLE) as Person[]) {

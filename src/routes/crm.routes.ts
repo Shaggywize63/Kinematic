@@ -6704,8 +6704,14 @@ imp.post('/commit', wrap(async (req, res) => {
   // while the dashboard's client picker points at a tenant would dump
   // leads as client_id=null and the tenant view wouldn't show them.
   // owner_assignment = 'admin_only': a non-admin's owner / owner_email column is ignored (leads get the default owner).
-  const ignoreOwnerColumns = !(await ownerAssign.mayChooseOwner(crmActor(req)));
-  const result = await importSvc.commitJob(orgId(req), body.job_id, userId(req), clientId(req), ignoreOwnerColumns);
+  const mayChooseOwner = await ownerAssign.mayChooseOwner(crmActor(req));
+  const ignoreOwnerColumns = !mayChooseOwner;
+  // "Assign all imported leads to <team member>": an admin-only override that
+  // sends the whole file to one user. Dropped for a caller who may not choose
+  // owners, so it can never escalate a non-admin's reach; the service 400s if
+  // the id is not a user in this org.
+  const defaultOwnerId = mayChooseOwner ? (body.default_owner_id ?? null) : null;
+  const result = await importSvc.commitJob(orgId(req), body.job_id, userId(req), clientId(req), ignoreOwnerColumns, defaultOwnerId);
   res.json({ success: true, data: result });
 }));
 imp.get('/jobs/:id', wrap(async (req, res) => {
