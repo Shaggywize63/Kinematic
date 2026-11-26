@@ -19,6 +19,7 @@ import { idempotency } from '../middleware/idempotency';
 import { AppError } from '../utils';
 import { sanitisePostgrestSearch } from '../utils/postgrest';
 import { B2B_LEAD_CLIENT_IDS, isB2bClient } from '../lib/b2bClients';
+import { isMaaMansha, DEAL_AMOUNT_LOCK_DAYS } from '../lib/maaMansha';
 import * as dealLineMakeBrand from '../services/crm/dealLineMakeBrand.service';
 import { AuthRequest } from '../types';
 import { supabaseAdmin } from '../lib/supabase';
@@ -1785,8 +1786,23 @@ leads.get('/export-area-leads-report', wrap(async (req, res) => {
 }));
 
 leads.get('/:id', wrap(async (req, res) => {
+  const baseLead = await leadsSvc.getLead(orgId(req), req.params.id);
+  // Maa Mansha lead access control: an own-scope rep may open ONLY a lead they
+  // own / are assigned / created — mirrors the own-only leads list, so another
+  // rep's lead can't be reached by guessing its id. Owner/Admin (team/all scope)
+  // are unaffected; so is every other tenant.
+  {
+    const me = (req as AuthRequest).user;
+    if (isMaaMansha(clientScope(req).id) && crmOwnScope(req, me)) {
+      const l = baseLead as { owner_id?: string | null; assigned_to?: string | null; created_by?: string | null };
+      const uid = me?.id ?? null;
+      if (uid && l.owner_id !== uid && l.assigned_to !== uid && l.created_by !== uid) {
+        throw new AppError(403, 'You can only view leads assigned to you.', 'LEAD_FORBIDDEN');
+      }
+    }
+  }
   const lead = await visitBridge.stampLeadHeader(orgId(req),
-    await stampSourceName(await stampOwnerName(await leadsSvc.getLead(orgId(req), req.params.id))));
+    await stampSourceName(await stampOwnerName(baseLead)));
   // Stamp the parent company (account → parent group) so the Edit form can prefill the
   // "Parent Company / Group" field — the parent is stored on the account, not the lead.
   await stampParentCompanyOnLeads(orgId(req), [lead as unknown as Record<string, unknown>]);
@@ -3020,7 +3036,7 @@ deals.patch('/:id', wrap(async (req, res) => {
   // is still OPEN the rep may edit the Products of Interest basket and the header
   // amount tracks the basket total. Enforced here (not inside updateDeal) so
   // winDeal's deliberate close-out amount still flows through the shared service.
-  const existing = await dealsSvc.getDeal(orgId(req), req.params.id) as { status?: string | null; client_id?: string | null };
+  const existing = await dealsSvc.getDeal(orgId(req), req.params.id) as { status?: string | null; client_id?: string | null; created_at?: string | null };
   // The quotation number is a connected-B2B field ('' clears it); every other client ignores it.
   if (quotationNo !== undefined && isB2bClient(existing?.client_id)) {
     (payload as Record<string, unknown>).quotation_no = (quotationNo ?? '').trim() || null;
@@ -3031,6 +3047,19 @@ deals.patch('/:id', wrap(async (req, res) => {
     existing: existing as unknown as Record<string, unknown>,
   });
   if (dealsSvc.isDealClosed(existing?.status)) {
+    dealsSvc.stripLockedDealFields(payload);
+  } else if (
+    // Maa Mansha: a deal's amount + product basket freeze DEAL_AMOUNT_LOCK_DAYS
+    // (3) days after it was created — but only for own-scope reps. Owner/Admin
+    // (team/all scope) fall through and can still adjust it; their change is
+    // recorded in the amount-change history by updateDeal like any other edit.
+    // Enforced at the route (not in updateDeal) for the same reason the
+    // closed-deal lock is: winDeal's deliberate close-out amount must still flow.
+    isMaaMansha(existing?.client_id)
+    && crmOwnScope(req, (req as AuthRequest).user)
+    && existing?.created_at
+    && (Date.now() - new Date(existing.created_at).getTime()) > DEAL_AMOUNT_LOCK_DAYS * 86_400_000
+  ) {
     dealsSvc.stripLockedDealFields(payload);
   } else {
     dealsSvc.applyOpenDealBasketAmount(payload);

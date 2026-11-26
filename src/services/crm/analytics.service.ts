@@ -233,6 +233,15 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
   const toDate = toIso.slice(0, 10);
   const lines = unit === 'weight' ? weightJoin : '';
 
+  // Start of the CURRENT week (Monday 00:00 IST), as a UTC instant — for the
+  // "lead visits this week" tile, which is always the running week regardless of
+  // the dashboard's picked date range.
+  const IST_OFFSET_MS = 5.5 * 3_600_000;
+  const istNow = new Date(Date.now() + IST_OFFSET_MS);
+  const istDow = (istNow.getUTCDay() + 6) % 7; // 0 = Monday
+  const istWeekMidnight = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate() - istDow, 0, 0, 0);
+  const weekStartIso = new Date(istWeekMidnight - IST_OFFSET_MS).toISOString();
+
   const [
     { count: totalLeads },
     { count: newInWindow },
@@ -248,6 +257,10 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     { data: estimateRows },
     { data: estimateDealRows },
     segmentsOn,
+    // Lead visits this week — field/marketing visits logged against a lead since
+    // Monday 00:00 IST. Marketing visits are crm_activities with
+    // metadata.kind='marketing_visit' and always carry a lead_id.
+    { count: leadVisitsWeek },
   ] = await Promise.all([
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null), scope), client_id),
     withClient(applyLeadScope(supabaseAdmin.from('crm_leads').select('id', { count: 'exact', head: true }).eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso), scope), client_id),
@@ -287,6 +300,10 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     withClient(applyOwnerScope(supabaseAdmin.from('crm_deals').select('amount, lead_id').eq('org_id', org_id).is('deleted_at', null).gte('created_at', fromIso).lte('created_at', toIso).range(0, 99999), scope), client_id),
     // Does this client name its lead types (Dealer / Farmers)? Only then does the response carry the split.
     leadTypesNamed(org_id, client_id),
+    withClient(applyActivityScope(supabaseAdmin.from('crm_activities').select('id', { count: 'exact', head: true })
+      .eq('org_id', org_id).is('deleted_at', null)
+      .eq('metadata->>kind', 'marketing_visit')
+      .gte('created_at', weekStartIso), scope), client_id),
   ]);
 
   // Total leads per lead type, on exactly the same basis as total_leads above (same org / client /
@@ -432,6 +449,7 @@ export async function dashboardSummary(org_id: string, range?: DateRange, client
     avg_sales_cycle_days,
     pipeline_velocity,
     activities_7d: activities7d ?? 0,
+    lead_visits_week: leadVisitsWeek ?? 0,
     conversion_rate,
     estimates_raised,
     by_stage,

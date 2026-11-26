@@ -349,6 +349,8 @@ export interface DashboardSummary {
   avg_sales_cycle_days: number;
   pipeline_velocity: number;
   activities_7d: number;
+  /** Field/marketing visits logged against a lead since Monday 00:00 IST. */
+  lead_visits_week: number;
   conversion_rate: number;
   /** Total ₹ of `custom_fields.estimated_amount` across the rep's
    *  leads in scope. Surfaced as the Champion "Total Estimates Raised"

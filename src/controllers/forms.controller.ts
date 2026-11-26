@@ -9,6 +9,8 @@ import { DEMO_ORG_ID, isDemo, getMockFormTemplates, getMockSubmissions, getMockS
 import { logger } from '../lib/logger';
 import { mirrorCheckinToRoutePlan } from '../services/routePlanCheckin.service';
 import * as crud from '../services/crm/crud.service';
+import { createLead } from '../services/crm/leads.service';
+import { isMaaMansha } from '../lib/maaMansha';
 import { fieldForceScopeIds } from '../services/supervisor-scope.service';
 import { withVisitFields } from '../services/formVisit.service';
 import { reverseGeocode } from '../services/crm/places.service';
@@ -620,6 +622,61 @@ export const submitForm = asyncHandler<AuthRequest>(async (req, res) => {
       }
     } catch (e: any) {
       logger.warn(`[forms.submit] follow-up reminder skipped: ${e?.message || e}`);
+    }
+  }
+
+  // Maa Mansha: a form flagged `create_lead_on_submit` captures a CRM lead from
+  // the submission — name / phone / email / company resolved from each question's
+  // `prefill_key` (falling back to its type). Best-effort + deduped, so it never
+  // fails the submit and never doubles an existing lead. Gated to Maa Mansha so
+  // no other tenant's forms start spawning leads.
+  if (submitterClientId && isMaaMansha(submitterClientId)
+      && template_id && Array.isArray(responses) && responses.length) {
+    try {
+      const { data: form } = await supabaseAdmin
+        .from('builder_forms').select('create_lead_on_submit, title').eq('id', template_id).maybeSingle();
+      if ((form as { create_lead_on_submit?: boolean } | null)?.create_lead_on_submit) {
+        const { data: qs } = await supabaseAdmin
+          .from('builder_questions').select('id, qtype, prefill_key').eq('form_id', template_id);
+        const ansFor = (qid: unknown): string => {
+          const a = (responses as any[]).find((r) => String(r.field_id ?? r.question_id ?? '') === String(qid));
+          const v = a?.value ?? a?.response;
+          return v == null ? '' : String(v).trim();
+        };
+        const byKey: Record<string, string> = {};
+        for (const q of (qs as any[]) || []) {
+          const key = (String(q.prefill_key || '').toLowerCase().trim())
+            || (q.qtype === 'phone' ? 'phone' : q.qtype === 'email' ? 'email' : q.qtype === 'company' ? 'company' : '');
+          if (!key) continue;
+          const val = ansFor(q.id);
+          if (val && !byKey[key]) byKey[key] = val;
+        }
+        let first = byKey.first_name || '';
+        let last = byKey.last_name || '';
+        const whole = byKey.name || byKey.full_name || byKey.customer_name || '';
+        if (!first && whole) { const parts = whole.split(/\s+/); first = parts.shift() || ''; last = last || parts.join(' '); }
+        const company = byKey.company || byKey.firm || byKey.shop_name || '';
+        const phone = byKey.phone || byKey.mobile || '';
+        const email = byKey.email || '';
+        if (first || company || phone) {
+          await createLead({
+            org_id: user.org_id, user_id: user.id,
+            payload: {
+              client_id: submitterClientId,
+              first_name: first || company || 'Lead',
+              last_name: last || null,
+              phone: phone || null,
+              email: email || null,
+              company: company || null,
+              owner_id: user.id,
+              custom_fields: { captured_from_form: (form as { title?: string | null })?.title ?? null, source_submission_id: sub.id },
+            } as never,
+            enforceRequired: false,
+          });
+        }
+      }
+    } catch (e: any) {
+      logger.warn(`[forms.submit] create-lead-on-submit skipped: ${e?.message || e}`);
     }
   }
 
