@@ -43,7 +43,7 @@ const LABELS = { lead_form: { segment_labels: { b2b: 'Dealer', b2c: 'Farmers' } 
 /** The keys dashboardSummary returned before this change. */
 const ORIGINAL_KEYS = [
   'total_leads', 'new_leads_30d', 'open_deals', 'open_deal_value', 'open_deal_volume', 'won_deals_30d', 'won_revenue_30d',
-  'win_rate_30d', 'avg_deal_size', 'avg_sales_cycle_days', 'pipeline_velocity', 'activities_7d', 'conversion_rate',
+  'win_rate_30d', 'avg_deal_size', 'avg_sales_cycle_days', 'pipeline_velocity', 'activities_7d', 'lead_visits_week', 'conversion_rate',
   'estimates_raised', 'by_stage', 'by_owner', 'by_source',
 ];
 

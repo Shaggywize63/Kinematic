@@ -45,6 +45,8 @@ const UNIQUES: Unique[] = [
   { table: 'hrms_learn_certificates', cols: ['org_id', 'seq'], name: 'hrms_learn_cert_org_seq_uq' },
   { table: 'hrms_learn_certificates', cols: ['org_id', 'number'], name: 'hrms_learn_cert_org_number_uq' },
   { table: 'hrms_learn_certificates', cols: ['assignment_id'], name: 'hrms_learn_cert_assignment_uq' },
+  { table: 'hrms_eng_values', cols: ['org_id', 'key'], name: 'hrms_eng_values_org_key_uq' },
+  { table: 'hrms_eng_exit_interviews', cols: ['org_id', 'exit_id'], name: 'hrms_eng_exit_org_exit_uq', where: (r) => r.exit_id != null },
 ];
 
 /** The database defaults of the columns the services leave out of an insert. */
