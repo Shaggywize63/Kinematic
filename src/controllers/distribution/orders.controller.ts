@@ -8,6 +8,7 @@ import { AuthRequest } from '../../types';
 import { asyncHandler, ok, created, badRequest, notFound, conflict, forbidden, isDemo } from '../../utils';
 import { audit } from '../../utils/audit';
 import * as incentives from '../../services/distribution/incentive.service';
+import * as orderStock from '../../services/distribution/orderStock.service';
 import { priceCart, haversineMeters, PricerError, CartLineInput } from '../../services/order-pricer';
 import { applySchemes, SCHEME_ENGINE_VERSION } from '../../services/scheme-engine';
 import { summariseTotals } from '../../services/tax';
@@ -229,6 +230,9 @@ export const cancel = asyncHandler(async (req: AuthRequest, res: Response) => {
   // An order that already earned its incentive (earn_on = 'placed' or 'approved') must give it
   // back. Reversed, not deleted, so the clawback stays visible in the ledger.
   incentives.reverseInBackground(data.id, reason || 'Order cancelled');
+  // Give the stock back to the central warehouse (idempotent; no-op if the
+  // order was never decremented or is already restored).
+  await orderStock.restoreForOrder(data.id, user.id);
   ok(res, data, 'Order cancelled');
 });
 
@@ -640,6 +644,14 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
   }));
   const { error: itemsErr } = await supabaseAdmin.from('order_items').insert(itemRows);
   if (itemsErr) return badRequest(res, itemsErr.message);
+
+  // Punching an order deducts its lines from the client's central warehouse
+  // (no-op for clients without one). Best-effort — never blocks placement.
+  await orderStock.decrementForOrder(
+    { id: order.id, org_id: order.org_id ?? user.org_id, client_id: order.client_id ?? null },
+    itemRows.map((r) => ({ sku_id: r.sku_id, qty: r.qty })),
+    user.id,
+  );
 
   // Persist scheme application proof (one row per applied scheme).
   if (schemeOut.applied.length) {
