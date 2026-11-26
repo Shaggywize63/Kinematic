@@ -308,7 +308,14 @@ router.put('/expenses/:id', asyncHandler(async (req: Request, res: Response) => 
 router.delete('/expenses/:id', asyncHandler(async (req: Request, res: Response) => res.json(await expensesSvc.deleteExpense(scopeOf(req), idParam(req)))));
 
 // ── reports ─────────────────────────────────────────────────────────────────
-router.get('/reports/projection', asyncHandler(async (req: Request, res: Response) => res.json({ success: true, data: await projectionSvc.projection(scopeOf(req), req.query) })));
+// Projection & Growth Plan is the platform's own business-planning tool (MRR, hiring, founder cost),
+// NOT part of the clean Finance module a client is granted. Master admin only — a finance-granted
+// client (e.g. Vanrakshak) gets invoicing + operational reports without it. The dashboard hides the
+// entry and guards the route too; this is the server-side enforcement for direct calls.
+router.get('/reports/projection', asyncHandler(async (req: Request, res: Response) => {
+  if (!isMasterCaller(req as AuthRequest)) throw new AppError(403, 'This report is not available for your account', 'FORBIDDEN');
+  res.json({ success: true, data: await projectionSvc.projection(scopeOf(req), req.query) });
+}));
 router.get('/reports/dashboard', asyncHandler(async (req: Request, res: Response) => res.json(await reports.dashboard(scopeOf(req), req.query))));
 router.get('/reports/:name', asyncHandler(async (req: Request, res: Response) => {
   const fn = reports.REPORTS[req.params.name] ?? expensesSvc.EXPENSE_REPORTS[req.params.name];
