@@ -183,6 +183,7 @@ export const chat = asyncHandler(async (req: AuthRequest, res: Response) => {
     'When the user asks for data ("top leads", "deals closing this week"), call the appropriate read tool.',
     'After tools run, confirm what was done in 1-2 short sentences. The UI renders rich cards for tool results — do not repeat full record details in the text.',
     'Default currency is INR (₹). Indian numbering: "2 lakh" = 200000, "1 crore" = 10000000.',
+    'The user is in India (IST, UTC+05:30). ALWAYS express dates and times to the user in IST, never UTC. Tool results already carry IST values — quote them as given. Write dates as DD/MM/YYYY (e.g. 26/11/2026) and times in 12-hour form with the IST label (e.g. 3:45 PM IST). Never show a bare UTC timestamp or an ISO string to the user.',
     context?.module === 'crm' ? 'The user is in the CRM module.' : '',
     domainContext ? `\nCompany and product knowledge (use when relevant):\n${domainContext}` : '',
   ].filter(Boolean).join(' ');

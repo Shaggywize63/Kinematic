@@ -105,6 +105,43 @@ function sanitizeInboundMessages(
   return cleaned.slice(start);
 }
 
+// ── Timestamps to IST for the model ─────────────────────────────────────────
+// KINI's tools return rows straight from the DB, where every timestamp is UTC.
+// The model otherwise quotes those UTC values back to the rep (who works in IST),
+// which has repeatedly confused follow-ups. So before a tool result is handed to
+// the model, every timestamp in it is rewritten to IST with an Indian date
+// (DD/MM/YYYY, h:mm am/pm IST). This is the single, reliable fix — it doesn't
+// depend on the model honouring a prompt directive, and it never touches the raw
+// result used for rendered cards (only the JSON the model reads).
+const IST_TZ = 'Asia/Kolkata';
+const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function utcToIst(s: string): string {
+  // A DB "timestamp" (no zone) is UTC; make that explicit so JS doesn't read it as local time.
+  let iso = s.replace(' ', 'T');
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(iso)) iso += 'Z';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return s;
+  const date = d.toLocaleDateString('en-IN', { timeZone: IST_TZ, day: '2-digit', month: '2-digit', year: 'numeric' });
+  const time = d.toLocaleTimeString('en-IN', { timeZone: IST_TZ, hour: '2-digit', minute: '2-digit', hour12: true });
+  return `${date}, ${time} IST`;
+}
+/** Deep-copy a tool result, rewriting any UTC timestamp / plain date string to IST + DD/MM/YYYY. Exported for tests. */
+export function istifyForModel(v: unknown): unknown {
+  if (typeof v === 'string') {
+    if (ISO_DATETIME_RE.test(v)) return utcToIst(v);
+    if (ISO_DATE_RE.test(v)) { const [y, m, dd] = v.split('-'); return `${dd}/${m}/${y}`; }
+    return v;
+  }
+  if (Array.isArray(v)) return v.map(istifyForModel);
+  if (v && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = istifyForModel(val);
+    return out;
+  }
+  return v;
+}
+
 // The normalised result of a single Anthropic turn — identical shape whether it
 // came from the buffered JSON path or the streamed SSE path, so the tool-use
 // loop below can consume either without branching on structure.
@@ -479,7 +516,7 @@ export async function chatWithTools(input: ChatWithToolsInput): Promise<ChatWith
       toolResults.push({
         type: 'tool_result',
         tool_use_id: tu.id,
-        content: JSON.stringify((result as { data?: unknown } | null | undefined)?.data ?? result),
+        content: JSON.stringify(istifyForModel((result as { data?: unknown } | null | undefined)?.data ?? result)),
       });
     }
     messages.push({ role: 'user', content: toolResults });

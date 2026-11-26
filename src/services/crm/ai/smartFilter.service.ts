@@ -116,18 +116,23 @@ export async function interpretSmartFilter(query: string): Promise<SmartFilterRe
   const primaryModel = process.env.CRM_NBA_MODEL || 'claude-haiku-4-5';
   let text: string;
   try {
-    text = await runModel(primaryModel);
+    try {
+      text = await runModel(primaryModel);
+    } catch (err) {
+      if (primaryModel === PINNED_MODEL) throw err; // nothing new to try
+      logger.warn(
+        `[smart-filter] model "${primaryModel}" failed (${err instanceof Error ? err.message : err}); retrying pinned ${PINNED_MODEL}`,
+      );
+      text = await runModel(PINNED_MODEL);
+    }
   } catch (err) {
-    if (primaryModel === PINNED_MODEL) throw err; // nothing new to try
-    logger.warn(
-      `[smart-filter] model "${primaryModel}" failed (${err instanceof Error ? err.message : err}); retrying pinned ${PINNED_MODEL}`,
-    );
-    text = await runModel(PINNED_MODEL);
+    // The AI is momentarily unavailable (overload / rate limit / transient upstream error, even after the retries in
+    // callKiniAI). Don't dead-end the rep with "Smart filter failed" and no results: fall back to a plain text search of
+    // their own words, which the leads list already understands, and say so plainly. (A parse miss below is different —
+    // the model answered but with no usable JSON — and still degrades to an empty filter.)
+    logger.warn(`[smart-filter] AI unavailable; falling back to a text search: ${err instanceof Error ? err.message : err}`);
+    return { params: { q: q.slice(0, 120) }, explanation: 'Smart filter is busy right now — showing a text search of your words instead. Try again in a moment.', mine: false };
   }
-  // NOTE: a callKiniAI failure (bad key/model, upstream error) is deliberately
-  // NOT swallowed here — it propagates so the UI shows a real error instead of a
-  // misleading "showing all leads". Only a parse miss (model returned no usable
-  // JSON) degrades to an empty filter.
   try {
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
