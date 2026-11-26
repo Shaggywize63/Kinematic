@@ -49,6 +49,16 @@ export interface CrudOpts {
 // .eq() against a 'view' column that doesn't exist.
 const RESERVED = ['limit','page','q','sort','order','from','to','view'];
 
+// Free-text CRM attribution columns where a filter must match LOOSELY: a smart
+// filter (or a user) saying "web" has to find "website" / "web_chat", and case
+// must never matter. These are applied as a case-insensitive partial ILIKE
+// instead of an exact eq. The exact-match path is kept for everything else
+// (status, owner_id, ids, dropdown-sourced city/state, …). Only triggers when
+// one of these keys is actually present in the query.
+const FUZZY_TEXT_KEYS = new Set(['utm_source', 'utm_campaign', 'utm_medium', 'industry']);
+const applyFilter = <T extends { eq: (k: string, v: never) => T; ilike: (k: string, v: string) => T }>(q: T, k: string, v: unknown): T =>
+  (FUZZY_TEXT_KEYS.has(k) && typeof v === 'string' ? q.ilike(k, `%${v}%`) : q.eq(k, v as never));
+
 const coAssignedClause = (opts: Partial<CrudOpts>): string[] =>
   opts.coAssignedIds && opts.coAssignedIds.length ? [`id.in.(${opts.coAssignedIds.join(',')})`] : [];
 
@@ -70,7 +80,7 @@ export async function list(table: string, org_id: string, query: Record<string, 
       q = q.or(`client_id.is.null,client_id.eq.${v}`);
       continue;
     }
-    q = q.eq(k, v as never);
+    q = applyFilter(q, k, v);
   }
   if (query.q && opts.searchColumns?.length) {
     // Sanitise — see utils/postgrest.ts for the threat model.
@@ -158,7 +168,7 @@ export async function clientScopedListWithCount(
   }
   for (const [k, v] of Object.entries(query)) {
     if (RESERVED.includes(k) || k === 'client_id' || v === undefined || v === null || v === '') continue;
-    q = q.eq(k, v as never);
+    q = applyFilter(q, k, v);
   }
   if (query.q && opts.searchColumns?.length) {
     const s = sanitisePostgrestSearch(query.q);

@@ -49,6 +49,23 @@ describe('listLeadsWithCount — tenant scoping', () => {
   });
 });
 
+describe('listLeadsWithCount — attribution filters match loosely', () => {
+  it('matches utm_source / utm_campaign with a case-insensitive partial ILIKE, not exact eq', async () => {
+    // Why: attribution is free text and inconsistently cased/spelled. A smart
+    // filter (or a user) saying "web" must find "website" / "web_chat", and
+    // "google" must find "google_ads". An exact eq silently returned nothing.
+    __mock.setDefault('crm_leads', { data: [], count: 0 });
+    await leads.listLeadsWithCount(ORG, { utm_source: 'web', utm_campaign: 'diwali' }, CLIENT, { strictClient: true });
+    const c = leadsChain();
+    const ilikes = c.ops.filter((o) => o.method === 'ilike');
+    expect(ilikes.some((o) => o.args[0] === 'utm_source' && o.args[1] === '%web%')).toBe(true);
+    expect(ilikes.some((o) => o.args[0] === 'utm_campaign' && o.args[1] === '%diwali%')).toBe(true);
+    // Never an exact eq on these columns (that was the "no results" bug).
+    expect(c.eqs.utm_source).toBeUndefined();
+    expect(c.eqs.utm_campaign).toBeUndefined();
+  });
+});
+
 describe('listLeadsWithCount — visibility scope', () => {
   it('builds a city IN-list (quoted) OR self-owner OR null-city for an admin', async () => {
     __mock.setDefault('crm_leads', { data: [], count: 0 });

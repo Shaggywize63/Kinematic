@@ -658,8 +658,12 @@ export async function listLeadsWithCount(
     q = q.in('source_id', Array.from(inboundSet));
   }
   if (filters.score_gte) q = q.gte('score', Number(filters.score_gte));
-  if (filters.utm_source)   q = q.eq('utm_source',   String(filters.utm_source));
-  if (filters.utm_campaign) q = q.eq('utm_campaign', String(filters.utm_campaign));
+  // Attribution is free text and inconsistently cased/spelled: a smart filter
+  // (or a user) saying "web" must find "website" / "web_chat" / "Web Form", and
+  // "google" must find "google_ads". Match these LOOSELY — case-insensitive and
+  // partial (ILIKE) — rather than the exact eq that silently returned nothing.
+  if (filters.utm_source)   q = q.ilike('utm_source',   `%${String(filters.utm_source)}%`);
+  if (filters.utm_campaign) q = q.ilike('utm_campaign', `%${String(filters.utm_campaign)}%`);
   // Geo narrowing (the app's global State/City location scope). For a
   // frontline own-only rep this must NEVER hide their OWN leads. Some tenants
   // (e.g. BMW Ventures) don't capture geo on lead-create, so every lead is
