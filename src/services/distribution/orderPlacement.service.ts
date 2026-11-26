@@ -13,7 +13,8 @@
 // ═══════════════════════════════════════════════════════════
 import { supabaseAdmin } from '../../lib/supabase';
 import { insertOrderWithFreeNo } from './orderNumber';
-import { buildPriceContext } from '../../controllers/distribution/orders.controller';
+import { buildPriceContext, clientAutoApprovesAdminSales } from '../../controllers/distribution/orders.controller';
+import * as incentives from './incentive.service';
 import { priceCart, CartLineInput } from '../../services/order-pricer';
 import { applySchemes, SCHEME_ENGINE_VERSION } from '../../services/scheme-engine';
 import { summariseTotals } from '../../services/tax';
@@ -86,6 +87,11 @@ export async function placeDraftOrder(
   const { data: orderNoRow } = await supabaseAdmin.rpc('gen_order_no', { p_org: user.org_id });
   const orderNo = orderNoRow || `ORD-${draft.id.slice(0, 8)}`;
 
+  // This path is admin-initiated (place-from-draft), so an auto-approve client
+  // (Vanrakshak) gets the order created already `approved` — no approval step.
+  const nowIso = new Date().toISOString();
+  const autoApprove = clientAutoApprovesAdminSales(user.client_id);
+
   // Mirror of orders.controller.create's insert shape, minus the salesman-app
   // fields (geofence/device/route/idempotency) — admin places from a plan.
   const orderRow: any = {
@@ -95,8 +101,10 @@ export async function placeDraftOrder(
     outlet_id,
     distributor_id: ctx.distributor.id,
     salesman_id: null,
-    status: 'placed',
-    placed_at: new Date().toISOString(),
+    status: autoApprove ? 'approved' : 'placed',
+    placed_at: nowIso,
+    approved_by: autoApprove ? user.id : null,
+    approved_at: autoApprove ? nowIso : null,
     price_list_id: priced.price_list_id,
     price_list_version: priced.price_list_version,
     customer_class: ctx.customer_class,
@@ -161,6 +169,10 @@ export async function placeDraftOrder(
       })),
     );
   }
+
+  // Created already `approved` for an auto-approve client — accrue any
+  // approval-time incentive (rule-gated + idempotent), mirroring the Approve path.
+  if (autoApprove) incentives.accrueInBackground(order);
 
   const { data: full } = await supabaseAdmin.from('orders')
     .select('*, order_items(*)').eq('id', order.id).single();
