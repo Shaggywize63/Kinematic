@@ -24,6 +24,7 @@ describe('embedded pending migrations', () => {
     'migration_record_owners.sql',
     'migration_product_make_text.sql',
     'migration_support_tickets.sql',
+    'migration_crm_form_lead_capture.sql',
   ];
 
   it('embeds exactly the expected migrations in apply order', () => {
