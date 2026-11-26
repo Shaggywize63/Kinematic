@@ -1,9 +1,34 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
+import { getProjectConfig, currentProjectKey } from '../lib/projects';
 import { AuthRequest } from '../types';
 import { ok, created, badRequest, notFound, isDemo } from '../utils';
 import { asyncHandler } from '../utils/asyncHandler';
+
+// A stored material file_url may be a Supabase-storage object reference. Those
+// buckets are PRIVATE, and a reference can even carry a stale cross-tenant host
+// (e.g. a Vanrakshak file whose URL was written against the Tata storage host).
+// So never hand the raw stored URL to a client: re-sign it against the CURRENT
+// tenant's storage, from the object's bucket+path alone (host/public|sign and
+// any token are ignored). An external URL (type 'link') is left untouched.
+const STORAGE_OBJECT_RE = /\/storage\/v1\/object\/(?:public|sign|authenticated)\/([^/?]+)\/([^?]+)/;
+
+async function toTenantSignedUrl(rawUrl?: string | null): Promise<string | null | undefined> {
+  if (!rawUrl) return rawUrl;
+  const m = STORAGE_OBJECT_RE.exec(rawUrl);
+  if (!m) return rawUrl; // not a storage object — an external link, leave as-is
+  const bucket = decodeURIComponent(m[1]);
+  const path = decodeURIComponent(m[2]);
+  try {
+    const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 60 * 60);
+    if (!error && data?.signedUrl) return data.signedUrl;
+  } catch { /* fall through to host-rewrite */ }
+  // Could not sign (e.g. object missing on this tenant): at minimum rewrite the
+  // host to the current tenant so a stale cross-tenant host never reaches a client.
+  const base = getProjectConfig(currentProjectKey()).url.replace(/\/+$/, '');
+  return `${base}/storage/v1/object/public/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
 
 const materialSchema = z.object({
   title: z.string().min(1),
@@ -37,13 +62,16 @@ export const getMaterials = asyncHandler(async (req: AuthRequest, res: Response)
 
   if (error) return badRequest(res, error.message);
 
-  const enriched = (data || []).map((m) => ({
+  const enriched = await Promise.all((data || []).map(async (m) => ({
     ...m,
+    // Serve a fresh, tenant-correct signed URL — never the raw stored reference.
+    file_url: await toTenantSignedUrl(m.file_url),
+    thumbnail_url: await toTenantSignedUrl(m.thumbnail_url),
     my_progress: Array.isArray(m.learning_progress) && m.learning_progress.length > 0
       ? m.learning_progress[0]
       : null,
     learning_progress: undefined,
-  }));
+  })));
 
   return ok(res, enriched);
 });
