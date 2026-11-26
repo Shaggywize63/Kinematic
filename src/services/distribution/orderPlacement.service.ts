@@ -13,6 +13,7 @@
 // ═══════════════════════════════════════════════════════════
 import { supabaseAdmin } from '../../lib/supabase';
 import { insertOrderWithFreeNo } from './orderNumber';
+import * as orderStock from './orderStock.service';
 import { buildPriceContext } from '../../controllers/distribution/orders.controller';
 import { priceCart, CartLineInput } from '../../services/order-pricer';
 import { applySchemes, SCHEME_ENGINE_VERSION } from '../../services/scheme-engine';
@@ -147,6 +148,14 @@ export async function placeDraftOrder(
   }));
   const { error: itemsErr } = await supabaseAdmin.from('order_items').insert(itemRows);
   if (itemsErr) throw new Error(itemsErr.message);
+
+  // Punching an order deducts its lines from the client's central warehouse
+  // (no-op for clients without one). Best-effort — never blocks placement.
+  await orderStock.decrementForOrder(
+    { id: order.id, org_id: order.org_id ?? user.org_id, client_id: order.client_id ?? null },
+    itemRows.map((r) => ({ sku_id: r.sku_id, qty: r.qty })),
+    user.id,
+  );
 
   if (schemeOut.applied.length) {
     await supabaseAdmin.from('scheme_application_log').insert(
