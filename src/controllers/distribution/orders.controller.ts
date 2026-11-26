@@ -27,6 +27,39 @@ const CAN_ASSIGN_ROLES = new Set([
 const FIELD_USER_ROLES = ['field_executive', 'executive'];
 const isFieldRole = (role: unknown): boolean => FIELD_USER_ROLES.includes(String(role));
 
+// Admin-tier roles (mirrors TENANT_ADMIN_ROLES / isTenantAdmin in
+// middleware/auth) — kept local to avoid importing the auth middleware into this
+// hot path. A `supervisor` is deliberately NOT here: only true admins skip
+// approval. An order BOOKED BY one of these roles is treated as pre-authorised.
+const ADMIN_TIER_ROLES = new Set([
+  'super_admin', 'admin', 'main_admin', 'sub_admin', 'client', 'city_manager',
+]);
+
+// Clients where an order BOOKED BY AN ADMIN is created already `approved`,
+// skipping the placed→approved step (per the client's request: "if a sale is
+// added by an admin there should be no approval"). Vanrakshak is included by
+// default; add more client UUIDs via ADMIN_ORDER_AUTOAPPROVE_CLIENT_IDS
+// (comma-separated). Tata and every other tenant are UNAFFECTED — they keep the
+// normal approval step. Field reps (`executive`) and supervisors are never
+// auto-approved, whatever the client.
+const VANRAKSHAK_CLIENT_ID = '4413a585-cce9-473e-a7b0-793650427ace';
+const ADMIN_ORDER_AUTOAPPROVE_CLIENT_IDS = new Set<string>(
+  [VANRAKSHAK_CLIENT_ID, ...(process.env.ADMIN_ORDER_AUTOAPPROVE_CLIENT_IDS || '').split(',')]
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+);
+
+/** True when this client auto-approves admin-booked sales (Vanrakshak + env list). */
+export function clientAutoApprovesAdminSales(clientId?: string | null): boolean {
+  return !!clientId && ADMIN_ORDER_AUTOAPPROVE_CLIENT_IDS.has(String(clientId).toLowerCase());
+}
+
+/** True when THIS user booking an order should have it auto-approved on create. */
+function adminOrderAutoApproves(user: { role?: string | null; client_id?: string | null }): boolean {
+  return ADMIN_TIER_ROLES.has(String(user.role ?? '').toLowerCase())
+    && clientAutoApprovesAdminSales(user.client_id);
+}
+
 /**
  * Resolve who an order is booked for. A field_executive is always themselves.
  * An admin/supervisor/client may pass `salesman_id` to assign the order to a
@@ -571,6 +604,11 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
 
   const idemKey = (req.headers['idempotency-key'] || req.headers['x-idempotency-key']) as string | undefined;
 
+  // Auto-approve: an admin booking a sale for an auto-approve client (Vanrakshak)
+  // skips the placed→approved step — the order is created already `approved`.
+  const nowIso = new Date().toISOString();
+  const autoApprove = adminOrderAutoApproves(user);
+
   const orderRow: any = {
     org_id: user.org_id,
     client_id: user.client_id ?? null,
@@ -579,8 +617,10 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     distributor_id: ctx.distributor.id,
     salesman_id: assignee.id,
     route_visit_id: parsed.data.visit_id ?? null,
-    status: 'placed',
-    placed_at: new Date().toISOString(),
+    status: autoApprove ? 'approved' : 'placed',
+    placed_at: nowIso,
+    approved_by: autoApprove ? user.id : null,
+    approved_at: autoApprove ? nowIso : null,
     gps_lat: parsed.data.gps?.lat ?? null,
     gps_lng: parsed.data.gps?.lng ?? null,
     geofence_passed,
@@ -675,7 +715,16 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     });
   }
 
+  if (autoApprove) {
+    // The order was created already `approved`, so mirror the Approve endpoint's
+    // side-effects: accrue any approval-time incentive (rule-gated + idempotent
+    // via UNIQUE(order_id), so safe here) and record the approval in the audit log.
+    await audit(req, 'order.approve', 'orders', order.id,
+      { status: 'placed' }, { status: 'approved', approved_by: user.id, approved_at: nowIso });
+    incentives.accrueInBackground(order);
+  }
+
   const { data: full } = await supabaseAdmin.from('orders')
     .select('*, order_items(*)').eq('id', order.id).single();
-  created(res, full, 'Order placed');
+  created(res, full, autoApprove ? 'Order placed & approved' : 'Order placed');
 });
