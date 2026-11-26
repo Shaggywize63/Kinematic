@@ -215,6 +215,17 @@ export class AIService {
 
     let response = await doCall(modelToUse);
 
+    // Retry a TRANSIENT upstream error (Anthropic overloaded / rate limited /
+    // gateway hiccup) a couple of times with a short backoff, before giving up.
+    // This is the common cause of an intermittent "AI request failed": the
+    // model id is fine, the service was briefly busy. 404 is handled below
+    // (it's a model-availability problem, not a transient one).
+    const TRANSIENT = new Set([429, 500, 502, 503, 529]);
+    for (let attempt = 0; attempt < 2 && response.status !== 404 && TRANSIENT.has(response.status); attempt++) {
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      response = await doCall(modelToUse);
+    }
+
     // Self-heal a model-not-found: discover an id this key can serve and retry
     // once. Only fires on a 404 (an otherwise-broken call), so a key for which
     // the hard-coded id works is never affected.
