@@ -25,6 +25,7 @@ import { currentProjectKey } from '../src/lib/projects';
 import { tools as v2Tools, executeTool } from '../src/services/crm/ai/kiniToolsV2.service';
 import { supportTools } from '../src/services/crm/ai/tools/support.tools';
 import { createTicket, _resetSupportState, type Requester, type Ticket } from '../src/services/support/supportTickets.service';
+import { SUPPORT_SYSTEM_GUIDANCE, SUPPORT_TOOLS_NAMED_IN_GUIDANCE } from '../src/services/crm/ai/kiniSupportGuidance';
 
 /**
  * KINI's customer-side support tools. The guarantees that matter here are the
@@ -244,5 +245,29 @@ describe('writes on an existing ticket', () => {
     expect(errorOf(await run('support_reply_ticket', { ref: 'KM-5001', message: 'trying to comment on this' }))).toMatch(/can't find/i);
     expect(errorOf(await run('support_confirm_fixed', { ref: 'KM-5001' }))).toMatch(/can't find/i);
     expect(tickets[0].status).toBe('open');
+  });
+});
+
+
+describe('what KINI is told about support', () => {
+  it('names only tools that are really registered', () => {
+    const registered = new Set(v2Tools.map((t) => t.name));
+    for (const name of SUPPORT_TOOLS_NAMED_IN_GUIDANCE) {
+      expect(registered.has(name)).toBe(true);
+    }
+  });
+
+  it('mentions every support tool, so none is left for the model to discover by luck', () => {
+    for (const name of SUPPORT_TOOLS_NAMED_IN_GUIDANCE) {
+      expect(SUPPORT_SYSTEM_GUIDANCE).toContain(name);
+    }
+    // And the list is the whole family — a tool added without guidance is a tool that rarely gets used.
+    expect([...SUPPORT_TOOLS_NAMED_IN_GUIDANCE].sort()).toEqual(supportTools.map((t) => t.name).sort());
+  });
+
+  it('tells the model to answer first, avoid duplicates, and never guess', () => {
+    expect(SUPPORT_SYSTEM_GUIDANCE).toMatch(/ANSWER THE QUESTION FIRST/);
+    expect(SUPPORT_SYSTEM_GUIDANCE).toMatch(/duplicate/i);
+    expect(SUPPORT_SYSTEM_GUIDANCE).toMatch(/never guess/i);
   });
 });

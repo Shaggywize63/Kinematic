@@ -122,6 +122,19 @@ where the **`kini_agentic_v2`** flag in `org_settings` is on.
 | `support_reply_ticket` | The customer's reply; reopens a terminal ticket rather than duplicating it |
 | `support_confirm_fixed` | The one status change a customer may make |
 
+KINI is also *told* about support: `SUPPORT_SYSTEM_GUIDANCE` (`services/crm/ai/kiniSupportGuidance.ts`) is
+added to both v2 system prompts, and the scope line now reads "…Admin and Support". Registering the tools is
+not enough on its own — without the guidance the prompt describes KINI's scope without support, so it holds
+the tools while being told the job is somebody else's. The bias is **answer first, raise second**, with one
+firm exception: never guess about a feature or about the customer's data; say so and offer a ticket.
+
+**What KINI can and cannot answer today.** Ticket questions are fully covered — status, what is open, adding
+to a thread, confirming a fix. Product how-tos are only as good as the knowledge the org has given it:
+`ai_domain_context` in `org_settings` (see `services/crm/ai/orgAiContext.ts`) is appended to the prompt as
+"Company and product knowledge", and is the no-code place to put help content. There is no FAQ or
+knowledge-base table, and `learning_materials` with category `Support` holds uploaded FILES (title +
+`file_url`), whose contents KINI cannot read — so it is not an answer source.
+
 Two boundaries these tools keep, deliberately:
 
 - **Customer-side only.** Every tool acts as `{ type: 'customer' }` and scopes every read to the caller's project +
