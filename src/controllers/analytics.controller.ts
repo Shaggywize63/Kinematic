@@ -9,6 +9,7 @@ import { annotateTransportLabels } from '../services/transportMode.store';
 import { resolveLivePosition } from '../lib/livePosition';
 import { logger } from '../lib/logger';
 import { countUnreadAllowed, isNotificationEnabled } from '../services/notificationPolicy';
+import { computeAttendanceFacts } from '../lib/attendanceFacts';
 import { UNKNOWN_STORE_FALLBACK, buildFeedTitle, customerNamesBySubmission } from '../services/activityFeedTitle.service';
 import { DEMO_ORG_ID, isDemo, getMockSummary, getMockTrends, getMockFeed, getMockHeatmap, getMockLocations, getMockAttendanceToday, getMockCityPerformance, getMockOutletCoverage, getMockMobileHome, getMockBroadcasts, getMockLearningMaterials } from '../utils/demoData';
 
@@ -855,7 +856,7 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
   const sevenDaysAgo = isoDate(new Date(Date.now() - 6 * 86400000));
 
   // 1. Definition of all queries
-  let attInitQuery = supabaseAdmin.from('attendance').select('status, is_regularised, checkout_at').eq('org_id', user.org_id).eq('date', today);
+  let attInitQuery = supabaseAdmin.from('attendance').select('status, is_regularised, checkout_at, checkin_at').eq('org_id', user.org_id).eq('date', today);
   let execInitQuery = supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('role', 'executive').eq('is_active', true);
   let kpisInitQuery = supabaseAdmin.from('v_daily_kpis').select('*').eq('org_id', user.org_id).eq('date', today);
   let grievanceInitQuery = supabaseAdmin.from('grievances').select('id', { count: 'exact', head: true }).eq('org_id', user.org_id).eq('status', 'submitted');
@@ -901,6 +902,8 @@ export const getDashboardInit = asyncHandler<AuthRequest>(async (req, res) => {
     absent: totalExecs - att.length,
     regularised: att.filter(a => a.is_regularised).length,
     on_leave: att.filter(a => a.status === 'on_leave').length,
+    // Footer of the dashboard's Attendance card: today's first check-in, and how many came in after 10:00 am IST.
+    ...computeAttendanceFacts(att),
   };
 
   const dayMap: Record<string, number> = {};
