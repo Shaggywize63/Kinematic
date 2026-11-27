@@ -44,7 +44,11 @@ const actorOf = (req: AuthRequest): Actor => ({ type: isPlatformOperator(req.use
 
 export const list = asyncHandler(async (req: AuthRequest, res: Response) => {
   const operator = isPlatformOperator(req.user!);
-  const r = await listTickets({ status: String(req.query.status ?? 'active'), q: String(req.query.q ?? ''), scope: operator ? null : scopeOf(req) });
+  const r = await listTickets({
+    status: String(req.query.status ?? 'active'), q: String(req.query.q ?? ''),
+    category: String(req.query.category ?? ''), platform: String(req.query.platform ?? ''), area: String(req.query.area ?? ''),
+    scope: operator ? null : scopeOf(req),
+  });
   ok(res, { ...r, is_operator: operator });
 });
 
@@ -53,7 +57,10 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     const project = currentProjectKey();
     const who = await requesterFromUser(project, req.user!);
     const b = req.body ?? {};
-    const t = await createTicket({ subject: b.subject, description: b.description, category: b.category, priority: b.priority, channel: 'dashboard' }, who, { notifyTeam: true });
+    const t = await createTicket({
+      subject: b.subject, description: b.description, category: b.category, priority: b.priority,
+      platforms: b.platforms, area: b.area, channel: 'dashboard',
+    }, who, { notifyTeam: true });
     created(res, t);
   } catch (e) { fail(res, e); }
 });
@@ -78,7 +85,10 @@ export const update = asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!t) return;
   try {
     const b = req.body ?? {};
-    const r = await updateTicket(t, { status: b.status, priority: b.priority, note: b.note }, actorOf(req), { notifyTeam: true });
+    const r = await updateTicket(t, {
+      status: b.status, priority: b.priority, note: b.note,
+      category: b.category, platforms: b.platforms, area: b.area,
+    }, actorOf(req), { notifyTeam: true });
     ok(res, { ...r, events: await listEvents(t.id) });
   } catch (e) { fail(res, e); }
 });
@@ -103,7 +113,8 @@ const bot = (fn: (req: Request, res: Response) => Promise<void>) => asyncHandler
 });
 
 const compact = (t: Ticket) => ({
-  id: t.id, ref: t.ref, status: t.status, priority: t.priority, subject: t.subject, org_name: t.org_name,
+  id: t.id, ref: t.ref, status: t.status, priority: t.priority, category: t.category, platforms: t.platforms, area: t.area,
+  subject: t.subject, org_name: t.org_name,
   contact_name: t.contact_name, contact_phone: t.contact_phone, created_at: t.created_at, updated_at: t.updated_at, resolution_note: t.resolution_note,
 });
 
@@ -113,7 +124,10 @@ export const botCreate = bot(async (req, res) => {
   if (digits(b.phone).length < 10) { badRequest(res, 'phone is required'); return; }
   try {
     const who = await requesterFromPhone(b.phone, typeof b.name === 'string' ? b.name.slice(0, 80) : null);
-    const t = await createTicket({ subject: b.subject, description: b.text, category: b.category, channel: 'whatsapp' }, who, { notifyTeam: false });
+    const t = await createTicket({
+      subject: b.subject, description: b.text, category: b.category,
+      platforms: b.platforms, area: b.area, channel: 'whatsapp',
+    }, who, { notifyTeam: false });
     created(res, { ticket: compact(t) });
   } catch (e) { fail(res, e); }
 });

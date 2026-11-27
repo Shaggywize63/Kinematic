@@ -29,24 +29,50 @@ export const SUPPORT_PROJECT = (process.env.SUPPORT_PROJECT || 'kinematic').trim
 const SUPPORT_NUMBER = () => (process.env.SUPPORT_WHATSAPP_NUMBER || '919220299228').replace(/\D/g, '');
 const WINDOW_MS = 23 * 3600_000;
 
-export const STATUSES = ['open', 'in_progress', 'waiting_on_customer', 'resolved', 'closed'] as const;
+export const STATUSES = [
+  'open', 'triaged', 'in_progress', 'waiting_on_customer', 'release_pending', 'resolved', 'closed', 'rejected',
+] as const;
 export const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
-export const CATEGORIES = ['how_to', 'bug', 'data', 'billing', 'feature_request', 'other'] as const;
-export const ACTIVE: readonly TicketStatus[] = ['open', 'in_progress', 'waiting_on_customer'];
+/** The ticket's type: what the customer is asking for. */
+export const CATEGORIES = [
+  'how_to', 'issue', 'bug', 'change_request', 'new_module',
+  'data_correction', 'billing', 'access_request', 'training', 'other',
+] as const;
+/** Where the customer hit it. A ticket may name more than one. */
+export const PLATFORMS = ['web', 'android', 'ios', 'whatsapp', 'other'] as const;
+/**
+ * Which part of the product the ticket is about. Deliberately the GENERIC Kinematic modules — a client's own
+ * taxonomy belongs in custom fields, never in a hard-coded list here.
+ */
+export const AREAS = [
+  'crm', 'attendance', 'distribution', 'orders', 'hrms', 'payroll', 'reports',
+  'dashboard', 'mobile_app', 'whatsapp_kini', 'admin_settings', 'integrations', 'billing', 'other',
+] as const;
+export const ACTIVE: readonly TicketStatus[] = ['open', 'triaged', 'in_progress', 'waiting_on_customer', 'release_pending'];
+/** Nothing more is expected to happen on these. */
+export const TERMINAL: readonly TicketStatus[] = ['resolved', 'closed', 'rejected'];
 export type TicketStatus = (typeof STATUSES)[number];
 export type TicketPriority = (typeof PRIORITIES)[number];
 export type TicketCategory = (typeof CATEGORIES)[number];
+export type TicketPlatform = (typeof PLATFORMS)[number];
+export type TicketArea = (typeof AREAS)[number];
+
+/** Category names from before the v2 taxonomy. Still accepted on input (older app builds, the WhatsApp bot). */
+const CATEGORY_ALIASES: Record<string, TicketCategory> = { data: 'data_correction', feature_request: 'new_module' };
 
 export const STATUS_LABEL: Record<TicketStatus, string> = {
-  open: 'Open', in_progress: 'In progress', waiting_on_customer: 'Waiting on you', resolved: 'Resolved', closed: 'Closed',
+  open: 'Open', triaged: 'Triaged', in_progress: 'In progress', waiting_on_customer: 'Waiting on you',
+  release_pending: 'Fix ready, ships in the next release', resolved: 'Resolved', closed: 'Closed', rejected: 'Not planned',
 };
 
 export interface Ticket {
   id: string; ref: string; status: TicketStatus; priority: TicketPriority; category: TicketCategory;
+  platforms: TicketPlatform[]; area: TicketArea | null;
   subject: string; description: string; channel: 'whatsapp' | 'dashboard' | 'app';
   project_key: string | null; org_id: string | null; org_name: string | null; raised_by_user_id: string | null;
   contact_name: string | null; contact_phone: string | null; contact_email: string | null;
   resolution_note: string | null; created_at: string; updated_at: string; resolved_at: string | null;
+  first_response_at: string | null;
 }
 export interface TicketEvent {
   id: string; ticket_id: string; kind: 'created' | 'status' | 'comment'; author_type: 'customer' | 'team' | 'system';
@@ -64,6 +90,38 @@ export const supportDb = (): SupabaseClient => adminClientFor(isKnownProject(SUP
 const clean = (v: unknown, max: number): string => String(v ?? '').replace(/\u0000/g, '').trim().slice(0, max);
 const oneOf = <T extends string>(list: readonly T[], v: unknown, fallback: T): T => (list.includes(v as T) ? (v as T) : fallback);
 const digits = (s: unknown) => String(s ?? '').replace(/\D/g, '');
+const key = (v: unknown) => String(v ?? '').trim().toLowerCase();
+
+/** A category, accepting the pre-v2 names; anything unknown becomes `other`. */
+export const toCategory = (v: unknown): TicketCategory => {
+  const k = key(v);
+  if ((CATEGORIES as readonly string[]).includes(k)) return k as TicketCategory;
+  return CATEGORY_ALIASES[k] ?? 'other';
+};
+
+/** Platforms from an array or a comma-separated string, de-duplicated; unknown values dropped. */
+export const toPlatforms = (v: unknown): TicketPlatform[] => {
+  const raw = Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : [];
+  const out: TicketPlatform[] = [];
+  for (const x of raw) {
+    const k = key(x);
+    if ((PLATFORMS as readonly string[]).includes(k) && !out.includes(k as TicketPlatform)) out.push(k as TicketPlatform);
+  }
+  return out;
+};
+
+export const toArea = (v: unknown): TicketArea | null => {
+  const k = key(v);
+  return (AREAS as readonly string[]).includes(k) ? (k as TicketArea) : null;
+};
+
+/** With nothing picked, the channel itself says where they were. */
+const platformsFor = (channel: Ticket['channel'], picked: TicketPlatform[]): TicketPlatform[] => {
+  if (picked.length) return picked;
+  if (channel === 'dashboard') return ['web'];
+  if (channel === 'whatsapp') return ['whatsapp'];
+  return [];
+};
 
 // ── Customer identity ─────────────────────────────────────────────────────────────────────────────────────────
 
@@ -113,7 +171,10 @@ export async function requesterFromPhone(phone: string, fallbackName?: string | 
 
 // ── Reads ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
-export interface ListFilter { status?: string; q?: string; scope?: { project_key: string; org_id: string } | null; phone?: string }
+export interface ListFilter {
+  status?: string; q?: string; scope?: { project_key: string; org_id: string } | null; phone?: string;
+  category?: string; platform?: string; area?: string;
+}
 
 export async function listTickets(f: ListFilter): Promise<{ tickets: Ticket[]; counts: Record<TicketStatus, number> }> {
   const db = supportDb();
@@ -126,7 +187,19 @@ export async function listTickets(f: ListFilter): Promise<{ tickets: Ticket[]; c
     }
     return out;
   };
-  let q = scoped(db.from('support_tickets').select('*') as any);
+  // Category / platform / area narrow the rows AND the tab counts, so the numbers match what is listed.
+  const narrow = <Q extends { eq: (c: string, v: unknown) => Q; contains: (c: string, v: unknown) => Q }>(q: Q): Q => {
+    let out = q;
+    const cat = key(f.category);
+    if (cat && (CATEGORIES as readonly string[]).includes(cat)) out = out.eq('category', cat);
+    const plat = key(f.platform);
+    if (plat && (PLATFORMS as readonly string[]).includes(plat)) out = out.contains('platforms', [plat]);
+    const area = key(f.area);
+    if (area && (AREAS as readonly string[]).includes(area)) out = out.eq('area', area);
+    return out;
+  };
+
+  let q = narrow(scoped(db.from('support_tickets').select('*') as any) as any) as any;
   const status = (f.status || 'active').toLowerCase();
   if (status === 'active') q = q.in('status', ACTIVE as unknown as string[]);
   else if ((STATUSES as readonly string[]).includes(status)) q = q.eq('status', status);
@@ -135,7 +208,7 @@ export async function listTickets(f: ListFilter): Promise<{ tickets: Ticket[]; c
   const { data, error } = await q.order('created_at', { ascending: false }).limit(200);
   if (error) throw new Error(error.message);
 
-  const { data: all } = await scoped(db.from('support_tickets').select('status') as any).limit(5000);
+  const { data: all } = await narrow(scoped(db.from('support_tickets').select('status') as any) as any).limit(5000);
   const counts = Object.fromEntries(STATUSES.map((s) => [s, 0])) as Record<TicketStatus, number>;
   for (const r of (all ?? []) as Array<{ status: TicketStatus }>) if (r.status in counts) counts[r.status]++;
   return { tickets: (data ?? []) as Ticket[], counts };
@@ -165,7 +238,10 @@ async function addEvent(e: Omit<TicketEvent, 'id' | 'created_at'>): Promise<void
   if (error) logger.warn(`[support] event insert failed ticket=${e.ticket_id}: ${error.message}`);
 }
 
-export interface CreateInput { subject?: unknown; description?: unknown; category?: unknown; priority?: unknown; channel: Ticket['channel'] }
+export interface CreateInput {
+  subject?: unknown; description?: unknown; category?: unknown; priority?: unknown;
+  platforms?: unknown; area?: unknown; channel: Ticket['channel'];
+}
 
 export async function createTicket(input: CreateInput, who: Requester, opts: { notifyTeam: boolean }): Promise<Ticket> {
   const description = clean(input.description, 5000);
@@ -174,8 +250,10 @@ export async function createTicket(input: CreateInput, who: Requester, opts: { n
   if (description.length < 10) throw new SupportError(400, 'Describe the issue in a little more detail (at least 10 characters).');
   const row = {
     subject, description,
-    category: oneOf(CATEGORIES, input.category, 'other'),
+    category: toCategory(input.category),
     priority: oneOf(PRIORITIES, input.priority, 'normal'),
+    platforms: platformsFor(input.channel, toPlatforms(input.platforms)),
+    area: toArea(input.area),
     channel: input.channel,
     project_key: who.project_key, org_id: who.org_id, org_name: who.org_name, raised_by_user_id: who.user_id,
     contact_name: who.name, contact_phone: who.phone, contact_email: who.email,
@@ -190,7 +268,10 @@ export async function createTicket(input: CreateInput, who: Requester, opts: { n
 
 export interface Actor { type: 'team' | 'customer'; name: string | null }
 
-export interface UpdateInput { status?: unknown; priority?: unknown; note?: unknown }
+export interface UpdateInput {
+  status?: unknown; priority?: unknown; note?: unknown;
+  category?: unknown; platforms?: unknown; area?: unknown;
+}
 
 /**
  * Change status / priority. The team may set anything; a customer may only confirm it's fixed (resolved) or say it
@@ -202,22 +283,30 @@ export async function updateTicket(t: Ticket, input: UpdateInput, actor: Actor, 
   const priority = input.priority === undefined || input.priority === null || input.priority === '' ? undefined : String(input.priority);
   if (status !== undefined && !(STATUSES as readonly string[]).includes(status)) throw new SupportError(400, `Unknown status "${status}".`);
   if (priority !== undefined && !(PRIORITIES as readonly string[]).includes(priority)) throw new SupportError(400, `Unknown priority "${priority}".`);
+  // Triage fields (type / platform / area) are the team's to set; the customer only says fixed or not fixed.
+  const triage = input.category !== undefined || input.platforms !== undefined || input.area !== undefined;
   if (actor.type === 'customer') {
-    if (priority !== undefined || (status !== 'resolved' && status !== 'open')) throw new SupportError(403, 'You can mark the ticket as fixed, or say it is still not working.');
+    if (priority !== undefined || triage || (status !== 'resolved' && status !== 'open')) throw new SupportError(403, 'You can mark the ticket as fixed, or say it is still not working.');
     if (status === 'open' && !note) throw new SupportError(400, "Tell us what's still not working.");
   }
-  if (status === undefined && priority === undefined && !note) throw new SupportError(400, 'Nothing to update.');
+  if (status === undefined && priority === undefined && !triage && !note) throw new SupportError(400, 'Nothing to update.');
 
   const prevStatus = t.status;
   const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
   const statusChanged = status !== undefined && status !== prevStatus;
   if (statusChanged) {
     patch.status = status;
-    if (status === 'resolved' || status === 'closed') patch.resolved_at = t.resolved_at ?? new Date().toISOString();
+    const done = TERMINAL.includes(status as TicketStatus);
+    if (done) patch.resolved_at = t.resolved_at ?? new Date().toISOString();
     else patch.resolved_at = null;
-    if (actor.type === 'team' && (status === 'resolved' || status === 'closed') && note) patch.resolution_note = note;
+    if (actor.type === 'team' && done && note) patch.resolution_note = note;
   }
   if (priority !== undefined) patch.priority = priority;
+  if (input.category !== undefined) patch.category = toCategory(input.category);
+  if (input.platforms !== undefined) patch.platforms = toPlatforms(input.platforms);
+  if (input.area !== undefined) patch.area = toArea(input.area);
+  // The first time the team says anything is the first response the SLA is measured against.
+  if (actor.type === 'team' && !t.first_response_at && (statusChanged || note)) patch.first_response_at = new Date().toISOString();
   const { data, error } = await supportDb().from('support_tickets').update(patch).eq('id', t.id).select('*').single();
   if (error || !data) throw new Error(error?.message || 'Could not update the ticket');
   const next = data as Ticket;
@@ -244,10 +333,12 @@ export async function addComment(t: Ticket, bodyRaw: unknown, actor: Actor, opts
   if (!body) throw new SupportError(400, 'Write a message first.');
   let ticket = t;
   const prevStatus = t.status;
-  const reopen = actor.type === 'customer' && (prevStatus === 'resolved' || prevStatus === 'closed' || prevStatus === 'waiting_on_customer');
+  const reopen = actor.type === 'customer'
+    && (TERMINAL.includes(prevStatus) || prevStatus === 'waiting_on_customer');
   const now = new Date().toISOString();
   const patch: Record<string, unknown> = { updated_at: now };
   if (reopen) { patch.status = 'open'; patch.resolved_at = null; }
+  if (actor.type === 'team' && !t.first_response_at) patch.first_response_at = now;
   const { data } = await supportDb().from('support_tickets').update(patch).eq('id', t.id).select('*').single();
   if (data) ticket = data as Ticket;
   await addEvent({ ticket_id: t.id, kind: 'comment', author_type: actor.type, author_name: actor.name, from_status: null, to_status: null, body });
@@ -267,6 +358,12 @@ export function statusMessage(t: Ticket, note: string | null): string {
       return `✅ Your Kinematic support ticket *${t.ref}* (${t.subject}) is resolved.${n}\n\nStill not working? Reply *reopen ${t.ref}* and tell us what you see.`;
     case 'closed':
       return `Your Kinematic support ticket *${t.ref}* (${t.subject}) is closed.${n}`;
+    case 'rejected':
+      return `Your Kinematic support ticket *${t.ref}* (${t.subject}) won't be taken forward for now.${n}\n\nIf this is blocking you, reply starting with ${t.ref} and tell us why.`;
+    case 'triaged':
+      return `📋 We've logged your Kinematic support ticket *${t.ref}* (${t.subject}) and it's queued with our team.${n}`;
+    case 'release_pending':
+      return `🚀 The fix for your Kinematic support ticket *${t.ref}* (${t.subject}) is ready and ships in the next release.${n}`;
     case 'in_progress':
       return `🛠 We're working on your Kinematic support ticket *${t.ref}* (${t.subject}).${n}`;
     case 'waiting_on_customer':

@@ -259,6 +259,98 @@ describe('listTickets', () => {
     await updateTicket(t, { status: 'resolved' }, { type: 'team', name: 'S' }, { notifyTeam: false });
     await listTickets({});
     const main = supa().chainsFor('support_tickets').filter((c: any) => c.ops.some((o: any) => o.method === 'order')).at(-1);
-    expect(main.ops.find((o: any) => o.method === 'in').args).toEqual(['status', ['open', 'in_progress', 'waiting_on_customer']]);
+    expect(main.ops.find((o: any) => o.method === 'in').args)
+      .toEqual(['status', ['open', 'triaged', 'in_progress', 'waiting_on_customer', 'release_pending']]);
+  });
+
+  it('narrows the rows AND the counts by category / platform / area', async () => {
+    await listTickets({ category: 'bug', platform: 'android', area: 'attendance' });
+    const chains = supa().chainsFor('support_tickets');
+    // Two queries are built: the rows (ordered) and the status counts. Both must carry the filters,
+    // or the tab counts would disagree with the list.
+    const rows = chains.filter((c: any) => c.ops.some((o: any) => o.method === 'order')).at(-1);
+    const counts = chains.filter((c: any) => !c.ops.some((o: any) => o.method === 'order')).at(-1);
+    for (const c of [rows, counts]) {
+      expect(c.eqs).toMatchObject({ category: 'bug', area: 'attendance' });
+      expect(c.ops.find((o: any) => o.method === 'contains').args).toEqual(['platforms', ['android']]);
+    }
+  });
+
+  it('ignores a category / platform / area that is not ours', async () => {
+    await listTickets({ category: 'nonsense', platform: 'windows', area: 'made_up' });
+    const rows = supa().chainsFor('support_tickets').filter((c: any) => c.ops.some((o: any) => o.method === 'order')).at(-1);
+    expect(rows.eqs).not.toHaveProperty('category');
+    expect(rows.eqs).not.toHaveProperty('area');
+    expect(rows.ops.find((o: any) => o.method === 'contains')).toBeUndefined();
+  });
+});
+
+describe('v2 taxonomy', () => {
+  it('accepts the pre-v2 category names and falls back to other', async () => {
+    const feature = await createTicket({ subject: 'Old name', description: 'raised with the pre-v2 category name', category: 'feature_request', channel: 'dashboard' }, who, { notifyTeam: false });
+    expect(feature.category).toBe('new_module');
+    const data = await createTicket({ subject: 'Numbers', description: 'the totals on the report look wrong', category: 'data', channel: 'dashboard' }, who, { notifyTeam: false });
+    expect(data.category).toBe('data_correction');
+    const junk = await createTicket({ subject: 'Junk', description: 'an unknown category should not be stored', category: 'not_a_category', channel: 'dashboard' }, who, { notifyTeam: false });
+    expect(junk.category).toBe('other');
+  });
+
+  it('defaults platforms from the channel when the customer picks none', async () => {
+    const web = await createTicket({ subject: 'From the web', description: 'raised from the dashboard with no platform', channel: 'dashboard' }, who, { notifyTeam: false });
+    expect(web.platforms).toEqual(['web']);
+    const wa = await createTicket({ subject: 'From WhatsApp', description: 'raised through the KINI bot with no platform', channel: 'whatsapp' }, who, { notifyTeam: false });
+    expect(wa.platforms).toEqual(['whatsapp']);
+    const app = await createTicket({ subject: 'From the app', description: 'the mobile client says which OS itself', channel: 'app' }, who, { notifyTeam: false });
+    expect(app.platforms).toEqual([]);
+  });
+
+  it('keeps only real platforms and areas, de-duplicated, from an array or a csv string', async () => {
+    const t = await createTicket({ subject: 'Mobile crash', description: 'the app closes when opening attendance', category: 'bug', platforms: ['android', 'ios', 'windows', 'android'], area: 'attendance', channel: 'dashboard' }, who, { notifyTeam: false });
+    expect(t.platforms).toEqual(['android', 'ios']);
+    expect(t.area).toBe('attendance');
+    const csv = await createTicket({ subject: 'Csv form', description: 'platforms arriving as a comma separated string', platforms: 'web, ios', area: 'made_up', channel: 'dashboard' }, who, { notifyTeam: false });
+    expect(csv.platforms).toEqual(['web', 'ios']);
+    expect(csv.area).toBeNull();
+  });
+
+  it('lets the team retriage a ticket but never the customer', async () => {
+    const t = await createTicket({ subject: 'Retriage me', description: 'raised as an issue but it is really a bug', channel: 'dashboard' }, who, { notifyTeam: false });
+    await expect(updateTicket(t, { category: 'bug' }, { type: 'customer', name: 'Asha Rao' }, { notifyTeam: false }))
+      .rejects.toBeInstanceOf(SupportError);
+    await expect(updateTicket(t, { area: 'crm' }, { type: 'customer', name: 'Asha Rao' }, { notifyTeam: false }))
+      .rejects.toBeInstanceOf(SupportError);
+    const r = await updateTicket(t, { status: 'triaged', category: 'bug', area: 'crm', platforms: ['web', 'android'] }, { type: 'team', name: 'S' }, { notifyTeam: false });
+    expect(r.ticket).toMatchObject({ status: 'triaged', category: 'bug', area: 'crm', platforms: ['web', 'android'] });
+  });
+
+  it('stamps the first team response once, and not for the customer', async () => {
+    const t = await createTicket({ subject: 'Response clock', description: 'the SLA clock starts on our first reply', channel: 'dashboard' }, who, { notifyTeam: false });
+    expect(t.first_response_at ?? null).toBeNull();
+    const mine = await addComment(t, 'Any update on this?', { type: 'customer', name: 'Asha Rao' }, { notifyTeam: false });
+    expect(mine.ticket.first_response_at ?? null).toBeNull();
+    const first = await addComment(mine.ticket, 'Looking into it now.', { type: 'team', name: 'S' }, { notifyTeam: false });
+    const stamped = first.ticket.first_response_at;
+    expect(stamped).toBeTruthy();
+    const second = await addComment(first.ticket, 'Still looking.', { type: 'team', name: 'S' }, { notifyTeam: false });
+    expect(second.ticket.first_response_at).toBe(stamped);
+  });
+
+  it('treats rejected as finished, and a customer reply reopens it', async () => {
+    const t = await createTicket({ subject: 'Not planned', description: 'a change request we are not taking forward', category: 'change_request', channel: 'dashboard' }, who, { notifyTeam: false });
+    const no = await updateTicket(t, { status: 'rejected', note: 'Not on the roadmap this quarter.' }, { type: 'team', name: 'S' }, { notifyTeam: false });
+    expect(no.ticket.status).toBe('rejected');
+    expect(no.ticket.resolved_at).toBeTruthy();
+    expect(no.ticket.resolution_note).toBe('Not on the roadmap this quarter.');
+    const back = await addComment(no.ticket, 'This is blocking our Pune rollout.', { type: 'customer', name: 'Asha Rao' }, { notifyTeam: false });
+    expect(back.ticket.status).toBe('open');
+  });
+
+  it('tells the customer something useful for each new status', async () => {
+    const t = await createTicket({ subject: 'Export broken', description: 'the export button does nothing at all', channel: 'dashboard' }, who, { notifyTeam: false });
+    expect(statusMessage({ ...t, status: 'triaged' }, null)).toContain('queued with our team');
+    expect(statusMessage({ ...t, status: 'release_pending' }, null)).toContain('next release');
+    const rejected = statusMessage({ ...t, status: 'rejected' }, 'Not on the roadmap.');
+    expect(rejected).toContain("won't be taken forward");
+    expect(rejected).toContain('Not on the roadmap.');
   });
 });
