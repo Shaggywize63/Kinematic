@@ -14,8 +14,12 @@ import {
   type KiniToolResult,
 } from './kiniTools.service';
 import { ffTools } from './tools/ff.tools';
+import { supportTools } from './tools/support.tools';
 
-export const tools: KiniTool[] = [...crmTools, ...ffTools];
+/** The module-scoped v2 tools, dispatched here before the legacy CRM registry. */
+const moduleTools: KiniTool[] = [...ffTools, ...supportTools];
+
+export const tools: KiniTool[] = [...crmTools, ...moduleTools];
 
 export function toAnthropicTools() {
   return tools.map((t) => ({
@@ -37,7 +41,7 @@ export async function executeTool(
   args: Record<string, unknown>,
   ctx?: KiniToolContext,
 ): Promise<KiniToolResult | null> {
-  const v2Tool = ffTools.find((t) => t.name === name);
+  const v2Tool = moduleTools.find((t) => t.name === name);
   if (v2Tool) {
     // Per-tool RBAC gate (permissive by default). CRM tools are gated inside
     // executeCrmTool; the v2-module (ff/…) tools are dispatched here, so apply
