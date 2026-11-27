@@ -63,6 +63,31 @@ The pre-v2 category names are still accepted on input and mapped (`data` → `da
   alerts (Client Management → WhatsApp alerts on Kinematic: its template and people). WhatsApp-raised tickets and
   WhatsApp replies are announced by the bot to the owner instead.
 
+## KINI tools (agentic v2)
+
+`src/services/crm/ai/tools/support.tools.ts`, registered in `kiniToolsV2.service.ts`, so they reach a tenant only
+where the **`kini_agentic_v2`** flag in `org_settings` is on.
+
+| Tool | Does |
+| --- | --- |
+| `support_raise_ticket` | Raises a ticket for the caller's org; KINI infers category / platforms / area from the conversation |
+| `support_my_tickets` | The org's tickets with per-status counts; takes the same status / category / platform / area filters as the list API |
+| `support_ticket_status` | One ticket plus its timeline, by reference |
+| `support_reply_ticket` | The customer's reply; reopens a terminal ticket rather than duplicating it |
+| `support_confirm_fixed` | The one status change a customer may make |
+
+Two boundaries these tools keep, deliberately:
+
+- **Customer-side only.** Every tool acts as `{ type: 'customer' }` and scopes every read to the caller's project +
+  org. KINI's tool context carries no email, so `isPlatformOperator` cannot be evaluated there; rather than guess,
+  the tools never grant team powers. Operators work other customers' tickets in the dashboard inbox.
+- **A ticket that isn't theirs reads as missing**, never as "forbidden", so a reference cannot be used to probe for
+  other customers.
+
+Note for whoever first tightens `ROLE_TOOL_POLICY` in `kiniTools.service.ts`: it is empty (fully permissive) today, so
+every role can use these. An allow-list added for a role would also have to include the `support_*` tools, or that
+role would lose the ability to raise a ticket through KINI while still having it on the web page.
+
 ## Bot API (`/api/v1/support/public`, header `x-kini-key` = `SUPPORT_BOT_KEY` or `KINI_WEB_CHAT_KEY`)
 
 - `POST /tickets` `{ phone, name?, text, subject?, category?, platforms?, area? }` → `{ ticket }`
