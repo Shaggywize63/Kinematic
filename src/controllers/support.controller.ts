@@ -16,10 +16,16 @@ import { currentProjectKey, runWithProject } from '../lib/projects';
 import { isPlatformOperator } from '../lib/tenantScope';
 import {
   SupportError, SUPPORT_PROJECT, listTickets, getTicket, listEvents, belongsTo, createTicket, updateTicket, addComment,
-  requesterFromUser, requesterFromPhone, type Ticket, type Actor,
+  submitFeedback, ticketAttachments, supportDb, requesterFromUser, requesterFromPhone, type Ticket, type Actor,
 } from '../services/support/supportTickets.service';
+import { AttachmentError, uploadAttachments, MAX_ATTACHMENTS } from '../services/support/supportAttachments';
 
 function fail(res: Response, e: unknown): void {
+  if (e instanceof AttachmentError) {
+    if (e.status === 500) { res.status(500).json({ success: false, error: e.message }); return; }
+    badRequest(res, e.message);
+    return;
+  }
   if (e instanceof SupportError) {
     if (e.status === 403) { forbidden(res, e.message); return; }
     if (e.status === 404) { notFound(res, e.message); return; }
@@ -59,7 +65,7 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
     const b = req.body ?? {};
     const t = await createTicket({
       subject: b.subject, description: b.description, category: b.category, priority: b.priority,
-      platforms: b.platforms, area: b.area, channel: 'dashboard',
+      platforms: b.platforms, area: b.area, attachments: b.attachments, channel: 'dashboard',
     }, who, { notifyTeam: true });
     created(res, t);
   } catch (e) { fail(res, e); }
@@ -68,7 +74,28 @@ export const create = asyncHandler(async (req: AuthRequest, res: Response) => {
 export const detail = asyncHandler(async (req: AuthRequest, res: Response) => {
   const t = await visibleTicket(req, res);
   if (!t) return;
-  ok(res, { ticket: t, events: await listEvents(t.id) });
+  const [events, attachments] = await Promise.all([listEvents(t.id), ticketAttachments(t)]);
+  ok(res, { ticket: t, events, attachments });
+});
+
+/**
+ * POST /tickets/attachments — screenshots, uploaded BEFORE the ticket exists (the form needs to show a
+ * preview while the person is still typing). The response descriptors are sent back with the create call,
+ * where they are re-validated against the caller's own org prefix.
+ *
+ * The files go into the support project's bucket, never the caller's own, so an operator in the Kinematic
+ * project can be served the same object — see services/support/supportAttachments.ts.
+ */
+export const uploadTicketAttachments = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+  try {
+    const saved = await runWithProject(SUPPORT_PROJECT, () => uploadAttachments(
+      supportDb(),
+      files.map((f) => ({ originalname: f.originalname, mimetype: f.mimetype, size: f.size, buffer: f.buffer })),
+      { orgId: req.user!.org_id },
+    ));
+    created(res, { attachments: saved, max: MAX_ATTACHMENTS });
+  } catch (e) { fail(res, e); }
 });
 
 export const comment = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -89,6 +116,17 @@ export const update = asyncHandler(async (req: AuthRequest, res: Response) => {
       status: b.status, priority: b.priority, note: b.note,
       category: b.category, platforms: b.platforms, area: b.area,
     }, actorOf(req), { notifyTeam: true });
+    ok(res, { ...r, events: await listEvents(t.id) });
+  } catch (e) { fail(res, e); }
+});
+
+/** POST /tickets/:id/feedback { rating, comment? } — how the customer rates a finished ticket. */
+export const feedback = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const t = await visibleTicket(req, res);
+  if (!t) return;
+  try {
+    const b = req.body ?? {};
+    const r = await submitFeedback(t, { rating: b.rating, comment: b.comment }, actorOf(req), { notifyTeam: true });
     ok(res, { ...r, events: await listEvents(t.id) });
   } catch (e) { fail(res, e); }
 });

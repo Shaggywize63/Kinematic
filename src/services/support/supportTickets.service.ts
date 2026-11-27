@@ -24,6 +24,18 @@ import { adminClientFor, isKnownProject, listProjectKeys, runWithProject } from 
 import { logger } from '../../lib/logger';
 import { sendWhatsapp } from '../crm/whatsapp.service';
 import { WA_SETTING_KEY, toSettings, sendToRecipients, listTemplates, isApproved, normalizePhone } from '../clientWhatsappAlerts.service';
+import { emailCustomer, type SupportEmailKind } from './supportEmail';
+import {
+  fromRow as attachmentsFromRow, signAttachments, toAttachments,
+  type SignedAttachment, type SupportAttachment,
+} from './supportAttachments';
+
+/**
+ * The notification kind for a ticket update, as registered in lib/notificationCatalog. One string identifies it
+ * on the row, in the push payload and in Client Management → Notifications. `support_ticket` is kept as an alias
+ * there so rows written before this existed still resolve.
+ */
+export const SUPPORT_NOTIFICATION_KIND = 'support_ticket_update';
 
 export const SUPPORT_PROJECT = (process.env.SUPPORT_PROJECT || 'kinematic').trim();
 const SUPPORT_NUMBER = () => (process.env.SUPPORT_WHATSAPP_NUMBER || '919220299228').replace(/\D/g, '');
@@ -68,17 +80,26 @@ export const STATUS_LABEL: Record<TicketStatus, string> = {
 export interface Ticket {
   id: string; ref: string; status: TicketStatus; priority: TicketPriority; category: TicketCategory;
   platforms: TicketPlatform[]; area: TicketArea | null;
+  /** Screenshots the customer attached when raising it. Descriptors only — never fetchable URLs. */
+  attachments: SupportAttachment[];
   subject: string; description: string; channel: 'whatsapp' | 'dashboard' | 'app';
   project_key: string | null; org_id: string | null; org_name: string | null; raised_by_user_id: string | null;
   contact_name: string | null; contact_phone: string | null; contact_email: string | null;
   resolution_note: string | null; created_at: string; updated_at: string; resolved_at: string | null;
   first_response_at: string | null;
+  csat_rating: number | null; csat_comment: string | null; csat_at: string | null;
 }
 export interface TicketEvent {
-  id: string; ticket_id: string; kind: 'created' | 'status' | 'comment'; author_type: 'customer' | 'team' | 'system';
+  id: string; ticket_id: string; kind: 'created' | 'status' | 'comment' | 'feedback'; author_type: 'customer' | 'team' | 'system';
   author_name: string | null; from_status: string | null; to_status: string | null; body: string | null; created_at: string;
 }
-export interface CustomerNotified { whatsapp: 'sent' | 'template' | 'skipped' | 'failed'; note?: string }
+export interface CustomerNotified {
+  whatsapp: 'sent' | 'template' | 'skipped' | 'failed';
+  note?: string;
+  /** What happened to the email. Absent only if the email path was never reached. */
+  email?: 'sent' | 'skipped' | 'failed';
+  email_note?: string;
+}
 
 export class SupportError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -241,6 +262,8 @@ async function addEvent(e: Omit<TicketEvent, 'id' | 'created_at'>): Promise<void
 export interface CreateInput {
   subject?: unknown; description?: unknown; category?: unknown; priority?: unknown;
   platforms?: unknown; area?: unknown; channel: Ticket['channel'];
+  /** Descriptors the client got back from the upload endpoint; validated against their own org. */
+  attachments?: unknown;
 }
 
 export async function createTicket(input: CreateInput, who: Requester, opts: { notifyTeam: boolean }): Promise<Ticket> {
@@ -254,6 +277,8 @@ export async function createTicket(input: CreateInput, who: Requester, opts: { n
     priority: oneOf(PRIORITIES, input.priority, 'normal'),
     platforms: platformsFor(input.channel, toPlatforms(input.platforms)),
     area: toArea(input.area),
+    // Only files already uploaded under THIS org's own prefix survive this.
+    attachments: toAttachments(input.attachments, who.org_id),
     channel: input.channel,
     project_key: who.project_key, org_id: who.org_id, org_name: who.org_name, raised_by_user_id: who.user_id,
     contact_name: who.name, contact_phone: who.phone, contact_email: who.email,
@@ -262,8 +287,21 @@ export async function createTicket(input: CreateInput, who: Requester, opts: { n
   if (error || !data) throw new Error(error?.message || 'Could not save the ticket');
   const t = data as Ticket;
   await addEvent({ ticket_id: t.id, kind: 'created', author_type: 'customer', author_name: who.name, from_status: null, to_status: 'open', body: null });
+  // Confirm to the customer with the reference they will quote back. Best-effort: a mail problem must never
+  // lose a ticket that is already saved.
+  await runWithProject(SUPPORT_PROJECT, async () => emailCustomer({
+    ticket: t, kind: 'raised', statusLabel: STATUS_LABEL[t.status] ?? t.status, message: null, orgId: await supportOrgId(),
+  })).catch(() => undefined);
   if (opts.notifyTeam) await alertTeam(`New support ticket ${t.ref}`, `${who.org_name || who.name || 'A customer'}: ${t.subject}. ${t.description}`);
   return t;
+}
+
+/**
+ * The ticket's screenshots with short-lived signed URLs for display. Call this only for a ticket the caller
+ * is already allowed to see — it does no authorisation of its own.
+ */
+export async function ticketAttachments(t: Ticket): Promise<SignedAttachment[]> {
+  return signAttachments(supportDb(), attachmentsFromRow(t.attachments));
 }
 
 export interface Actor { type: 'team' | 'customer'; name: string | null }
@@ -319,7 +357,7 @@ export async function updateTicket(t: Ticket, input: UpdateInput, actor: Actor, 
 
   if (actor.type === 'team' && (statusChanged || note)) {
     const message = statusChanged ? statusMessage(next, note) : commentMessage(next, note!);
-    return { ticket: next, customer_notified: await notifyCustomer(next, message, actor.name) };
+    return { ticket: next, customer_notified: await notifyCustomer(next, message, actor.name, statusChanged ? 'status' : 'comment', note) };
   }
   if (actor.type === 'customer' && opts.notifyTeam && statusChanged) {
     await alertTeam(status === 'resolved' ? `Ticket ${t.ref} confirmed fixed` : `Ticket ${t.ref} reopened`, `${t.org_name || t.contact_name || 'Customer'}: ${note || t.subject}`);
@@ -344,9 +382,45 @@ export async function addComment(t: Ticket, bodyRaw: unknown, actor: Actor, opts
   await addEvent({ ticket_id: t.id, kind: 'comment', author_type: actor.type, author_name: actor.name, from_status: null, to_status: null, body });
   if (reopen) await addEvent({ ticket_id: t.id, kind: 'status', author_type: 'system', author_name: null, from_status: prevStatus, to_status: 'open', body: null });
 
-  if (actor.type === 'team') return { ticket, customer_notified: await notifyCustomer(ticket, commentMessage(ticket, body), actor.name) };
+  if (actor.type === 'team') return { ticket, customer_notified: await notifyCustomer(ticket, commentMessage(ticket, body), actor.name, 'comment', body) };
   if (opts.notifyTeam) await alertTeam(`Reply on ticket ${t.ref}`, `${t.org_name || t.contact_name || 'Customer'}: ${body}`);
   return { ticket };
+}
+
+export interface FeedbackInput { rating?: unknown; comment?: unknown }
+
+/**
+ * The customer's rating of how their ticket was handled, with an optional comment.
+ *
+ * Only the customer may give it, and only once the ticket has finished — rating work still in progress tells us
+ * nothing. It is re-submittable on purpose: changing your mind should not need a ticket of its own. The team is
+ * told, and the rating joins the timeline so it reads in context rather than hiding in a report.
+ */
+export async function submitFeedback(t: Ticket, input: FeedbackInput, actor: Actor, opts: { notifyTeam: boolean }): Promise<{ ticket: Ticket }> {
+  if (actor.type !== 'customer') throw new SupportError(403, 'Only the customer can rate the ticket.');
+  if (!TERMINAL.includes(t.status)) throw new SupportError(400, 'You can rate this ticket once it has been resolved or closed.');
+  const rating = Number(input.rating);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new SupportError(400, 'Give the ticket a rating from 1 to 5.');
+  const comment = clean(input.comment, 2000) || null;
+
+  const now = new Date().toISOString();
+  const { data, error } = await supportDb().from('support_tickets')
+    .update({ csat_rating: rating, csat_comment: comment, csat_at: now, updated_at: now })
+    .eq('id', t.id).select('*').single();
+  if (error || !data) throw new Error(error?.message || 'Could not save your feedback');
+  const next = data as Ticket;
+
+  await addEvent({
+    ticket_id: t.id, kind: 'feedback', author_type: 'customer', author_name: actor.name,
+    from_status: null, to_status: null, body: comment ? `${rating}/5 — ${comment}` : `${rating}/5`,
+  });
+  if (opts.notifyTeam) {
+    await alertTeam(
+      `Feedback on ticket ${t.ref}: ${rating}/5`,
+      `${t.org_name || t.contact_name || 'A customer'} rated ${t.ref} ${rating}/5${comment ? `: ${comment}` : ''}`,
+    );
+  }
+  return { ticket: next };
 }
 
 // ── Telling people ────────────────────────────────────────────────────────────────────────────────────────────
@@ -401,13 +475,34 @@ async function inWindow(orgId: string, phone: string): Promise<boolean> {
 
 const firstName = (n: string | null | undefined) => (String(n ?? '').trim().split(/\s+/)[0] || 'there');
 
-/** Tell the customer on WhatsApp (and in the app). Never throws. */
-export async function notifyCustomer(t: Ticket, message: string, teamName: string | null): Promise<CustomerNotified> {
+/**
+ * Tell the customer: in the app, by email, and on WhatsApp. Never throws — a delivery problem must not undo
+ * the status change or reply that triggered it, so each channel reports its own outcome instead.
+ */
+export async function notifyCustomer(
+  t: Ticket,
+  /** The WhatsApp message — already carries WhatsApp's `*bold*` and its "reply reopen KM-…" instructions. */
+  message: string,
+  teamName: string | null,
+  kind: SupportEmailKind = 'status',
+  /**
+   * What the team actually wrote, unformatted. The email quotes THIS, never `message`: the WhatsApp copy is
+   * full of asterisks and "reply reopen KM-…" directions that are meaningless in an inbox, and the email
+   * template writes its own opening and closing lines anyway.
+   */
+  mailMessage: string | null = null,
+): Promise<CustomerNotified> {
   await notifyInApp(t, message).catch(() => undefined);
+  const mail = await runWithProject(SUPPORT_PROJECT, async () => emailCustomer({
+    ticket: t, kind, statusLabel: STATUS_LABEL[t.status] ?? t.status, message: mailMessage, orgId: await supportOrgId(),
+  })).catch((e: any) => ({ email: 'failed' as const, note: e?.message || 'Email send failed' }));
+
+  const withMail = (r: CustomerNotified): CustomerNotified => ({ ...r, email: mail.email, email_note: mail.note });
+
   const phone = normalizePhone(t.contact_phone);
-  if (!phone) return { whatsapp: 'skipped', note: 'No WhatsApp number on this ticket. The customer was told in the app.' };
+  if (!phone) return withMail({ whatsapp: 'skipped', note: 'No WhatsApp number on this ticket. The customer was told in the app.' });
   try {
-    return await runWithProject(SUPPORT_PROJECT, async () => {
+    return withMail(await runWithProject(SUPPORT_PROJECT, async () => {
       const orgId = await supportOrgId();
       if (!orgId) return { whatsapp: 'skipped' as const, note: "Kinematic's WhatsApp number isn't connected in CRM Settings → WhatsApp, so no WhatsApp was sent." };
       if (await inWindow(orgId, phone)) {
@@ -424,10 +519,10 @@ export async function notifyCustomer(t: Ticket, message: string, teamName: strin
         template_variables: { 1: firstName(t.contact_name), 2: firstName(teamName) === 'there' ? 'Kinematic support' : firstName(teamName), 3: flat },
       });
       return r.status === 'sent' ? { whatsapp: 'template' as const } : { whatsapp: 'failed' as const, note: r.error || 'WhatsApp send failed' };
-    });
+    }));
   } catch (e: any) {
     logger.warn(`[support] WhatsApp to customer failed ticket=${t.ref}: ${e?.message || e}`);
-    return { whatsapp: 'failed', note: e?.message || 'WhatsApp send failed' };
+    return withMail({ whatsapp: 'failed', note: e?.message || 'WhatsApp send failed' });
   }
 }
 
@@ -439,7 +534,7 @@ async function notifyInApp(t: Ticket, message: string): Promise<void> {
     title: `Support ticket ${t.ref}: ${STATUS_LABEL[t.status] ?? t.status}`,
     body: message.replace(/\*/g, '').slice(0, 500),
     type: 'general',
-    data: { kind: 'support_ticket', ticket_id: t.id, ref: t.ref },
+    data: { kind: SUPPORT_NOTIFICATION_KIND, ticket_id: t.id, ref: t.ref },
     is_read: false, sent_at: null,
   });
   if (error) logger.warn(`[support] in-app notification failed ticket=${t.ref}: ${error.message}`);

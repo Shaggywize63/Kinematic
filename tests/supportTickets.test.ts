@@ -16,6 +16,10 @@ jest.mock('../src/lib/projects', () => {
 jest.mock('../src/services/crm/whatsapp.service', () => ({
   sendWhatsapp: jest.fn(async () => ({ id: 'log-1', provider_message_id: 'wamid.out', status: 'sent', error: null })),
 }));
+jest.mock('../src/services/support/supportEmail', () => {
+  const actual = jest.requireActual('../src/services/support/supportEmail');
+  return { ...actual, emailCustomer: jest.fn(async () => ({ email: 'sent' })) };
+});
 jest.mock('../src/services/clientWhatsappAlerts.service', () => {
   const actual = jest.requireActual('../src/services/clientWhatsappAlerts.service');
   return { ...actual, sendToRecipients: jest.fn(async () => [{ phone: '918802274880', name: 'Sagar', status: 'sent', error: null }]) };
@@ -23,14 +27,17 @@ jest.mock('../src/services/clientWhatsappAlerts.service', () => {
 
 import {
   createTicket, updateTicket, addComment, requesterFromPhone, listTickets, statusMessage, _resetSupportState, SupportError,
+  submitFeedback, SUPPORT_NOTIFICATION_KIND,
   type Ticket, type Requester,
 } from '../src/services/support/supportTickets.service';
 import * as ctrl from '../src/controllers/support.controller';
 import { sendWhatsapp } from '../src/services/crm/whatsapp.service';
+import { emailCustomer } from '../src/services/support/supportEmail';
 import { sendToRecipients } from '../src/services/clientWhatsappAlerts.service';
 
 const supa = () => (global as any).__supa;
 const send = sendWhatsapp as jest.Mock;
+const mail = emailCustomer as jest.Mock;
 const SUPPORT_ORG = 'org-kinematic';
 const CUST_ORG = 'org-acme';
 const TPL = 'tpl-handoff';
@@ -55,7 +62,7 @@ beforeEach(() => {
     const ins = chain.ops.find((o: any) => o.method === 'insert');
     if (ins) {
       const now = new Date().toISOString();
-      const t = { id: `00000000-0000-4000-8000-00000000${seq}`, ref: `KM-${seq++}`, status: 'open', priority: 'normal', category: 'other', resolution_note: null, resolved_at: null, created_at: now, updated_at: now, ...ins.args[0] };
+      const t = { id: `00000000-0000-4000-8000-00000000${seq}`, ref: `KM-${seq++}`, status: 'open', priority: 'normal', category: 'other', attachments: [], resolution_note: null, resolved_at: null, created_at: now, updated_at: now, ...ins.args[0] };
       tickets.push(t);
       return { data: t };
     }
@@ -100,13 +107,16 @@ describe('updateTicket (team)', () => {
     const r = await updateTicket(t, { status: 'resolved', note: 'The sync job was restarted.' }, { type: 'team', name: 'Sagar Bhargava' }, { notifyTeam: true });
     expect(r.ticket).toMatchObject({ status: 'resolved', resolution_note: 'The sync job was restarted.' });
     expect(r.ticket.resolved_at).toBeTruthy();
-    expect(r.customer_notified).toEqual({ whatsapp: 'sent' });
+    expect(r.customer_notified).toEqual({ whatsapp: 'sent', email: 'sent' });
     expect(send.mock.calls[0][0]).toMatchObject({ org_id: SUPPORT_ORG, to: '919811112222' });
     expect(send.mock.calls[0][0].body_text).toBe(statusMessage(r.ticket, 'The sync job was restarted.'));
     expect(send.mock.calls[0][0].body_text).toContain('Still not working? Reply *reopen KM-5001*');
     expect(evts().at(-1)).toMatchObject({ kind: 'status', author_type: 'team', author_name: 'Sagar Bhargava', from_status: 'open', to_status: 'resolved', body: 'The sync job was restarted.' });
     const note = supa().chainsFor('notifications')[0].ops.find((o: any) => o.method === 'insert').args[0];
-    expect(note).toMatchObject({ org_id: CUST_ORG, user_id: 'u-asha', title: 'Support ticket KM-5001: Resolved', type: 'general', data: { kind: 'support_ticket', ref: 'KM-5001' } });
+    // data.kind must be the kind registered in lib/notificationCatalog — the push dispatcher suppresses any
+    // kind that is not in the catalogue, so a drift here silently stops the push reaching the phone.
+    expect(note).toMatchObject({ org_id: CUST_ORG, user_id: 'u-asha', title: 'Support ticket KM-5001: Resolved', type: 'general', data: { kind: SUPPORT_NOTIFICATION_KIND, ref: 'KM-5001' } });
+    expect(SUPPORT_NOTIFICATION_KIND).toBe('support_ticket_update');
     // The customer's 24-hour window was checked on Kinematic's own number.
     expect(supa().chainsFor('crm_whatsapp_logs')[0].eqs).toMatchObject({ org_id: SUPPORT_ORG, direction: 'inbound' });
   });
@@ -121,7 +131,7 @@ describe('updateTicket (team)', () => {
 
     templates = [{ id: TPL, meta_template_name: 'handoff_reply', status: 'APPROVED', body_text: 'Hi {{1}}, {{2}} from Kinematic here… {{3}}' }];
     r = await updateTicket(r.ticket, { status: 'resolved', note: 'Fixed.' }, { type: 'team', name: 'Sagar Bhargava' }, { notifyTeam: true });
-    expect(r.customer_notified).toEqual({ whatsapp: 'template' });
+    expect(r.customer_notified).toEqual({ whatsapp: 'template', email: 'sent' });
     expect(send.mock.calls[0][0]).toMatchObject({ template_id: TPL, template_variables: { 1: 'Asha', 2: 'Sagar' } });
     expect(send.mock.calls[0][0].template_variables[3]).toMatch(/^✅ Your Kinematic support ticket KM-5001 \(Sync broken\) is resolved\. Fixed\./);
   });
@@ -132,7 +142,7 @@ describe('updateTicket (team)', () => {
     const r2 = await updateTicket(r1.ticket, { status: 'open', note: 'Looking again.' }, { type: 'team', name: 'Sagar' }, { notifyTeam: true });
     expect(r2.ticket.resolved_at).toBeNull();
     const r3 = await addComment(r2.ticket, 'Can you share a screenshot?', { type: 'team', name: 'Sagar' }, { notifyTeam: true });
-    expect(r3.customer_notified).toEqual({ whatsapp: 'sent' });
+    expect(r3.customer_notified).toEqual({ whatsapp: 'sent', email: 'sent' });
     expect(send.mock.calls.at(-1)[0].body_text).toContain('Can you share a screenshot?');
     await expect(updateTicket(t, { status: 'done' }, { type: 'team', name: 'Sagar' }, { notifyTeam: true })).rejects.toThrow(/Unknown status/);
   });
@@ -221,7 +231,7 @@ describe('dashboard API', () => {
     const op = await call(ctrl.update, { user: operator, params: { id }, body: { status: 'resolved', note: 'Export fixed in 4.2' } });
     expect(op.status).toBe(200);
     expect(op.body.data.ticket.status).toBe('resolved');
-    expect(op.body.data.customer_notified).toEqual({ whatsapp: 'sent' });
+    expect(op.body.data.customer_notified).toEqual({ whatsapp: 'sent', email: 'sent' });
   });
 });
 
@@ -246,7 +256,7 @@ describe('bot API', () => {
     expect((await call(ctrl.botComment, { headers: h, params: { ref: 'KM-5001' }, body: { phone: '919800000000', text: 'hi' } })).status).toBe(404);
     const upd = await call(ctrl.botTeamUpdate, { headers: h, params: { ref: 'km-5001' }, body: { status: 'resolved', note: 'Restarted the sync', by: 'Sagar' } });
     expect(upd.body.data.ticket.status).toBe('resolved');
-    expect(upd.body.data.customer_notified).toEqual({ whatsapp: 'sent' });
+    expect(upd.body.data.customer_notified).toEqual({ whatsapp: 'sent', email: 'sent' });
     const reopen = await call(ctrl.botReopen, { headers: h, params: { ref: 'KM-5001' }, body: { phone: '9811112222', text: 'Still broken in Pune' } });
     expect(reopen.body.data.ticket.status).toBe('open');
   });
@@ -352,5 +362,162 @@ describe('v2 taxonomy', () => {
     const rejected = statusMessage({ ...t, status: 'rejected' }, 'Not on the roadmap.');
     expect(rejected).toContain("won't be taken forward");
     expect(rejected).toContain('Not on the roadmap.');
+  });
+});
+
+
+describe('email to the customer', () => {
+  const raise = () => createTicket({ subject: 'Sync broken', description: 'Attendance not syncing since morning', channel: 'dashboard' }, who, { notifyTeam: false });
+
+  it('confirms a new ticket, then follows every team update with the right kind', async () => {
+    const t = await raise();
+    expect(mail).toHaveBeenCalledWith(expect.objectContaining({ kind: 'raised', message: null }));
+
+    mail.mockClear();
+    const upd = await updateTicket(t, { status: 'in_progress', note: 'On it now.' }, { type: 'team', name: 'S' }, { notifyTeam: false });
+    expect(mail).toHaveBeenCalledWith(expect.objectContaining({ kind: 'status', statusLabel: 'In progress', message: 'On it now.' }));
+    expect(upd.customer_notified?.email).toBe('sent');
+
+    mail.mockClear();
+    const rep = await addComment(upd.ticket, 'One more question for you.', { type: 'team', name: 'S' }, { notifyTeam: false });
+    expect(mail).toHaveBeenCalledWith(expect.objectContaining({ kind: 'comment' }));
+    expect(rep.customer_notified?.email).toBe('sent');
+  });
+
+  it('does not email the customer about their own reply', async () => {
+    const t = await raise();
+    mail.mockClear();
+    const r = await addComment(t, 'Any update?', { type: 'customer', name: 'Asha Rao' }, { notifyTeam: false });
+    expect(mail).not.toHaveBeenCalled();
+    expect(r.customer_notified).toBeUndefined();
+  });
+
+  it('reports a failed email without losing the status change', async () => {
+    const t = await raise();
+    mail.mockResolvedValueOnce({ email: 'failed', note: 'Mailbox does not exist' });
+    const r = await updateTicket(t, { status: 'resolved', note: 'Fixed.' }, { type: 'team', name: 'S' }, { notifyTeam: false });
+    expect(r.ticket.status).toBe('resolved');
+    expect(r.customer_notified).toMatchObject({ email: 'failed', email_note: 'Mailbox does not exist' });
+  });
+
+  it('survives the email module throwing', async () => {
+    const t = await raise();
+    mail.mockRejectedValueOnce(new Error('provider exploded'));
+    const r = await updateTicket(t, { status: 'resolved' }, { type: 'team', name: 'S' }, { notifyTeam: false });
+    expect(r.ticket.status).toBe('resolved');
+    expect(r.customer_notified?.email).toBe('failed');
+  });
+});
+
+describe('feedback (CSAT)', () => {
+  const raise = () => createTicket({ subject: 'Sync broken', description: 'Attendance not syncing since morning', channel: 'dashboard' }, who, { notifyTeam: false });
+  const finish = async (status: 'resolved' | 'closed' | 'rejected' = 'resolved') => {
+    const t = await raise();
+    return (await updateTicket(t, { status }, { type: 'team', name: 'S' }, { notifyTeam: false })).ticket;
+  };
+  const asCustomer = { type: 'customer' as const, name: 'Asha Rao' };
+
+  it('is refused while the ticket is still being worked', async () => {
+    const t = await raise();
+    await expect(submitFeedback(t, { rating: 5 }, asCustomer, { notifyTeam: false })).rejects.toThrow(/resolved or closed/);
+    expect(t.csat_rating ?? null).toBeNull();
+  });
+
+  it('is the customer\'s to give, not the team\'s', async () => {
+    const done = await finish();
+    await expect(submitFeedback(done, { rating: 5 }, { type: 'team', name: 'S' }, { notifyTeam: false }))
+      .rejects.toThrow(/Only the customer/);
+  });
+
+  it('takes a whole number from 1 to 5 and nothing else', async () => {
+    const done = await finish();
+    for (const rating of [0, 6, 4.5, -1, 'five', null, undefined]) {
+      await expect(submitFeedback(done, { rating }, asCustomer, { notifyTeam: false })).rejects.toThrow(/1 to 5/);
+    }
+  });
+
+  it('saves the rating, puts it on the timeline and tells the team', async () => {
+    const done = await finish();
+    const r = await submitFeedback(done, { rating: 4, comment: 'Quick, thanks.' }, asCustomer, { notifyTeam: true });
+    expect(r.ticket).toMatchObject({ csat_rating: 4, csat_comment: 'Quick, thanks.' });
+    expect(r.ticket.csat_at).toBeTruthy();
+    expect(evts().at(-1)).toMatchObject({ kind: 'feedback', author_type: 'customer', author_name: 'Asha Rao', body: '4/5 — Quick, thanks.' });
+    expect(sendToRecipients).toHaveBeenCalledWith(
+      SUPPORT_ORG, expect.anything(), 'Feedback on ticket KM-5001: 4/5', expect.stringContaining('4/5'),
+    );
+  });
+
+  it('records a bare rating with no comment', async () => {
+    const done = await finish();
+    const r = await submitFeedback(done, { rating: 5 }, asCustomer, { notifyTeam: false });
+    expect(r.ticket).toMatchObject({ csat_rating: 5, csat_comment: null });
+    expect(evts().at(-1)).toMatchObject({ kind: 'feedback', body: '5/5' });
+  });
+
+  it('can be changed afterwards', async () => {
+    const done = await finish();
+    await submitFeedback(done, { rating: 2, comment: 'Took a while.' }, asCustomer, { notifyTeam: false });
+    const again = await submitFeedback(done, { rating: 5, comment: 'Sorted in the end.' }, asCustomer, { notifyTeam: false });
+    expect(again.ticket).toMatchObject({ csat_rating: 5, csat_comment: 'Sorted in the end.' });
+  });
+
+  it('can be given on a closed or not-planned ticket too', async () => {
+    for (const status of ['closed', 'rejected'] as const) {
+      supa().reset();
+      tickets = [];
+      supa().setDefault('support_tickets', (chain: any) => {
+        const ins = chain.ops.find((o: any) => o.method === 'insert');
+        if (ins) {
+          const now = new Date().toISOString();
+          const t = { id: '00000000-0000-4000-8000-000000005001', ref: 'KM-5001', status: 'open', priority: 'normal', category: 'other', platforms: [], area: null, resolution_note: null, resolved_at: null, first_response_at: null, csat_rating: null, csat_comment: null, csat_at: null, created_at: now, updated_at: now, ...ins.args[0] };
+          tickets.push(t as Ticket);
+          return { data: t };
+        }
+        const upd = chain.ops.find((o: any) => o.method === 'update');
+        const match = tickets.filter((x: any) => Object.entries(chain.eqs).every(([k, v]) => x[k] === v));
+        if (upd) { match.forEach((x) => Object.assign(x, upd.args[0])); return { data: match[0] ?? null }; }
+        return { data: chain.single ? match[0] ?? null : match };
+      });
+      supa().setDefault('support_ticket_events', { data: [] });
+      supa().setDefault('organisations', { data: { name: 'Acme Foods' } });
+      const done = await finish(status);
+      const r = await submitFeedback(done, { rating: 3 }, asCustomer, { notifyTeam: false });
+      expect(r.ticket.csat_rating).toBe(3);
+    }
+  });
+});
+
+
+describe('attachments on a new ticket', () => {
+  const OURS = `support/${CUST_ORG}/shot.png`;
+  const descriptor = (path: string) => ({
+    path, bucket: 'support-attachments', name: 'screenshot.png',
+    size: 2048, content_type: 'image/png', uploaded_at: '2026-11-27T10:00:00Z',
+  });
+
+  it('keeps the screenshots the customer uploaded under their own org', async () => {
+    const t = await createTicket(
+      { subject: 'Export is blank', description: 'The export downloads an empty file.', attachments: [descriptor(OURS)], channel: 'dashboard' },
+      who, { notifyTeam: false },
+    );
+    expect(t.attachments).toEqual([expect.objectContaining({ path: OURS, name: 'screenshot.png' })]);
+  });
+
+  it("drops a descriptor pointing at another organisation's object rather than failing the ticket", async () => {
+    const t = await createTicket(
+      { subject: 'Export is blank', description: 'The export downloads an empty file.', attachments: [descriptor('support/someone-else/shot.png')], channel: 'dashboard' },
+      who, { notifyTeam: false },
+    );
+    // The report is far more valuable than the screenshot, so the ticket is still raised.
+    expect(t.attachments).toEqual([]);
+    expect(t.ref).toBe('KM-5001');
+  });
+
+  it('stores an empty list when none were attached', async () => {
+    const t = await createTicket(
+      { subject: 'A question', description: 'How do I export the attendance report?', channel: 'dashboard' },
+      who, { notifyTeam: false },
+    );
+    expect(t.attachments).toEqual([]);
   });
 });
