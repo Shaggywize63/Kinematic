@@ -9,6 +9,7 @@ router.get('/tickets', ctrl.list);
 router.post('/tickets', ctrl.create);
 router.get('/tickets/:id', ctrl.detail);
 router.post('/tickets/:id/comments', ctrl.comment);
+router.post('/tickets/:id/feedback', ctrl.feedback);
 router.patch('/tickets/:id', ctrl.update);
 
 export default router;
