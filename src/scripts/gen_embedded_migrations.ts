@@ -33,6 +33,7 @@ const FILES = [
   'migration_support_tickets.sql',
   'migration_support_tickets_v2.sql',
   'migration_support_tickets_feedback.sql',
+  'migration_support_tickets_attachments.sql',
   'migration_crm_form_lead_capture.sql',
 ];
 

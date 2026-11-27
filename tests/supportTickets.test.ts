@@ -62,7 +62,7 @@ beforeEach(() => {
     const ins = chain.ops.find((o: any) => o.method === 'insert');
     if (ins) {
       const now = new Date().toISOString();
-      const t = { id: `00000000-0000-4000-8000-00000000${seq}`, ref: `KM-${seq++}`, status: 'open', priority: 'normal', category: 'other', resolution_note: null, resolved_at: null, created_at: now, updated_at: now, ...ins.args[0] };
+      const t = { id: `00000000-0000-4000-8000-00000000${seq}`, ref: `KM-${seq++}`, status: 'open', priority: 'normal', category: 'other', attachments: [], resolution_note: null, resolved_at: null, created_at: now, updated_at: now, ...ins.args[0] };
       tickets.push(t);
       return { data: t };
     }
@@ -484,5 +484,40 @@ describe('feedback (CSAT)', () => {
       const r = await submitFeedback(done, { rating: 3 }, asCustomer, { notifyTeam: false });
       expect(r.ticket.csat_rating).toBe(3);
     }
+  });
+});
+
+
+describe('attachments on a new ticket', () => {
+  const OURS = `support/${CUST_ORG}/shot.png`;
+  const descriptor = (path: string) => ({
+    path, bucket: 'support-attachments', name: 'screenshot.png',
+    size: 2048, content_type: 'image/png', uploaded_at: '2026-11-27T10:00:00Z',
+  });
+
+  it('keeps the screenshots the customer uploaded under their own org', async () => {
+    const t = await createTicket(
+      { subject: 'Export is blank', description: 'The export downloads an empty file.', attachments: [descriptor(OURS)], channel: 'dashboard' },
+      who, { notifyTeam: false },
+    );
+    expect(t.attachments).toEqual([expect.objectContaining({ path: OURS, name: 'screenshot.png' })]);
+  });
+
+  it("drops a descriptor pointing at another organisation's object rather than failing the ticket", async () => {
+    const t = await createTicket(
+      { subject: 'Export is blank', description: 'The export downloads an empty file.', attachments: [descriptor('support/someone-else/shot.png')], channel: 'dashboard' },
+      who, { notifyTeam: false },
+    );
+    // The report is far more valuable than the screenshot, so the ticket is still raised.
+    expect(t.attachments).toEqual([]);
+    expect(t.ref).toBe('KM-5001');
+  });
+
+  it('stores an empty list when none were attached', async () => {
+    const t = await createTicket(
+      { subject: 'A question', description: 'How do I export the attendance report?', channel: 'dashboard' },
+      who, { notifyTeam: false },
+    );
+    expect(t.attachments).toEqual([]);
   });
 });

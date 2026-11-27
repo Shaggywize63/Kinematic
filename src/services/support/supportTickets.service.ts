@@ -25,6 +25,10 @@ import { logger } from '../../lib/logger';
 import { sendWhatsapp } from '../crm/whatsapp.service';
 import { WA_SETTING_KEY, toSettings, sendToRecipients, listTemplates, isApproved, normalizePhone } from '../clientWhatsappAlerts.service';
 import { emailCustomer, type SupportEmailKind } from './supportEmail';
+import {
+  fromRow as attachmentsFromRow, signAttachments, toAttachments,
+  type SignedAttachment, type SupportAttachment,
+} from './supportAttachments';
 
 /**
  * The notification kind for a ticket update, as registered in lib/notificationCatalog. One string identifies it
@@ -76,6 +80,8 @@ export const STATUS_LABEL: Record<TicketStatus, string> = {
 export interface Ticket {
   id: string; ref: string; status: TicketStatus; priority: TicketPriority; category: TicketCategory;
   platforms: TicketPlatform[]; area: TicketArea | null;
+  /** Screenshots the customer attached when raising it. Descriptors only — never fetchable URLs. */
+  attachments: SupportAttachment[];
   subject: string; description: string; channel: 'whatsapp' | 'dashboard' | 'app';
   project_key: string | null; org_id: string | null; org_name: string | null; raised_by_user_id: string | null;
   contact_name: string | null; contact_phone: string | null; contact_email: string | null;
@@ -256,6 +262,8 @@ async function addEvent(e: Omit<TicketEvent, 'id' | 'created_at'>): Promise<void
 export interface CreateInput {
   subject?: unknown; description?: unknown; category?: unknown; priority?: unknown;
   platforms?: unknown; area?: unknown; channel: Ticket['channel'];
+  /** Descriptors the client got back from the upload endpoint; validated against their own org. */
+  attachments?: unknown;
 }
 
 export async function createTicket(input: CreateInput, who: Requester, opts: { notifyTeam: boolean }): Promise<Ticket> {
@@ -269,6 +277,8 @@ export async function createTicket(input: CreateInput, who: Requester, opts: { n
     priority: oneOf(PRIORITIES, input.priority, 'normal'),
     platforms: platformsFor(input.channel, toPlatforms(input.platforms)),
     area: toArea(input.area),
+    // Only files already uploaded under THIS org's own prefix survive this.
+    attachments: toAttachments(input.attachments, who.org_id),
     channel: input.channel,
     project_key: who.project_key, org_id: who.org_id, org_name: who.org_name, raised_by_user_id: who.user_id,
     contact_name: who.name, contact_phone: who.phone, contact_email: who.email,
@@ -284,6 +294,14 @@ export async function createTicket(input: CreateInput, who: Requester, opts: { n
   })).catch(() => undefined);
   if (opts.notifyTeam) await alertTeam(`New support ticket ${t.ref}`, `${who.org_name || who.name || 'A customer'}: ${t.subject}. ${t.description}`);
   return t;
+}
+
+/**
+ * The ticket's screenshots with short-lived signed URLs for display. Call this only for a ticket the caller
+ * is already allowed to see — it does no authorisation of its own.
+ */
+export async function ticketAttachments(t: Ticket): Promise<SignedAttachment[]> {
+  return signAttachments(supportDb(), attachmentsFromRow(t.attachments));
 }
 
 export interface Actor { type: 'team' | 'customer'; name: string | null }

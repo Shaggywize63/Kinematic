@@ -5,7 +5,8 @@ Customers raise tickets; the Kinematic team works them in one inbox; the custome
 Code: `src/services/support/supportTickets.service.ts`, `src/controllers/support.controller.ts`,
 `src/routes/support.routes.ts` (dashboard), `src/routes/support-public.routes.ts` (KINI WhatsApp bot).
 Tables: `support_tickets`, `support_ticket_events` (`migration_support_tickets.sql` then
-`migration_support_tickets_v2.sql` then `migration_support_tickets_feedback.sql`, all applied on boot — add any new one to
+`migration_support_tickets_v2.sql`, `migration_support_tickets_feedback.sql` then
+`migration_support_tickets_attachments.sql`, all applied on boot — add any new one to
 `src/scripts/gen_embedded_migrations.ts` and regenerate, or a fresh tenant boots on the old schema).
 
 ## Where tickets live
@@ -50,6 +51,28 @@ The pre-v2 category names are still accepted on input and mapped (`data` → `da
 - **Customer**: can say it is fixed (`resolved`) or that it is still not working (`open` + note), and nothing else —
   the triage fields are rejected with a 403. A customer reply on a terminal or waiting ticket reopens it, `rejected`
   included.
+
+## Screenshots
+
+A customer can attach up to 5 images (PNG / JPEG / WEBP / HEIC, 8 MB each) when raising a ticket, from the
+file picker, a drag-and-drop, or by **pasting straight from the clipboard** — which is how a screenshot
+usually arrives. `services/support/supportAttachments.ts`.
+
+Two things worth knowing:
+
+- **The files live in the support project's own private bucket**, never the customer's. The generic
+  `POST /upload/:type` writes to whichever project the caller is in, so a screenshot uploaded by a Tata user
+  would sit in Tata's storage and a platform operator (who works in the Kinematic project) could never be
+  issued a signed URL for it. One bucket in the support project serves both sides.
+- **The object path carries the org** (`support/<org_id>/<uuid>.<ext>`). The browser uploads *before* the
+  ticket exists, so the create call receives client-supplied descriptors; `toAttachments` refuses anything
+  outside the requester's own prefix. Without that, a customer could name another customer's object id and be
+  handed a signed URL for their screenshot. A descriptor that fails validation is dropped rather than failing
+  the ticket — the report matters far more than the picture.
+
+`POST /tickets/attachments` (field `photos`, the shared `uploadMultiple` middleware) returns descriptors;
+`GET /tickets/:id` returns them with short-lived signed URLs, and only for a ticket the caller may already
+see. The bucket is created on first use, so no environment needs manual setup.
 
 ## Customer feedback (CSAT)
 
