@@ -25,6 +25,7 @@
  *      timesheets/...                 phase 9: Timesheets (projects, weekly sheets, limits) (hrmsTimesheets.routes.ts)
  *      learning/...                   phase 10: Learning (courses, assignments, quizzes, certificates) (hrmsLearning.routes.ts)
  *      engagement/...                 phase 11: Engagement (pulses, anonymous responses, recognition, exit interviews) (hrmsEngagement.routes.ts)
+ *      talent/...                     phase 12: Talent (skills, succession bench, 9-box) (hrmsTalent.routes.ts)
  *
  * PAN and bank details are encrypted at rest (lib/hrmsCrypto) and masked in every response; they are write-only.
  * If the HRMS tables are not there yet (migration_hrms_core.sql not applied) every call answers 503 HRMS_NOT_READY.
@@ -58,6 +59,7 @@ import compensationRoutes from './hrmsCompensation.routes';
 import timesheetsRoutes from './hrmsTimesheets.routes';
 import learningRoutes from './hrmsLearning.routes';
 import engagementRoutes from './hrmsEngagement.routes';
+import talentRoutes from './hrmsTalent.routes';
 import * as payrollSettings from '../services/hrms/payroll/settings.service';
 import { payrollSettingsBody } from '../services/hrms/payroll/schemas';
 
@@ -122,6 +124,9 @@ router.use('/learning', learningRoutes);
 
 // ── engagement: pulses, anonymous responses, recognition, exit interviews (phase 11) ──
 router.use('/engagement', engagementRoutes);
+
+// ── talent: skills, succession bench, 9-box (phase 12) ────────────────────────
+router.use('/talent', talentRoutes);
 
 // ── organisation structure ──────────────────────────────────────────────────
 const MASTER_ROUTES: Array<{ path: string; kind: MasterKind; create: Parameters<typeof parse>[0]; update: Parameters<typeof parse>[0] }> = [

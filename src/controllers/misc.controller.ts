@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { supabaseAdmin } from '../lib/supabase';
 import { isLiveTrackingDisabled, requiresOpenShift, shouldLogOffShift } from '../lib/liveTracking';
 import { isDuplicateHeartbeat, isNullIsland } from '../lib/heartbeatGuard';
+import { resolvePingCapturedAt } from '../lib/pingCapturedAt';
 import { clearEmailProjectCache } from '../lib/projects';
 import { asyncHandler, sendSuccess, sendPaginated, getPagination, AppError, todayDate, isoDate, parseAppDate, ok, isUUID, scopeOwnOrg } from '../utils';
 import { AuthRequest } from '../types';
@@ -1256,7 +1257,7 @@ export const resolveSOS = asyncHandler<AuthRequest>(async (req, res) => {
 
 export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   const { latitude, longitude, battery_percentage, battery, activity_type, device_model, device_brand, os_version,
-          is_mock, location_accuracy_m, location_precise } = req.body;
+          is_mock, location_accuracy_m, location_precise, captured_at } = req.body;
   const user = req.user!;
 
   // Defence-in-depth kill switch — even if a stale build keeps pinging,
@@ -1273,9 +1274,21 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     throw new AppError(400, 'Latitude and longitude are required', 'VALIDATION_ERROR');
   }
 
-  // Repeat of the exact fix this user just sent (see lib/heartbeatGuard): acknowledge, store nothing.
   const kind = activity_type || 'HEARTBEAT';
-  if (kind === 'HEARTBEAT' && isDuplicateHeartbeat(user.id, latitude, longitude)) {
+
+  // Offline ping queue: a client flushing fixes it captured in a no-signal zone replays each with its
+  // original `captured_at`. Resolve what we do with it (see lib/pingCapturedAt):
+  //  - live     → stamp now, update the live position as always;
+  //  - backfill → stamp at the original time, trail HISTORY ONLY (never move the live position/last-seen);
+  //  - drop     → too stale to store; ACK so the client dequeues it.
+  const pingTime = resolvePingCapturedAt(captured_at, Date.now());
+  if (pingTime.kind === 'drop') { sendSuccess(res, null, 'Status updated'); return; }
+  const isBackfill = pingTime.kind === 'backfill';
+
+  // Repeat of the exact fix this user just sent (see lib/heartbeatGuard): acknowledge, store nothing.
+  // The in-memory dedupe only guards the live stream; a flushed backfill ping is historical and must
+  // never be swallowed by it (distinct capture times, replayed in a burst).
+  if (kind === 'HEARTBEAT' && !isBackfill && isDuplicateHeartbeat(user.id, latitude, longitude)) {
     sendSuccess(res, null, 'Status updated');
     return;
   }
@@ -1283,20 +1296,27 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   // overwrite the rep's real last position or refresh the "last seen" time.
   const hasFix = !isNullIsland(latitude, longitude);
 
-  const now = new Date().toISOString();
+  // `rowCapturedAt` is when the fix was taken (now for a live ping, the original time for a backfill);
+  // `liveNow` is wall-clock now, used only for the user's "last seen" on a live ping.
+  const rowCapturedAt = pingTime.iso;
+  const liveNow = new Date().toISOString();
   // Bug Fix: 0% battery is valid.
   const batteryLevel = battery !== undefined ? battery : (battery_percentage !== undefined ? battery_percentage : null);
   
   // The open shift (checked in, not checked out). Location is stored only while one exists — see requiresOpenShift.
   // Today or yesterday (IST): a shift that started before midnight is still open until it is checked out.
   const sinceDate = isoDate(new Date(Date.now() - 86_400_000));
-  const { data: att } = await supabaseAdmin
+  // A live ping is stored only while a shift is OPEN. A backfilled ping may arrive after the rep has
+  // already checked out (they reconnected, then the queue flushed), so for backfill we match the most
+  // recent checked-in shift in the window even if it has since been closed — the fix belongs to it.
+  let attQuery = supabaseAdmin
     .from('attendance')
     .select('id')
     .eq('user_id', user.id)
     .gte('date', sinceDate)
-    .not('checkin_at', 'is', null)
-    .is('checkout_at', null)
+    .not('checkin_at', 'is', null);
+  if (!isBackfill) attQuery = attQuery.is('checkout_at', null);
+  const { data: att } = await attQuery
     .order('date', { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -1306,26 +1326,34 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
   }
 
   // Run the user update and the previous-fix lookup concurrently.
+  //
+  // A BACKFILL ping is history only: it must not touch the users row at all. Writing last_* / battery /
+  // location_status from a stale fix would snap the live map and "last seen" backwards to where the rep
+  // was when they lost signal — the opposite of what the queue is for. So for backfill we skip the user
+  // update, and skip the teleport check (its previous-fix lookup returns the LATEST row, which is newer
+  // than a backfilled fix, so the speed math is meaningless).
   const [userUpdate, prevPingResult] = await Promise.all([
-    supabaseAdmin
-      .from('users')
-      .update({
-        ...(storeLocation && { last_latitude: latitude, last_longitude: longitude, last_location_updated_at: now }),
-        battery_percentage: batteryLevel,
-        device_model: device_model || undefined,
-        device_brand: device_brand || undefined,
-        os_version: os_version || undefined,
-        // A real fix arrived, so location is on. The "off since" timestamp
-        // (location_status_updated_at) is set by the location-status endpoint
-        // on an off-transition and isn't shown while status is 'on', so we
-        // don't touch it here — keeping the heartbeat a single write.
-        ...(hasFix && { location_status: 'on' }),
-        ...(location_precise !== undefined && { location_precise: !!location_precise })
-      })
-      .eq('id', user.id),
+    isBackfill
+      ? Promise.resolve({ error: null })
+      : supabaseAdmin
+          .from('users')
+          .update({
+            ...(storeLocation && { last_latitude: latitude, last_longitude: longitude, last_location_updated_at: liveNow }),
+            battery_percentage: batteryLevel,
+            device_model: device_model || undefined,
+            device_brand: device_brand || undefined,
+            os_version: os_version || undefined,
+            // A real fix arrived, so location is on. The "off since" timestamp
+            // (location_status_updated_at) is set by the location-status endpoint
+            // on an off-transition and isn't shown while status is 'on', so we
+            // don't touch it here — keeping the heartbeat a single write.
+            ...(hasFix && { location_status: 'on' }),
+            ...(location_precise !== undefined && { location_precise: !!location_precise })
+          })
+          .eq('id', user.id),
 
-    // Previous fix — for the server-side teleport / impossible-speed check.
-    storeLocation
+    // Previous fix — for the server-side teleport / impossible-speed check (live pings only).
+    storeLocation && !isBackfill
       ? supabaseAdmin
           .from('work_activity')
           .select('lat, lng, captured_at')
@@ -1350,7 +1378,7 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     const dLat = toRad(latitude - prev.lat), dLng = toRad(longitude - prev.lng);
     const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(prev.lat)) * Math.cos(toRad(latitude)) * Math.sin(dLng / 2) ** 2;
     const meters = 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
-    const secs = (new Date(now).getTime() - new Date(prev.captured_at).getTime()) / 1000;
+    const secs = (new Date(rowCapturedAt).getTime() - new Date(prev.captured_at).getTime()) / 1000;
     if (secs > 1 && meters / secs > 100 && meters > 500) {
       isSuspect = true;
       suspectReason = `teleport ${Math.round(meters)}m in ${Math.round(secs)}s (~${Math.round((meters / secs) * 3.6)} km/h)`;
@@ -1371,7 +1399,7 @@ export const updateUserStatus = asyncHandler<AuthRequest>(async (req, res) => {
     device_model: device_model || null,
     device_brand: device_brand || null,
     os_version: os_version || null,
-    captured_at: now,
+    captured_at: rowCapturedAt,
     ...(is_mock !== undefined && { is_mock: !!is_mock }),
     ...(location_accuracy_m !== undefined && { accuracy_m: location_accuracy_m }),
     ...(isSuspect !== null && { is_suspect: isSuspect, suspect_reason: suspectReason })
