@@ -9,6 +9,7 @@ import {
   updateStatus,
   submitAnswer,
   getResults,
+  getLeaderboard,
 } from '../controllers/broadcast.controller';
 
 const router = Router();
@@ -17,6 +18,7 @@ router.use(requireAuth);
 
 // Admin routes
 router.get('/admin', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), getAdminQuestions);
+router.get('/leaderboard', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), getLeaderboard);
 router.post('/', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), createQuestion);
 router.patch('/:id', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), updateQuestion);
 router.delete('/:id', requireRole('admin', 'super_admin', 'main_admin', 'sub_admin', 'client', 'city_manager'), deleteQuestion);
