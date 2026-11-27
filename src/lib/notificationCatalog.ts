@@ -85,6 +85,12 @@ export const NOTIFICATION_CATALOG: CatalogEntry[] = [
   { kind: 'broadcast', label: 'Broadcasts', group: 'System', description: 'Questions and announcements sent by an admin.' },
   { kind: 'security_alert', label: 'Security alerts', group: 'System', description: 'Suspicious sign-in and similar account alerts.', recommended: true },
   { kind: 'finance_invoice_due', label: 'Invoice reminders', group: 'System', description: 'An invoice is due or overdue.' },
+  {
+    kind: 'support_ticket_update', label: 'Support ticket updates', group: 'System',
+    description: "The person who raised a support ticket is told when the Kinematic team changes its status or replies.",
+    // Rows written before this entry existed carry `support_ticket`; the alias keeps them resolving to this kind.
+    aliases: ['support_ticket'],
+  },
 ];
 
 const byKind = new Map<string, CatalogEntry>();

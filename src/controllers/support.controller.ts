@@ -16,7 +16,7 @@ import { currentProjectKey, runWithProject } from '../lib/projects';
 import { isPlatformOperator } from '../lib/tenantScope';
 import {
   SupportError, SUPPORT_PROJECT, listTickets, getTicket, listEvents, belongsTo, createTicket, updateTicket, addComment,
-  requesterFromUser, requesterFromPhone, type Ticket, type Actor,
+  submitFeedback, requesterFromUser, requesterFromPhone, type Ticket, type Actor,
 } from '../services/support/supportTickets.service';
 
 function fail(res: Response, e: unknown): void {
@@ -89,6 +89,17 @@ export const update = asyncHandler(async (req: AuthRequest, res: Response) => {
       status: b.status, priority: b.priority, note: b.note,
       category: b.category, platforms: b.platforms, area: b.area,
     }, actorOf(req), { notifyTeam: true });
+    ok(res, { ...r, events: await listEvents(t.id) });
+  } catch (e) { fail(res, e); }
+});
+
+/** POST /tickets/:id/feedback { rating, comment? } — how the customer rates a finished ticket. */
+export const feedback = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const t = await visibleTicket(req, res);
+  if (!t) return;
+  try {
+    const b = req.body ?? {};
+    const r = await submitFeedback(t, { rating: b.rating, comment: b.comment }, actorOf(req), { notifyTeam: true });
     ok(res, { ...r, events: await listEvents(t.id) });
   } catch (e) { fail(res, e); }
 });
